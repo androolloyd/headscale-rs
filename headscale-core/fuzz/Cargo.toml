@@ -1,0 +1,110 @@
+[package]
+name = "headscale-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Isolate from parent workspace
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+tokio = { version = "1.42", features = ["rt"] }
+
+[dependencies.headscale-core]
+path = ".."
+
+[dependencies.boringtun]
+version = "0.6"
+
+# STUN parsing fuzz target
+[[bin]]
+name = "fuzz_stun"
+path = "fuzz_targets/fuzz_stun.rs"
+test = false
+doc = false
+bench = false
+
+# DERP parsing fuzz target
+[[bin]]
+name = "fuzz_derp"
+path = "fuzz_targets/fuzz_derp.rs"
+test = false
+doc = false
+bench = false
+
+# IP packet parsing fuzz target
+[[bin]]
+name = "fuzz_ip_packet"
+path = "fuzz_targets/fuzz_ip_packet.rs"
+test = false
+doc = false
+bench = false
+
+# WireGuard packet parsing fuzz target
+[[bin]]
+name = "fuzz_wireguard"
+path = "fuzz_targets/fuzz_wireguard.rs"
+test = false
+doc = false
+bench = false
+
+# Key operations fuzz target
+[[bin]]
+name = "fuzz_keys"
+path = "fuzz_targets/fuzz_keys.rs"
+test = false
+doc = false
+bench = false
+
+# TUN device packet parsing fuzz target
+[[bin]]
+name = "fuzz_tun"
+path = "fuzz_targets/fuzz_tun.rs"
+test = false
+doc = false
+bench = false
+
+# Endpoint tracking fuzz target
+[[bin]]
+name = "fuzz_endpoint"
+path = "fuzz_targets/fuzz_endpoint.rs"
+test = false
+doc = false
+bench = false
+
+# ACL policy parsing fuzz target
+[[bin]]
+name = "fuzz_acl"
+path = "fuzz_targets/fuzz_acl.rs"
+test = false
+doc = false
+bench = false
+
+# Transport message parsing fuzz target
+[[bin]]
+name = "fuzz_transport"
+path = "fuzz_targets/fuzz_transport.rs"
+test = false
+doc = false
+bench = false
+
+# Rental lease token fuzz target
+[[bin]]
+name = "fuzz_rental"
+path = "fuzz_targets/fuzz_rental.rs"
+test = false
+doc = false
+bench = false
+
+# Accounting pipeline fuzz target
+[[bin]]
+name = "fuzz_accounting"
+path = "fuzz_targets/fuzz_accounting.rs"
+test = false
+doc = false
+bench = false

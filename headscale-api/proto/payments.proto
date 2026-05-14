@@ -1,0 +1,161 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+import "common.proto";
+
+// Payment service
+service PaymentService {
+  // Get account balance
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+
+  // Deposit funds
+  rpc Deposit(DepositRequest) returns (Transaction);
+
+  // Transfer between accounts
+  rpc Transfer(TransferRequest) returns (Transaction);
+
+  // Get transaction history
+  rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
+
+  // Set credit limit
+  rpc SetCreditLimit(SetCreditLimitRequest) returns (Status);
+
+  // Create payment channel
+  rpc CreateChannel(CreateChannelRequest) returns (PaymentChannel);
+
+  // Update payment channel
+  rpc UpdateChannel(UpdateChannelRequest) returns (PaymentChannel);
+
+  // Close payment channel
+  rpc CloseChannel(CloseChannelRequest) returns (Status);
+
+  // Get payment channels
+  rpc GetChannels(GetChannelsRequest) returns (GetChannelsResponse);
+}
+
+// Transaction types
+enum TransactionTypeEnum {
+  TRANSACTION_TYPE_UNSPECIFIED = 0;
+  TRANSACTION_TYPE_TRANSFER = 1;
+  TRANSACTION_TYPE_DEPOSIT = 2;
+  TRANSACTION_TYPE_WITHDRAWAL = 3;
+  TRANSACTION_TYPE_RESOURCE_PAYMENT = 4;
+  TRANSACTION_TYPE_BOUNTY_PAYMENT = 5;
+  TRANSACTION_TYPE_CREDIT_EXTENSION = 6;
+}
+
+// Transaction
+message Transaction {
+  string id = 1;
+  string from = 2;  // DID
+  string to = 3;    // DID
+  uint64 amount = 4;
+  string description = 5;
+  uint64 timestamp = 6;
+  TransactionTypeEnum tx_type = 7;
+}
+
+// Get balance request
+message GetBalanceRequest {
+  string account_id = 1;  // DID
+}
+
+// Get balance response
+message GetBalanceResponse {
+  int64 balance = 1;  // in millitokens, can be negative
+  uint64 credit_limit = 2;
+  int64 available = 3;  // balance + credit
+}
+
+// Deposit request
+message DepositRequest {
+  string account_id = 1;
+  uint64 amount = 2;
+  string description = 3;
+  optional string external_tx_id = 4;
+}
+
+// Transfer request
+message TransferRequest {
+  string from = 1;
+  string to = 2;
+  uint64 amount = 3;
+  string description = 4;
+}
+
+// Get history request
+message GetHistoryRequest {
+  string account_id = 1;
+  optional uint64 start_time = 2;
+  optional uint64 end_time = 3;
+  optional uint32 limit = 4;
+  optional uint32 offset = 5;
+}
+
+// Get history response
+message GetHistoryResponse {
+  repeated Transaction transactions = 1;
+  uint32 total = 2;
+}
+
+// Set credit limit request
+message SetCreditLimitRequest {
+  string account_id = 1;
+  uint64 limit = 2;
+}
+
+// Payment channel state
+enum ChannelStateEnum {
+  CHANNEL_STATE_UNSPECIFIED = 0;
+  CHANNEL_STATE_OPEN = 1;
+  CHANNEL_STATE_ACTIVE = 2;
+  CHANNEL_STATE_SETTLING = 3;
+  CHANNEL_STATE_CLOSED = 4;
+}
+
+// Payment channel
+message PaymentChannel {
+  string id = 1;
+  string payer = 2;  // DID
+  string payee = 3;  // DID
+  uint64 capacity = 4;
+  uint64 balance = 5;
+  ChannelStateEnum state = 6;
+  uint64 created_at = 7;
+  optional uint64 closed_at = 8;
+  uint64 nonce = 9;
+  string last_signature = 10;
+}
+
+// Create channel request
+message CreateChannelRequest {
+  string payer = 1;
+  string payee = 2;
+  uint64 capacity = 3;
+}
+
+// Update channel request
+message UpdateChannelRequest {
+  string channel_id = 1;
+  uint64 amount = 2;  // amount to pay
+  uint64 nonce = 3;
+  string signature = 4;
+}
+
+// Close channel request
+message CloseChannelRequest {
+  string channel_id = 1;
+  optional string final_signature = 2;
+}
+
+// Get channels request
+message GetChannelsRequest {
+  optional string account_id = 1;  // filter by payer or payee
+  optional ChannelStateEnum state_filter = 2;
+}
+
+// Get channels response
+message GetChannelsResponse {
+  repeated PaymentChannel channels = 1;
+}

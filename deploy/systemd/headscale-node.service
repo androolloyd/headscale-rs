@@ -1,0 +1,48 @@
+[Unit]
+Description=Headscale-rs Mesh Node
+Documentation=https://github.com/last-net/headscale-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Node mode needs root for TUN device and WireGuard interface
+
+# Binary location
+ExecStart=/usr/local/bin/headscale node \
+    --config /etc/headscale/config.toml
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitInterval=60
+
+# Limited security hardening (node needs network privileges)
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# Allow network device access for TUN/WireGuard
+PrivateDevices=no
+DeviceAllow=/dev/net/tun rw
+
+# Allow write to state directory
+ReadWritePaths=/var/lib/headscale
+ReadWritePaths=/etc/wireguard
+
+# Capabilities for network configuration
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+# Environment
+Environment=RUST_LOG=info
+Environment=HEADSCALE_LOG=info
+
+[Install]
+WantedBy=multi-user.target

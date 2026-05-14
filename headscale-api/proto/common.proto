@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+// Common types used across services
+
+// Timestamp in Unix seconds
+message Timestamp {
+  uint64 seconds = 1;
+}
+
+// DID identifier
+message Did {
+  string value = 1;
+}
+
+// Empty response for operations that don't return data
+message Empty {}
+
+// Generic status response
+message Status {
+  bool success = 1;
+  string message = 2;
+  optional string error_code = 3;
+}

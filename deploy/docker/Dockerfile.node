@@ -1,0 +1,80 @@
+# Headscale-rs Node Docker Image
+# For running mesh nodes in containers
+
+# Build stage
+FROM rust:1.82-bookworm AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy manifests first for better caching
+COPY Cargo.toml Cargo.lock ./
+COPY headscale-core/Cargo.toml headscale-core/
+COPY headscale-identity/Cargo.toml headscale-identity/
+COPY headscale-resources/Cargo.toml headscale-resources/
+COPY headscale-payments/Cargo.toml headscale-payments/
+COPY headscale-api/Cargo.toml headscale-api/
+COPY headscale-db/Cargo.toml headscale-db/
+COPY headscale-cli/Cargo.toml headscale-cli/
+
+# Create dummy source files for caching dependencies
+RUN mkdir -p headscale-core/src headscale-identity/src headscale-resources/src \
+    headscale-payments/src headscale-api/src headscale-db/src headscale-cli/src && \
+    echo "fn main() {}" > headscale-cli/src/main.rs && \
+    for crate in headscale-core headscale-identity headscale-resources headscale-payments headscale-api headscale-db; do \
+        echo "pub fn dummy() {}" > $crate/src/lib.rs; \
+    done
+
+# Build dependencies only
+RUN cargo build --release --package headscale-cli || true
+
+# Copy actual source code
+COPY headscale-core headscale-core
+COPY headscale-identity headscale-identity
+COPY headscale-resources headscale-resources
+COPY headscale-payments headscale-payments
+COPY headscale-api headscale-api
+COPY headscale-db headscale-db
+COPY headscale-cli headscale-cli
+
+# Touch source files to ensure rebuild
+RUN find . -name "*.rs" -exec touch {} \;
+
+# Build release binary
+RUN cargo build --release --package headscale-cli
+
+# Runtime stage - needs more privileges for networking
+FROM debian:bookworm-slim AS runtime
+
+# Install runtime dependencies including wireguard tools
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    iproute2 \
+    iptables \
+    wireguard-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directories
+RUN mkdir -p /etc/headscale /var/lib/headscale /dev/net
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/headscale /usr/local/bin/headscale
+
+# Default config location
+ENV HEADSCALE_CONFIG=/etc/headscale/config.toml
+
+# WireGuard port
+EXPOSE 51820/udp
+
+VOLUME ["/etc/headscale", "/var/lib/headscale"]
+
+# Node mode needs root for TUN/WireGuard
+USER root
+
+ENTRYPOINT ["/usr/local/bin/headscale"]
+CMD ["node", "--config", "/etc/headscale/config.toml"]

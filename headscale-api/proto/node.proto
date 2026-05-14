@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+import "common.proto";
+
+// Node management service
+service NodeService {
+  // Register a new node in the mesh
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Update node information
+  rpc UpdateNode(UpdateNodeRequest) returns (Node);
+
+  // Get node by ID
+  rpc GetNode(GetNodeRequest) returns (Node);
+
+  // List all nodes in the mesh
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+
+  // Delete a node
+  rpc DeleteNode(DeleteNodeRequest) returns (Status);
+
+  // Heartbeat to maintain online status
+  rpc Heartbeat(HeartbeatRequest) returns (Status);
+
+  // Get peers for a node
+  rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+}
+
+// Node capabilities
+message NodeCapabilities {
+  bool relay = 1;
+  bool inference = 2;
+  bool storage = 3;
+  bool compute = 4;
+  bool seed = 5;
+}
+
+// Node in the mesh
+message Node {
+  string id = 1;  // DID
+  string name = 2;
+  string wg_pubkey = 3;
+  repeated string addresses = 4;  // IP addresses
+  repeated string endpoints = 5;
+  uint64 last_seen = 6;
+  NodeCapabilities capabilities = 7;
+  bool online = 8;
+}
+
+// Node registration request
+message RegisterRequest {
+  string id = 1;  // DID
+  string name = 2;
+  string wg_pubkey = 3;
+  repeated string endpoints = 4;
+  NodeCapabilities capabilities = 5;
+}
+
+// Node registration response
+message RegisterResponse {
+  repeated string addresses = 1;
+  repeated PeerInfo peers = 2;
+  optional DerpMap derp_map = 3;
+}
+
+// Peer information
+message PeerInfo {
+  string id = 1;
+  string wg_pubkey = 2;
+  repeated string addresses = 3;
+  repeated string endpoints = 4;
+  repeated string allowed_ips = 5;
+}
+
+// DERP server map
+message DerpMap {
+  repeated DerpRegion regions = 1;
+}
+
+message DerpRegion {
+  uint32 id = 1;
+  string name = 2;
+  repeated DerpNode nodes = 3;
+}
+
+message DerpNode {
+  string name = 1;
+  string url = 2;
+  uint32 stun_port = 3;
+}
+
+// Update node request
+message UpdateNodeRequest {
+  string id = 1;
+  optional string name = 2;
+  optional string wg_pubkey = 3;
+  repeated string endpoints = 4;
+  optional NodeCapabilities capabilities = 5;
+}
+
+// Get node request
+message GetNodeRequest {
+  string id = 1;
+}
+
+// List nodes request
+message ListNodesRequest {
+  optional bool online_only = 1;
+  optional uint32 limit = 2;
+  optional uint32 offset = 3;
+}
+
+// List nodes response
+message ListNodesResponse {
+  repeated Node nodes = 1;
+  uint32 total = 2;
+}
+
+// Delete node request
+message DeleteNodeRequest {
+  string id = 1;
+}
+
+// Heartbeat request
+message HeartbeatRequest {
+  string id = 1;
+  repeated string endpoints = 2;
+}
+
+// Get peers request
+message GetPeersRequest {
+  string id = 1;
+}
+
+// Get peers response
+message GetPeersResponse {
+  repeated PeerInfo peers = 1;
+}

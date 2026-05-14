@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+import "common.proto";
+
+// Resource management service
+service ResourceService {
+  // Register resource capability
+  rpc RegisterResource(RegisterResourceRequest) returns (Status);
+
+  // Query available resources
+  rpc QueryResources(QueryResourcesRequest) returns (QueryResourcesResponse);
+
+  // Get resource usage for a node
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+
+  // Record resource usage
+  rpc RecordUsage(RecordUsageRequest) returns (Status);
+
+  // Get resource pricing
+  rpc GetPricing(GetPricingRequest) returns (GetPricingResponse);
+}
+
+// Resource types
+enum ResourceTypeEnum {
+  RESOURCE_TYPE_UNSPECIFIED = 0;
+  RESOURCE_TYPE_INFERENCE = 1;
+  RESOURCE_TYPE_STORAGE = 2;
+  RESOURCE_TYPE_COMPUTE = 3;
+  RESOURCE_TYPE_BANDWIDTH = 4;
+}
+
+// Storage types
+enum StorageTypeEnum {
+  STORAGE_TYPE_UNSPECIFIED = 0;
+  STORAGE_TYPE_SSD = 1;
+  STORAGE_TYPE_HDD = 2;
+  STORAGE_TYPE_NVME = 3;
+  STORAGE_TYPE_RAM = 4;
+}
+
+// Inference specification
+message InferenceSpec {
+  string model = 1;
+  uint64 max_context = 2;
+  uint64 tokens_per_second = 3;
+}
+
+// Storage specification
+message StorageSpec {
+  uint64 total_bytes = 1;
+  uint64 available_bytes = 2;
+  StorageTypeEnum storage_type = 3;
+}
+
+// GPU specification
+message GpuSpec {
+  string model = 1;
+  uint64 memory_bytes = 2;
+  string compute_capability = 3;
+}
+
+// Compute specification
+message ComputeSpec {
+  uint32 cpu_cores = 1;
+  uint32 cpu_threads = 2;
+  uint64 memory_bytes = 3;
+  optional GpuSpec gpu = 4;
+}
+
+// Bandwidth specification
+message BandwidthSpec {
+  uint32 upload_mbps = 1;
+  uint32 download_mbps = 2;
+}
+
+// Resource type with spec
+message ResourceType {
+  oneof spec {
+    InferenceSpec inference = 1;
+    StorageSpec storage = 2;
+    ComputeSpec compute = 3;
+    BandwidthSpec bandwidth = 4;
+  }
+}
+
+// Resource registration request
+message RegisterResourceRequest {
+  string node_id = 1;  // DID
+  ResourceType resource_type = 2;
+  uint64 price_per_unit = 3;  // millitokens
+  string unit_description = 4;
+  uint64 minimum_units = 5;
+}
+
+// Query resources request
+message QueryResourcesRequest {
+  optional ResourceTypeEnum type_filter = 1;
+  optional string provider_id = 2;
+  optional uint32 limit = 3;
+}
+
+// Query resources response
+message QueryResourcesResponse {
+  repeated ResourceListing resources = 1;
+}
+
+// Resource listing
+message ResourceListing {
+  string provider_id = 1;
+  ResourceType resource_type = 2;
+  uint64 price_per_unit = 3;
+  string unit_description = 4;
+  uint64 minimum_units = 5;
+  bool available = 6;
+}
+
+// Get usage request
+message GetUsageRequest {
+  optional string consumer_id = 1;
+  optional string provider_id = 2;
+  optional uint64 start_time = 3;
+  optional uint64 end_time = 4;
+}
+
+// Get usage response
+message GetUsageResponse {
+  repeated ResourceUsage usage = 1;
+  uint64 total_cost_millitokens = 2;
+}
+
+// Resource usage record
+message ResourceUsage {
+  ResourceType resource_type = 1;
+  string consumer = 2;  // DID
+  string provider = 3;  // DID
+  uint64 started_at = 4;
+  optional uint64 ended_at = 5;
+  uint64 units_consumed = 6;
+  uint64 cost_millitokens = 7;
+}
+
+// Record usage request
+message RecordUsageRequest {
+  string consumer_id = 1;
+  string provider_id = 2;
+  ResourceType resource_type = 3;
+  uint64 units_consumed = 4;
+  uint64 started_at = 5;
+  optional uint64 ended_at = 6;
+}
+
+// Get pricing request
+message GetPricingRequest {
+  optional ResourceTypeEnum type_filter = 1;
+  optional string provider_id = 2;
+}
+
+// Get pricing response
+message GetPricingResponse {
+  repeated ResourcePricing pricing = 1;
+}
+
+// Resource pricing
+message ResourcePricing {
+  ResourceType resource_type = 1;
+  uint64 price_per_unit = 2;
+  string unit_description = 3;
+  uint64 minimum_units = 4;
+  string provider_id = 5;
+}

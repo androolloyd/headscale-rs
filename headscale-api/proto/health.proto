@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+import "common.proto";
+
+// Health check service
+service HealthService {
+  // Check service health
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Watch service health (streaming)
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+
+  // Get service metrics
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+}
+
+// Health check request
+message HealthCheckRequest {
+  string service = 1;  // empty = overall health
+}
+
+// Health status
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_NOT_SERVING = 2;
+  HEALTH_STATUS_UNKNOWN = 3;
+  HEALTH_STATUS_DEGRADED = 4;
+}
+
+// Health check response
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  optional string message = 2;
+  map<string, string> details = 3;
+}
+
+// Metrics request
+message MetricsRequest {
+  optional string service = 1;
+}
+
+// Metrics response
+message MetricsResponse {
+  uint64 timestamp = 1;
+  map<string, MetricValue> metrics = 2;
+}
+
+// Metric value
+message MetricValue {
+  oneof value {
+    int64 int_value = 1;
+    double float_value = 2;
+    string string_value = 3;
+  }
+}

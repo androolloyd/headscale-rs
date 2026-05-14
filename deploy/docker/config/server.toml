@@ -1,0 +1,17 @@
+# Headscale-rs Server Configuration for Docker
+
+[server]
+listen = "0.0.0.0:8080"
+db_path = "/var/lib/headscale/db.sqlite"
+mesh_cidr = "100.64.0.0/10"
+
+# Add DERP servers as needed
+# [[server.derp_servers]]
+# name = "derp1"
+# hostname = "derp.example.com"
+# region = "us-west"
+# stun_enabled = true
+
+[logging]
+level = "info"
+format = "pretty"

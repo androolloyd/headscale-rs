@@ -1,0 +1,40 @@
+[package]
+name = "headscale-cli"
+description = "CLI for headscale-rs mesh networking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "headscale"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+headscale-core = { workspace = true }
+headscale-api = { workspace = true }
+headscale-identity = { workspace = true }
+headscale-payments = { workspace = true }
+headscale-resources = { workspace = true }
+headscale-db = { workspace = true }
+
+# CLI argument parsing
+clap = { workspace = true }
+
+# Config file support
+toml = { workspace = true }
+
+# HTTP client for node mode
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Local endpoint discovery
+hostname = { workspace = true }
+local-ip-address = { workspace = true }

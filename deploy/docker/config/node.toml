@@ -1,0 +1,19 @@
+# Headscale-rs Node Configuration for Docker
+
+[node]
+server = "http://headscale-server:8080"
+name = "docker-node"
+wg_interface = "wg0"
+wg_port = 51820
+identity_file = "/var/lib/headscale/identity.json"
+
+[node.capabilities]
+relay = false
+inference = false
+storage = false
+compute = false
+seed = false
+
+[logging]
+level = "info"
+format = "pretty"

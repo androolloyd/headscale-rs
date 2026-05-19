@@ -20,6 +20,7 @@
 //!   user-label rename.
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
@@ -27,6 +28,25 @@ use axum::{
 };
 use serde::Serialize;
 use std::net::Ipv4Addr;
+
+/// Decode a `RegisterRequest` from a raw body without requiring the
+/// `Content-Type: application/json` header. Stock `tailscale up`
+/// (via controlhttp over the noise tunnel) sends register payloads
+/// with no `Content-Type` set, so the axum `Json` extractor rejects
+/// them with HTTP 415. We use a `Bytes` extractor + manual
+/// `serde_json::from_slice` to mirror what upstream's
+/// `gorilla/mux`-routed handlers accept.
+fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Response> {
+    serde_json::from_slice::<RegisterRequest>(raw).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("invalid RegisterRequest JSON: {e}"),
+            }),
+        )
+            .into_response()
+    })
+}
 
 use super::wire::{
     stable_id_from_key, strip_key_prefix, HostInfo, MapNode, RegisterRequest, RegisterResponse,
@@ -42,8 +62,12 @@ struct ErrorBody {
 pub async fn handle_register(
     State(state): State<WireState>,
     Path(node_key_path): Path<String>,
-    Json(body): Json<RegisterRequest>,
-) -> impl IntoResponse {
+    raw: Bytes,
+) -> axum::response::Response {
+    let body = match parse_register_body(&raw) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
     // Resolve hex form of the node key.
     let body_node_key_hex = match strip_key_prefix(&body.node_key) {
         Some(h) => h.to_string(),
@@ -74,8 +98,12 @@ pub async fn handle_register(
 /// for older clients and our own integration tests.
 pub async fn handle_register_flat(
     State(state): State<WireState>,
-    Json(body): Json<RegisterRequest>,
+    raw: Bytes,
 ) -> axum::response::Response {
+    let body = match parse_register_body(&raw) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
     let body_node_key_hex = match strip_key_prefix(&body.node_key) {
         Some(h) => h.to_string(),
         None => body.node_key.clone(),

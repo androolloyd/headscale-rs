@@ -72,7 +72,7 @@ use tokio::{
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tower::ServiceExt;
 
-use super::noise::{drive_ts2021_with_init, UPGRADE_PROTOCOL};
+use super::noise::{drive_ts2021_be_with_init, UPGRADE_PROTOCOL};
 use super::WireState;
 
 /// HTTP header carrying a base64-encoded controlbase Initiation
@@ -224,7 +224,7 @@ async fn handle_one(
             %peer,
             post_header_bytes = body_after_headers.len(),
             fast_start = initial_frame.is_some(),
-            "dispatching /ts2021 to drive_ts2021 (raw bypass)"
+            "dispatching /ts2021 to drive_ts2021_be (BE-nonce transport)"
         );
         // 4a. Verify the Upgrade header is present *and* matches —
         //     `is_ts2021_upgrade` already does this. Write the 101
@@ -232,7 +232,10 @@ async fn handle_one(
         //     client land on the unbuffered TLS stream.
         write_101(&mut tls).await?;
         let stream = PrefixedStream::new(body_after_headers.to_vec(), tls);
-        drive_ts2021_with_init(wire_state, stream, initial_frame)
+        // `drive_ts2021_be_with_init` switches to BE-nonce transport
+        // ChaCha20Poly1305 records after the snow IK handshake completes.
+        // Closes Wall 4 from `docs/tailscale-interop-blocker.md`.
+        drive_ts2021_be_with_init(wire_state, stream, initial_frame)
             .await
             .map_err(|e| io::Error::other(format!("ts2021: {e}")))?;
         return Ok(());

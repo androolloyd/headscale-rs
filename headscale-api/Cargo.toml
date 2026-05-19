@@ -52,8 +52,22 @@ futures = { version = "0.3", optional = true }
 # Tailscale wire-protocol layer (migrated from
 # octravpn-mesh::tailscale_wire 2026-05-19). The Noise IK handshake
 # (`tailscale_wire::noise`) is pinned to snow 0.9 per the upstream
-# OctraVPN blocker doc.
-snow = "0.9.6"
+# OctraVPN blocker doc. The `risky-raw-split` feature exposes
+# `HandshakeState::dangerously_get_raw_split()`, which we need to
+# extract the two ChaCha20Poly1305 keys after the IK handshake so the
+# post-handshake transport (`tailscale_wire::be_transport`) can encrypt
+# records with Tailscale's big-endian nonce convention. The Noise
+# spec mandates little-endian; Tailscale deviates. snow follows spec,
+# so we own the transport phase. See
+# `docs/tailscale-interop-blocker.md` "Wall 4" entry for the citation
+# to upstream `tailscale/control/controlbase/conn.go::nonce`.
+snow = { version = "0.9.6", features = ["risky-raw-split"] }
+# Post-handshake transport AEAD. We use the audited
+# `chacha20poly1305` crate directly (NOT any custom cipher math) and
+# only deviate from the Noise spec in the nonce-encoding step. Same
+# crate version OctraVPN already uses workspace-wide for the WG
+# throughput bench.
+chacha20poly1305 = "0.10"
 # `/ts2021` HTTP/2 server over the Noise-wrapped hijacked socket.
 h2 = "0.4"
 # Hyper supplies `hyper::upgrade::OnUpgrade` (placed in request

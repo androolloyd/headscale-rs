@@ -60,6 +60,7 @@ use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use snow::{params::NoiseParams, Builder};
 
+use super::be_transport::{BeNoiseStream, BeTransport};
 use super::controlbase::{Framed, FrameHeader, MsgType};
 use super::{WireError, WireState};
 
@@ -386,7 +387,14 @@ pub async fn handle_ts2021_post(
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
-                if let Err(e) = drive_ts2021(state_for_task, io).await {
+                // `drive_ts2021_be` switches to the BE-nonce transport
+                // after the snow IK handshake — closes Wall 4
+                // (`docs/tailscale-interop-blocker.md`). The
+                // hyper-upgrade path is exercised by tests that don't
+                // care about post-handshake h2 (the snow-backed
+                // sibling `drive_ts2021` is kept for the existing
+                // in-process tests that talk Noise spec).
+                if let Err(e) = drive_ts2021_be(state_for_task, io).await {
                     tracing::warn!(target = "tailscale_wire::noise", error = %e, "ts2021 connection ended with error");
                 }
             }
@@ -518,10 +526,14 @@ where
     // there's no need to persist it.
     let challenge_pub = generate_x25519_public()
         .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
+    // `NodeKeyChallenge` is a `key.ChallengePublic` — see
+    // `tailscale/types/key/chal.go`. Its text marshaling is
+    // `chalpub:<hex>`; JSON uses the same shape via Go's default
+    // `MarshalText` plumbing (the unmarshaler in the client expects a
+    // bare string, not an object — we shipped an object first and
+    // the client logged a json-unmarshal error on the EarlyNoise read).
     let early_json = serde_json::json!({
-        "NodeKeyChallenge": {
-            "Public": format!("nodekey:{}", hex::encode(challenge_pub))
-        }
+        "NodeKeyChallenge": format!("chalpub:{}", hex::encode(challenge_pub))
     })
     .to_string();
     let early_bytes = early_json.as_bytes();
@@ -636,6 +648,7 @@ async fn dispatch_h2_request(
 fn inner_router(state: WireState) -> Router {
     use axum::routing::post;
     Router::new()
+        // Keyed variants — kept for legacy / direct-test paths.
         .route(
             "/machine/:node_key/register",
             post(super::register::handle_register),
@@ -644,7 +657,172 @@ fn inner_router(state: WireState) -> Router {
             "/machine/:node_key/map",
             post(super::map::handle_map),
         )
+        // Flat v1.78+ paths — what stock `tailscale up` actually POSTs
+        // through the noise-h2 tunnel. NodeKey lives in the request
+        // body, not the URL.
+        .route(
+            "/machine/register",
+            post(super::register::handle_register_flat),
+        )
+        .route(
+            "/machine/map",
+            post(super::map::handle_map_flat),
+        )
         .with_state(state)
+}
+
+/// Like [`drive_ts2021_with_init`] but uses the **big-endian-nonce**
+/// post-handshake transport ([`BeTransport`]) instead of `snow`'s
+/// spec-faithful little-endian transport. This is the variant
+/// production wires up: stock `tailscale up` v1.78+ writes its
+/// transport records with BE nonces (see
+/// `tailscale/control/controlbase/conn.go::nonce`), so we have to
+/// match or the very first decrypt-after-handshake fails with a tag
+/// mismatch.
+///
+/// The IK handshake itself still runs through `snow` — that part is
+/// fully spec-compliant and well-tested by upstream snow users. We
+/// only deviate from `snow` at the `Split()` boundary: extract the
+/// two ChaCha20Poly1305 keys via `dangerously_get_raw_split()`, hand
+/// them to `BeTransport`, then run record encryption/decryption with
+/// BE nonces.
+pub async fn drive_ts2021_be_with_init<T>(
+    state: WireState,
+    io: T,
+    initial_frame: Option<Vec<u8>>,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut framed = Framed::new(io);
+
+    // Step 1: source the Initiation (header-fast-start or pipelined).
+    let (hdr, init_body) = match initial_frame {
+        Some(bytes) => {
+            tracing::debug!(
+                target = "tailscale_wire::noise",
+                len = bytes.len(),
+                "ts2021/be using pre-decoded Initiation from X-Tailscale-Handshake header"
+            );
+            parse_initiation_frame(&bytes)?
+        }
+        None => framed
+            .read_frame()
+            .await
+            .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
+    };
+    let proto_version = match hdr {
+        FrameHeader::Initiation { protocol_version, .. } => protocol_version,
+        other @ FrameHeader::Regular { .. } => {
+            return Err(WireError::Noise(format!(
+                "expected Initiation frame first, got {other:?}"
+            )));
+        }
+    };
+    tracing::debug!(
+        target = "tailscale_wire::noise",
+        proto_version,
+        len = init_body.len(),
+        "ts2021/be received initiation"
+    );
+
+    // Step 2: drive Noise IK responder via snow (handshake stays
+    // spec-faithful).
+    let mut responder = state
+        .server_noise_key
+        .build_responder_for_version(proto_version)?;
+    let mut payload_buf = vec![0u8; 65535];
+    let _payload_len = responder
+        .read_message(&init_body, &mut payload_buf)
+        .map_err(noise_err)?;
+
+    // Step 3: write Reply frame.
+    let mut reply_body = vec![0u8; 65535];
+    let reply_len = responder
+        .write_message(&[], &mut reply_body)
+        .map_err(noise_err)?;
+    reply_body.truncate(reply_len);
+    framed
+        .write_frame(MsgType::Reply, &reply_body)
+        .await
+        .map_err(|e| WireError::Noise(format!("write reply frame: {e}")))?;
+
+    // Step 4: extract split keys *before* converting into transport
+    // mode (snow's transport_state_mut path is private; the public
+    // accessor is on HandshakeState). `dangerously_get_raw_split`
+    // returns (k1, k2) where k1 = initiator-egress and k2 =
+    // responder-egress per Noise spec `Split()`. Behind the
+    // `risky-raw-split` feature in our Cargo.toml.
+    let (k1_init_egress, k2_resp_egress) = responder.dangerously_get_raw_split();
+    tracing::debug!(
+        target = "tailscale_wire::noise",
+        "ts2021/be split keys extracted; switching to BE-nonce transport"
+    );
+    // We are the responder: send_key = k2, recv_key = k1.
+    let be_transport = BeTransport::from_split_responder(k1_init_egress, k2_resp_egress);
+    let inner_io = framed.into_inner();
+    let mut noise_stream = BeNoiseStream::new(inner_io, be_transport);
+
+    // Step 5: send the EarlyNoise frame. Same payload as the
+    // snow-backed path. With the BE transport this is what stock
+    // `tailscale up` actually expects to decrypt first.
+    let challenge_pub = generate_x25519_public()
+        .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
+    // `NodeKeyChallenge` is a `key.ChallengePublic` — see
+    // `tailscale/types/key/chal.go`. Its text marshaling is
+    // `chalpub:<hex>`; JSON uses the same shape via Go's default
+    // `MarshalText` plumbing (the unmarshaler in the client expects a
+    // bare string, not an object — we shipped an object first and
+    // the client logged a json-unmarshal error on the EarlyNoise read).
+    let early_json = serde_json::json!({
+        "NodeKeyChallenge": format!("chalpub:{}", hex::encode(challenge_pub))
+    })
+    .to_string();
+    let early_bytes = early_json.as_bytes();
+    let mut early = Vec::with_capacity(5 + 4 + early_bytes.len());
+    early.extend_from_slice(&EARLY_NOISE_MAGIC);
+    early.extend_from_slice(&(early_bytes.len() as u32).to_be_bytes());
+    early.extend_from_slice(early_bytes);
+    use tokio::io::AsyncWriteExt;
+    noise_stream
+        .write_all(&early)
+        .await
+        .map_err(|e| WireError::Noise(format!("write early-noise (be): {e}")))?;
+    noise_stream
+        .flush()
+        .await
+        .map_err(|e| WireError::Noise(format!("flush early-noise (be): {e}")))?;
+
+    // Step 6: h2 over BE-nonce noise stream + per-request dispatch.
+    let mut h2_conn = h2::server::handshake(noise_stream)
+        .await
+        .map_err(|e| WireError::Noise(format!("h2 handshake: {e}")))?;
+
+    let router = inner_router(state.clone());
+    while let Some(result) = h2_conn.accept().await {
+        let (req, mut respond) = match result {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 accept failed");
+                break;
+            }
+        };
+        let router_for_req = router.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dispatch_h2_request(router_for_req, req, &mut respond).await {
+                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 dispatch failed");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Convenience wrapper for the no-pre-decoded-Initiation case.
+pub async fn drive_ts2021_be<T>(state: WireState, io: T) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    drive_ts2021_be_with_init(state, io, None).await
 }
 
 /// Decode a pre-fetched controlbase-framed Initiation (the bytes that

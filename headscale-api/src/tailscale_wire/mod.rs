@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::Notify;
 
+pub mod be_transport;
 pub mod controlbase;
 pub mod key_handler;
 pub mod map;

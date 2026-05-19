@@ -26,12 +26,32 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+
+/// Decode a `MapRequest` from a raw body without requiring
+/// `Content-Type: application/json`. Stock `tailscale up` (via
+/// controlhttp over the noise tunnel) posts without the header set;
+/// the `axum::Json` extractor 415s those requests. An empty body
+/// decodes to the default-constructed `MapRequest`.
+fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
+    if raw.is_empty() {
+        return Ok(MapRequest::default());
+    }
+    serde_json::from_slice::<MapRequest>(raw).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("invalid MapRequest JSON: {e}"),
+            }),
+        )
+            .into_response()
+    })
+}
 use serde::Serialize;
 
 use super::register::record_to_map_node;
@@ -62,9 +82,12 @@ struct ErrorBody {
 pub async fn handle_map(
     State(state): State<WireState>,
     Path(node_key_path): Path<String>,
-    body: Option<Json<MapRequest>>,
+    raw: Bytes,
 ) -> Response {
-    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let req = match parse_map_body(&raw) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
     let node_key_hex = match strip_key_prefix(&node_key_path) {
         Some(h) => h.to_string(),
         None => node_key_path.clone(),
@@ -78,9 +101,12 @@ pub async fn handle_map(
 /// keyed `/machine/{node_key}/map` route is kept for older clients.
 pub async fn handle_map_flat(
     State(state): State<WireState>,
-    body: Option<Json<MapRequest>>,
+    raw: Bytes,
 ) -> Response {
-    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let req = match parse_map_body(&raw) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
     let node_key_hex = match strip_key_prefix(&req.node_key) {
         Some(h) => h.to_string(),
         None => req.node_key.clone(),

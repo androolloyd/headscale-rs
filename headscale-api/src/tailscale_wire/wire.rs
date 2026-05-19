@@ -189,6 +189,12 @@ pub struct MapRequest {
     /// `OmitPeers` true ⇒ client just wants a poke / heartbeat.
     #[serde(default)]
     pub omit_peers: bool,
+    /// `nodekey:` prefixed hex string. Present on v1.78+ flat-path
+    /// requests (`POST /machine/map`) where there's no URL parameter.
+    /// Empty on the keyed-path variant (caller takes the value from the
+    /// URL instead).
+    #[serde(default)]
+    pub node_key: String,
 }
 
 /// Response to `/machine/{node_key}/map`.

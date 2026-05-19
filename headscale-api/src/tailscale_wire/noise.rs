@@ -267,6 +267,31 @@ fn noise_err<E: std::fmt::Display>(e: E) -> WireError {
     WireError::Noise(e.to_string())
 }
 
+/// Generate a fresh X25519 public key (32 bytes) suitable for use as
+/// the `NodeKeyChallenge` field in the EarlyNoise frame.
+///
+/// Matches the upstream `key.NewChallenge()` semantics: a fresh
+/// keypair on every call, public-only return. We discard the private
+/// half because the client never proves possession of the
+/// corresponding shared secret in the stock interop flow (the
+/// challenge is only meaningful when paired with a follow-up
+/// `NodeChallengeReply` later in the flow, which we don't implement).
+fn generate_x25519_public() -> Result<[u8; 32], WireError> {
+    let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
+    let kp = Builder::new(params)
+        .generate_keypair()
+        .map_err(noise_err)?;
+    if kp.public.len() != 32 {
+        return Err(WireError::Noise(format!(
+            "generated x25519 public has len {}; expected 32",
+            kp.public.len()
+        )));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&kp.public);
+    Ok(out)
+}
+
 /// HTTP header the client sends to request the TS2021 upgrade.
 pub const UPGRADE_PROTOCOL: &str = "tailscale-control-protocol";
 
@@ -410,13 +435,26 @@ where
 
     // Step 5: send the EarlyNoise frame before HTTP/2 starts. Format:
     // [0xff 0xff 0xff 'T' 'S'] [json_len:u32be] [json].
-    // Newer Tailscale clients ignore the body if the magic is absent
-    // but newer ones require it; we ship a minimal `NodeKeyChallenge`
-    // payload (32 zero bytes hex-encoded) — the client never validates
-    // the challenge for stock-up flow.
+    //
+    // Upstream `hscontrol/noise.go::earlyNoise` marshals a
+    // `tailcfg.EarlyNoise{NodeKeyChallenge: ns.challenge.Public()}`
+    // where `challenge` is a freshly-generated X25519 challenge key
+    // (`key.NewChallenge()`). The client uses this challenge to prove
+    // node-key possession in a follow-up request later in the flow;
+    // for the stock `tailscale up` interop test the value just needs
+    // to be a *well-formed* X25519 public key — a degenerate
+    // all-zeros key may be rejected by the client's curve25519
+    // validation.
+    //
+    // We generate a fresh challenge per /ts2021 connection via
+    // `snow::Builder::generate_keypair` (already a workspace dep) so
+    // we don't depend on x25519-dalek. The challenge is ephemeral —
+    // there's no need to persist it.
+    let challenge_pub = generate_x25519_public()
+        .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
     let early_json = serde_json::json!({
         "NodeKeyChallenge": {
-            "Public": "nodekey:0000000000000000000000000000000000000000000000000000000000000000"
+            "Public": format!("nodekey:{}", hex::encode(challenge_pub))
         }
     })
     .to_string();

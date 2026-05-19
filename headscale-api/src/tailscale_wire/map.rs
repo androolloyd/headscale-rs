@@ -64,13 +64,40 @@ pub async fn handle_map(
     Path(node_key_path): Path<String>,
     body: Option<Json<MapRequest>>,
 ) -> Response {
-    let Json(req) = body.unwrap_or(Json(MapRequest::default()));
-
+    let req = body.map(|Json(r)| r).unwrap_or_default();
     let node_key_hex = match strip_key_prefix(&node_key_path) {
         Some(h) => h.to_string(),
         None => node_key_path.clone(),
     };
+    map_inner(state, node_key_hex, req).await
+}
 
+/// `POST /machine/map` (v1.78+ flat path).
+///
+/// NodeKey lives in the request body (`MapRequest.NodeKey`). The
+/// keyed `/machine/{node_key}/map` route is kept for older clients.
+pub async fn handle_map_flat(
+    State(state): State<WireState>,
+    body: Option<Json<MapRequest>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let node_key_hex = match strip_key_prefix(&req.node_key) {
+        Some(h) => h.to_string(),
+        None => req.node_key.clone(),
+    };
+    if node_key_hex.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "missing NodeKey in body".into(),
+            }),
+        )
+            .into_response();
+    }
+    map_inner(state, node_key_hex, req).await
+}
+
+async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> Response {
     // The caller must already have registered. If not, 404 — they need
     // to go through `/machine/{node_key}/register` first.
     let Some(own) = state.machines.get(&node_key_hex) else {
@@ -126,10 +153,16 @@ pub async fn handle_map(
     let _ = stable_id_from_key(&node_key_hex); // tickle import-used assertion
 
     if req.stream {
-        // Stream:true: emit the MapResponse JSON immediately + a
-        // newline keepalive every [`MAP_KEEPALIVE_INTERVAL`]. Stock
-        // `tailscale` requires *something* to land on the stream
-        // periodically or it tears the connection down.
+        // Stream:true: emit the MapResponse JSON immediately, then push
+        // a fresh chunk every time the registry changes (a new peer
+        // joins / leaves), with `"\n"` keepalive chunks bounding any
+        // idle period at [`MAP_KEEPALIVE_INTERVAL`]. Stock `tailscale`
+        // requires *something* to land on the stream periodically or
+        // it tears the connection down.
+        //
+        // Per `docs/tailscale-interop-blocker.md` 2026-05-19 §"What
+        // unblocks exit 0": the body must NOT terminate naturally — the
+        // client expects to long-poll until it closes the connection.
         let first = match serde_json::to_vec(&resp) {
             Ok(mut v) => {
                 v.push(b'\n');
@@ -145,22 +178,76 @@ pub async fn handle_map(
                     .into_response();
             }
         };
-        // Build the stream by hand to avoid an `async_stream` dep.
-        // `unfold` carries a small state machine: `None` ⇒ emit the
-        // first MapResponse chunk; `Some(())` ⇒ wait one keepalive
-        // interval then emit `"\n"`. The stream never terminates —
-        // axum will drop it when the client disconnects.
+
+        // The stream's carried state is enough to re-build MapResponse
+        // on each registry wake.
+        let machines = state.machines.clone();
+        let notify = state.machines.notify.clone();
+        let self_node_key = node_key_hex.clone();
         let stream = futures_util::stream::unfold(
-            (Some(first), false),
-            |(first, _ever_woke): (Option<Vec<u8>>, bool)| async move {
-                if let Some(initial) = first {
-                    Some((Ok::<_, std::io::Error>(initial), (None, true)))
-                } else {
-                    tokio::time::sleep(MAP_KEEPALIVE_INTERVAL).await;
-                    Some((Ok(b"\n".to_vec()), (None, true)))
+            (Some(first), machines, notify, self_node_key),
+            move |(first_opt, machines, notify, self_node_key)| async move {
+                if let Some(initial) = first_opt {
+                    return Some((
+                        Ok::<_, std::io::Error>(initial),
+                        (None, machines, notify, self_node_key),
+                    ));
                 }
+                // Wait for either a registry change or a keepalive
+                // tick, whichever fires first. We park the `Notified`
+                // future inside a small scope so the Arc isn't borrowed
+                // when we re-wrap the state for the next iteration.
+                let chunk = {
+                    let notify_for_wait = notify.clone();
+                    let notified = notify_for_wait.notified();
+                    tokio::pin!(notified);
+                    tokio::select! {
+                    _ = &mut notified => {
+                        // Registry changed — rebuild + emit a fresh
+                        // MapResponse chunk. If our own machine vanished
+                        // we emit a `"\n"` keepalive and let the next
+                        // iteration handle teardown.
+                        if let Some(own) = machines.get(&self_node_key) {
+                            let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
+                            let mut peers: Vec<MapNode> = machines
+                                .all()
+                                .into_iter()
+                                .filter(|(k, _)| k != &self_node_key)
+                                .map(|(_, rec)| record_to_map_node(&rec, TAILNET_DOMAIN))
+                                .collect();
+                            peers.sort_by_key(|n| n.id);
+                            let mr = MapResponse {
+                                key_expiry_extension: 0,
+                                node: own_node,
+                                peers,
+                                dns_config: DnsConfig::default(),
+                                derp_map: DerpMap::default(),
+                                domain: TAILNET_DOMAIN.into(),
+                                keep_alive: true,
+                            };
+                            match serde_json::to_vec(&mr) {
+                                Ok(mut v) => {
+                                    v.push(b'\n');
+                                    v
+                                }
+                                Err(_) => b"\n".to_vec(),
+                            }
+                        } else {
+                            b"\n".to_vec()
+                        }
+                    }
+                    _ = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
+                        b"\n".to_vec()
+                    }
+                    }
+                };
+                Some((
+                    Ok(chunk),
+                    (None, machines, notify, self_node_key),
+                ))
             },
         );
+
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
@@ -302,6 +389,142 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers.len(), 1, "long-poll should have woken on B's register");
+    }
+
+    /// Flat v1.78+ path: NodeKey lives in the body.
+    #[tokio::test]
+    async fn flat_map_extracts_node_key_from_body() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let req = serde_json::json!({
+            "NodeKey": format!("nodekey:{a}"),
+            "Version": 39,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/map")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.node.addresses[0], "100.64.0.10/32");
+        assert_eq!(mr.peers.len(), 1);
+    }
+
+    /// Keyed map still works (regression guard).
+    #[tokio::test]
+    async fn keyed_map_still_works_after_flat_addition() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Flat map rejects empty NodeKey body.
+    #[tokio::test]
+    async fn flat_map_rejects_missing_node_key() {
+        let (state, _dir) = fixture();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/map")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Stream:true: notify_waiters on the registry produces a follow-up
+    /// MapResponse chunk on the existing stream (PR 3 acceptance).
+    /// We drive `tokio::time::pause` so the test doesn't actually wait
+    /// 30s for the keepalive interval.
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_emits_mapresponse_chunk_on_registry_change() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        // Note: only peer-a registered initially.
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // First chunk: a single-peer MapResponse (no peers yet).
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let trimmed = &chunk[..chunk.len() - 1];
+        let first_mr: MapResponse = serde_json::from_slice(trimmed).unwrap();
+        assert_eq!(first_mr.peers.len(), 0);
+
+        // Trigger a registry change: insert peer-b. The stream
+        // listener wakes via `Notify::notify_waiters` and emits a
+        // follow-up MapResponse chunk with the new peer included.
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        // The follow-up chunk is a full MapResponse + '\n'.
+        assert!(chunk.ends_with(b"\n"));
+        let trimmed = &chunk[..chunk.len() - 1];
+        let mr: MapResponse = serde_json::from_slice(trimmed).unwrap();
+        assert_eq!(
+            mr.peers.len(),
+            1,
+            "second chunk should include the newly-registered peer"
+        );
+        assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
     }
 
     /// Stream:true: the response body emits the first MapResponse

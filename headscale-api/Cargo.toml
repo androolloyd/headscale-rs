@@ -75,6 +75,17 @@ parking_lot = "0.12"
 bytes = "1"
 hex = "0.4"
 
+# TLS termination on :443 — required by stock `tailscale up` v1.78+
+# which forces an HTTPS-on-443 dial after the initial /key probe.
+# `rcgen` mints the self-signed cert at startup (cached under
+# `<state_dir>/tls.{crt,key}`); `axum-server` is the rustls bridge for
+# axum 0.7. `rustls-pemfile` parses the cached PEM back into rustls
+# Cert/Key types. Both new in this PR.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
+
 [build-dependencies]
 tonic-build = "0.12"
 

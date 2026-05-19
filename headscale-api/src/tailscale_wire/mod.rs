@@ -49,6 +49,8 @@ pub mod key_handler;
 pub mod map;
 pub mod noise;
 pub mod register;
+pub mod serve;
+pub mod tls;
 pub mod wire;
 
 pub use noise::ServerNoiseKey;
@@ -209,6 +211,12 @@ pub fn router(state: WireState) -> Router {
             post(register::handle_register),
         )
         .route("/machine/:node_key/map", post(map::handle_map))
+        // Flat v1.78+ paths — extract NodeKey from the request body.
+        // See `docs/tailscale-interop-blocker.md` 2026-05-19 §"Wire-format
+        // surprise". Both shapes coexist deliberately so older clients
+        // and our own integration tests keep working.
+        .route("/machine/register", post(register::handle_register_flat))
+        .route("/machine/map", post(map::handle_map_flat))
         .with_state(state)
 }
 

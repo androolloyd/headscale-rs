@@ -62,7 +62,48 @@ pub async fn handle_register(
         )
             .into_response();
     }
+    register_inner(state, body_node_key_hex, body).await
+}
 
+/// `POST /machine/register` (v1.78+ flat path).
+///
+/// Identical to [`handle_register`] except the NodeKey is read solely
+/// from the request body — the URL carries no path parameter. Stock
+/// `tailscale up` after the controlhttp forced-443 switchover posts to
+/// this shape; the keyed `/machine/{node_key}/register` route is kept
+/// for older clients and our own integration tests.
+pub async fn handle_register_flat(
+    State(state): State<WireState>,
+    Json(body): Json<RegisterRequest>,
+) -> axum::response::Response {
+    let body_node_key_hex = match strip_key_prefix(&body.node_key) {
+        Some(h) => h.to_string(),
+        None => body.node_key.clone(),
+    };
+    if body_node_key_hex.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "missing NodeKey in body".into(),
+            }),
+        )
+            .into_response();
+    }
+    register_inner(state, body_node_key_hex, body).await
+}
+
+/// Shared logic between the keyed and flat register handlers.
+///
+/// `node_key_hex` is the canonical, prefix-stripped form. The body's
+/// own NodeKey is also re-parsed here (and used to populate the
+/// `MachineRecord`); callers are expected to have already validated
+/// that the two agree (for the keyed path) or supplied the body's value
+/// directly (for the flat path).
+async fn register_inner(
+    state: WireState,
+    node_key_hex: String,
+    body: RegisterRequest,
+) -> axum::response::Response {
     // Redeem the presented preauth token. Absence of an `Auth.AuthKey`
     // is treated as "no authkey presented" which is a 401.
     let authkey = body
@@ -106,7 +147,7 @@ pub async fn handle_register(
     // the same IP — handy for tests, but the `MachineRegistry` itself
     // keys on the node key so duplicate registers under different
     // node keys do get separate records.
-    let alloc_input = format!("{user}:{body_node_key_hex}");
+    let alloc_input = format!("{user}:{node_key_hex}");
     let ipv4: Ipv4Addr = match state.ip_allocator.allocate(&alloc_input) {
         Ok(ip) => ip,
         Err(e) => {
@@ -126,13 +167,13 @@ pub async fn handle_register(
         .map(|h| h.hostname.clone())
         .unwrap_or_default();
     let rec = MachineRecord {
-        node_key_hex: body_node_key_hex.clone(),
+        node_key_hex: node_key_hex.clone(),
         machine_key_hex: String::new(),
         user: user.clone(),
         hostname,
         ipv4,
     };
-    state.machines.upsert(body_node_key_hex, rec);
+    state.machines.upsert(node_key_hex, rec);
 
     let user_id = stable_id_from_key(&user);
     let resp = RegisterResponse {
@@ -290,6 +331,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Flat v1.78+ path: NodeKey lives in the body, not the URL.
+    #[tokio::test]
+    async fn flat_register_extracts_node_key_from_body() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "octrapreauth-flat-alice";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "11".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert_eq!(rr.user.login_name, "alice");
+        // Machine registry remembers the registration under the
+        // body-supplied NodeKey hex.
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.user, "alice");
+    }
+
+    /// Keyed path still works after the flat-path addition (regression
+    /// guard for the additive-router design).
+    #[tokio::test]
+    async fn keyed_register_still_works_after_flat_addition() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "octrapreauth-keyed-regression";
+        redeemer.insert(authkey, "bob");
+        let app = router(state.clone());
+        let node_key_hex = "22".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Flat path rejects an empty NodeKey body.
+    #[tokio::test]
+    async fn flat_register_rejects_missing_node_key() {
+        let (state, _redeemer, _dir) = fixture();
+        let app = router(state);
+        let body = serde_json::json!({
+            "NodeKey": "",
+            "Auth": { "AuthKey": "anything" },
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

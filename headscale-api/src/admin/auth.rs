@@ -29,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
-    http::{header, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Response, StatusCode, header},
     response::{IntoResponse, Redirect},
 };
 use hmac::{Hmac, Mac};
@@ -130,7 +130,11 @@ impl AdminAuth {
     }
 
     /// Format the `Set-Cookie` header value for a freshly minted session.
-    pub(crate) fn cookie_header(&self, payload: &str, max_age_secs: u64) -> String {
+    ///
+    /// Associated fn (no `&self`): the header is fully derived from the
+    /// session payload + constants. Kept on `AdminAuth` for call-site
+    /// locality (`s.auth.cookie_header(...)`).
+    pub(crate) fn cookie_header(payload: &str, max_age_secs: u64) -> String {
         // `Secure` is included unconditionally; operators are expected
         // to terminate TLS in front of the admin port (or use an SSH
         // port-forward). Modern browsers tolerate `Secure` on localhost.
@@ -140,7 +144,7 @@ impl AdminAuth {
     }
 
     /// `Set-Cookie` value that deletes the session cookie.
-    pub(crate) fn cookie_clear_header(&self) -> String {
+    pub(crate) fn cookie_clear_header() -> String {
         format!("{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0")
     }
 
@@ -242,7 +246,10 @@ pub(crate) fn redirect_to_login() -> Response<Body> {
 pub(crate) fn api_unauthorized() -> Response<Body> {
     let mut r = (
         StatusCode::UNAUTHORIZED,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
         r#"{"error":"unauthorized"}"#,
     )
         .into_response();

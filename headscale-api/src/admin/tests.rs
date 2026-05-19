@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use axum::{
-    body::{to_bytes, Body},
-    http::{header, Method, Request, StatusCode},
     Router,
+    body::{Body, to_bytes},
+    http::{Method, Request, StatusCode, header},
 };
 use tower::ServiceExt;
 
@@ -31,6 +31,8 @@ fn build_state() -> AdminState {
             user: "alice".into(),
             hostname: "node-1".into(),
             ipv4: std::net::Ipv4Addr::new(100, 64, 0, 5),
+            disco_key: None,
+            endpoints: Vec::new(),
         },
     );
     AdminState::builder()
@@ -95,7 +97,12 @@ async fn anonymous_dashboard_redirects_to_login() {
     let (app, _) = app();
     let resp = app.oneshot(req_get("/admin/")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(loc, "/admin/login");
 }
 
@@ -331,7 +338,12 @@ async fn bad_login_redirects_with_error() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(loc.starts_with("/admin/login?err="));
 }
 
@@ -345,6 +357,7 @@ async fn expired_session_redirects_to_login() {
         machines: Arc::new(NoopMachines),
         preauth: Arc::new(InMemoryPreauthAdmin::new()),
         derp_regions: 0,
+        policy: crate::policy::PolicyStore::new(),
     };
     let app = router(state.clone());
     let payload = state.auth.mint_session(1); // expired
@@ -445,6 +458,8 @@ async fn xss_escaped_in_machine_detail() {
             user: "alice".into(),
             hostname: "<script>alert(1)</script>".into(),
             ipv4: std::net::Ipv4Addr::new(100, 64, 0, 6),
+            disco_key: None,
+            endpoints: Vec::new(),
         },
     );
     let state = AdminState::builder()

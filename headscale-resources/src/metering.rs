@@ -1,12 +1,23 @@
 //! Resource metering - tracks usage.
+//!
+//! The Prometheus metric for compute uses `f64` CPU-seconds, and the
+//! end-of-session "duration" computation likewise feeds the same family.
+//! Both `units`/`duration` come from `u64` counters that physically
+//! cannot exceed 2^53 in our deployments (sessions cap at 2^31 ms × 2^32
+//! peers); the precision loss is bounded and intentional. Silence the
+//! lint at the module boundary rather than per-site.
+#![allow(clippy::cast_precision_loss)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::RwLock;
 
 use crate::metrics::global_metrics;
 use crate::types::{ResourceType, ResourceUsage};
+
+static NEXT_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Meters resource usage for billing.
 pub struct Meter {
@@ -18,7 +29,6 @@ pub struct Meter {
 
 #[derive(Debug, Clone)]
 struct ActiveSession {
-    id: String,
     consumer: String,
     provider: String,
     resource_type: ResourceType,
@@ -46,7 +56,6 @@ impl Meter {
         let id = generate_session_id();
 
         let session = ActiveSession {
-            id: id.clone(),
             consumer: consumer.to_string(),
             provider: provider.to_string(),
             resource_type,
@@ -66,7 +75,10 @@ impl Meter {
             .get_mut(session_id)
             .ok_or(MeterError::SessionNotFound)?;
 
-        session.units_consumed += units;
+        session.units_consumed = session
+            .units_consumed
+            .checked_add(units)
+            .ok_or(MeterError::UsageOverflow)?;
 
         // Update prometheus metrics based on resource type
         let metrics = global_metrics();
@@ -79,7 +91,11 @@ impl Meter {
             }
             ResourceType::Compute(_) => {
                 // Assuming units are in CPU seconds
-                metrics.record_compute_cpu_seconds(&session.consumer, &session.provider, units as f64);
+                metrics.record_compute_cpu_seconds(
+                    &session.consumer,
+                    &session.provider,
+                    units as f64,
+                );
             }
             ResourceType::Bandwidth(_) => {
                 metrics.record_bandwidth_bytes(&session.consumer, &session.provider, units);
@@ -108,7 +124,10 @@ impl Meter {
             started_at: session.started_at,
             ended_at: Some(ended_at),
             units_consumed: session.units_consumed,
-            cost_millitokens: session.units_consumed * session.rate_per_unit,
+            cost_millitokens: session
+                .units_consumed
+                .checked_mul(session.rate_per_unit)
+                .ok_or(MeterError::CostOverflow)?,
         };
 
         // Record session duration in metrics
@@ -122,7 +141,10 @@ impl Meter {
     pub async fn current_cost(&self, session_id: &str) -> Result<u64, MeterError> {
         let active = self.active.read().await;
         let session = active.get(session_id).ok_or(MeterError::SessionNotFound)?;
-        Ok(session.units_consumed * session.rate_per_unit)
+        session
+            .units_consumed
+            .checked_mul(session.rate_per_unit)
+            .ok_or(MeterError::CostOverflow)
     }
 
     /// Get all usage for a consumer.
@@ -141,8 +163,7 @@ impl Meter {
         self.consumer_usage(consumer)
             .await
             .iter()
-            .map(|u| u.cost_millitokens)
-            .sum()
+            .fold(0u64, |total, u| total.saturating_add(u.cost_millitokens))
     }
 }
 
@@ -156,6 +177,10 @@ impl Default for Meter {
 pub enum MeterError {
     #[error("Session not found")]
     SessionNotFound,
+    #[error("Usage counter overflow")]
+    UsageOverflow,
+    #[error("Usage cost overflow")]
+    CostOverflow,
 }
 
 fn now() -> u64 {
@@ -166,5 +191,66 @@ fn now() -> u64 {
 }
 
 fn generate_session_id() -> String {
-    format!("session_{}", now())
+    let sequence = NEXT_SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("session_{nanos}_{sequence}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{BandwidthSpec, ResourceType};
+
+    fn bandwidth() -> ResourceType {
+        ResourceType::Bandwidth(BandwidthSpec {
+            upload_mbps: 100,
+            download_mbps: 100,
+        })
+    }
+
+    #[tokio::test]
+    async fn session_ids_are_unique_within_same_second() {
+        let meter = Meter::new();
+
+        let first = meter
+            .start_session("consumer", "provider", bandwidth(), 1)
+            .await;
+        let second = meter
+            .start_session("consumer", "provider", bandwidth(), 1)
+            .await;
+
+        assert_ne!(first, second);
+        assert_eq!(meter.active.read().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn consumer_total_cost_saturates() {
+        let meter = Meter::new();
+
+        meter.completed.write().await.extend([
+            ResourceUsage {
+                resource_type: bandwidth(),
+                consumer: "consumer".to_string(),
+                provider: "provider-a".to_string(),
+                started_at: 0,
+                ended_at: Some(1),
+                units_consumed: u64::MAX,
+                cost_millitokens: u64::MAX,
+            },
+            ResourceUsage {
+                resource_type: bandwidth(),
+                consumer: "consumer".to_string(),
+                provider: "provider-b".to_string(),
+                started_at: 0,
+                ended_at: Some(1),
+                units_consumed: 1,
+                cost_millitokens: 1,
+            },
+        ]);
+
+        assert_eq!(meter.consumer_total_cost("consumer").await, u64::MAX);
+    }
 }

@@ -69,11 +69,11 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
 };
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tower::ServiceExt;
 
-use super::noise::{drive_ts2021_be_with_init, UPGRADE_PROTOCOL};
 use super::WireState;
+use super::noise::{UPGRADE_PROTOCOL, drive_ts2021_be_with_init};
 
 /// HTTP header carrying a base64-encoded controlbase Initiation
 /// frame. Stock Tailscale clients (v1.42+) populate this on the
@@ -288,9 +288,7 @@ async fn write_101<W: AsyncWrite + Unpin>(w: &mut W) -> io::Result<()> {
 /// first byte *after* the `\r\n\r\n` sequence, or `None` if not
 /// present.
 fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
 /// True iff the buffer starts with `POST /ts2021 ` and the header
@@ -318,9 +316,8 @@ fn is_ts2021_upgrade(buf: &[u8]) -> bool {
     let path = tokens.next().unwrap_or(b"");
     // Accept any path that *starts with* `/ts2021` so a `?key=` query
     // string variant (used by some client versions) still matches.
-    let path_ok = path == b"/ts2021"
-        || path.starts_with(b"/ts2021?")
-        || path.starts_with(b"/ts2021/");
+    let path_ok =
+        path == b"/ts2021" || path.starts_with(b"/ts2021?") || path.starts_with(b"/ts2021/");
     if !path_ok {
         return false;
     }
@@ -366,12 +363,14 @@ fn trim_trailing_cr(b: &[u8]) -> &[u8] {
 }
 
 fn trim_ascii(b: &[u8]) -> &[u8] {
-    let start = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
+    let start = b
+        .iter()
+        .position(|c| !c.is_ascii_whitespace())
+        .unwrap_or(b.len());
     let end = b
         .iter()
         .rposition(|c| !c.is_ascii_whitespace())
-        .map(|i| i + 1)
-        .unwrap_or(start);
+        .map_or(start, |i| i + 1);
     &b[start..end]
 }
 
@@ -457,16 +456,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<T> {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -480,13 +473,13 @@ type RawTlsStream = TlsStream<TcpStream>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tailscale_wire::noise::drive_ts2021;
     use crate::tailscale_wire::{
+        MachineRegistry, WireState,
         noise::ServerNoiseKey,
         test_support::{MockIpAllocator, MockRedeemer},
-        MachineRegistry, WireState,
     };
-    use crate::tailscale_wire::noise::drive_ts2021;
-    use tokio::io::{duplex, AsyncWriteExt};
+    use tokio::io::{AsyncWriteExt, duplex};
 
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -497,6 +490,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
         };
         (state, dir)
     }
@@ -617,7 +611,7 @@ mod tests {
     /// fixing: the bytes after the `\r\n\r\n` must survive the peek.
     #[tokio::test]
     async fn ts2021_dispatch_preserves_initiation_bytes_across_peek() {
-        use crate::tailscale_wire::controlbase::{Framed, FrameHeader, MsgType};
+        use crate::tailscale_wire::controlbase::{FrameHeader, Framed, MsgType};
 
         let (state, _dir) = fixture_state();
         let server_pub = state.server_noise_key.public_bytes();

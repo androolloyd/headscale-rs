@@ -23,7 +23,7 @@ const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 
 /// STUN magic cookie (RFC 5389).
-const MAGIC_COOKIE: u32 = 0x2112A442;
+const MAGIC_COOKIE: u32 = 0x2112_A442;
 
 /// Well-known public STUN servers.
 pub static DEFAULT_STUN_SERVERS: &[&str] = &[
@@ -46,11 +46,10 @@ impl StunClient {
         let mut servers = Vec::new();
 
         for server in DEFAULT_STUN_SERVERS {
-            if let Ok(addrs) = tokio::net::lookup_host(server).await {
-                for addr in addrs {
-                    servers.push(addr);
-                    break; // Just use first address
-                }
+            if let Ok(mut addrs) = tokio::net::lookup_host(server).await
+                && let Some(addr) = addrs.next()
+            {
+                servers.push(addr);
             }
         }
 
@@ -103,7 +102,6 @@ impl StunClient {
                         error = %e,
                         "STUN server query failed"
                     );
-                    continue;
                 }
             }
         }
@@ -184,8 +182,7 @@ pub fn parse_binding_response(
     let msg_type = u16::from_be_bytes([data[0], data[1]]);
     if msg_type != STUN_BINDING_RESPONSE {
         return Err(StunError::InvalidResponse(format!(
-            "Unexpected message type: 0x{:04x}",
-            msg_type
+            "Unexpected message type: 0x{msg_type:04x}"
         )));
     }
 
@@ -198,7 +195,9 @@ pub fn parse_binding_response(
     // Check magic cookie
     let cookie = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     if cookie != MAGIC_COOKIE {
-        return Err(StunError::InvalidResponse("Invalid magic cookie".to_string()));
+        return Err(StunError::InvalidResponse(
+            "Invalid magic cookie".to_string(),
+        ));
     }
 
     // Check transaction ID
@@ -270,8 +269,7 @@ pub fn parse_mapped_address(data: &[u8]) -> Result<SocketAddr, StunError> {
             Ok(SocketAddr::new(IpAddr::V6(addr.into()), port))
         }
         _ => Err(StunError::InvalidResponse(format!(
-            "Unknown address family: {}",
-            family
+            "Unknown address family: {family}"
         ))),
     }
 }
@@ -327,8 +325,7 @@ pub fn parse_xor_mapped_address(
             Ok(SocketAddr::new(IpAddr::V6(addr.into()), port))
         }
         _ => Err(StunError::InvalidResponse(format!(
-            "Unknown address family: {}",
-            family
+            "Unknown address family: {family}"
         ))),
     }
 }
@@ -372,7 +369,10 @@ mod tests {
         // Family: IPv4, Port: 12345, IP: 1.2.3.4
         let data = [0x00, 0x01, 0x30, 0x39, 1, 2, 3, 4];
         let addr = parse_mapped_address(&data).unwrap();
-        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 12345));
+        assert_eq!(
+            addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 12345)
+        );
     }
 
     #[test]
@@ -389,7 +389,10 @@ mod tests {
         data[4..8].copy_from_slice(&xor_ip.to_be_bytes());
 
         let addr = parse_xor_mapped_address(&data, &txn_id).unwrap();
-        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 12345));
+        assert_eq!(
+            addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 12345)
+        );
     }
 
     #[test]
@@ -398,9 +401,13 @@ mod tests {
         // The IPv6 address is XOR'd with (magic cookie || transaction ID)
         use std::net::Ipv6Addr;
 
-        let txn_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let txn_id = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        ];
         let port = 54321u16;
-        let ipv6 = Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0x0000, 0x0000, 0x8a2e, 0x0370, 0x7334);
+        let ipv6 = Ipv6Addr::new(
+            0x2001, 0x0db8, 0x85a3, 0x0000, 0x0000, 0x8a2e, 0x0370, 0x7334,
+        );
 
         // Build the XOR mask: magic cookie (4 bytes) || transaction ID (12 bytes)
         let cookie_bytes = MAGIC_COOKIE.to_be_bytes();

@@ -112,20 +112,24 @@ impl WireMachineAdmin {
         }
     }
 
+    /// Render a borrowed `(id, rec)` pair into the admin DTO without
+    /// consuming the source record. #238: avoids cloning the
+    /// `MachineRecord` strings out of the registry snapshot in
+    /// `list()` — the few strings the DTO needs are cloned only out of
+    /// the kept records.
     fn render(
-        &self,
-        id: String,
-        rec: crate::tailscale_wire::MachineRecord,
+        id: &str,
+        rec: &crate::tailscale_wire::MachineRecord,
         is_expired: bool,
     ) -> MachineAdminRecord {
         MachineAdminRecord {
-            id,
-            name: rec.hostname,
-            user: rec.user,
+            id: id.to_string(),
+            name: rec.hostname.clone(),
+            user: rec.user.clone(),
             ipv4: rec.ipv4.to_string(),
             online: !is_expired,
             last_seen: if is_expired { 0 } else { now_unix() },
-            machine_key_hex: rec.machine_key_hex,
+            machine_key_hex: rec.machine_key_hex.clone(),
             os: "unknown".into(),
             version: "unknown".into(),
             tags: Vec::new(),
@@ -140,14 +144,15 @@ impl MachineAdmin for WireMachineAdmin {
     async fn list(&self) -> Vec<MachineAdminRecord> {
         let deleted = self.deleted.read();
         let expired = self.expired.read();
-        let mut out: Vec<_> = self
-            .registry
-            .all()
-            .into_iter()
-            .filter(|(k, _)| !deleted.contains(k))
+        // #238: walk the snapshot's borrowed entries; only allocate
+        // for records that survive the `deleted` filter.
+        let snapshot = self.registry.snapshot();
+        let mut out: Vec<_> = snapshot
+            .iter()
+            .filter(|(k, _)| !deleted.contains(k.as_str()))
             .map(|(k, rec)| {
-                let is_exp = expired.contains(&k);
-                self.render(k, rec, is_exp)
+                let is_exp = expired.contains(k.as_str());
+                Self::render(k.as_str(), rec, is_exp)
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -160,7 +165,7 @@ impl MachineAdmin for WireMachineAdmin {
         }
         let rec = self.registry.get(id)?;
         let is_exp = self.expired.read().contains(id);
-        Some(self.render(id.to_string(), rec, is_exp))
+        Some(Self::render(id, &rec, is_exp))
     }
 
     async fn expire(&self, id: &str) -> Result<(), MachineAdminError> {
@@ -204,6 +209,8 @@ mod tests {
                 user: "alice".into(),
                 hostname: "node-1".into(),
                 ipv4: Ipv4Addr::new(100, 64, 0, 5),
+                disco_key: None,
+                endpoints: Vec::new(),
             },
         );
         (WireMachineAdmin::new(reg.clone()), reg)
@@ -241,7 +248,9 @@ mod tests {
     #[test]
     fn expire_unknown_errors() {
         let (a, _) = fixture();
-        let e = rt().block_on(a.expire("zz".repeat(32).as_str())).unwrap_err();
+        let e = rt()
+            .block_on(a.expire("zz".repeat(32).as_str()))
+            .unwrap_err();
         assert!(matches!(e, MachineAdminError::NotFound(_)));
     }
 }

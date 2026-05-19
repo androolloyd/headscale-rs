@@ -50,7 +50,7 @@ pub(crate) async fn run_node(
 
     tracing::info!("Registering with control plane...");
     let resp = client
-        .post(format!("{}/api/v1/register", server_url))
+        .post(format!("{server_url}/api/v1/register"))
         .json(&register_req)
         .send()
         .await
@@ -59,11 +59,11 @@ pub(crate) async fn run_node(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Registration failed: {} - {}", status, body);
+        anyhow::bail!("Registration failed: {status} - {body}");
     }
 
-    let register_resp: RegisterResponse = resp.json().await
-        .context("Invalid registration response")?;
+    let register_resp: RegisterResponse =
+        resp.json().await.context("Invalid registration response")?;
 
     tracing::info!("Registration successful!");
     tracing::info!("  Assigned IPs: {:?}", register_resp.addresses);
@@ -73,7 +73,7 @@ pub(crate) async fn run_node(
     configure_wireguard(wg_interface, &wg_keypair, wg_port, &register_resp).await?;
 
     // Start heartbeat loop
-    let heartbeat_url = format!("{}/api/v1/nodes/{}/heartbeat", server_url, node_id);
+    let heartbeat_url = format!("{server_url}/api/v1/nodes/{node_id}/heartbeat");
     let heartbeat_client = client.clone();
 
     tokio::spawn(async move {
@@ -112,7 +112,7 @@ fn generate_node_id() -> String {
         .as_nanos();
 
     // Simple hash-based ID
-    format!("node-{:016x}", timestamp)
+    format!("node-{timestamp:016x}")
 }
 
 /// Discover local endpoints for NAT traversal.
@@ -134,7 +134,7 @@ async fn discover_endpoints(wg_port: u16) -> Vec<String> {
                     continue;
                 }
 
-                endpoints.push(format!("{}:{}", v4, wg_port));
+                endpoints.push(format!("{v4}:{wg_port}"));
             }
         }
     }

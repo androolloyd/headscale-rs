@@ -31,11 +31,11 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
+    Json,
     body::{Body, Bytes},
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 
 /// Decode a `MapRequest` from a raw body without requiring
@@ -59,12 +59,12 @@ fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
 }
 use serde::Serialize;
 
+use super::WireState;
 use super::register::record_to_map_node;
 use super::wire::{
-    stable_id_from_key, strip_key_prefix, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse,
-    NetPortRange, PortRange,
+    DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PortRange,
+    stable_id_from_key, strip_key_prefix,
 };
-use super::WireState;
 
 /// How long we wait for a second peer to join before returning an
 /// empty-peers `MapResponse`.
@@ -101,6 +101,32 @@ pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
     }]
 }
 
+/// Pick the packet filter to send in a `MapResponse`.
+///
+/// Decision table:
+///
+/// | `policy.is_loaded()` | `policy.filter_rules()` | result |
+/// |---|---|---|
+/// | false                | (any)                   | `allow_all_packet_filter()` |
+/// | true                 | non-empty               | the cached `FilterRule` list |
+/// | true                 | empty                   | `vec![]` (deny-all on the wire) |
+///
+/// "Empty result on a loaded policy" is the deny-all path: the
+/// operator pushed a doc whose only rules are `deny` (or whose
+/// accept rules have no resolvable principals). Stock `tailscale`
+/// v1.78+ rejects inter-peer traffic with `unknown peer` in that
+/// state, which is the intended UX.
+///
+/// "No policy loaded" preserves the interop default — the Wall 7
+/// fixture still works without an operator-supplied ACL.
+pub(crate) fn packet_filter_for(policy: &crate::policy::PolicyStore) -> Vec<FilterRule> {
+    if policy.is_loaded() {
+        policy.filter_rules()
+    } else {
+        allow_all_packet_filter()
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
@@ -126,10 +152,7 @@ pub async fn handle_map(
 ///
 /// NodeKey lives in the request body (`MapRequest.NodeKey`). The
 /// keyed `/machine/{node_key}/map` route is kept for older clients.
-pub async fn handle_map_flat(
-    State(state): State<WireState>,
-    raw: Bytes,
-) -> Response {
+pub async fn handle_map_flat(State(state): State<WireState>, raw: Bytes) -> Response {
     let req = match parse_map_body(&raw) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -176,17 +199,17 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // peer's streaming `/map` so they pick up the new disco/endpoint
     // values on the next chunk.
     let mut record_changed = false;
-    if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty()) {
-        if own.disco_key.as_deref() != Some(dk.as_str()) {
-            own.disco_key.clone_from(&Some(dk.clone()));
-            record_changed = true;
-        }
+    if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty())
+        && own.disco_key.as_deref() != Some(dk.as_str())
+    {
+        own.disco_key = Some(dk.clone());
+        record_changed = true;
     }
-    if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty()) {
-        if &own.endpoints != eps {
-            own.endpoints.clone_from(eps);
-            record_changed = true;
-        }
+    if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty())
+        && &own.endpoints != eps
+    {
+        own.endpoints = eps.clone();
+        record_changed = true;
     }
     if record_changed {
         state.machines.upsert(node_key_hex.clone(), own.clone());
@@ -223,12 +246,15 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
 
     // Build the response.
     let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
-    let mut peers: Vec<MapNode> = state
-        .machines
-        .all()
-        .into_iter()
-        .filter(|(k, _)| k != &node_key_hex)
-        .map(|(_, rec)| record_to_map_node(&rec, TAILNET_DOMAIN))
+    // #238: `snapshot()` returns `Arc<HashMap<…>>` — one Arc clone
+    // total. Iterating borrows the map; we never clone individual
+    // records. `record_to_map_node` takes `&MachineRecord` so the
+    // borrowed iter feeds it directly.
+    let snapshot = state.machines.snapshot();
+    let mut peers: Vec<MapNode> = snapshot
+        .iter()
+        .filter(|(k, _)| k.as_str() != node_key_hex.as_str())
+        .map(|(_, rec)| record_to_map_node(rec, TAILNET_DOMAIN))
         .collect();
     // Stable order so tests are deterministic.
     peers.sort_by_key(|n| n.id);
@@ -244,9 +270,12 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // sidecar (see `derp_config::load_derp_map`).
         derp_map: (*state.derp_map).clone(),
         domain: TAILNET_DOMAIN.into(),
-        // Wall 7: open packet filter. Required for inter-peer
-        // traffic to land — see `allow_all_packet_filter`.
-        packet_filter: allow_all_packet_filter(),
+        // Packet filter from the live `PolicyStore`. Falls back to
+        // `allow_all_packet_filter` when no policy has been pushed —
+        // preserves the Wall 7 default for the interop test, while
+        // operator-managed deployments serve the cached
+        // `FilterRule` list translated from the ACL doc.
+        packet_filter: packet_filter_for(&state.policy),
         // FULL MapResponse — NOT a keepalive. Upstream
         // `controlclient/direct.go::sendMapRequest` `continue`s past
         // the netmap-update handler when `KeepAlive=true`, which
@@ -284,71 +313,72 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         };
 
         // The stream's carried state is enough to re-build MapResponse
-        // on each registry wake.
+        // on each registry / policy wake.
         let machines = state.machines.clone();
         let notify = state.machines.notify.clone();
+        let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let derp_map_for_stream = state.derp_map.clone();
         let stream = futures_util::stream::unfold(
-            (Some(first), machines, notify, self_node_key, derp_map_for_stream),
-            move |(first_opt, machines, notify, self_node_key, machines_derp_map)| async move {
+            (
+                Some(first),
+                machines,
+                notify,
+                policy,
+                self_node_key,
+                derp_map_for_stream,
+            ),
+            move |(first_opt, machines, notify, policy, self_node_key, machines_derp_map)| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),
-                        (None, machines, notify, self_node_key, machines_derp_map),
+                        (
+                            None,
+                            machines,
+                            notify,
+                            policy,
+                            self_node_key,
+                            machines_derp_map,
+                        ),
                     ));
                 }
-                // Wait for either a registry change or a keepalive
-                // tick, whichever fires first. We park the `Notified`
-                // future inside a small scope so the Arc isn't borrowed
-                // when we re-wrap the state for the next iteration.
+                // Wait for either a registry change, a policy change,
+                // or a keepalive tick, whichever fires first. We park
+                // each `Notified` future inside a small scope so the
+                // Arcs aren't borrowed when we re-wrap the state for
+                // the next iteration.
                 let chunk = {
                     let notify_for_wait = notify.clone();
                     let notified = notify_for_wait.notified();
+                    let policy_for_wait = policy.clone();
+                    let policy_changed = policy_for_wait.wait_for_change();
                     tokio::pin!(notified);
+                    tokio::pin!(policy_changed);
                     tokio::select! {
-                    _ = &mut notified => {
-                        // Registry changed — rebuild + emit a fresh
-                        // MapResponse chunk. If our own machine vanished
-                        // we emit a keepalive and let the next iteration
-                        // handle teardown.
-                        if let Some(own) = machines.get(&self_node_key) {
-                            let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
-                            let mut peers: Vec<MapNode> = machines
-                                .all()
-                                .into_iter()
-                                .filter(|(k, _)| k != &self_node_key)
-                                .map(|(_, rec)| record_to_map_node(&rec, TAILNET_DOMAIN))
-                                .collect();
-                            peers.sort_by_key(|n| n.id);
-                            let mr = MapResponse {
-                                key_expiry_extension: 0,
-                                node: own_node,
-                                peers,
-                                dns_config: DnsConfig::default(),
-                                // Wall 6 — see comment in map_inner.
-                                derp_map: (*machines_derp_map).clone(),
-                                domain: TAILNET_DOMAIN.into(),
-                                // Wall 7 — open packet filter.
-                                packet_filter: allow_all_packet_filter(),
-                                // Full payload — see comment in
-                                // `map_inner` for why this must be
-                                // `false`.
-                                keep_alive: false,
-                            };
-                            build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
-                        } else {
-                            build_keepalive_chunk()
-                        }
+                    () = &mut notified => {
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map)
                     }
-                    _ = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
+                    () = &mut policy_changed => {
+                        // Policy edited via admin PUT — every parked
+                        // poller wakes and emits a refreshed
+                        // MapResponse with the new packet_filter.
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map)
+                    }
+                    () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
                         build_keepalive_chunk()
                     }
                     }
                 };
                 Some((
                     Ok(chunk),
-                    (None, machines, notify, self_node_key, machines_derp_map),
+                    (
+                        None,
+                        machines,
+                        notify,
+                        policy,
+                        self_node_key,
+                        machines_derp_map,
+                    ),
                 ))
             },
         );
@@ -367,6 +397,43 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     }
 }
 
+/// Rebuild a single `MapResponse` chunk for an in-flight `Stream:true`
+/// `/machine/map` poller. Called once per registry / policy wake; the
+/// caller decides between this and `build_keepalive_chunk` based on
+/// what fired in the select. If the requesting node has been deleted
+/// from the registry between the wake and the rebuild, we emit a
+/// keepalive instead of a stale MapResponse — the next iteration
+/// handles teardown.
+fn rebuild_map_chunk(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    policy: &Arc<crate::policy::PolicyStore>,
+    self_node_key: &str,
+    derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
+) -> Vec<u8> {
+    let Some(own) = machines.get(self_node_key) else {
+        return build_keepalive_chunk();
+    };
+    let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
+    let snapshot = machines.snapshot();
+    let mut peers: Vec<MapNode> = snapshot
+        .iter()
+        .filter(|(k, _)| k.as_str() != self_node_key)
+        .map(|(_, rec)| record_to_map_node(rec, TAILNET_DOMAIN))
+        .collect();
+    peers.sort_by_key(|n| n.id);
+    let mr = MapResponse {
+        key_expiry_extension: 0,
+        node: own_node,
+        peers,
+        dns_config: DnsConfig::default(),
+        derp_map: (**derp_map).clone(),
+        domain: TAILNET_DOMAIN.into(),
+        packet_filter: packet_filter_for(policy),
+        keep_alive: false,
+    };
+    build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
+}
+
 /// Encode a MapResponse into the wire framing the streaming
 /// `/machine/map` endpoint uses: `[u32 LE total size][zstd(JSON)]`.
 /// The Go upstream encoder is `klauspost/compress/zstd`'s default
@@ -374,8 +441,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
 /// with default level produces frame-mode output that the upstream
 /// decoder accepts without any custom dictionary.
 pub(crate) fn build_framed_chunk(mr: &MapResponse) -> Result<Vec<u8>, std::io::Error> {
-    let json_bytes = serde_json::to_vec(mr)
-        .map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
+    let json_bytes =
+        serde_json::to_vec(mr).map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
     let compressed = zstd::bulk::compress(&json_bytes, 3)
         .map_err(|e| std::io::Error::other(format!("zstd encode: {e}")))?;
     let mut out = Vec::with_capacity(4 + compressed.len());
@@ -412,11 +479,11 @@ async fn wait_for_change(notify: Arc<tokio::sync::Notify>) {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
+        MachineRecord, MachineRegistry, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::DerpMap,
-        MachineRecord, MachineRegistry, WireState,
     };
     use axum::body::to_bytes;
     use std::net::Ipv4Addr;
@@ -433,6 +500,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
         };
         (state, dir)
     }
@@ -549,7 +617,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(mr.peers.len(), 1, "long-poll should have woken on B's register");
+        assert_eq!(
+            mr.peers.len(),
+            1,
+            "long-poll should have woken on B's register"
+        );
     }
 
     /// Flat v1.78+ path: NodeKey lives in the body.
@@ -630,7 +702,11 @@ mod tests {
     /// into the original JSON bytes. Mirrors what upstream
     /// `controlclient/direct.go::decodeMsg` does on the wire.
     fn decode_framed(bytes: &[u8]) -> Vec<u8> {
-        assert!(bytes.len() >= 4, "framed chunk too short: {} bytes", bytes.len());
+        assert!(
+            bytes.len() >= 4,
+            "framed chunk too short: {} bytes",
+            bytes.len()
+        );
         let size = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         assert_eq!(
             bytes.len(),
@@ -740,7 +816,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let mut body = resp.into_body();
-        let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
@@ -750,7 +829,10 @@ mod tests {
         // the next chunk decodes to the canonical `{"KeepAlive":true}`
         // payload (matches upstream `justKeepAliveStr`).
         tokio::time::advance(MAP_KEEPALIVE_INTERVAL + Duration::from_millis(1)).await;
-        let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
@@ -782,7 +864,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let mut body = resp.into_body();
-        let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         // Inspect raw JSON: upstream decoder calls
@@ -790,12 +875,18 @@ mod tests {
         // We assert the field exists AND carries `User`/`StableID`.
         let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
         let node = json.get("Node").expect("Node field present");
-        assert!(node.get("User").and_then(|u| u.as_u64()).unwrap_or(0) > 0);
-        assert!(node
-            .get("StableID")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .starts_with('n'));
+        assert!(
+            node.get("User")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            node.get("StableID")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .starts_with('n')
+        );
         assert!(node.get("Name").is_some());
     }
 
@@ -912,9 +1003,15 @@ mod tests {
         let json_bytes =
             zstd::bulk::decompress(&bytes[4..], 16 * 1024 * 1024).expect("decompress ok");
         let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
-        assert!(v.get("Node").is_some(), "Node field present after framed encode");
+        assert!(
+            v.get("Node").is_some(),
+            "Node field present after framed encode"
+        );
         assert_eq!(
-            v.get("Node").unwrap().get("User").and_then(|u| u.as_u64()),
+            v.get("Node")
+                .unwrap()
+                .get("User")
+                .and_then(serde_json::Value::as_u64),
             Some(7)
         );
     }

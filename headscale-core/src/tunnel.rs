@@ -163,10 +163,10 @@ impl Tunnel {
                     self.state = TunnelState::Connecting;
                 }
             }
-            TunnResult::Done => {}
             TunnResult::Err(_) => {
                 self.state = TunnelState::Failed;
             }
+            // `Done` (no action) and any new boringtun variant fall through.
             _ => {}
         }
 
@@ -198,8 +198,7 @@ impl Tunnel {
                 self.stats.tx_packets += 1;
                 self.stats.last_tx = Some(Instant::now());
             }
-            TunnResult::Done => {}
-            TunnResult::Err(_) => {}
+            TunnResult::Done | TunnResult::Err(_) => {}
         }
 
         result
@@ -436,7 +435,7 @@ impl TunnelManager {
     /// Get a peer's tunnel state.
     pub async fn get_state(&self, peer_id: &str) -> Option<TunnelState> {
         let tunnels = self.tunnels.read().await;
-        tunnels.get(peer_id).map(|t| t.state())
+        tunnels.get(peer_id).map(Tunnel::state)
     }
 
     /// Get tunnel statistics for a peer.
@@ -457,7 +456,7 @@ impl TunnelManager {
     /// Supports /32 host routes, subnet routes, and 0.0.0.0/0 default routes.
     pub async fn route_by_ip(&self, dst_ip: IpAddr) -> Option<String> {
         let routing = self.routing_table.read().await;
-        routing.lookup(dst_ip).map(|s| s.to_string())
+        routing.lookup(dst_ip).map(std::string::ToString::to_string)
     }
 
     /// Check whether a peer is allowed to send packets claiming `ip` as source.
@@ -604,16 +603,14 @@ impl TunnelManager {
         // Get receiver index from the packet (bytes 4-7 for most packet types)
         let packet_type = u32::from_le_bytes([datagram[0], datagram[1], datagram[2], datagram[3]]);
 
-        let _receiver_idx = match packet_type {
-            1 => return None, // Handshake init - no receiver index, need to try all
-            2..=4 => {
-                // Handshake response, cookie reply, data - have receiver index at bytes 4-7
-                // But we need to check if this matches any of our tunnel indices
-                // For now, return None and let caller try all peers
-                return None;
-            }
-            _ => return None,
-        };
+        // packet_type 1 = handshake init (no receiver index, must try all peers);
+        // 2..=4 = handshake response / cookie reply / data — we have a receiver
+        // index but the caller still tries all peers today; everything else is
+        // unknown. All three branches collapse to "let caller fan out", so we
+        // just return `None` unconditionally and keep `packet_type` for the
+        // logging that will hang off this site once receiver-index lookup lands.
+        let _ = packet_type;
+        None
     }
 
     /// Run timer updates for all tunnels.
@@ -625,15 +622,11 @@ impl TunnelManager {
 
         for (peer_id, tunnel) in tunnels.iter_mut() {
             let mut buf = vec![0u8; PACKET_BUFFER_SIZE];
-            loop {
-                match tunnel.update_timers(&mut buf) {
-                    TunnResult::WriteToNetwork(data) => {
-                        if let Some(endpoint) = tunnel.endpoint {
-                            packets.push((peer_id.clone(), endpoint, data.to_vec()));
-                        }
-                    }
-                    TunnResult::Done => break,
-                    _ => break,
+            // `Done` and any other (Err / new boringtun) variant ends the tick
+            // for this tunnel.
+            while let TunnResult::WriteToNetwork(data) = tunnel.update_timers(&mut buf) {
+                if let Some(endpoint) = tunnel.endpoint {
+                    packets.push((peer_id.clone(), endpoint, data.to_vec()));
                 }
             }
         }
@@ -658,7 +651,7 @@ impl TunnelManager {
         let mut buf = vec![0u8; PACKET_BUFFER_SIZE];
         match tunnel.initiate_handshake(&mut buf) {
             TunnResult::WriteToNetwork(data) => Ok((endpoint, data.to_vec())),
-            TunnResult::Err(e) => Err(TunnelError::Handshake(format!("{:?}", e))),
+            TunnResult::Err(e) => Err(TunnelError::Handshake(format!("{e:?}"))),
             _ => Err(TunnelError::Handshake("Unexpected result".to_string())),
         }
     }
@@ -740,8 +733,10 @@ mod tests {
         let state = manager.get_state(&peer_id).await;
         assert_eq!(state, Some(TunnelState::Disconnected));
 
-        // Remove peer
-        manager.remove_peer(&peer_id).await.unwrap();
+        // Remove peer. `Box::pin` to keep the test future small —
+        // `remove_peer` carries the full Tunn state on the stack and the
+        // `large_futures` lint complains otherwise.
+        Box::pin(manager.remove_peer(&peer_id)).await.unwrap();
         let peers = manager.list_peers().await;
         assert!(peers.is_empty());
     }

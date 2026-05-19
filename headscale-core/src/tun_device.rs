@@ -60,7 +60,8 @@ impl TunDevice {
             p.packet_information(false);
         });
 
-        let device = tun::create_as_async(&tun_config).map_err(|e| TunError::Create(e.to_string()))?;
+        let device =
+            tun::create_as_async(&tun_config).map_err(|e| TunError::Create(e.to_string()))?;
 
         tracing::info!(
             name = %config.name,
@@ -181,7 +182,9 @@ pub fn parse_ipv4_destination(packet: &[u8]) -> Option<Ipv4Addr> {
         return None;
     }
 
-    Some(Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]))
+    Some(Ipv4Addr::new(
+        packet[16], packet[17], packet[18], packet[19],
+    ))
 }
 
 /// Parse the source IP address from an IPv4 packet.
@@ -196,7 +199,9 @@ pub fn parse_ipv4_source(packet: &[u8]) -> Option<Ipv4Addr> {
         return None;
     }
 
-    Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]))
+    Some(Ipv4Addr::new(
+        packet[12], packet[13], packet[14], packet[15],
+    ))
 }
 
 #[cfg(test)]
@@ -206,10 +211,10 @@ mod tests {
     #[test]
     fn test_netmask_conversion() {
         assert_eq!(netmask_to_ipv4(0), 0);
-        assert_eq!(netmask_to_ipv4(8), 0xFF000000);
-        assert_eq!(netmask_to_ipv4(16), 0xFFFF0000);
-        assert_eq!(netmask_to_ipv4(24), 0xFFFFFF00);
-        assert_eq!(netmask_to_ipv4(32), 0xFFFFFFFF);
+        assert_eq!(netmask_to_ipv4(8), 0xFF00_0000);
+        assert_eq!(netmask_to_ipv4(16), 0xFFFF_0000);
+        assert_eq!(netmask_to_ipv4(24), 0xFFFF_FF00);
+        assert_eq!(netmask_to_ipv4(32), 0xFFFF_FFFF);
     }
 
     #[test]

@@ -245,7 +245,7 @@ mod tests {
     fn empty_user_rejected() {
         let a = InMemoryPreauthAdmin::new();
         let req = PreauthMintRequest {
-            user: "".into(),
+            user: String::new(),
             ttl_secs: 600,
             reusable: false,
             ephemeral: false,
@@ -285,4 +285,3 @@ mod tests {
         assert!(p.ends_with('…'));
     }
 }
-

@@ -31,7 +31,7 @@
 //! # Default Policy
 //!
 //! By default, all traffic within the fleet is allowed (allow-fleet).
-//! External rentals require explicit ACL rules.
+//! External resource access requires explicit ACL rules.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -64,17 +64,12 @@ pub enum AclError {
 }
 
 /// ACL action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Accept,
+    #[default]
     Deny,
-}
-
-impl Default for Action {
-    fn default() -> Self {
-        Action::Deny
-    }
 }
 
 /// A single ACL rule.
@@ -139,8 +134,8 @@ impl HostSpec {
     /// Get all IPs from this host spec.
     pub fn ips(&self) -> Vec<IpAddr> {
         match self {
-            HostSpec::Single(s) => s.parse().ok().into_iter().collect(),
-            HostSpec::Multiple(v) => v.iter().filter_map(|s| s.parse().ok()).collect(),
+            Self::Single(s) => s.parse().ok().into_iter().collect(),
+            Self::Multiple(v) => v.iter().filter_map(|s| s.parse().ok()).collect(),
         }
     }
 }
@@ -203,6 +198,21 @@ impl AclPolicy {
         serde_json::from_str(json).map_err(|e| AclError::ParseError(e.to_string()))
     }
 
+    /// Parse policy from JSON, reject unknown policy keys, and validate references.
+    ///
+    /// This is the recommended entry point for security-sensitive callers.
+    /// `from_json` remains a compatibility parser for callers that want to
+    /// handle validation separately.
+    pub fn from_json_strict(json: &str) -> Result<Self, AclError> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| AclError::ParseError(e.to_string()))?;
+        reject_unknown_acl_fields(&value)?;
+        let policy: Self =
+            serde_json::from_value(value).map_err(|e| AclError::ParseError(e.to_string()))?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
     /// Serialize policy to JSON string.
     pub fn to_json(&self) -> Result<String, AclError> {
         serde_json::to_string_pretty(self).map_err(|e| AclError::ParseError(e.to_string()))
@@ -217,7 +227,7 @@ impl AclPolicy {
             }
             for dst in &rule.dst {
                 // dst is "host:port", extract host part
-                let host = dst.split(':').next().unwrap_or(dst);
+                let (host, _) = split_destination_spec(dst);
                 if host != "*" {
                     self.validate_reference(host)?;
                 }
@@ -228,8 +238,7 @@ impl AclPolicy {
         for (tag, owners) in &self.tag_owners {
             if !tag.starts_with("tag:") {
                 return Err(AclError::InvalidPolicy(format!(
-                    "Tag owner key must start with 'tag:': {}",
-                    tag
+                    "Tag owner key must start with 'tag:': {tag}"
                 )));
             }
             for owner in owners {
@@ -249,10 +258,10 @@ impl AclPolicy {
         if let Some(group_name) = reference.strip_prefix("group:") {
             if !self.groups.contains_key(group_name) {
                 return Err(AclError::UnknownReference(format!(
-                    "Unknown group: {}",
-                    group_name
+                    "Unknown group: {group_name}"
                 )));
             }
+            return Ok(());
         } else if reference.starts_with("tag:") {
             // Tags are always valid (they're assigned at runtime)
             return Ok(());
@@ -270,12 +279,7 @@ impl AclPolicy {
             return Ok(());
         }
 
-        // Check if it's a valid IP or CIDR (allow raw IPs in rules)
-        if reference.contains('/') || reference.parse::<IpAddr>().is_ok() {
-            return Ok(());
-        }
-
-        Ok(()) // Be permissive for now - unknown refs might be resolved later
+        Err(AclError::UnknownReference(reference.to_string()))
     }
 }
 
@@ -296,7 +300,7 @@ impl AclContext {
     /// Create a context from a node ID and IP.
     pub fn from_node(node_id: &str, ip: IpAddr) -> Self {
         Self {
-            src: format!("user:{}", node_id),
+            src: format!("user:{node_id}"),
             src_ip: Some(ip),
             src_tags: HashSet::new(),
             src_groups: HashSet::new(),
@@ -305,7 +309,7 @@ impl AclContext {
 
     /// Add a tag to the context.
     pub fn with_tag(mut self, tag: &str) -> Self {
-        self.src_tags.insert(format!("tag:{}", tag));
+        self.src_tags.insert(format!("tag:{tag}"));
         self
     }
 
@@ -315,7 +319,7 @@ impl AclContext {
             if tag.starts_with("tag:") {
                 self.src_tags.insert(tag);
             } else {
-                self.src_tags.insert(format!("tag:{}", tag));
+                self.src_tags.insert(format!("tag:{tag}"));
             }
         }
         self
@@ -323,7 +327,7 @@ impl AclContext {
 
     /// Add a group membership.
     pub fn with_group(mut self, group: &str) -> Self {
-        self.src_groups.insert(format!("group:{}", group));
+        self.src_groups.insert(format!("group:{group}"));
         self
     }
 }
@@ -434,14 +438,12 @@ impl AclEvaluator {
         }
 
         // Check protocol if specified
-        if let Some(ref rule_proto) = rule.proto {
-            if rule_proto != "*" {
-                if let Some(ref dst_proto) = dst.proto {
-                    if rule_proto != dst_proto {
-                        return false;
-                    }
-                }
-            }
+        if let Some(ref rule_proto) = rule.proto
+            && rule_proto != "*"
+            && let Some(ref dst_proto) = dst.proto
+            && rule_proto != dst_proto
+        {
+            return false;
         }
 
         true
@@ -479,32 +481,31 @@ impl AclEvaluator {
                 }
             }
             // Also check resolved groups
-            if ctx.src_groups.contains(&format!("group:{}", group_name)) {
+            if ctx.src_groups.contains(&format!("group:{group_name}")) {
                 return true;
             }
         }
 
         // Check IP match
         if let Some(src_ip) = ctx.src_ip {
-            if let Ok(ip) = spec.parse::<IpAddr>() {
-                if ip == src_ip {
-                    return true;
-                }
+            if let Ok(ip) = spec.parse::<IpAddr>()
+                && ip == src_ip
+            {
+                return true;
             }
-            if let Ok(cidr) = IpNet::from_str(spec) {
-                if cidr.contains(&src_ip) {
-                    return true;
-                }
+            if let Ok(cidr) = IpNet::from_str(spec)
+                && cidr.contains(&src_ip)
+            {
+                return true;
             }
         }
 
         // Check named host match
-        if let Some(host_spec) = self.policy.hosts.get(spec) {
-            if let Some(src_ip) = ctx.src_ip {
-                if host_spec.ips().contains(&src_ip) {
-                    return true;
-                }
-            }
+        if let Some(host_spec) = self.policy.hosts.get(spec)
+            && let Some(src_ip) = ctx.src_ip
+            && host_spec.ips().contains(&src_ip)
+        {
+            return true;
         }
 
         false
@@ -513,20 +514,17 @@ impl AclEvaluator {
     /// Check if destination specification matches destination.
     fn matches_destination(&self, spec: &str, dst: &AclDestination) -> bool {
         // Parse "host:port" format
-        let (host_part, port_part) = if let Some(idx) = spec.rfind(':') {
-            (&spec[..idx], &spec[idx + 1..])
-        } else {
-            (spec, "*")
-        };
+        let (host_part, port_part) = split_destination_spec(spec);
 
         // Check port match
-        if port_part != "*" {
-            if let Ok(rule_port) = port_part.parse::<u16>() {
-                match dst.port {
-                    Some(p) if p != rule_port => return false,
-                    None => {} // No port in dst means any port
-                    _ => {}
-                }
+        if port_part != "*"
+            && let Ok(rule_port) = port_part.parse::<u16>()
+        {
+            // `None` in dst means any port, matching port equality means allow.
+            if let Some(p) = dst.port
+                && p != rule_port
+            {
+                return false;
             }
         }
 
@@ -545,25 +543,24 @@ impl AclEvaluator {
 
         // Check direct IP match
         if let Some(dst_ip) = dst.dst_ip {
-            if let Ok(ip) = host_part.parse::<IpAddr>() {
-                if ip == dst_ip {
-                    return true;
-                }
+            if let Ok(ip) = host_part.parse::<IpAddr>()
+                && ip == dst_ip
+            {
+                return true;
             }
-            if let Ok(cidr) = IpNet::from_str(host_part) {
-                if cidr.contains(&dst_ip) {
-                    return true;
-                }
+            if let Ok(cidr) = IpNet::from_str(host_part)
+                && cidr.contains(&dst_ip)
+            {
+                return true;
             }
         }
 
         // Check named host match
-        if let Some(host_spec) = self.policy.hosts.get(host_part) {
-            if let Some(dst_ip) = dst.dst_ip {
-                if host_spec.ips().contains(&dst_ip) {
-                    return true;
-                }
-            }
+        if let Some(host_spec) = self.policy.hosts.get(host_part)
+            && let Some(dst_ip) = dst.dst_ip
+            && host_spec.ips().contains(&dst_ip)
+        {
+            return true;
         }
 
         // Check string match on dst identifier
@@ -605,6 +602,91 @@ impl AclEvaluator {
     }
 }
 
+fn reject_unknown_acl_fields(value: &serde_json::Value) -> Result<(), AclError> {
+    reject_unknown_keys(
+        value,
+        "ACL policy",
+        &[
+            "hosts",
+            "groups",
+            "acls",
+            "tagOwners",
+            "autoApprovers",
+            "ssh",
+        ],
+    )?;
+
+    if let Some(acls) = value.get("acls").and_then(serde_json::Value::as_array) {
+        for rule in acls {
+            reject_unknown_keys(rule, "ACL rule", &["action", "src", "dst", "proto"])?;
+        }
+    }
+
+    if let Some(ssh) = value.get("ssh").and_then(serde_json::Value::as_array) {
+        for rule in ssh {
+            reject_unknown_keys(rule, "SSH rule", &["action", "src", "dst", "users"])?;
+        }
+    }
+
+    if let Some(auto_approvers) = value.get("autoApprovers") {
+        reject_unknown_keys(auto_approvers, "autoApprovers", &["routes", "exitNode"])?;
+    }
+
+    Ok(())
+}
+
+fn reject_unknown_keys(
+    value: &serde_json::Value,
+    context: &str,
+    allowed: &[&str],
+) -> Result<(), AclError> {
+    let Some(object) = value.as_object() else {
+        return Err(AclError::ParseError(format!(
+            "{context} must be a JSON object"
+        )));
+    };
+
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(AclError::InvalidPolicy(format!(
+                "Unknown {context} field: {key}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn split_destination_spec(spec: &str) -> (&str, &str) {
+    if spec.parse::<IpAddr>().is_ok() || IpNet::from_str(spec).is_ok() {
+        return (spec, "*");
+    }
+
+    if spec.starts_with('[')
+        && let Some(end) = spec.find(']')
+    {
+        let host = &spec[1..end];
+        let rest = &spec[end + 1..];
+        if rest.is_empty() {
+            return (host, "*");
+        }
+        if let Some(port) = rest.strip_prefix(':')
+            && (port == "*" || port.parse::<u16>().is_ok())
+        {
+            return (host, port);
+        }
+    }
+
+    if let Some(idx) = spec.rfind(':') {
+        let port = &spec[idx + 1..];
+        if port == "*" || port.parse::<u16>().is_ok() {
+            return (&spec[..idx], port);
+        }
+    }
+
+    (spec, "*")
+}
+
 /// Check if an IP is in RFC1918 private range.
 fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
@@ -642,16 +724,22 @@ mod tests {
         AclPolicy {
             hosts: {
                 let mut h = HashMap::new();
-                h.insert("gateway".to_string(), HostSpec::Single("100.64.0.1".to_string()));
-                h.insert("servers".to_string(), HostSpec::Multiple(vec![
-                    "100.64.0.10".to_string(),
-                    "100.64.0.11".to_string(),
-                ]));
+                h.insert(
+                    "gateway".to_string(),
+                    HostSpec::Single("100.64.0.1".to_string()),
+                );
+                h.insert(
+                    "servers".to_string(),
+                    HostSpec::Multiple(vec!["100.64.0.10".to_string(), "100.64.0.11".to_string()]),
+                );
                 h
             },
             groups: {
                 let mut g = HashMap::new();
-                g.insert("admins".to_string(), vec!["user:alice".to_string(), "user:bob".to_string()]);
+                g.insert(
+                    "admins".to_string(),
+                    vec!["user:alice".to_string(), "user:bob".to_string()],
+                );
                 g.insert("gpu-nodes".to_string(), vec!["tag:gpu".to_string()]);
                 g
             },
@@ -760,8 +848,8 @@ mod tests {
         let evaluator = AclEvaluator::new(policy);
 
         // Node with tag
-        let ctx_with_tag = AclContext::from_node("node1", "100.64.0.1".parse().unwrap())
-            .with_tag("trusted");
+        let ctx_with_tag =
+            AclContext::from_node("node1", "100.64.0.1".parse().unwrap()).with_tag("trusted");
         let dst = AclDestination::new("100.64.0.2".parse().unwrap(), Some(22));
         assert_eq!(evaluator.evaluate(&ctx_with_tag, &dst), Action::Accept);
 
@@ -812,7 +900,7 @@ mod tests {
     #[test]
     fn test_policy_validation() {
         let policy = test_policy();
-        assert!(policy.validate().is_ok());
+        policy.validate().unwrap();
     }
 
     #[test]
@@ -836,6 +924,77 @@ mod tests {
         assert!(policy.hosts.contains_key("gateway"));
         assert!(policy.groups.contains_key("admins"));
         assert_eq!(policy.acls.len(), 1);
+    }
+
+    #[test]
+    fn test_strict_policy_rejects_unknown_top_level_field() {
+        let json = r#"{
+            "hosts": {},
+            "acls": [],
+            "surprise": true
+        }"#;
+
+        assert!(matches!(
+            AclPolicy::from_json_strict(json),
+            Err(AclError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn test_strict_policy_rejects_unknown_rule_field() {
+        let json = r#"{
+            "acls": [
+                {
+                    "action": "accept",
+                    "src": ["*"],
+                    "dst": ["*:*"],
+                    "extra": "ignored-by-serde"
+                }
+            ]
+        }"#;
+
+        assert!(matches!(
+            AclPolicy::from_json_strict(json),
+            Err(AclError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_bare_reference() {
+        let policy = AclPolicy {
+            acls: vec![AclRule {
+                action: Action::Accept,
+                src: vec!["typo-admins".to_string()],
+                dst: vec!["*:*".to_string()],
+                proto: None,
+            }],
+            ..AclPolicy::deny_all()
+        };
+
+        assert!(matches!(
+            policy.validate(),
+            Err(AclError::UnknownReference(reference)) if reference == "typo-admins"
+        ));
+    }
+
+    #[test]
+    fn test_strict_policy_accepts_bracketed_ipv6_destination() {
+        let json = r#"{
+            "acls": [
+                {
+                    "action": "accept",
+                    "src": ["*"],
+                    "dst": ["[2001:db8::1]:443"]
+                }
+            ]
+        }"#;
+
+        let policy = AclPolicy::from_json_strict(json).unwrap();
+        let evaluator = AclEvaluator::new(policy);
+        let ctx = AclContext::from_node("node1", "100.64.0.1".parse().unwrap());
+        let dst = AclDestination::new("2001:db8::1".parse().unwrap(), Some(443));
+
+        assert_eq!(evaluator.evaluate(&ctx, &dst), Action::Accept);
     }
 
     #[test]
@@ -886,12 +1045,12 @@ mod proptests {
 
     /// Strategy for generating valid node identifiers.
     fn arb_node_id() -> impl Strategy<Value = String> {
-        "[a-z][a-z0-9_-]{0,15}".prop_map(|s| format!("node:{}", s))
+        "[a-z][a-z0-9_-]{0,15}".prop_map(|s| format!("node:{s}"))
     }
 
     /// Strategy for generating valid tag names.
     fn arb_tag() -> impl Strategy<Value = String> {
-        "[a-z][a-z0-9_-]{0,10}".prop_map(|s| format!("tag:{}", s))
+        "[a-z][a-z0-9_-]{0,10}".prop_map(|s| format!("tag:{s}"))
     }
 
     proptest! {
@@ -1081,12 +1240,12 @@ mod proptests {
             test_offset in 0u32..=255,
         ) {
             // Create a /24 CIDR
-            let cidr_str = format!("100.64.{}.0/24", base_ip);
+            let cidr_str = format!("100.64.{base_ip}.0/24");
 
             let policy = AclPolicy {
                 acls: vec![AclRule {
                     action: Action::Accept,
-                    src: vec![cidr_str.clone()],
+                    src: vec![cidr_str],
                     dst: vec!["*:*".to_string()],
                     proto: None,
                 }],

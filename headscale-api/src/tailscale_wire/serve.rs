@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 
 use super::raw_tls;
 use super::tls::{self, SanConfig, TlsMaterial};
-use super::{router, WireError, WireState};
+use super::{WireError, WireState, router};
 
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
@@ -152,9 +152,9 @@ pub async fn serve(
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
+        MachineRegistry, WireState,
         noise::ServerNoiseKey,
         test_support::{MockIpAllocator, MockRedeemer},
-        MachineRegistry, WireState,
     };
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -168,6 +168,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
         };
         (state, dir)
     }

@@ -31,12 +31,7 @@ impl ResourceRegistry {
     }
 
     /// Register a resource from a provider.
-    pub async fn register(
-        &self,
-        provider: &str,
-        resource: ResourceType,
-        pricing: ResourcePricing,
-    ) {
+    pub async fn register(&self, provider: &str, resource: ResourceType, pricing: ResourcePricing) {
         let mut providers = self.providers.write().await;
         let resources = providers.entry(provider.to_string()).or_default();
 
@@ -62,7 +57,10 @@ impl ResourceRegistry {
     }
 
     /// Get cheapest provider for a resource.
-    pub async fn cheapest_provider(&self, resource_type: &ResourceType) -> Option<ProviderResource> {
+    pub async fn cheapest_provider(
+        &self,
+        resource_type: &ResourceType,
+    ) -> Option<ProviderResource> {
         let mut providers = self.find_providers(resource_type).await;
         providers.sort_by_key(|p| p.pricing.price_per_unit);
         providers.into_iter().next()
@@ -91,9 +89,9 @@ impl Default for ResourceRegistry {
 fn matches_resource_type(a: &ResourceType, b: &ResourceType) -> bool {
     match (a, b) {
         (ResourceType::Inference(a), ResourceType::Inference(b)) => a.model == b.model,
-        (ResourceType::Storage(_), ResourceType::Storage(_)) => true,
-        (ResourceType::Compute(_), ResourceType::Compute(_)) => true,
-        (ResourceType::Bandwidth(_), ResourceType::Bandwidth(_)) => true,
+        (ResourceType::Storage(_), ResourceType::Storage(_))
+        | (ResourceType::Compute(_), ResourceType::Compute(_))
+        | (ResourceType::Bandwidth(_), ResourceType::Bandwidth(_)) => true,
         _ => false,
     }
 }

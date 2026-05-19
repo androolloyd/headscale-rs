@@ -1,6 +1,5 @@
 //! Database models and conversions.
 
-use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 /// Database model for a node.
@@ -9,8 +8,8 @@ pub struct NodeRow {
     pub id: String,
     pub name: String,
     pub wg_pubkey: String,
-    pub addresses: String,      // JSON
-    pub endpoints: String,      // JSON
+    pub addresses: String, // JSON
+    pub endpoints: String, // JSON
     pub last_seen: i64,
     pub online: bool,
     pub cap_relay: bool,
@@ -66,12 +65,12 @@ impl TransactionRow {
         use headscale_payments::ledger::TransactionType;
 
         let tx_type = match self.tx_type.as_str() {
-            "transfer" => TransactionType::Transfer,
             "deposit" => TransactionType::Deposit,
             "withdrawal" => TransactionType::Withdrawal,
             "resource_payment" => TransactionType::ResourcePayment,
             "bounty_payment" => TransactionType::BountyPayment,
             "credit_extension" => TransactionType::CreditExtension,
+            // "transfer" + unknown both fall through to Transfer (default).
             _ => TransactionType::Transfer,
         };
 
@@ -102,8 +101,8 @@ pub struct ResourceRow {
     pub id: i64,
     pub provider: String,
     pub resource_type: String,
-    pub resource_spec: String,     // JSON
-    pub pricing: String,            // JSON
+    pub resource_spec: String, // JSON
+    pub pricing: String,       // JSON
     pub available: bool,
     pub last_updated: i64,
     pub created_at: i64,
@@ -112,7 +111,9 @@ pub struct ResourceRow {
 
 impl ResourceRow {
     /// Convert to headscale_resources::registry::ProviderResource
-    pub fn to_provider_resource(&self) -> Result<headscale_resources::registry::ProviderResource, crate::DbError> {
+    pub fn to_provider_resource(
+        &self,
+    ) -> Result<headscale_resources::registry::ProviderResource, crate::DbError> {
         let resource_type: headscale_resources::types::ResourceType =
             serde_json::from_str(&self.resource_spec)?;
         let pricing: headscale_resources::types::ResourcePricing =
@@ -133,7 +134,7 @@ impl ResourceRow {
 pub struct ResourceUsageRow {
     pub id: i64,
     pub resource_type: String,
-    pub resource_spec: String,      // JSON
+    pub resource_spec: String, // JSON
     pub consumer: String,
     pub provider: String,
     pub started_at: i64,
@@ -145,7 +146,9 @@ pub struct ResourceUsageRow {
 
 impl ResourceUsageRow {
     /// Convert to headscale_resources::types::ResourceUsage
-    pub fn to_resource_usage(&self) -> Result<headscale_resources::types::ResourceUsage, crate::DbError> {
+    pub fn to_resource_usage(
+        &self,
+    ) -> Result<headscale_resources::types::ResourceUsage, crate::DbError> {
         let resource_type: headscale_resources::types::ResourceType =
             serde_json::from_str(&self.resource_spec)?;
 
@@ -168,7 +171,7 @@ pub struct SessionRow {
     pub did: String,
     pub created_at: i64,
     pub expires_at: i64,
-    pub capabilities: String,      // JSON
+    pub capabilities: String, // JSON
 }
 
 impl SessionRow {
@@ -178,7 +181,7 @@ impl SessionRow {
 
         let capabilities: Vec<String> = serde_json::from_str(&self.capabilities)?;
         let did = Did::parse(&self.did)
-            .map_err(|e| crate::DbError::General(format!("Invalid DID: {}", e)))?;
+            .map_err(|e| crate::DbError::General(format!("Invalid DID: {e}")))?;
 
         Ok(headscale_identity::session::Session {
             did,

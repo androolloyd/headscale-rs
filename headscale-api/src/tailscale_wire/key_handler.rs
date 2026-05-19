@@ -22,9 +22,9 @@
 //!   (`OverTLSPublicKeyResponse` deserialise) round-trips.
 
 use axum::{
+    Json,
     extract::{Query, State},
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,10 +67,10 @@ pub async fn handle_key(
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
+        MachineRegistry, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
-        MachineRegistry, WireState,
     };
     use axum::body::to_bytes;
     use std::sync::Arc;
@@ -86,6 +86,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
         };
         (state, dir)
     }

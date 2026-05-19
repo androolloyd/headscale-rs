@@ -56,10 +56,15 @@ impl WgKeyPair {
         let mut secret_bytes = [0u8; 32];
         secret_bytes.copy_from_slice(&hash[..32]);
 
-        // Apply x25519 clamping as per RFC 7748
-        secret_bytes[0] &= 248;
-        secret_bytes[31] &= 127;
-        secret_bytes[31] |= 64;
+        // Apply x25519 clamping as per RFC 7748. Decimal masks (248, 127,
+        // 64) match the RFC text verbatim — switching to hex hurts the
+        // cross-reference, so silence `decimal_bitwise_operands` locally.
+        #[allow(clippy::decimal_bitwise_operands)]
+        {
+            secret_bytes[0] &= 248;
+            secret_bytes[31] &= 127;
+            secret_bytes[31] |= 64;
+        }
 
         Self::from_secret(secret_bytes)
     }
@@ -181,12 +186,18 @@ mod tests {
 
         // Should be deterministic
         let wg_keypair2 = WgKeyPair::from_ed25519_secret(&ed25519_secret);
-        assert_eq!(wg_keypair.public_key_bytes(), wg_keypair2.public_key_bytes());
+        assert_eq!(
+            wg_keypair.public_key_bytes(),
+            wg_keypair2.public_key_bytes()
+        );
 
         // Different Ed25519 keys should produce different WG keys
         let ed25519_secret2 = [43u8; 32];
         let wg_keypair3 = WgKeyPair::from_ed25519_secret(&ed25519_secret2);
-        assert_ne!(wg_keypair.public_key_bytes(), wg_keypair3.public_key_bytes());
+        assert_ne!(
+            wg_keypair.public_key_bytes(),
+            wg_keypair3.public_key_bytes()
+        );
     }
 
     #[test]

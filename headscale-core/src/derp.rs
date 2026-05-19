@@ -6,11 +6,10 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// Default DERP port (HTTPS).
 pub const DERP_PORT: u16 = 443;
@@ -60,10 +59,7 @@ pub enum DerpEvent {
     /// Disconnected from a DERP server.
     Disconnected { server: String, reason: String },
     /// Received a packet from a peer via DERP.
-    PacketReceived {
-        peer_key: [u8; 32],
-        data: Vec<u8>,
-    },
+    PacketReceived { peer_key: [u8; 32], data: Vec<u8> },
     /// A peer is now reachable via this DERP server.
     PeerPresent { peer_key: [u8; 32] },
     /// A peer is no longer reachable via this DERP server.
@@ -87,15 +83,15 @@ pub struct DerpClient {
 /// An active connection to a DERP server.
 struct DerpConnection {
     /// Server name.
-    server_name: String,
+    _server_name: String,
     /// Connection state.
     state: DerpState,
     /// Channel to send packets.
     tx: mpsc::Sender<DerpFrame>,
     /// Server's public key.
-    server_key: Option<[u8; 32]>,
+    _server_key: Option<[u8; 32]>,
     /// Last activity time.
-    last_activity: Instant,
+    _last_activity: Instant,
 }
 
 /// A DERP frame to send.
@@ -103,8 +99,6 @@ struct DerpConnection {
 enum DerpFrame {
     /// Send a packet to a peer.
     Send { peer_key: [u8; 32], data: Vec<u8> },
-    /// Send a keepalive.
-    KeepAlive,
 }
 
 impl DerpClient {
@@ -148,10 +142,10 @@ impl DerpClient {
         // Check if already connected
         {
             let connections = self.connections.read().await;
-            if let Some(conn) = connections.get(server_name) {
-                if conn.state == DerpState::Connected {
-                    return Ok(());
-                }
+            if let Some(conn) = connections.get(server_name)
+                && conn.state == DerpState::Connected
+            {
+                return Ok(());
             }
         }
 
@@ -169,11 +163,11 @@ impl DerpClient {
             connections.insert(
                 server_name.to_string(),
                 DerpConnection {
-                    server_name: server_name.to_string(),
+                    _server_name: server_name.to_string(),
                     state: DerpState::Connecting,
                     tx,
-                    server_key: None,
-                    last_activity: Instant::now(),
+                    _server_key: None,
+                    _last_activity: Instant::now(),
                 },
             );
         }
@@ -182,10 +176,20 @@ impl DerpClient {
         let local_key = self.local_key;
         let event_tx = self.event_tx.clone();
         let server_name_owned = server_name.to_string();
-        let connections = Arc::new(&self.connections);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_derp_connection(stream, local_key, rx, event_tx.clone()).await {
+            // Box::pin to keep the spawned future's stack footprint small —
+            // `handle_derp_connection` has a 64 KiB packet buffer + per-stream
+            // rustls state, so dropping it on the stack triggers
+            // `clippy::large_futures` and risks stack overflow under deep tasks.
+            if let Err(e) = Box::pin(handle_derp_connection(
+                stream,
+                local_key,
+                rx,
+                event_tx.clone(),
+            ))
+            .await
+            {
                 tracing::warn!(server = %server_name_owned, error = %e, "DERP connection failed");
                 let _ = event_tx.send(DerpEvent::Disconnected {
                     server: server_name_owned,
@@ -261,8 +265,7 @@ impl DerpClient {
         let connections = self.connections.read().await;
         connections
             .get(server_name)
-            .map(|c| c.state)
-            .unwrap_or(DerpState::Disconnected)
+            .map_or(DerpState::Disconnected, |c| c.state)
     }
 
     /// Get all connected servers.
@@ -294,7 +297,11 @@ async fn handle_derp_connection(
         server: "unknown".to_string(),
     });
 
-    // Main loop
+    // Main loop. 64 KiB stack buffer for one DERP frame — protocol-mandated
+    // upper bound, allocated once per connection. clippy::large_stack_arrays
+    // warns at 16 KiB; this lives inside an `async fn` already pinned via
+    // `Box::pin` at the call site, so the stack pressure is bounded.
+    #[allow(clippy::large_stack_arrays)]
     let mut buf = [0u8; 65536];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(60));
 
@@ -317,9 +324,6 @@ async fn handle_derp_connection(
                 match frame {
                     DerpFrame::Send { peer_key, data } => {
                         send_packet(&mut stream, &peer_key, &data).await?;
-                    }
-                    DerpFrame::KeepAlive => {
-                        send_keepalive(&mut stream).await?;
                     }
                 }
             }
@@ -358,8 +362,7 @@ async fn recv_server_key(stream: &mut TcpStream) -> Result<[u8; 32], DerpError> 
     let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
     if len != 32 {
         return Err(DerpError::Protocol(format!(
-            "Invalid server key length: {}",
-            len
+            "Invalid server key length: {len}"
         )));
     }
 

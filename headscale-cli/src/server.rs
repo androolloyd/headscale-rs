@@ -18,11 +18,12 @@ pub(crate) async fn run_server(listen: &str, db_path: &Path, mesh_cidr: &str) ->
     tracing::info!("  Mesh CIDR: {}", mesh_cidr);
 
     // Ensure database directory exists
-    if let Some(parent) = db_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
-        }
+    if let Some(parent) = db_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create database directory: {}", parent.display())
+        })?;
     }
 
     // Create core components
@@ -33,7 +34,7 @@ pub(crate) async fn run_server(listen: &str, db_path: &Path, mesh_cidr: &str) ->
     // Parse listen address
     let listen_addr = listen
         .parse()
-        .with_context(|| format!("Invalid listen address: {}", listen))?;
+        .with_context(|| format!("Invalid listen address: {listen}"))?;
 
     // Create and run server
     let server = Server::new(mesh, ledger, resources, listen_addr);

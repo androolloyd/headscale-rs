@@ -20,11 +20,11 @@
 //!   user-label rename.
 
 use axum::{
+    Json,
     body::Bytes,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::Serialize;
 use std::net::Ipv4Addr;
@@ -49,8 +49,8 @@ fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Re
 }
 
 use super::wire::{
-    stable_id_from_key, strip_key_prefix, HostInfo, MapNode, RegisterRequest, RegisterResponse,
-    SimpleLogin, SimpleUser,
+    HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
+    stable_id_from_key, strip_key_prefix,
 };
 use super::{MachineRecord, RedeemError, WireState};
 
@@ -134,10 +134,7 @@ async fn register_inner(
 ) -> axum::response::Response {
     // Redeem the presented preauth token. Absence of an `Auth.AuthKey`
     // is treated as "no authkey presented" which is a 401.
-    let authkey = body
-        .auth
-        .as_ref()
-        .map_or("", |a| a.auth_key.as_str());
+    let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     if authkey.is_empty() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -232,7 +229,11 @@ async fn register_inner(
 /// `MapNode` shape we ship in `MapResponse.Peers`.
 pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
     let name = if rec.hostname.is_empty() {
-        format!("node-{}.{}", &rec.node_key_hex[..8.min(rec.node_key_hex.len())], domain)
+        format!(
+            "node-{}.{}",
+            &rec.node_key_hex[..8.min(rec.node_key_hex.len())],
+            domain
+        )
     } else {
         format!("{}.{}", rec.hostname, domain)
     };
@@ -279,10 +280,10 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
+        MachineRegistry, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
-        MachineRegistry, WireState,
     };
     use axum::body::to_bytes;
     use std::sync::Arc;
@@ -299,6 +300,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
         };
         (state, redeemer, dir)
     }
@@ -338,7 +340,10 @@ mod tests {
         // on decode so either survives the client side; the wire-format
         // test pins the encoded shape so future regressions don't slip
         // through.
-        assert!(raw_str.contains("\"AuthURL\""), "expected AuthURL field name; got: {raw_str}");
+        assert!(
+            raw_str.contains("\"AuthURL\""),
+            "expected AuthURL field name; got: {raw_str}"
+        );
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
         assert_eq!(rr.user.login_name, "alice");

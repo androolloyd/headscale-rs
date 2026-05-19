@@ -201,8 +201,7 @@ impl<S> AuthMiddleware<S> {
                 req.method().as_str(),
                 req.uri()
                     .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/"),
+                    .map_or("/", http::uri::PathAndQuery::as_str),
                 did,
                 sig,
                 timestamp,
@@ -404,7 +403,7 @@ mod tests {
                 lease_id: "lease_123".to_string(),
                 renter_did: "did:key:test".to_string(),
                 resource_type: GatewayResourceType::Inference,
-                expires_at: super::super::types::now_secs() * 1000 + 3600000, // 1 hour from now
+                expires_at: super::super::types::now_secs() * 1000 + 3_600_000, // 1 hour from now
             },
         );
 
@@ -450,10 +449,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         store.grant_credit(&did);
 
-        let middleware = AuthMiddleware {
-            inner: (),
-            store: store.clone(),
-        };
+        let middleware = AuthMiddleware { inner: (), store };
         let req = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-1");
 
         let identity = middleware.authenticate(&req).unwrap();
@@ -468,10 +464,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         store.grant_credit(&did);
 
-        let middleware = AuthMiddleware {
-            inner: (),
-            store: store.clone(),
-        };
+        let middleware = AuthMiddleware { inner: (), store };
         let req = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-2");
         let replay = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-2");
 
@@ -489,10 +482,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         store.grant_credit(&did);
 
-        let middleware = AuthMiddleware {
-            inner: (),
-            store: store.clone(),
-        };
+        let middleware = AuthMiddleware { inner: (), store };
         let signed = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-3");
         let mut tampered = signed;
         *tampered.uri_mut() = "/v1/inference/models".parse().unwrap();

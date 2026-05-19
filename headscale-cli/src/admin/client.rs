@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::AdminError;
 
@@ -74,7 +74,9 @@ impl AdminClient {
             .await
             .map_err(|e| map_send_err(&e))?;
         let resp = check_status(resp).await?;
-        resp.json::<T>().await.map_err(|e| AdminError::Decode(e.to_string()))
+        resp.json::<T>()
+            .await
+            .map_err(|e| AdminError::Decode(e.to_string()))
     }
 
     /// `POST /api/v1<path>` carrying a JSON body. Returns the decoded
@@ -94,7 +96,9 @@ impl AdminClient {
             .await
             .map_err(|e| map_send_err(&e))?;
         let resp = check_status(resp).await?;
-        resp.json::<T>().await.map_err(|e| AdminError::Decode(e.to_string()))
+        resp.json::<T>()
+            .await
+            .map_err(|e| AdminError::Decode(e.to_string()))
     }
 
     /// `POST /api/v1<path>` expecting `204 No Content`. The body, if
@@ -113,7 +117,11 @@ impl AdminClient {
 
     /// `PUT /api/v1<path>` carrying a raw string body (the policy
     /// endpoint accepts hujson; we never re-encode).
-    pub async fn put_text(&self, path: &str, body: String) -> Result<serde_json::Value, AdminError> {
+    pub async fn put_text(
+        &self,
+        path: &str,
+        body: String,
+    ) -> Result<serde_json::Value, AdminError> {
         let resp = self
             .http
             .put(self.url(path))
@@ -127,7 +135,10 @@ impl AdminClient {
         // Admin returns `{applied, note}` on success — fall back to a
         // Null value if the response is empty (the `204 No Content`
         // future path).
-        let bytes = resp.bytes().await.map_err(|e| AdminError::Decode(e.to_string()))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AdminError::Decode(e.to_string()))?;
         if bytes.is_empty() {
             Ok(serde_json::Value::Null)
         } else {
@@ -172,10 +183,7 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, Admi
             status: status.as_u16(),
             body,
         },
-        500..=599 => AdminError::Server {
-            status: status.as_u16(),
-            body,
-        },
+        // 5xx + any other unmapped status fall through to Server.
         _ => AdminError::Server {
             status: status.as_u16(),
             body,
@@ -198,7 +206,10 @@ mod tests {
     #[test]
     fn url_no_trailing_slash() {
         let c = AdminClient::new("http://localhost:51822", "tok");
-        assert_eq!(c.url("/preauthkeys"), "http://localhost:51822/api/v1/preauthkeys");
+        assert_eq!(
+            c.url("/preauthkeys"),
+            "http://localhost:51822/api/v1/preauthkeys"
+        );
     }
 
     #[test]

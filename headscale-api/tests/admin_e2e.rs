@@ -13,11 +13,11 @@
 use std::sync::Arc;
 
 use axum::{
-    body::{to_bytes, Body},
-    http::{header, Method, Request, StatusCode},
+    body::{Body, to_bytes},
+    http::{Method, Request, StatusCode, header},
 };
 use headscale_api::admin::{
-    router, AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin,
+    AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin, router,
 };
 use headscale_api::tailscale_wire::{MachineRecord, MachineRegistry};
 use tower::ServiceExt;
@@ -35,6 +35,8 @@ fn fixture_state() -> AdminState {
             user: "alice".into(),
             hostname: "alice-laptop".into(),
             ipv4: std::net::Ipv4Addr::new(100, 64, 0, 5),
+            disco_key: None,
+            endpoints: Vec::new(),
         },
     );
     reg.upsert(
@@ -45,6 +47,8 @@ fn fixture_state() -> AdminState {
             user: "bob".into(),
             hostname: "bob-server".into(),
             ipv4: std::net::Ipv4Addr::new(100, 64, 0, 6),
+            disco_key: None,
+            endpoints: Vec::new(),
         },
     );
     AdminState::builder()
@@ -86,9 +90,13 @@ async fn admin_router_machines_api_lists_two_fixture_machines() {
     let app = router(fixture_state());
     let resp = app
         .oneshot(
-            bearer(Request::builder().method(Method::GET).uri("/api/v1/machines"))
-                .body(Body::empty())
-                .unwrap(),
+            bearer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/machines"),
+            )
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -161,9 +169,13 @@ async fn admin_router_tailnet_api_reports_derp_count() {
     let app = router(fixture_state());
     let resp = app
         .oneshot(
-            bearer(Request::builder().method(Method::GET).uri("/api/v1/tailnet"))
-                .body(Body::empty())
-                .unwrap(),
+            bearer(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/tailnet"),
+            )
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();

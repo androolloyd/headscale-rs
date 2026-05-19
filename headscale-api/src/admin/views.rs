@@ -24,10 +24,10 @@
 //! JavaScript framework is loaded — only the ~1 KB `app.js` for
 //! confirm-on-delete + input hints.
 
-use maud::{html, Markup, PreEscaped, DOCTYPE};
+use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use super::machines::MachineAdminRecord;
-use super::preauth::{key_prefix, PreauthAdminKey, MAX_TTL_DAYS};
+use super::preauth::{MAX_TTL_DAYS, PreauthAdminKey, key_prefix};
 use super::users::UserRecord;
 
 // Inline assets, embedded at build time. ~5 KB combined.
@@ -59,6 +59,11 @@ pub enum Section {
 /// page-specific `inner`. `csrf` is plumbed through to forms via the
 /// `csrf_input` helper, but the shell itself doesn't render forms —
 /// per-page bodies do.
+/// `inner` is taken by value (not `&Markup`) because every caller
+/// builds it inline via `html!{}` and there's no reuse — borrowing
+/// would just add a temporary, and changing the shape would ripple
+/// through every page handler in `admin/mod.rs`.
+#[allow(clippy::needless_pass_by_value)]
 pub fn shell(title: &str, section: Section, signed_in: bool, inner: Markup) -> Markup {
     let nav_link = |label: &str, href: &str, sec: Section| -> Markup {
         let active = sec == section;

@@ -235,18 +235,15 @@ pub async fn chat_completions(
     }
 
     // Find backend
-    let backend = match handler.find_backend(&req.model).await {
-        Some(b) => b,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(GatewayErrorResponse::not_found(format!(
-                    "Model '{}' not available",
-                    req.model
-                ))),
-            )
-                .into_response();
-        }
+    let Some(backend) = handler.find_backend(&req.model).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse::not_found(format!(
+                "Model '{}' not available",
+                req.model
+            ))),
+        )
+            .into_response();
     };
 
     if req.stream {
@@ -319,8 +316,7 @@ async fn handle_blocking_chat(
                     .quota
                     .status(lease_id, GatewayResourceType::Inference)
                     .await
-                    .map(|s| s.remaining.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .map_or_else(|| "unknown".to_string(), |s| s.remaining.to_string()),
             ),
         ],
         Json(response),
@@ -336,7 +332,7 @@ async fn handle_streaming_chat(
 ) -> Response {
     let model = req.model.clone();
     let created = super::types::now_secs();
-    let id = format!("chatcmpl-{}", created);
+    let id = format!("chatcmpl-{created}");
 
     // Create a mock stream
     let chunks = vec![

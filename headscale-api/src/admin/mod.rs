@@ -68,11 +68,11 @@ mod tests;
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{FromRef, Path, RawQuery, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -102,6 +102,10 @@ pub struct AdminState {
     /// DERP map isn't passed through — the admin module doesn't need
     /// to introspect it for v0.
     pub derp_regions: usize,
+    /// Live policy store, shared with the wire layer's
+    /// [`crate::tailscale_wire::WireState::policy`]. Admin PUT mutates
+    /// it; the store's `Notify` wakes parked `/map` long-pollers.
+    pub policy: crate::policy::PolicyStore,
 }
 
 impl AdminState {
@@ -118,6 +122,7 @@ pub struct AdminStateBuilder {
     machines: Option<Arc<dyn MachineAdmin>>,
     preauth: Option<Arc<dyn PreauthAdmin>>,
     derp_regions: usize,
+    policy: Option<crate::policy::PolicyStore>,
 }
 
 impl AdminStateBuilder {
@@ -141,6 +146,15 @@ impl AdminStateBuilder {
         self.derp_regions = n;
         self
     }
+    /// Attach a shared [`crate::policy::PolicyStore`]. If unset the
+    /// builder constructs an empty store; the wire layer will then
+    /// fall back to `allow_all_packet_filter` (interop default).
+    /// Production callers MUST pass the same `Arc` they handed to
+    /// `WireState::policy` so PUT propagates to /map.
+    pub fn policy(mut self, p: crate::policy::PolicyStore) -> Self {
+        self.policy = Some(p);
+        self
+    }
     pub fn build(self) -> AdminState {
         AdminState {
             auth: AdminAuth::new(self.bearer_token.unwrap_or_default()),
@@ -152,6 +166,7 @@ impl AdminStateBuilder {
                 .preauth
                 .unwrap_or_else(|| Arc::new(InMemoryPreauthAdmin::new()) as Arc<dyn PreauthAdmin>),
             derp_regions: self.derp_regions,
+            policy: self.policy.unwrap_or_default(),
         }
     }
 }
@@ -214,10 +229,16 @@ pub fn router(state: AdminState) -> Router {
 
     let api = Router::new()
         .route("/api/v1/users", get(api_users_list).post(api_users_create))
-        .route("/api/v1/users/:name", axum::routing::delete(api_users_delete))
+        .route(
+            "/api/v1/users/:name",
+            axum::routing::delete(api_users_delete),
+        )
         .route("/api/v1/machines", get(api_machines_list))
         .route("/api/v1/machines/:id", get(api_machines_get))
-        .route("/api/v1/machines/:id", axum::routing::delete(api_machines_delete))
+        .route(
+            "/api/v1/machines/:id",
+            axum::routing::delete(api_machines_delete),
+        )
         .route("/api/v1/machines/:id/expire", post(api_machines_expire))
         .route(
             "/api/v1/preauthkeys",
@@ -228,6 +249,7 @@ pub fn router(state: AdminState) -> Router {
             post(api_preauth_expire),
         )
         .route("/api/v1/policy", get(api_policy_get).put(api_policy_put))
+        .route("/api/v1/policy/validate", post(api_policy_validate))
         .route("/api/v1/tailnet", get(api_tailnet));
 
     Router::new().merge(html).merge(api).with_state(state)
@@ -351,7 +373,11 @@ async fn page_machine_detail(
     let body = views::shell(
         &format!(
             "Machine {}",
-            if m.name.is_empty() { &m.id[..8] } else { &m.name }
+            if m.name.is_empty() {
+                &m.id[..8]
+            } else {
+                &m.name
+            }
         ),
         Section::Machines,
         true,
@@ -448,8 +474,9 @@ async fn post_users_create(State(s): State<AdminState>, req: Request) -> Respons
     }
     match s.users.create(form.name.trim()) {
         Ok(_) => Redirect::to("/admin/users").into_response(),
-        Err(e) => Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string())))
-            .into_response(),
+        Err(e) => {
+            Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string()))).into_response()
+        }
     }
 }
 
@@ -492,10 +519,7 @@ async fn page_preauth(
             } else if let Some(raw) = kv.strip_prefix("minted=") {
                 // Look up the key by prefix in the live list.
                 let prefix = urldecode(raw);
-                just_minted = keys
-                    .iter()
-                    .find(|k| k.key.starts_with(&prefix))
-                    .cloned();
+                just_minted = keys.iter().find(|k| k.key.starts_with(&prefix)).cloned();
             }
         }
     }
@@ -557,11 +581,8 @@ async fn post_preauth_mint(State(s): State<AdminState>, req: Request) -> Respons
             // full token from `s.preauth.list()` on render.
             let head_len = "octrapreauth-".len() + 8;
             let prefix = &k.key[..head_len.min(k.key.len())];
-            Redirect::to(&format!(
-                "/admin/preauthkeys?minted={}",
-                urlencode(prefix)
-            ))
-            .into_response()
+            Redirect::to(&format!("/admin/preauthkeys?minted={}", urlencode(prefix)))
+                .into_response()
         }
         Err(e) => Redirect::to(&format!(
             "/admin/preauthkeys?err={}",
@@ -616,12 +637,7 @@ async fn page_sessions(State(s): State<AdminState>, req: Request) -> Response {
     if let Err(r) = guard_html(&s, &req) {
         return r;
     }
-    let body = views::shell(
-        "Sessions",
-        Section::Sessions,
-        true,
-        views::sessions_page(),
-    );
+    let body = views::shell("Sessions", Section::Sessions, true, views::sessions_page());
     Html(body.into_string()).into_response()
 }
 
@@ -646,15 +662,12 @@ async fn post_login(State(s): State<AdminState>, req: Request) -> Response {
         Err(r) => return r,
     };
     if !s.auth.verify_bearer(form.token.trim()) {
-        return Redirect::to(&format!(
-            "/admin/login?err={}",
-            urlencode("Invalid token")
-        ))
-        .into_response();
+        return Redirect::to(&format!("/admin/login?err={}", urlencode("Invalid token")))
+            .into_response();
     }
     let expires = auth::now_unix().saturating_add(SESSION_TTL_SECS);
     let payload = s.auth.mint_session(expires);
-    let cookie = s.auth.cookie_header(&payload, SESSION_TTL_SECS);
+    let cookie = AdminAuth::cookie_header(&payload, SESSION_TTL_SECS);
     let mut r = Redirect::to("/admin/").into_response();
     r.headers_mut().insert(
         header::SET_COOKIE,
@@ -663,11 +676,11 @@ async fn post_login(State(s): State<AdminState>, req: Request) -> Response {
     r
 }
 
-async fn get_logout(State(s): State<AdminState>) -> Response {
+async fn get_logout(State(_s): State<AdminState>) -> Response {
     let mut r = Redirect::to("/admin/login").into_response();
     r.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&s.auth.cookie_clear_header()).expect("cookie ascii"),
+        HeaderValue::from_str(&AdminAuth::cookie_clear_header()).expect("cookie ascii"),
     );
     r
 }
@@ -698,7 +711,11 @@ async fn api_users_create(State(s): State<AdminState>, req: Request) -> Response
     };
     match s.users.create(body.name.trim()) {
         Ok(rec) => (StatusCode::CREATED, Json(rec)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -805,7 +822,11 @@ async fn api_preauth_mint(State(s): State<AdminState>, req: Request) -> Response
     };
     match s.preauth.mint(mint).await {
         Ok(k) => (StatusCode::CREATED, Json(k)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -823,26 +844,122 @@ async fn api_preauth_expire(
     }
 }
 
+/// `GET /api/v1/policy` — return the currently loaded policy.
+///
+/// Body shape (always JSON, even when no policy is loaded):
+///
+/// ```json
+/// { "loaded": <bool>, "policy": <PolicyDoc | null>,
+///   "raw": "<hujson source | null>" }
+/// ```
+///
+/// `policy` is the canonicalised serde shape; `raw` preserves the
+/// operator's exact source bytes (hujson comments + trailing commas
+/// included) so the CLI can fetch + re-push without a re-serialise
+/// round-trip.
 async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
     if let Err(r) = guard_api(&s, &req) {
         return r;
     }
-    // v0 stub: no policy wired. Return an empty document.
-    Json(json!({"loaded": false, "policy": null})).into_response()
+    let doc = s.policy.doc();
+    let raw = s.policy.raw();
+    let loaded = doc.is_some();
+    Json(json!({
+        "loaded": loaded,
+        "policy": doc,
+        "raw": raw,
+    }))
+    .into_response()
 }
 
+/// `PUT /api/v1/policy` — replace the policy document.
+///
+/// Body is hujson (Tailscale's flavour of JSON with line/block
+/// comments + trailing commas). On parse failure the response is
+/// `400 Bad Request` with `{"error": "<diagnostic>"}` — the
+/// existing policy stays intact. On success the new doc lands
+/// atomically and every parked `/map` long-poller wakes within
+/// ~1 ms.
 async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
     if let Err(r) = guard_api(&s, &req) {
         return r;
     }
-    // v0 stub: drain and discard the body so the caller's PUT semantics
-    // round-trip. #230 lands the real editor.
-    let _ = axum::body::to_bytes(req.into_body(), 1024 * 1024).await;
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"applied": false, "note": "policy editor lands in #230"})),
-    )
-        .into_response()
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "policy body too large or unreadable"})),
+        )
+            .into_response();
+    };
+    let raw = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("policy body not UTF-8: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    match crate::policy::parse_hujson_policy(&raw) {
+        Ok(doc) => {
+            let n_rules = doc.rules.len();
+            s.policy.set(doc, raw);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "applied": true,
+                    "rules": n_rules,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/policy/validate` — parse the body as hujson + check
+/// the schema without mutating the store. Returns `200 OK` with
+/// `{"valid": true, "rules": <count>}` on success, `400` with
+/// `{"error": "..."}` on failure. Operators wire this into pre-commit
+/// hooks to catch typos before pushing.
+async fn api_policy_validate(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "policy body too large or unreadable"})),
+        )
+            .into_response();
+    };
+    let raw = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("policy body not UTF-8: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    match crate::policy::parse_hujson_policy(raw) {
+        Ok(doc) => (
+            StatusCode::OK,
+            Json(json!({"valid": true, "rules": doc.rules.len()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
@@ -852,7 +969,7 @@ async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
     Json(json!({
         "derp_regions": s.derp_regions,
         "dns": { "magic_dns": false, "enabled": false },
-        "policy_loaded": false,
+        "policy_loaded": s.policy.is_loaded(),
     }))
     .into_response()
 }
@@ -864,11 +981,8 @@ async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
 /// Buffer the request body and parse it as `application/x-www-form-urlencoded`.
 #[allow(clippy::result_large_err)]
 async fn read_form<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Response> {
-    let bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, "body").into_response());
-        }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else {
+        return Err((StatusCode::BAD_REQUEST, "body").into_response());
     };
     serde_urlencoded::from_bytes(&bytes)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("form: {e}")).into_response())
@@ -877,11 +991,8 @@ async fn read_form<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Re
 /// Buffer the request body and parse it as JSON.
 #[allow(clippy::result_large_err)]
 async fn read_json<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Response> {
-    let bytes = match axum::body::to_bytes(req.into_body(), 256 * 1024).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, "body").into_response());
-        }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 256 * 1024).await else {
+        return Err((StatusCode::BAD_REQUEST, "body").into_response());
     };
     serde_json::from_slice(&bytes).map_err(|e| {
         (
@@ -899,12 +1010,15 @@ async fn read_json<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Re
 /// Very small `application/x-www-form-urlencoded`-style escape — used
 /// only for redirect targets. We don't need a general urlencoder.
 fn urlencode(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{:02X}", b));
+            // Write into the buffer directly — saves the intermediate `format!`
+            // allocation. `String` writes never fail.
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out

@@ -9,19 +9,24 @@
 //!
 //! ## Decision log
 //!
-//! - **Single-response body, not the `Stream=true` ndjson framing.**
-//!   See the note on `MapRequest.stream` in `wire.rs`. Long-term the
-//!   client will require streaming chunks; for the interop test a
-//!   single-shot response is enough.
+//! - **`Stream=true` framing: `[u32 LE size][zstd(JSON)]`.** Discovered
+//!   while diagnosing Wall 5 in `docs/tailscale-interop-blocker.md`.
+//!   Upstream's `tailscale/control/controlclient/direct.go::sendMapRequest`
+//!   reads bytes with `binary.LittleEndian.Uint32(siz[:4])` then
+//!   `zstdframe.AppendDecode(...)`. The framing is NOT newline-delimited,
+//!   the body is NOT plaintext JSON, and the stream is NOT terminated
+//!   naturally — the client expects keepalive frames carrying
+//!   `zstd({"KeepAlive":true})` every <120 s (`watchdogTimeout`).
+//!   Our `Stream=false` test path emits a single plaintext JSON
+//!   `MapResponse` for the non-noise direct-router tests; the prod
+//!   `Stream=true` path emits the framed/compressed stream.
 //! - **Long-poll wake via `tokio::sync::Notify` on the registry.**
 //!   Cheaper than a watch channel for the 2-peer test and the
 //!   correctness story is simpler — every register notifies, every
 //!   waiter wakes and recomputes the snapshot.
-//! - **Timeout = 30s.** Stock `tailscale up` is patient (the upstream
-//!   long-poll runs for many minutes), but 30s is enough for the
-//!   second peer's `register` to land in the interop test's
-//!   tight-loop. If the test times out at 30s the client retries the
-//!   map call — same end result, slightly slower convergence.
+//! - **Keepalive interval = 30s.** Upstream watchdog is 120s, so this
+//!   leaves 4x headroom for slow links. Keepalive bytes are
+//!   `zstd_frame({"KeepAlive":true})`, NOT a bare newline.
 
 use std::{sync::Arc, time::Duration};
 
@@ -136,22 +141,32 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             .into_response();
     };
 
-    // Long-poll if we're alone. Wake on any registry change, or after
-    // the timeout. We re-check after each wake (a `Notify::notify_waiters`
-    // wakes everyone, not just us; spurious wakes are fine).
-    let notify = state.machines.notify.clone();
-    let deadline = tokio::time::Instant::now() + MAP_LONGPOLL_TIMEOUT;
-    while state.machines.len() < 2 {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let remaining = deadline - now;
-        if tokio::time::timeout(remaining, wait_for_change(notify.clone()))
-            .await
-            .is_err()
-        {
-            break;
+    // Long-poll for a second peer ONLY when this is a non-streaming,
+    // non-OmitPeers map call AND we're alone in the tailnet. In every
+    // other case the client expects a response IMMEDIATELY — stock
+    // `tailscale up` v1.78+ sends Stream=true + OmitPeers=true on
+    // its initial noise-channel pre-pump, and waits for both to land
+    // before transitioning state.
+    //
+    // Wall 5 regression cause: the previous code long-polled in
+    // every code path, including the streaming + OmitPeers cases.
+    // That stalled the first MapResponse by 30 s and timed out
+    // the test's 25 s `tailscale up` wrapper.
+    if !req.stream && !req.omit_peers {
+        let notify = state.machines.notify.clone();
+        let deadline = tokio::time::Instant::now() + MAP_LONGPOLL_TIMEOUT;
+        while state.machines.len() < 2 {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline - now;
+            if tokio::time::timeout(remaining, wait_for_change(notify.clone()))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     }
 
@@ -174,26 +189,31 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         dns_config: DnsConfig::default(),
         derp_map: DerpMap::default(),
         domain: TAILNET_DOMAIN.into(),
-        keep_alive: true,
+        // FULL MapResponse — NOT a keepalive. Upstream
+        // `controlclient/direct.go::sendMapRequest` `continue`s past
+        // the netmap-update handler when `KeepAlive=true`, which
+        // means our full payload would be silently dropped. The bit
+        // that prevented `BackendState` from advancing past
+        // `NeedsLogin`. Dedicated keepalive frames go out via
+        // [`build_keepalive_chunk`]'s separate `{"KeepAlive":true}`
+        // payload — never inlined here.
+        keep_alive: false,
     };
     let _ = stable_id_from_key(&node_key_hex); // tickle import-used assertion
 
     if req.stream {
-        // Stream:true: emit the MapResponse JSON immediately, then push
-        // a fresh chunk every time the registry changes (a new peer
-        // joins / leaves), with `"\n"` keepalive chunks bounding any
-        // idle period at [`MAP_KEEPALIVE_INTERVAL`]. Stock `tailscale`
-        // requires *something* to land on the stream periodically or
-        // it tears the connection down.
+        // Stream:true — emit length-prefixed zstd-compressed
+        // MapResponse JSON chunks. See module decision log for the
+        // wire-format details. The first chunk goes out immediately;
+        // subsequent chunks land either when the registry changes
+        // (full MapResponse rebuild) or after [`MAP_KEEPALIVE_INTERVAL`]
+        // (a compact `{"KeepAlive":true}` keepalive frame).
         //
-        // Per `docs/tailscale-interop-blocker.md` 2026-05-19 §"What
-        // unblocks exit 0": the body must NOT terminate naturally — the
-        // client expects to long-poll until it closes the connection.
-        let first = match serde_json::to_vec(&resp) {
-            Ok(mut v) => {
-                v.push(b'\n');
-                v
-            }
+        // Per `docs/tailscale-interop-blocker.md` "Wall 5":
+        // the body must NOT terminate naturally — the client expects
+        // to long-poll until it closes the connection itself.
+        let first = match build_framed_chunk(&resp) {
+            Ok(v) => v,
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -231,8 +251,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                     _ = &mut notified => {
                         // Registry changed — rebuild + emit a fresh
                         // MapResponse chunk. If our own machine vanished
-                        // we emit a `"\n"` keepalive and let the next
-                        // iteration handle teardown.
+                        // we emit a keepalive and let the next iteration
+                        // handle teardown.
                         if let Some(own) = machines.get(&self_node_key) {
                             let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
                             let mut peers: Vec<MapNode> = machines
@@ -249,21 +269,18 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                                 dns_config: DnsConfig::default(),
                                 derp_map: DerpMap::default(),
                                 domain: TAILNET_DOMAIN.into(),
-                                keep_alive: true,
+                                // Full payload — see comment in
+                                // `map_inner` for why this must be
+                                // `false`.
+                                keep_alive: false,
                             };
-                            match serde_json::to_vec(&mr) {
-                                Ok(mut v) => {
-                                    v.push(b'\n');
-                                    v
-                                }
-                                Err(_) => b"\n".to_vec(),
-                            }
+                            build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
                         } else {
-                            b"\n".to_vec()
+                            build_keepalive_chunk()
                         }
                     }
                     _ = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
-                        b"\n".to_vec()
+                        build_keepalive_chunk()
                     }
                     }
                 };
@@ -274,14 +291,55 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             },
         );
 
+        // Upstream content-type is `application/x-protobuf` historically
+        // but newer clients accept any content-type — the framing rules
+        // are positional, not header-driven. `application/octet-stream`
+        // is the safest neutral choice.
         Response::builder()
             .status(StatusCode::OK)
-            .header("content-type", "application/json")
+            .header("content-type", "application/octet-stream")
             .body(Body::from_stream(stream))
             .unwrap()
     } else {
         Json(resp).into_response()
     }
+}
+
+/// Encode a MapResponse into the wire framing the streaming
+/// `/machine/map` endpoint uses: `[u32 LE total size][zstd(JSON)]`.
+/// The Go upstream encoder is `klauspost/compress/zstd`'s default
+/// frame mode (`zstdframe.AppendEncode`); our `zstd::bulk::compress`
+/// with default level produces frame-mode output that the upstream
+/// decoder accepts without any custom dictionary.
+pub(crate) fn build_framed_chunk(mr: &MapResponse) -> Result<Vec<u8>, std::io::Error> {
+    let json_bytes = serde_json::to_vec(mr)
+        .map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
+    let compressed = zstd::bulk::compress(&json_bytes, 3)
+        .map_err(|e| std::io::Error::other(format!("zstd encode: {e}")))?;
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    let len = compressed.len() as u32;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
+/// Build the keepalive frame: `[u32 LE size][zstd({"KeepAlive":true})]`.
+/// Cached on the upstream side as `keepAliveZ` for the fast-path
+/// compare — caching here is unnecessary because the responder
+/// re-uses the same body bytes for every keepalive emission, and the
+/// upstream still hashes the compressed bytes for its own cache.
+pub(crate) fn build_keepalive_chunk() -> Vec<u8> {
+    // `tailscale/control/controlclient/direct.go::justKeepAliveStr`
+    // = `{"KeepAlive":true}` — matched byte-for-byte so the upstream
+    // fast-path on cached compressed-bytes lights up.
+    const KEEPALIVE_JSON: &[u8] = b"{\"KeepAlive\":true}";
+    let compressed =
+        zstd::bulk::compress(KEEPALIVE_JSON, 3).expect("zstd compress of static bytes never fails");
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    let len = compressed.len() as u32;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    out
 }
 
 async fn wait_for_change(notify: Arc<tokio::sync::Notify>) {
@@ -352,6 +410,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        // Pin a few load-bearing upstream JSON tag names that would
+        // otherwise silently regress past `rename_all = "PascalCase"`'s
+        // handling of Go's all-caps acronyms (DNS, DERP, IP, OS).
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("\"DNSConfig\""), "DNSConfig field name");
+        assert!(raw_str.contains("\"DERPMap\""), "DERPMap field name");
+        assert!(raw_str.contains("\"AllowedIPs\""), "AllowedIPs field name");
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         // own node has the requester's IP
         assert_eq!(mr.node.addresses[0], "100.64.0.10/32");
@@ -359,7 +424,11 @@ mod tests {
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
         assert_eq!(mr.peers[0].name, "peer-b.octra.test");
         assert_eq!(mr.domain, "octra.test");
-        assert!(mr.keep_alive);
+        // Full MapResponse — must NOT be flagged as a keepalive.
+        // Wall 5 regression: when `KeepAlive=true` the upstream client
+        // skips the netmap-update handler and the daemon stays in
+        // `NeedsLogin` forever.
+        assert!(!mr.keep_alive);
     }
 
     #[tokio::test]
@@ -491,6 +560,21 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Decode a single `[u32 LE size][zstd(JSON)]` framed chunk back
+    /// into the original JSON bytes. Mirrors what upstream
+    /// `controlclient/direct.go::decodeMsg` does on the wire.
+    fn decode_framed(bytes: &[u8]) -> Vec<u8> {
+        assert!(bytes.len() >= 4, "framed chunk too short: {} bytes", bytes.len());
+        let size = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(
+            bytes.len(),
+            4 + size,
+            "frame size mismatch: header says {size}, body has {}",
+            bytes.len() - 4
+        );
+        zstd::bulk::decompress(&bytes[4..], 16 * 1024 * 1024).expect("valid zstd frame")
+    }
+
     /// Stream:true: notify_waiters on the registry produces a follow-up
     /// MapResponse chunk on the existing stream (PR 3 acceptance).
     /// We drive `tokio::time::pause` so the test doesn't actually wait
@@ -520,31 +604,38 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // First chunk: a single-peer MapResponse (no peers yet).
+        // First chunk: a single-peer MapResponse (no peers yet),
+        // length-prefixed + zstd-framed.
         let mut body = resp.into_body();
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
             .unwrap();
         let chunk = frame.into_data().unwrap();
-        let trimmed = &chunk[..chunk.len() - 1];
-        let first_mr: MapResponse = serde_json::from_slice(trimmed).unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(first_mr.peers.len(), 0);
 
-        // Trigger a registry change: insert peer-b. The stream
-        // listener wakes via `Notify::notify_waiters` and emits a
-        // follow-up MapResponse chunk with the new peer included.
-        insert_peer(&state, &b, "peer-b", 11);
+        // Schedule the registry change for AFTER the unfold has parked
+        // on `notify.notified()`. `notify_waiters` only wakes already-
+        // parked waiters (it does NOT enqueue a pending notification),
+        // so the spawn-with-delay ordering is required — without it
+        // the wake fires before the listener is registered and the
+        // subsequent `frame()` reads a keepalive instead.
+        let state_for_spawn = state.clone();
+        let b_clone = b.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            insert_peer(&state_for_spawn, &b_clone, "peer-b", 11);
+        });
 
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
             .unwrap();
         let chunk = frame.into_data().unwrap();
-        // The follow-up chunk is a full MapResponse + '\n'.
-        assert!(chunk.ends_with(b"\n"));
-        let trimmed = &chunk[..chunk.len() - 1];
-        let mr: MapResponse = serde_json::from_slice(trimmed).unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(
             mr.peers.len(),
             1,
@@ -553,10 +644,10 @@ mod tests {
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
     }
 
-    /// Stream:true: the response body emits the first MapResponse
-    /// chunk immediately, then a `"\n"` keepalive after
-    /// [`MAP_KEEPALIVE_INTERVAL`]. We drive `tokio::time::pause` so the
-    /// test doesn't actually wait 30s.
+    /// Stream:true: the response body emits the first framed
+    /// MapResponse chunk immediately, then a keepalive frame
+    /// (`zstd({"KeepAlive":true})`) after [`MAP_KEEPALIVE_INTERVAL`].
+    /// We drive `tokio::time::pause` so the test doesn't wait 30s.
     #[tokio::test(start_paused = true)]
     async fn stream_true_emits_keepalive() {
         let (state, _dir) = fixture();
@@ -582,23 +673,104 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // First chunk should be the MapResponse JSON + newline. We
-        // read it via the streaming body interface so we can stop
-        // before the test would otherwise block on the keepalive.
         let mut body = resp.into_body();
         let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
         let chunk = frame.into_data().unwrap();
-        assert!(chunk.ends_with(b"\n"), "first chunk should be newline-terminated");
-        // The first chunk is a complete JSON document.
-        let trimmed = &chunk[..chunk.len() - 1];
-        let mr: MapResponse = serde_json::from_slice(trimmed).unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(mr.peers.len(), 1);
 
         // Advance virtual time past one keepalive interval and confirm
-        // the next chunk is the `"\n"` keepalive.
+        // the next chunk decodes to the canonical `{"KeepAlive":true}`
+        // payload (matches upstream `justKeepAliveStr`).
         tokio::time::advance(MAP_KEEPALIVE_INTERVAL + Duration::from_millis(1)).await;
         let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
         let chunk = frame.into_data().unwrap();
-        assert_eq!(&chunk[..], b"\n");
+        let decoded = decode_framed(&chunk);
+        assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
+    }
+
+    /// First MapResponse chunk must carry the upstream-required `Node`
+    /// field with a non-empty `User`. Wall 5 regression guard.
+    #[tokio::test]
+    async fn stream_true_first_chunk_carries_node_with_user() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state);
+        let req_body = serde_json::json!({ "Stream": true, "Version": 133 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body).await.unwrap().unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        // Inspect raw JSON: upstream decoder calls
+        // `json.Unmarshal(b, v)` and then asserts `resp.Node != nil`.
+        // We assert the field exists AND carries `User`/`StableID`.
+        let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        let node = json.get("Node").expect("Node field present");
+        assert!(node.get("User").and_then(|u| u.as_u64()).unwrap_or(0) > 0);
+        assert!(node
+            .get("StableID")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .starts_with('n'));
+        assert!(node.get("Name").is_some());
+    }
+
+    /// Compatibility sample: a hand-built MapResponse, run through
+    /// `build_framed_chunk`, must round-trip through the upstream
+    /// decoding rule — `[u32 LE size][zstd(JSON)]` → `Node` present.
+    /// Pins the framing against accidental regressions in
+    /// `build_framed_chunk`.
+    #[test]
+    fn framed_chunk_matches_upstream_decoder_shape() {
+        let mr = MapResponse {
+            key_expiry_extension: 0,
+            node: MapNode {
+                id: 42,
+                stable_id: "n42".into(),
+                name: "peer-a.octra.test".into(),
+                user: 7,
+                key: format!("nodekey:{}", "aa".repeat(32)),
+                machine: None,
+                addresses: vec!["100.64.0.10/32".into()],
+                allowed_ips: vec!["100.64.0.10/32".into()],
+                hostinfo: crate::tailscale_wire::wire::HostInfo::default(),
+                machine_authorized: true,
+            },
+            peers: vec![],
+            dns_config: DnsConfig::default(),
+            derp_map: DerpMap::default(),
+            domain: TAILNET_DOMAIN.into(),
+            keep_alive: true,
+        };
+        let bytes = build_framed_chunk(&mr).expect("framed chunk encodes");
+        // Decode the way upstream does.
+        let size = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(bytes.len(), 4 + size);
+        let json_bytes =
+            zstd::bulk::decompress(&bytes[4..], 16 * 1024 * 1024).expect("decompress ok");
+        let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(v.get("Node").is_some(), "Node field present after framed encode");
+        assert_eq!(
+            v.get("Node").unwrap().get("User").and_then(|u| u.as_u64()),
+            Some(7)
+        );
     }
 }

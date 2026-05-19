@@ -83,8 +83,14 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "service", "http1
 # Async futures combinators used in the controlbase framing reader
 # and the `/map` Stream:true keepalive emitter.
 futures-util = "0.3"
-# `BodyExt::collect` etc. — buffers the inner router response body
-# before pushing it onto an h2 SendResponse channel.
+# Body-frame plumbing. `http-body` exposes `Body::poll_frame`, which
+# is what `dispatch_h2_request` uses to forward streaming response
+# bodies frame-by-frame onto the h2 SendResponse (closing Wall 5 from
+# `docs/tailscale-interop-blocker.md`: the prior `BodyExt::collect`
+# call blocked forever on the long-poll `/machine/map` body).
+# `http-body-util` is kept for the tests that buffer small bodies
+# via `BodyExt::collect`.
+http-body = "1"
 http-body-util = "0.1"
 http = "1"
 parking_lot = "0.12"
@@ -96,6 +102,17 @@ hex = "0.4"
 # header to save an RTT; without this dep we'd block forever waiting
 # for a body-pipelined Initiation that never arrives.
 base64 = "0.22"
+# Streaming `/machine/map` response framing — see
+# `docs/tailscale-interop-blocker.md` "Wall 5" for the discovery.
+# Stock `tailscale` reads MapResponse bytes via
+# `binary.LittleEndian.Uint32(siz[:4])` then
+# `zstdframe.AppendDecode(...)` (in
+# `tailscale/control/controlclient/direct.go::decodeMsg`). The wire is
+# length-prefixed zstd-compressed JSON, NOT newline-delimited. We use
+# the `zstd` crate's frame-mode encoder (`zstd::bulk::compress`) so
+# our output is byte-compatible with klauspost's `zstdframe` package
+# that upstream consumes.
+zstd = { version = "0.13", default-features = false }
 
 # TLS termination on :443 — required by stock `tailscale up` v1.78+
 # which forces an HTTPS-on-443 dial after the initial /key probe.

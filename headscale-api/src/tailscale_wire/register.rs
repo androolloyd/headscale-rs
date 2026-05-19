@@ -231,10 +231,25 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
     } else {
         format!("{}.{}", rec.hostname, domain)
     };
+    let id = stable_id_from_key(&rec.node_key_hex);
+    let stable_id = format!("n{id}");
+    // `User` mirrors upstream `tailcfg.Node.User`. We synthesise the
+    // UserID by hashing the preauth user label the same way
+    // `RegisterResponse.User.ID` does. Empty label ⇒ id 0; the
+    // interop test always presents a non-empty user.
+    let user = stable_id_from_key(&rec.user);
+    let machine = if rec.machine_key_hex.is_empty() {
+        None
+    } else {
+        Some(format!("mkey:{}", rec.machine_key_hex))
+    };
     MapNode {
-        id: stable_id_from_key(&rec.node_key_hex),
+        id,
+        stable_id,
+        name,
+        user,
         key: format!("nodekey:{}", rec.node_key_hex),
-        machine: format!("mkey:{}", rec.machine_key_hex),
+        machine,
         addresses: vec![format!("{}/32", rec.ipv4)],
         allowed_ips: vec![format!("{}/32", rec.ipv4)],
         hostinfo: HostInfo {
@@ -242,7 +257,10 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             os: String::new(),
             os_version: String::new(),
         },
-        name,
+        // Any record in [`MachineRegistry`] passed
+        // [`PreauthRedeemer::redeem`]; mirror the bit into the
+        // netmap so the daemon advances past `NeedsMachineAuth`.
+        machine_authorized: true,
     }
 }
 
@@ -302,6 +320,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        // Pin upstream JSON tag name: `AuthURL` (all-caps URL), not
+        // PascalCase `AuthUrl`. Go's encoding/json is case-insensitive
+        // on decode so either survives the client side; the wire-format
+        // test pins the encoded shape so future regressions don't slip
+        // through.
+        assert!(raw_str.contains("\"AuthURL\""), "expected AuthURL field name; got: {raw_str}");
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
         assert_eq!(rr.user.login_name, "alice");

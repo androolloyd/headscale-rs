@@ -101,7 +101,9 @@ pub struct RegisterAuth {
 pub struct HostInfo {
     #[serde(default)]
     pub hostname: String,
-    #[serde(default)]
+    /// Upstream JSON tag is `OS` (all-caps). PascalCase would produce
+    /// `Os` — wrong.
+    #[serde(default, rename = "OS")]
     pub os: String,
     /// Upstream calls this `OSVersion`; PascalCase rename keeps the
     /// wire byte-identical.
@@ -127,7 +129,12 @@ pub struct RegisterResponse {
     #[serde(default)]
     pub node_key_expired: bool,
     /// Browser URL for OIDC/web auth. Empty on preauth-success path.
-    #[serde(default)]
+    /// Upstream JSON tag is `AuthURL` (all-caps URL); PascalCase
+    /// `auth_url` would emit `AuthUrl` — wrong, and a non-empty
+    /// `AuthUrl`-shaped field is parsed as "extra unknown" by
+    /// upstream's Go decoder, causing the client to fall into the
+    /// "needs browser auth" branch instead of "preauth success."
+    #[serde(default, rename = "AuthURL")]
     pub auth_url: String,
     /// Per-machine flag the client polls for in subsequent `/map`
     /// calls. True ⇒ "you're admitted into the tailnet."
@@ -216,10 +223,14 @@ pub struct MapResponse {
     /// second registration to flesh this out.
     pub peers: Vec<MapNode>,
     /// Synthetic empty DNS config — present so the client doesn't
-    /// reject the response for missing fields.
+    /// reject the response for missing fields. Upstream JSON tag is
+    /// `DNSConfig` (all-caps DNS), not `DnsConfig`.
+    #[serde(rename = "DNSConfig")]
     pub dns_config: DnsConfig,
     /// Synthetic empty DERPMap — peers will fall back to direct
-    /// connections on the docker bridge.
+    /// connections on the docker bridge. Upstream JSON tag is
+    /// `DERPMap`, not `DerpMap`.
+    #[serde(rename = "DERPMap")]
     pub derp_map: DerpMap,
     /// Domain string the client treats as the tailnet's MagicDNS root.
     /// We hard-code `octra.test` for the interop run.
@@ -230,6 +241,26 @@ pub struct MapResponse {
 }
 
 /// A single node record inside a `MapResponse`.
+///
+/// Field set + JSON names track `tailscale/tailcfg/tailcfg.go::Node`.
+/// The fields without `omitempty`/`omitzero` upstream are emitted on
+/// every node record:
+///
+/// - `ID` (NodeID — required, no omitempty)
+/// - `StableID` (StableNodeID — required, no omitempty)
+/// - `Name` (MagicDNS-style hostname — required)
+/// - `User` (UserID — required)
+/// - `Key` (NodePublic — required)
+/// - `Machine` (MachinePublic — required, `omitzero` but always non-zero in practice)
+/// - `Addresses` (`[]netip.Prefix` — required)
+/// - `Hostinfo` (HostinfoView — `omitzero`, present)
+///
+/// `User` is the field that broke Wall 5 here: stock `tailscale`
+/// `mapSession.decodeMsg` calls `json.Unmarshal(b, v)` on the full
+/// MapResponse and then the netmap-builder dereferences `n.User`
+/// expecting a `UserID`. With our pre-fix MapNode omitting `User`,
+/// the decode succeeded but the downstream state-machine couldn't
+/// build a usable netmap for the node it had just been told it was.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapNode {
@@ -237,19 +268,48 @@ pub struct MapNode {
     /// key bytes — deterministic for a given key, fits in u64.
     #[serde(rename = "ID")]
     pub id: u64,
+    /// `StableNodeID` — same value-domain as `ID` but a string. We
+    /// derive it as `"n{ID}"` (matches headscale-go's
+    /// `fmt.Sprintf("n%d", id)` convention).
+    #[serde(rename = "StableID")]
+    pub stable_id: String,
+    /// MagicDNS-style stable name (`<hostname>.<domain>`). Same value
+    /// as `name` (which is the legacy field we kept around for the
+    /// keyed-path tests); upstream calls this `Name`. Serialised
+    /// first since older clients seek it.
+    pub name: String,
+    /// User who owns this node. We synthesise a 64-bit user ID from
+    /// the preauth user label (see `register::register_inner`).
+    #[serde(rename = "User")]
+    pub user: u64,
     /// `nodekey:` prefixed hex.
     pub key: String,
-    /// `mkey:` prefixed hex.
-    pub machine: String,
+    /// `mkey:` prefixed hex. Upstream `Node.Machine` is tagged
+    /// `omitzero`; `tailscale` v1.78+ rejects a literal `"mkey:"`
+    /// (zero-length hex) with `PollNetMap: response: key hex has the
+    /// wrong size, got 0 want 64`. We make this `Option<String>` so an
+    /// empty machine_key (no Noise IK static-key seen yet) is OMITTED
+    /// rather than emitted as a degenerate prefix-only value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub machine: Option<String>,
     /// Tailnet IPv4 + IPv6 addresses (we only emit the v4).
     pub addresses: Vec<String>,
     /// CIDR ranges the node accepts traffic for. Same as `Addresses`
-    /// for a pure mesh peer.
+    /// for a pure mesh peer. Upstream JSON tag is `AllowedIPs`
+    /// (all-caps IPs).
+    #[serde(rename = "AllowedIPs")]
     pub allowed_ips: Vec<String>,
     /// Hostname the node advertised.
     pub hostinfo: HostInfo,
-    /// Stable string name for MagicDNS lookups. We use `<hostname>.<domain>`.
-    pub name: String,
+    /// Mirrors upstream `tailcfg.Node.MachineAuthorized` (line 433 of
+    /// `tailcfg/tailcfg.go`). The control client's
+    /// `netmap.NetworkMap.GetMachineStatus()` reads this off
+    /// `SelfNode`; without it the daemon stalls in `NeedsMachineAuth`
+    /// (BackendState 3) even after `RegisterResponse.MachineAuthorized
+    /// = true`. Wall 5 sequel: register-time auth is necessary but
+    /// not sufficient — the netmap must carry the same bit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub machine_authorized: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -286,7 +346,11 @@ pub struct DerpRegionNode {
     #[serde(rename = "RegionID")]
     pub region_id: u16,
     pub host_name: String,
-    pub i_pv4: String,
+    /// Upstream JSON tag is `IPv4`, not `IPv4` -> `IPv4`. PascalCase
+    /// emits `IPv4` for `i_pv4` only because the camel-to-pascal step
+    /// in serde mishandles single-letter prefixes; rename explicitly.
+    #[serde(rename = "IPv4")]
+    pub ipv4: String,
 }
 
 /// Strip a Tailscale key prefix (`mkey:`, `nodekey:`, `discokey:`)
@@ -302,8 +366,14 @@ pub fn strip_key_prefix(s: &str) -> Option<&str> {
     None
 }
 
-/// Deterministic u64 from a 32-byte key. Used to derive `ID` fields in
-/// `MapNode` / `SimpleUser`. Not cryptographic.
+/// Deterministic positive 63-bit ID from a hex string. Used to derive
+/// `ID` fields in `MapNode` / `SimpleUser`. Not cryptographic.
+///
+/// Upstream `tailcfg.NodeID` is a Go `int64`; emitting a `u64` value
+/// above `i64::MAX` triggers
+/// `json: cannot unmarshal number X into … NodeID of type tailcfg.NodeID`
+/// on the client. We mask the top bit out so the value always fits in
+/// a positive signed 63-bit integer.
 pub fn stable_id_from_key(hex_str: &str) -> u64 {
     // FNV-1a 64-bit. Inlined to avoid pulling in a fnv crate.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -311,7 +381,8 @@ pub fn stable_id_from_key(hex_str: &str) -> u64 {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    h
+    // Clear the sign bit so the value round-trips through Go's int64.
+    h & 0x7fff_ffff_ffff_ffff
 }
 
 #[cfg(test)]

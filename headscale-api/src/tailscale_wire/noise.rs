@@ -582,19 +582,38 @@ where
 
 /// Drain an h2 request body, hand it to `router.oneshot(...)`, send
 /// the response back via the h2 SendResponse.
+///
+/// **Wall 5 fix (2026-05-19):** the response body is forwarded
+/// frame-by-frame instead of `collect()`-ed up-front. The long-poll
+/// `/machine/map` handler returns a never-terminating
+/// `futures_util::stream::unfold` body (initial MapResponse + 30s
+/// keepalives, no natural EOF). Buffering it via
+/// `BodyExt::collect().await` therefore blocked forever, the h2
+/// `SendResponse` never carried response headers back to the client,
+/// and stock `tailscale up` timed out 20s into its first map call.
 async fn dispatch_h2_request(
     router: Router,
     req: http::Request<h2::RecvStream>,
     respond: &mut h2::server::SendResponse<bytes::Bytes>,
 ) -> Result<(), WireError> {
     use bytes::{Bytes, BytesMut};
-    use http_body_util::BodyExt;
+    use http_body::Body as HttpBody;
     use tower::ServiceExt;
 
     let (parts, mut body) = req.into_parts();
 
+    let req_method = parts.method.clone();
+    let req_uri = parts.uri.clone();
+    tracing::debug!(
+        target = "tailscale_wire::noise",
+        method = %req_method,
+        uri = %req_uri,
+        "h2 dispatch begin"
+    );
+
     // Drain the request body into a Bytes — the existing handlers all
-    // expect a fully-buffered body anyway (`Json<...>` extractor).
+    // expect a fully-buffered body anyway (`Json<...>` / `Bytes`
+    // extractors). Register and map bodies are <2 KiB.
     let mut body_bytes = BytesMut::new();
     while let Some(chunk) = body.data().await {
         let chunk = chunk
@@ -614,7 +633,7 @@ async fn dispatch_h2_request(
         .await
         .map_err(|e| WireError::Noise(format!("router oneshot: {e}")))?;
 
-    let (resp_parts, resp_body) = resp.into_parts();
+    let (resp_parts, mut resp_body) = resp.into_parts();
     let mut head = http::Response::builder().status(resp_parts.status);
     {
         let hdrs = head.headers_mut().expect("builder is valid");
@@ -624,21 +643,84 @@ async fn dispatch_h2_request(
     }
     let head: http::Response<()> = head.body(()).unwrap();
 
-    // Collect the response body fully — register/map all return
-    // small bodies; long-poll `map` is up to a single MapResponse JSON
-    // (no streaming yet — Stream=true follow-up tracked).
-    let collected = resp_body
-        .collect()
-        .await
-        .map_err(|e| WireError::Noise(format!("collect axum body: {e}")))?
-        .to_bytes();
-    let chunk: Bytes = collected;
-
+    // Send response headers IMMEDIATELY so the client can advance its
+    // state machine while we keep streaming body frames. `end_of_stream
+    // = false` because the body may carry one or more frames (and for
+    // `/machine/map` Stream=true, infinitely many).
     let mut send = respond
         .send_response(head, false)
         .map_err(|e| WireError::Noise(format!("h2 send_response: {e}")))?;
-    send.send_data(chunk, true)
-        .map_err(|e| WireError::Noise(format!("h2 send_data: {e}")))?;
+    tracing::debug!(
+        target = "tailscale_wire::noise",
+        uri = %req_uri,
+        "h2 dispatch sent response headers; streaming body frames"
+    );
+
+    // Forward body frames as they arrive. We poll the underlying
+    // `http_body::Body` directly (rather than going through
+    // `BodyExt::collect`) so a non-terminating stream — the
+    // `Stream=true` long-poll body — keeps the h2 stream open and
+    // delivers keepalive `\n` chunks the client expects every 30s.
+    //
+    // Per `tailscale/control/controlclient/direct.go::sendMapRequest`,
+    // the client uses `json.NewDecoder(resp.Body).Decode(&mr)` on a
+    // streaming JSON decoder — pure newline-delimited JSON is
+    // tolerated as whitespace between documents. The first
+    // MapResponse frame unblocks the daemon's state-machine transition
+    // to "Up"; subsequent frames carry registry-change deltas (we emit
+    // a fresh full MapResponse on every wake — incremental Peers{Patch,Changed}
+    // is documented as upstream-equivalent-but-unimplemented in
+    // `wire.rs`).
+    let mut frame_count: u64 = 0;
+    loop {
+        let frame_opt = std::future::poll_fn(|cx| {
+            std::pin::Pin::new(&mut resp_body).poll_frame(cx)
+        })
+        .await;
+        match frame_opt {
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(data) => {
+                    if !data.is_empty() {
+                        let chunk: Bytes = data;
+                        send.send_data(chunk, false).map_err(|e| {
+                            WireError::Noise(format!("h2 send_data: {e}"))
+                        })?;
+                        frame_count += 1;
+                    }
+                }
+                Err(_trailers_frame) => {
+                    // We don't emit trailers for the streaming map
+                    // response, but if any handler ever does, just
+                    // skip — h2 will close the stream cleanly on the
+                    // next iteration when poll_frame returns None.
+                }
+            },
+            Some(Err(e)) => {
+                tracing::warn!(
+                    target = "tailscale_wire::noise",
+                    uri = %req_uri,
+                    error = %e,
+                    "h2 dispatch body error"
+                );
+                return Err(WireError::Noise(format!("body frame: {e}")));
+            }
+            None => {
+                // Body ended naturally — for register/non-streaming
+                // map this is the common path. Close the stream by
+                // sending an empty final frame with end_of_stream=true.
+                send.send_data(Bytes::new(), true).map_err(|e| {
+                    WireError::Noise(format!("h2 send_data eof: {e}"))
+                })?;
+                break;
+            }
+        }
+    }
+    tracing::debug!(
+        target = "tailscale_wire::noise",
+        uri = %req_uri,
+        frames = frame_count,
+        "h2 dispatch complete"
+    );
     Ok(())
 }
 

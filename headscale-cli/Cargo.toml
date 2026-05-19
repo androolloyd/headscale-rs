@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "headscale_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "headscale"
 path = "src/main.rs"
@@ -20,7 +24,14 @@ anyhow.workspace = true
 thiserror.workspace = true
 
 headscale-core = { workspace = true }
-headscale-api = { workspace = true }
+# The admin subcommands (users / nodes / preauthkeys / policy / tailnet)
+# only need the type definitions exported under the `admin` feature.
+# The full `default` set (gateway / gRPC / Server) is also enabled
+# because the existing `headscale server` / `headscale node`
+# subcommands still depend on `headscale_api::Server`. Once the gateway
+# WIP lands and those subcommands are refactored, the `full` feature
+# can be dropped here — the admin client surface itself never touches it.
+headscale-api = { path = "../headscale-api", default-features = false, features = ["admin", "full"] }
 headscale-identity = { workspace = true }
 headscale-payments = { workspace = true }
 headscale-resources = { workspace = true }
@@ -32,9 +43,19 @@ clap = { workspace = true }
 # Config file support
 toml = { workspace = true }
 
-# HTTP client for node mode
+# HTTP client for node mode + admin API client.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Local endpoint discovery
 hostname = { workspace = true }
 local-ip-address = { workspace = true }
+
+[dev-dependencies]
+# Mock HTTP server for the admin client unit tests. Pinned minor; the
+# crate is dev-only and not part of the production dep tree.
+httpmock = "0.7"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+
+[lints]
+workspace = true

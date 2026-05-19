@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Run as a mesh node.
-pub async fn run_node(
+pub(crate) async fn run_node(
     server_url: &str,
     name: Option<&str>,
     wg_interface: &str,
@@ -17,12 +17,15 @@ pub async fn run_node(
 
     // Generate or load identity
     let node_id = generate_node_id();
-    let node_name = name
-        .map(String::from)
-        .unwrap_or_else(|| hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| format!("node-{}", &node_id[..8])));
+    let node_name = name.map_or_else(
+        || {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| format!("node-{}", &node_id[..8]))
+        },
+        String::from,
+    );
 
     tracing::info!("  Node ID: {}", node_id);
     tracing::info!("  Node name: {}", node_name);

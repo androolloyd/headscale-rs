@@ -11,7 +11,7 @@ use headscale_payments::Ledger;
 use headscale_resources::ResourceRegistry;
 
 /// Run the control plane server.
-pub async fn run_server(listen: &str, db_path: &Path, mesh_cidr: &str) -> Result<()> {
+pub(crate) async fn run_server(listen: &str, db_path: &Path, mesh_cidr: &str) -> Result<()> {
     tracing::info!("Starting headscale control plane");
     tracing::info!("  Listen: {}", listen);
     tracing::info!("  Database: {}", db_path.display());

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CliConfig {
+pub(crate) struct CliConfig {
     /// Server mode configuration
     pub server: Option<ServerConfig>,
     /// Node mode configuration
@@ -18,7 +18,7 @@ pub struct CliConfig {
 
 /// Server (control plane) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
+pub(crate) struct ServerConfig {
     /// Listen address for the API
     #[serde(default = "default_listen")]
     pub listen: String,
@@ -35,7 +35,7 @@ pub struct ServerConfig {
 
 /// DERP server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DerpServerConfig {
+pub(crate) struct DerpServerConfig {
     /// Server name
     pub name: String,
     /// Server hostname
@@ -49,7 +49,7 @@ pub struct DerpServerConfig {
 
 /// Node mode configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeConfig {
+pub(crate) struct NodeConfig {
     /// Control plane URL
     pub server: String,
     /// Node name
@@ -70,7 +70,7 @@ pub struct NodeConfig {
 
 /// What resources this node can provide.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct NodeCapabilities {
+pub(crate) struct NodeCapabilities {
     /// Can relay traffic for other nodes
     #[serde(default)]
     pub relay: bool,
@@ -90,7 +90,7 @@ pub struct NodeCapabilities {
 
 /// Logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
+pub(crate) struct LoggingConfig {
     /// Log level
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -101,7 +101,7 @@ pub struct LoggingConfig {
 
 impl CliConfig {
     /// Load configuration from a file.
-    pub fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
         Ok(config)
@@ -109,7 +109,7 @@ impl CliConfig {
 
     /// Save configuration to a file.
     #[allow(dead_code)]
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(path, contents)?;
         Ok(())

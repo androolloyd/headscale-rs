@@ -53,6 +53,23 @@ pub struct MachineRecord {
     pub hostname: String,
     /// Allocated tailnet IPv4 in the CGNAT range.
     pub ipv4: std::net::Ipv4Addr,
+    /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
+    /// Populated from `MapRequest.disco_key` on every `/machine/map`
+    /// call (the client refreshes it on each map round-trip). `None`
+    /// before the first map call has landed; once present, every peer
+    /// MapNode emits it so magicsock can shim disco probes.
+    ///
+    /// Upstream JSON tag is `DiscoKey` (`tailcfg.Node.DiscoKey`).
+    /// Without it `wgengine.Reconfig` runs at `0/0 peers` and
+    /// `tailscale ping` returns `unknown peer`.
+    pub disco_key: Option<String>,
+    /// Wall 7: client's NAT-traversal endpoint candidates as
+    /// `"ip:port"` strings. Populated from `MapRequest.endpoints` on
+    /// every `/machine/map` call. Empty before the first map call has
+    /// landed (or if the client advertises only DERP routing).
+    ///
+    /// Upstream JSON tag is `Endpoints` (`tailcfg.Node.Endpoints`).
+    pub endpoints: Vec<String>,
 }
 
 /// Body of `POST /machine/{node_key}/register`.
@@ -202,6 +219,23 @@ pub struct MapRequest {
     /// URL instead).
     #[serde(default)]
     pub node_key: String,
+    /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
+    /// Stock `tailscale` v1.78+ includes this on every MapRequest;
+    /// the server must persist + fan it back out on every peer's
+    /// `MapNode.DiscoKey` for `wgengine.Reconfig` to add the peer.
+    /// Optional because older clients (and our own test fixtures that
+    /// don't model a real disco key) may omit it.
+    ///
+    /// Upstream JSON tag is `DiscoKey` (`tailcfg.MapRequest.DiscoKey`).
+    #[serde(default, rename = "DiscoKey", skip_serializing_if = "Option::is_none")]
+    pub disco_key: Option<String>,
+    /// Wall 7: NAT-traversal endpoint candidates the client wants peers
+    /// to try (`"ip:port"` strings). Upstream `tailcfg.MapRequest`
+    /// historically carried `Endpoints []string`; v1.78+ added a typed
+    /// `[]netip.AddrPort` shape but the JSON wire still encodes as a
+    /// `[]string`. Optional ⇒ empty list when absent.
+    #[serde(default, rename = "Endpoints")]
+    pub endpoints: Option<Vec<String>>,
 }
 
 /// Response to `/machine/{node_key}/map`.
@@ -359,6 +393,23 @@ pub struct MapNode {
     /// not sufficient — the netmap must carry the same bit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub machine_authorized: bool,
+    /// Wall 7: `tailcfg.Node.DiscoKey` (`discokey:<hex>` X25519 public).
+    /// Without this `wgcfg.NewFromIPs` rejects the node and
+    /// `wgengine.Reconfig` runs at `0/0 peers` — `tailscale ping`
+    /// returns `unknown peer` even though the netmap holds the
+    /// target. Upstream JSON tag is `DiscoKey`. Optional; omitted when
+    /// the matching `MachineRecord` hasn't seen a MapRequest with a
+    /// DiscoKey yet (e.g. immediately after register but before the
+    /// first map call).
+    #[serde(rename = "DiscoKey", default, skip_serializing_if = "Option::is_none")]
+    pub disco_key: Option<String>,
+    /// Wall 7: `tailcfg.Node.Endpoints` — NAT-traversal candidate
+    /// addresses as `"ip:port"` strings. Empty list ⇒ DERP-only
+    /// routing (upstream still accepts the peer in that mode, but the
+    /// derp-1 sidecar must be reachable). Empty list is serialised as
+    /// an empty JSON array.
+    #[serde(rename = "Endpoints", default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

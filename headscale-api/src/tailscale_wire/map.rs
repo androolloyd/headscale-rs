@@ -153,7 +153,7 @@ pub async fn handle_map_flat(
 async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> Response {
     // The caller must already have registered. If not, 404 — they need
     // to go through `/machine/{node_key}/register` first.
-    let Some(own) = state.machines.get(&node_key_hex) else {
+    let Some(mut own) = state.machines.get(&node_key_hex) else {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -162,6 +162,35 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         )
             .into_response();
     };
+
+    // Wall 7: persist client-provided DiscoKey + Endpoints from
+    // `MapRequest` into the `MachineRecord` so subsequent map calls
+    // for OTHER peers see them on this peer's `MapNode`. Stock
+    // `tailscale` v1.78+ sends these on every map call (initial +
+    // refresh); we treat any non-empty value as a fresh overwrite, and
+    // `None` / empty as "keep what was there." This means a client
+    // that omits the fields on one call doesn't accidentally clear
+    // what previous calls established.
+    //
+    // `upsert` on the registry notifies waiters, which wakes any
+    // peer's streaming `/map` so they pick up the new disco/endpoint
+    // values on the next chunk.
+    let mut record_changed = false;
+    if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty()) {
+        if own.disco_key.as_deref() != Some(dk.as_str()) {
+            own.disco_key.clone_from(&Some(dk.clone()));
+            record_changed = true;
+        }
+    }
+    if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty()) {
+        if &own.endpoints != eps {
+            own.endpoints.clone_from(eps);
+            record_changed = true;
+        }
+    }
+    if record_changed {
+        state.machines.upsert(node_key_hex.clone(), own.clone());
+    }
 
     // Long-poll for a second peer ONLY when this is a non-streaming,
     // non-OmitPeers map call AND we're alone in the tailnet. In every
@@ -417,6 +446,8 @@ mod tests {
                 user: "u".into(),
                 hostname: host.into(),
                 ipv4: Ipv4Addr::new(100, 64, 0, last_octet),
+                disco_key: None,
+                endpoints: Vec::new(),
             },
         );
     }
@@ -768,6 +799,82 @@ mod tests {
         assert!(node.get("Name").is_some());
     }
 
+    /// Wall 7 round-trip: a MapRequest carrying `DiscoKey` +
+    /// `Endpoints` for peer-a must persist into `MachineRecord` and
+    /// then fan back out on peer-b's view of peer-a in the
+    /// MapResponse.Peers list. Without this, `wgengine.Reconfig` on
+    /// peer-b runs at `0/0 peers` and `tailscale ping` returns
+    /// `unknown peer`.
+    #[tokio::test]
+    async fn map_response_round_trips_disco_key_and_endpoints() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let disco_a = format!("discokey:{}", "1a".repeat(32));
+        let endpoints_a = vec!["10.0.0.10:41641".to_string(), "[fe80::1]:41641".to_string()];
+
+        // Peer-a posts a /map call with DiscoKey + Endpoints set.
+        let req_a = serde_json::json!({
+            "Version": 39,
+            "DiscoKey": &disco_a,
+            "Endpoints": &endpoints_a,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&req_a).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The record on the registry must now carry the fields.
+        let rec_a = state.machines.get(&a).expect("peer-a still registered");
+        assert_eq!(rec_a.disco_key.as_deref(), Some(disco_a.as_str()));
+        assert_eq!(rec_a.endpoints, endpoints_a);
+
+        // Peer-b polls /map and must see peer-a's DiscoKey + Endpoints
+        // on its MapNode entry. Pins both the wire-tag spelling and
+        // the payload value.
+        let req_b = serde_json::json!({ "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{b}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&req_b).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let raw_str = std::str::from_utf8(&raw).unwrap();
+        assert!(
+            raw_str.contains("\"DiscoKey\""),
+            "DiscoKey tag present on the wire: {raw_str}"
+        );
+        assert!(
+            raw_str.contains("\"Endpoints\""),
+            "Endpoints tag present on the wire: {raw_str}"
+        );
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.peers.len(), 1);
+        let peer_a = &mr.peers[0];
+        assert_eq!(peer_a.disco_key.as_deref(), Some(disco_a.as_str()));
+        assert_eq!(peer_a.endpoints, endpoints_a);
+    }
+
     /// Compatibility sample: a hand-built MapResponse, run through
     /// `build_framed_chunk`, must round-trip through the upstream
     /// decoding rule — `[u32 LE size][zstd(JSON)]` → `Node` present.
@@ -788,6 +895,8 @@ mod tests {
                 allowed_ips: vec!["100.64.0.10/32".into()],
                 hostinfo: crate::tailscale_wire::wire::HostInfo::default(),
                 machine_authorized: true,
+                disco_key: None,
+                endpoints: Vec::new(),
             },
             peers: vec![],
             dns_config: DnsConfig::default(),

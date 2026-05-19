@@ -200,6 +200,11 @@ async fn register_inner(
         user: user.clone(),
         hostname,
         ipv4,
+        // Wall 7: DiscoKey + Endpoints arrive on the `/map` call, not
+        // on register. Start empty; `map_inner` upserts a fresh record
+        // with the populated fields on the client's first map request.
+        disco_key: None,
+        endpoints: Vec::new(),
     };
     state.machines.upsert(node_key_hex, rec);
 
@@ -261,6 +266,12 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         // [`PreauthRedeemer::redeem`]; mirror the bit into the
         // netmap so the daemon advances past `NeedsMachineAuth`.
         machine_authorized: true,
+        // Wall 7: fan the client-provided DiscoKey + Endpoints back
+        // out so `wgengine.Reconfig` materialises this peer. Empty /
+        // None ⇒ omitted on the wire (see `skip_serializing_if` on
+        // `MapNode.disco_key` + `MapNode.endpoints`).
+        disco_key: rec.disco_key.clone(),
+        endpoints: rec.endpoints.clone(),
     }
 }
 

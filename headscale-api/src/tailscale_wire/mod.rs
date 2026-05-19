@@ -48,6 +48,7 @@ pub mod controlbase;
 pub mod key_handler;
 pub mod map;
 pub mod noise;
+pub mod raw_tls;
 pub mod register;
 pub mod serve;
 pub mod tls;

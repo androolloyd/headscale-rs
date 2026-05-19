@@ -186,12 +186,33 @@ impl ServerNoiseKey {
 
     /// Build an IK responder. Used by `/ts2021` once the frame layer
     /// is wired.
+    ///
+    /// The prologue MUST match the value the client computed for the
+    /// same handshake — upstream
+    /// `tailscale/control/controlbase/handshake.go::Server` calls
+    /// `s.MixHash(protocolVersionPrologue(clientVersion))` where
+    /// `clientVersion` is the version advertised in the Initiation
+    /// frame's 2-byte header. Use
+    /// [`Self::build_responder_for_version`] from the actual upgrade
+    /// handler; this default keeps the pinned [`NOISE_CAPABILITY_VERSION`]
+    /// for the existing in-process round-trip tests.
     pub fn build_responder(&self) -> Result<snow::HandshakeState, WireError> {
+        self.build_responder_for_version(NOISE_CAPABILITY_VERSION)
+    }
+
+    /// Build an IK responder using the client-advertised
+    /// `protocol_version` as the prologue input. Mirrors upstream's
+    /// `protocolVersionPrologue(clientVersion)` call in
+    /// `controlbase/handshake.go::Server`.
+    pub fn build_responder_for_version(
+        &self,
+        protocol_version: u16,
+    ) -> Result<snow::HandshakeState, WireError> {
         let priv_g = self.private.lock();
         let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
         Builder::new(params)
             .local_private_key(&priv_g)
-            .prologue(&prologue_bytes(NOISE_CAPABILITY_VERSION))
+            .prologue(&prologue_bytes(protocol_version))
             .build_responder()
             .map_err(noise_err)
     }
@@ -390,13 +411,52 @@ pub async fn drive_ts2021<T>(state: WireState, io: T) -> Result<(), WireError>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    drive_ts2021_with_init(state, io, None).await
+}
+
+/// Variant of [`drive_ts2021`] that accepts an optionally pre-decoded
+/// Initiation frame (the entire controlbase-framed message including
+/// the 5-byte header).
+///
+/// Newer Tailscale clients (v1.42+ over `controlhttp.AcceptHTTP`) send
+/// the Initiation as a base64-encoded value in the
+/// `X-Tailscale-Handshake` request header instead of as the body of
+/// the upgrade request. The raw-rustls listener extracts that header,
+/// base64-decodes it, and passes the resulting bytes here so we don't
+/// wait forever on `read_frame()`.
+///
+/// Sourced from `tailscale/control/controlhttp/controlhttpserver.go`
+/// (`acceptHTTP`) + `tailscale/control/controlbase/handshake.go`
+/// (`Server`, `optionalInit` parameter). The framed Initiation
+/// includes a 5-byte controlbase header (`[type=1:u8][version:u16be][len:u16be]`)
+/// followed by the Noise body.
+pub async fn drive_ts2021_with_init<T>(
+    state: WireState,
+    io: T,
+    initial_frame: Option<Vec<u8>>,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut framed = Framed::new(io);
 
-    // Step 1: read Initiation.
-    let (hdr, init_body) = framed
-        .read_frame()
-        .await
-        .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?;
+    // Step 1: source the Initiation. The header-fast-start path
+    // delivers the entire framed Initiation (5-byte header + body)
+    // up front; the pipelined path reads it off the wire.
+    let (hdr, init_body) = match initial_frame {
+        Some(bytes) => {
+            tracing::debug!(
+                target = "tailscale_wire::noise",
+                len = bytes.len(),
+                "ts2021 using pre-decoded Initiation from X-Tailscale-Handshake header"
+            );
+            parse_initiation_frame(&bytes)?
+        }
+        None => framed
+            .read_frame()
+            .await
+            .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
+    };
     let proto_version = match hdr {
         FrameHeader::Initiation { protocol_version, .. } => protocol_version,
         other @ FrameHeader::Regular { .. } => {
@@ -412,8 +472,14 @@ where
         "ts2021 received initiation"
     );
 
-    // Step 2: drive Noise IK responder.
-    let mut responder = state.server_noise_key.build_responder()?;
+    // Step 2: drive Noise IK responder. The prologue must be derived
+    // from the client-advertised protocol version, not a server
+    // constant — upstream
+    // `tailscale/control/controlbase/handshake.go::Server` does
+    // `s.MixHash(protocolVersionPrologue(clientVersion))`.
+    let mut responder = state
+        .server_noise_key
+        .build_responder_for_version(proto_version)?;
     let mut payload_buf = vec![0u8; 65535];
     let _payload_len = responder
         .read_message(&init_body, &mut payload_buf)
@@ -579,6 +645,46 @@ fn inner_router(state: WireState) -> Router {
             post(super::map::handle_map),
         )
         .with_state(state)
+}
+
+/// Decode a pre-fetched controlbase-framed Initiation (the bytes that
+/// arrived in the `X-Tailscale-Handshake` header). Returns the same
+/// `(FrameHeader::Initiation { .. }, body)` shape `Framed::read_frame`
+/// produces.
+///
+/// The wire format mirrors upstream `controlbase/messages.go::initiationMessage`
+/// (and our updated `Framed::write_initiation`):
+///   `[protocol_version:u16be][msg_type=1:u8][len:u16be][body...]`
+fn parse_initiation_frame(bytes: &[u8]) -> Result<(FrameHeader, Vec<u8>), WireError> {
+    if bytes.len() < 5 {
+        return Err(WireError::Noise(format!(
+            "X-Tailscale-Handshake init too short: {} bytes",
+            bytes.len()
+        )));
+    }
+    let protocol_version = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let msg_type = bytes[2];
+    if msg_type != MsgType::Initiation as u8 {
+        return Err(WireError::Noise(format!(
+            "X-Tailscale-Handshake init: expected msg type 1 at offset 2, got {msg_type}"
+        )));
+    }
+    let body_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    if bytes.len() != 5 + body_len {
+        return Err(WireError::Noise(format!(
+            "X-Tailscale-Handshake init length mismatch: header says {}, total bytes {}",
+            5 + body_len,
+            bytes.len()
+        )));
+    }
+    let body = bytes[5..].to_vec();
+    Ok((
+        FrameHeader::Initiation {
+            protocol_version,
+            len: body_len as u16,
+        },
+        body,
+    ))
 }
 
 /// Compatibility alias for the old `handle_ts2021_stub` name. Returns

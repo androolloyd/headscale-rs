@@ -57,17 +57,39 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// Tailscale's `controlbase` message type byte.
+///
+/// Sourced from upstream `tailscale/control/controlbase/messages.go`:
+///
+/// ```text
+/// const (
+///     msgTypeInitiation = 1
+///     msgTypeResponse   = 2
+///     msgTypeError      = 3
+///     msgTypeRecord     = 4
+/// )
+/// ```
+///
+/// The original headscale-rs port used `Record = 3` which is wrong —
+/// fixed 2026-05-19 alongside the X-Tailscale-Handshake header path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MsgType {
-    /// Handshake Initiation (`-> e, es, s, ss`). Carries a 2-byte
-    /// `protocolVersion` between the type byte and the length, hence
-    /// the 5-byte header instead of 3.
+    /// Handshake Initiation (`-> e, es, s, ss`). 5-byte header with
+    /// embedded protocol version. Layout (upstream
+    /// `messages.go:initiationMessage`):
+    /// `[version:u16be][type=1:u8][len:u16be]`.
     Initiation = 1,
-    /// Handshake Reply (`<- e, ee, se`). 3-byte header.
+    /// Handshake Reply (`<- e, ee, se`). 3-byte header
+    /// `[type=2:u8][len:u16be]`. Kept as `Reply` in the Rust API for
+    /// readability; the wire byte is `msgTypeResponse = 2`.
     Reply = 2,
-    /// Encrypted transport record. 3-byte header.
-    Record = 3,
+    /// Cleartext error message (unauthenticated). 3-byte header.
+    /// We don't generate these, but the decoder accepts them so a
+    /// peer-issued error doesn't get misclassified as a record.
+    Error = 3,
+    /// Encrypted transport record. 3-byte header
+    /// `[type=4:u8][len:u16be]`.
+    Record = 4,
 }
 
 impl MsgType {
@@ -75,7 +97,8 @@ impl MsgType {
         match b {
             1 => Ok(Self::Initiation),
             2 => Ok(Self::Reply),
-            3 => Ok(Self::Record),
+            3 => Ok(Self::Error),
+            4 => Ok(Self::Record),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown controlbase msg type: {other}"),
@@ -123,37 +146,77 @@ where
     /// caller should not perform any further reads on `inner` between
     /// `read_frame` calls.
     pub async fn read_frame(&mut self) -> io::Result<(FrameHeader, Vec<u8>)> {
-        let mut type_byte = [0u8; 1];
-        self.inner.read_exact(&mut type_byte).await?;
-        let mt = MsgType::from_u8(type_byte[0])?;
+        // First byte determines the header layout:
+        //   - 0x01 (Initiation) → 5-byte header
+        //     **with upstream layout** [version:u16be][type=1:u8][len:u16be].
+        //     The byte we just read is actually the FIRST byte of the
+        //     version (`u16be`), not the type byte. Upstream
+        //     `controlbase.Server` matches this by reading 5 bytes
+        //     unconditionally on the server's first frame; we
+        //     special-case it on the type byte because our
+        //     `read_frame` is reused for the subsequent
+        //     Record/Reply/Error stream.
+        //   - 0x02 (Reply/Response), 0x03 (Error), 0x04 (Record) →
+        //     3-byte header `[type:u8][len:u16be]`. Type byte first.
+        //
+        // We disambiguate by peeking the first byte. Real Initiation
+        // frames from a client carry `version & 0xff00 == 0x0000` for
+        // protocolVersion < 256 (the only kind we support, capped at
+        // ~138 in current upstream), which means the first byte is
+        // 0x00. Reply/Record/Error always have type 0x02/0x03/0x04 as
+        // the first byte. The first byte of an Initiation cannot be
+        // 0x02/0x03/0x04 unless protocolVersion ≥ 512, which we
+        // explicitly reject.
+        let mut first = [0u8; 1];
+        self.inner.read_exact(&mut first).await?;
 
-        let header = match mt {
-            MsgType::Initiation => {
-                let mut rest = [0u8; 4];
-                self.inner.read_exact(&mut rest).await?;
-                let proto = u16::from_be_bytes([rest[0], rest[1]]);
-                let len = u16::from_be_bytes([rest[2], rest[3]]);
+        if first[0] == 0x00 {
+            // Initiation: 5-byte header. We've consumed the high byte
+            // of `version`. Read the remaining 4 bytes.
+            let mut rest = [0u8; 4];
+            self.inner.read_exact(&mut rest).await?;
+            let proto = u16::from_be_bytes([first[0], rest[0]]);
+            let type_byte = rest[1];
+            if type_byte != MsgType::Initiation as u8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected Initiation type byte (1) in 5-byte header, got {type_byte}"
+                    ),
+                ));
+            }
+            let len = u16::from_be_bytes([rest[2], rest[3]]);
+            let mut body = vec![0u8; len as usize];
+            if len > 0 {
+                self.inner.read_exact(&mut body).await?;
+            }
+            return Ok((
                 FrameHeader::Initiation {
                     protocol_version: proto,
                     len,
-                }
-            }
-            MsgType::Reply | MsgType::Record => {
-                let mut rest = [0u8; 2];
-                self.inner.read_exact(&mut rest).await?;
-                let len = u16::from_be_bytes([rest[0], rest[1]]);
-                FrameHeader::Regular { msg_type: mt, len }
-            }
-        };
+                },
+                body,
+            ));
+        }
 
-        let len = match header {
-            FrameHeader::Regular { len, .. } | FrameHeader::Initiation { len, .. } => len,
-        };
+        let mt = MsgType::from_u8(first[0])?;
+        if matches!(mt, MsgType::Initiation) {
+            // Should be unreachable because Initiation's first wire
+            // byte is the version high-byte, not the type byte. Reject
+            // explicitly so we don't read a malformed frame.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Initiation frame must use the 5-byte header layout (first byte = version high byte = 0)",
+            ));
+        }
+        let mut rest = [0u8; 2];
+        self.inner.read_exact(&mut rest).await?;
+        let len = u16::from_be_bytes([rest[0], rest[1]]);
         let mut body = vec![0u8; len as usize];
         if len > 0 {
             self.inner.read_exact(&mut body).await?;
         }
-        Ok((header, body))
+        Ok((FrameHeader::Regular { msg_type: mt, len }, body))
     }
 
     /// Write a regular 3-byte-header frame (Reply or Record).
@@ -193,9 +256,13 @@ where
                 format!("initiation body too large: {} bytes", body.len()),
             ));
         }
+        // Upstream `controlbase/messages.go::initiationMessage`:
+        //   2b: protocol version (u16 BE)
+        //   1b: message type (0x01)
+        //   2b: payload length (u16 BE)
         let mut hdr = [0u8; 5];
-        hdr[0] = MsgType::Initiation as u8;
-        hdr[1..3].copy_from_slice(&protocol_version.to_be_bytes());
+        hdr[0..2].copy_from_slice(&protocol_version.to_be_bytes());
+        hdr[2] = MsgType::Initiation as u8;
         hdr[3..5].copy_from_slice(&(body.len() as u16).to_be_bytes());
         self.inner.write_all(&hdr).await?;
         if !body.is_empty() {

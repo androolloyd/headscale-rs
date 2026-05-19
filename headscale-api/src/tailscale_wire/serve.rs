@@ -14,10 +14,15 @@
 //!
 //! ## Decision log
 //!
-//! - **`axum-server`** is the bridge between rustls and axum 0.7's
-//!   `Router`. Pulling it in here is the second new dep (per the task
-//!   brief). It's a thin wrapper over `hyper-server` + rustls; no
-//!   global state, no per-request overhead.
+//! - **HTTPS uses `raw_tls::serve_raw_tls`, not `axum-server`.** The
+//!   `/ts2021` upgrade can't go through `axum-server` /
+//!   `hyper-rustls` — see `raw_tls`'s module doc and
+//!   `docs/tailscale-interop-blocker.md` 2026-05-19 §"P0 batch
+//!   shipped" for why (hyper-rustls' read buffer drains the
+//!   Initiation frame between the 101 response and the moment our
+//!   `OnUpgrade` handler regains the socket). The raw listener
+//!   special-cases `/ts2021`, dispatches everything else into the
+//!   same `axum::Router` via `hyper::server::conn::http1`.
 //! - **Both listeners run as separate tasks.** A single bind failure
 //!   shouldn't bring down the other listener; the dual-listener entry
 //!   point logs and returns the first error it sees.
@@ -33,6 +38,7 @@ use std::sync::Arc;
 use axum::Router;
 use tokio::task::JoinHandle;
 
+use super::raw_tls;
 use super::tls::{self, SanConfig, TlsMaterial};
 use super::{router, WireError, WireState};
 
@@ -88,7 +94,7 @@ pub async fn serve(
     cfg: ServeConfig,
     extra_routes: Router,
 ) -> Result<ServeHandle, WireError> {
-    let app = extra_routes.merge(router(state));
+    let app = extra_routes.merge(router(state.clone()));
 
     let http_listener = tokio::net::TcpListener::bind(cfg.http_addr)
         .await
@@ -108,22 +114,31 @@ pub async fn serve(
 
     // HTTPS branch — only mint TLS material when an https addr is
     // actually configured.
+    //
+    // Implementation note: we deliberately route HTTPS through
+    // `raw_tls::serve_raw_tls`, **not** `axum_server::bind_rustls`.
+    // The latter's hyper-rustls stack drains the Noise IK
+    // Initiation bytes off the TLS read buffer between the
+    // `101 Switching Protocols` response and the moment our
+    // `/ts2021` handler regains control of the socket, which kills
+    // the handshake (observed wall — see the blocker doc 2026-05-19
+    // entry). The raw listener peeks the request line itself and
+    // hands the unbuffered `TlsStream` straight to
+    // `noise::drive_ts2021` for the upgrade path; everything else
+    // still flows through the same axum router via hyper http1.
     let (https, tls) = if let Some(https_addr) = cfg.https_addr {
         let material = tls::load_or_generate(&cfg.state_dir, &cfg.sans)?;
         tracing::info!(
             target = "tailscale_wire::serve",
             addr = %https_addr,
             cert_path = %material.cert_path.display(),
-            "wire surface listening (HTTPS, self-signed)"
+            "wire surface listening (HTTPS, self-signed, raw rustls)"
         );
         let server_config = Arc::clone(&material.server_config);
         let https_app = app.clone();
+        let wire_state = state.clone();
         let handle = tokio::spawn(async move {
-            // axum_server consumes a rustls config + a SocketAddr.
-            let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
-            axum_server::bind_rustls(https_addr, rustls_cfg)
-                .serve(https_app.into_make_service())
-                .await
+            raw_tls::serve_raw_tls(https_addr, server_config, https_app, wire_state).await
         });
         (Some(handle), Some(material))
     } else {

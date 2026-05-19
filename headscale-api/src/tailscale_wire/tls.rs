@@ -57,7 +57,8 @@ pub struct TlsMaterial {
     pub cert_path: PathBuf,
     /// Key path on disk (under `state_dir`).
     pub key_path: PathBuf,
-    /// Ready-to-use rustls config for `axum_server::bind_rustls`.
+    /// Ready-to-use rustls config for the raw-tls listener in
+    /// `raw_tls::serve_raw_tls`.
     pub server_config: Arc<ServerConfig>,
 }
 

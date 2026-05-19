@@ -26,6 +26,13 @@ pub mod http;
 pub mod server;
 pub mod tailscale_wire;
 
+// Tailnet ACL policy storage + hujson parser + ACL → FilterRule
+// translation + live-reload broadcast. Consumed by `tailscale_wire`
+// (to populate `MapResponse.packet_filter`) and by `admin` (CRUD).
+// Stays in the wire-default feature set: a wire-only embedder still
+// needs the policy store to populate the packet filter.
+pub mod policy;
+
 // Admin GUI v0 — Tailscale-admin-equivalent web panel + JSON API.
 // Gated behind the `admin` feature (default-on); downstream wire-only
 // consumers can disable it with `default-features = false`. See
@@ -38,4 +45,4 @@ pub mod admin;
 pub use gateway::ResourceGateway;
 #[cfg(feature = "full")]
 pub use server::Server;
-pub use tailscale_wire::{router as tailscale_wire_router, WireState};
+pub use tailscale_wire::{WireState, router as tailscale_wire_router};

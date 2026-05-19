@@ -480,6 +480,130 @@ async fn xss_escaped_in_machine_detail() {
     assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
 }
 
+// -- Policy CRUD --------------------------------------------------------
+//
+// The wire layer's `/map` consumer is covered by an end-to-end test
+// in `octravpn-node/tests/policy_e2e.rs`. Here we pin the admin-side
+// HTTP contract: PUT applies a parsed doc, GET round-trips raw bytes,
+// validate-only doesn't mutate, and bearer-auth gates everything.
+
+fn req_put_text(uri: &str, body: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn req_post_text(uri: &str, body: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn policy_put_then_get_round_trip() {
+    let (app, _) = app();
+    let raw = r#"{ "version":1, "rules":[
+        {"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}
+    ]}"#;
+    let resp = app
+        .clone()
+        .oneshot(req_put_text("/api/v1/policy", raw, &admin_token()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_str(resp).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["applied"], serde_json::Value::Bool(true));
+    assert_eq!(v["rules"], serde_json::json!(1));
+
+    let resp = app
+        .oneshot(req_get_authed("/api/v1/policy", &admin_token()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_str(resp).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["loaded"], serde_json::Value::Bool(true));
+    assert_eq!(v["policy"]["rules"][0]["action"], "accept");
+    // Raw bytes round-trip verbatim.
+    assert!(v["raw"].as_str().unwrap().contains("tcp/22"));
+}
+
+#[tokio::test]
+async fn policy_put_rejects_invalid_doc() {
+    let (app, _) = app();
+    let bad = r#"{"rules":[{"action":"bogus","src":["*"],"dst":["*"]}]}"#;
+    let resp = app
+        .oneshot(req_put_text("/api/v1/policy", bad, &admin_token()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_str(resp).await;
+    assert!(
+        body.contains("error"),
+        "PUT rejection must carry a structured error: {body}"
+    );
+}
+
+#[tokio::test]
+async fn policy_validate_does_not_mutate() {
+    let (app, state) = app();
+    assert!(!state.policy.is_loaded(), "store starts empty");
+    let good = r#"{"version":1,"rules":[]}"#;
+    let resp = app
+        .clone()
+        .oneshot(req_post_text("/api/v1/policy/validate", good, &admin_token()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_str(resp).await;
+    assert!(body.contains("\"valid\":true"));
+    assert!(
+        !state.policy.is_loaded(),
+        "validate must not mutate the store"
+    );
+}
+
+#[tokio::test]
+async fn policy_endpoints_require_bearer() {
+    let (app, _) = app();
+    // No bearer header at all.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/policy")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"version":1,"rules":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/policy/validate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"version":1,"rules":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Tiny urlencode for the login form. Keeps the test deps zero — we
 /// only need to escape `=` and `+` for the bearer token, but the
 /// fixture token is alpha-num plus `-`, so this is identity-mapping.

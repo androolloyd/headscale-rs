@@ -2,16 +2,20 @@
 //!
 //! `get` / `set` round-trip the policy document with the admin
 //! surface. `check` runs locally — it parses + validates the file
-//! without touching the server. The v0 admin endpoint (#216) is a stub
-//! that returns `{loaded:false, policy:null}` and accepts any PUT
-//! body; we still wire the CLI verbs so the operator-facing UX is in
-//! place when #230 lands the real editor.
+//! without touching the server. The admin endpoint (wired up
+//! alongside the wire-layer `MapResponse.PacketFilter` plumbing)
+//! answers PUT with `{"applied": true, "rules": <n>}` on success
+//! and `400 {"error": …}` on a hujson schema violation. GET returns
+//! `{loaded, policy, raw}` where `raw` is the operator's exact
+//! source bytes (comments + trailing commas preserved). The CLI
+//! displays whichever fields the server emits; the missing-field
+//! paths default sensibly so older servers still work.
 
 use std::path::Path;
 
-use super::client::AdminClient;
-use super::output::{print_json, OutputFormat};
 use super::AdminError;
+use super::client::AdminClient;
+use super::output::{OutputFormat, print_json};
 
 pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let value: serde_json::Value = client.get_json("/policy").await?;
@@ -23,22 +27,18 @@ pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminErr
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             println!("Policy loaded: {loaded}");
-            if let Some(p) = value.get("policy") {
-                if !p.is_null() {
-                    println!("---");
-                    println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
-                }
+            if let Some(p) = value.get("policy")
+                && !p.is_null()
+            {
+                println!("---");
+                println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
             }
         }
     }
     Ok(())
 }
 
-pub async fn set(
-    client: &AdminClient,
-    path: &Path,
-    fmt: OutputFormat,
-) -> Result<(), AdminError> {
+pub async fn set(client: &AdminClient, path: &Path, fmt: OutputFormat) -> Result<(), AdminError> {
     let body = read_policy_file(path)?;
     // Local validation before sending — fail fast on garbage.
     check_policy_str(&body)?;
@@ -46,7 +46,10 @@ pub async fn set(
     match fmt {
         OutputFormat::Json => print_json(&resp)?,
         OutputFormat::Table => {
-            let applied = resp.get("applied").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let applied = resp
+                .get("applied")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             println!("Policy applied: {applied}");
             if let Some(note) = resp.get("note").and_then(serde_json::Value::as_str) {
                 println!("Note: {note}");

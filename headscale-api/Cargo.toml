@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["full"]
+default = ["full", "admin"]
 # Enables the HTTP gateway / gRPC / server modules + the sibling-crate
 # deps they need (`headscale-core`, `headscale-identity`,
 # `headscale-resources`, `headscale-payments`). Downstream callers
@@ -25,6 +25,17 @@ full = [
     "dep:prost",
     "dep:reqwest",
     "dep:futures",
+]
+# Admin GUI v0 — `admin::router()` returns an axum Router with
+# server-side rendered HTML (maud) + JSON API. Default-on; downstream
+# crates can disable it with `default-features = false` to skip the
+# maud dep entirely.
+admin = [
+    "dep:maud",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:serde_urlencoded",
+    "dep:rand_core",
 ]
 
 [dependencies]
@@ -114,6 +125,20 @@ base64 = "0.22"
 # that upstream consumes.
 zstd = { version = "0.13", default-features = false }
 
+# Admin GUI v0 deps — only pulled in when the `admin` feature is on
+# (default). `maud` is the type-safe HTML template engine; `hmac` +
+# `sha2` back the session-cookie + CSRF tokens; `serde_urlencoded`
+# parses `application/x-www-form-urlencoded` POST bodies; `rand_core`
+# (with the `getrandom` feature, set at workspace level) seeds the
+# per-process HMAC secret + the preauth token raw bytes. All four
+# already live in the transitive dep tree, so this adds zero net
+# crates to the build graph — only their `dep:` activation.
+maud = { version = "0.27", features = ["axum"], optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+serde_urlencoded = { version = "0.7", optional = true }
+rand_core = { workspace = true, optional = true }
+
 # TLS termination on :443 — required by stock `tailscale up` v1.78+
 # which forces an HTTPS-on-443 dial after the initial /key probe.
 # `rcgen` mints the self-signed cert at startup (cached under
@@ -140,3 +165,11 @@ futures = "0.3"
 # `tempfile::tempdir` for the wire module's per-test
 # ServerNoiseKey fixtures.
 tempfile = "3"
+# Admin GUI unit tests use `tower::ServiceExt::oneshot` to drive the
+# axum Router without binding a socket.
+tower = { version = "0.5", features = ["util"] }
+# Admin GUI tests parse JSON responses from the `/api/v1/*` surface.
+serde_json = { workspace = true }
+# Admin GUI integration test crate uses `hex` to build a fixture
+# node-key hex string.
+hex = "0.4"

@@ -26,6 +26,14 @@ pub mod http;
 pub mod server;
 pub mod tailscale_wire;
 
+// Admin GUI v0 — Tailscale-admin-equivalent web panel + JSON API.
+// Gated behind the `admin` feature (default-on); downstream wire-only
+// consumers can disable it with `default-features = false`. See
+// `admin::router` for the mount surface; recommended dedicated port is
+// `127.0.0.1:51822` (NEVER 443 / 51820 / 51821).
+#[cfg(feature = "admin")]
+pub mod admin;
+
 #[cfg(feature = "full")]
 pub use gateway::ResourceGateway;
 #[cfg(feature = "full")]

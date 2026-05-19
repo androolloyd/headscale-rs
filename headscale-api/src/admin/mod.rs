@@ -1,0 +1,941 @@
+//! OctraVPN admin GUI v0 — Tailscale-admin-equivalent web panel.
+//!
+//! This module is mounted by the operator at a dedicated port —
+//! recommended `127.0.0.1:51822` (a new port; never 443 / 51820 /
+//! 51821 which belong to the Tailscale wire / WireGuard / Headscale
+//! gRPC surfaces). It serves two parallel route families:
+//!
+//! * `GET/POST /admin/*` — server-side rendered HTML (maud), with a
+//!   session-cookie + CSRF auth flow for browsers.
+//! * `GET/POST /api/v1/*` — same data shaped as JSON, with bearer-token
+//!   auth (no cookie required).
+//!
+//! Both families read + mutate the same backing state:
+//!
+//! * Users live in [`users::UserRegistry`] — a new in-memory store next
+//!   to [`crate::tailscale_wire::MachineRegistry`]. Persistence is
+//!   intentionally out of scope for v0; the same volatile-by-design
+//!   model the rest of the wire / portal surface uses today.
+//! * Machines come from [`crate::tailscale_wire::MachineRegistry`] via
+//!   the [`machines::WireMachineAdmin`] adapter (which layers
+//!   "expired" / "deleted" sidecars on top because the wire registry
+//!   is intentionally read-only outside of `register`).
+//! * Pre-auth keys come from the embedding host through the
+//!   [`preauth::PreauthAdmin`] trait; OctraVPN's `PreauthMinter`
+//!   implements this in the mesh crate's bridge code. An in-process
+//!   default ([`preauth::InMemoryPreauthAdmin`]) is shipped here for
+//!   tests + standalone deployments.
+//!
+//! ## Mount point
+//!
+//! ```ignore
+//! # use std::sync::Arc;
+//! use headscale_api::{admin, tailscale_wire};
+//! let wire = tailscale_wire::WireState {
+//!     // …populated by the embedding host…
+//!     # server_noise_key: todo!(),
+//!     # preauth: todo!(),
+//!     # ip_allocator: todo!(),
+//!     # machines: Arc::new(tailscale_wire::MachineRegistry::new()),
+//!     # derp_map: Arc::new(Default::default()),
+//! };
+//! let admin_state = admin::AdminState::builder()
+//!     .bearer_token("op-secret-token")
+//!     .users(admin::UserRegistry::new())
+//!     .machines(Arc::new(admin::WireMachineAdmin::new(wire.machines.clone())))
+//!     .preauth(Arc::new(admin::InMemoryPreauthAdmin::new()))
+//!     .derp_regions(wire.derp_map.regions.len())
+//!     .build();
+//! let app = admin::router(admin_state);
+//! // axum::serve(listener_on_51822, app).await.unwrap();
+//! ```
+//!
+//! ## Feature flag
+//!
+//! Gated behind the `admin` cargo feature (default-on). Downstream
+//! crates that only want the wire layer can disable it with
+//! `default-features = false`.
+
+pub mod auth;
+pub mod machines;
+pub mod preauth;
+pub mod users;
+mod views;
+
+#[cfg(test)]
+mod tests;
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{FromRef, Path, RawQuery, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::Deserialize;
+use serde_json::json;
+
+pub use auth::{AdminAuth, AuthOutcome, SESSION_COOKIE, SESSION_TTL_SECS};
+pub use machines::{MachineAdmin, MachineAdminError, MachineAdminRecord, WireMachineAdmin};
+pub use preauth::{
+    InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,
+};
+pub use users::{UserRecord, UserRegistry, UserRegistryError};
+
+use views::Section;
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// Composite state passed to every admin handler. Cheap to clone — all
+/// fields are `Arc` / `Clone`.
+#[derive(Clone)]
+pub struct AdminState {
+    pub auth: AdminAuth,
+    pub users: UserRegistry,
+    pub machines: Arc<dyn MachineAdmin>,
+    pub preauth: Arc<dyn PreauthAdmin>,
+    /// DERP region count for the read-only tailnet page. The full
+    /// DERP map isn't passed through — the admin module doesn't need
+    /// to introspect it for v0.
+    pub derp_regions: usize,
+}
+
+impl AdminState {
+    /// Returns a fresh builder.
+    pub fn builder() -> AdminStateBuilder {
+        AdminStateBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct AdminStateBuilder {
+    bearer_token: Option<String>,
+    users: Option<UserRegistry>,
+    machines: Option<Arc<dyn MachineAdmin>>,
+    preauth: Option<Arc<dyn PreauthAdmin>>,
+    derp_regions: usize,
+}
+
+impl AdminStateBuilder {
+    pub fn bearer_token(mut self, t: impl Into<String>) -> Self {
+        self.bearer_token = Some(t.into());
+        self
+    }
+    pub fn users(mut self, u: UserRegistry) -> Self {
+        self.users = Some(u);
+        self
+    }
+    pub fn machines(mut self, m: Arc<dyn MachineAdmin>) -> Self {
+        self.machines = Some(m);
+        self
+    }
+    pub fn preauth(mut self, p: Arc<dyn PreauthAdmin>) -> Self {
+        self.preauth = Some(p);
+        self
+    }
+    pub fn derp_regions(mut self, n: usize) -> Self {
+        self.derp_regions = n;
+        self
+    }
+    pub fn build(self) -> AdminState {
+        AdminState {
+            auth: AdminAuth::new(self.bearer_token.unwrap_or_default()),
+            users: self.users.unwrap_or_default(),
+            machines: self
+                .machines
+                .unwrap_or_else(|| Arc::new(NoopMachines) as Arc<dyn MachineAdmin>),
+            preauth: self
+                .preauth
+                .unwrap_or_else(|| Arc::new(InMemoryPreauthAdmin::new()) as Arc<dyn PreauthAdmin>),
+            derp_regions: self.derp_regions,
+        }
+    }
+}
+
+impl FromRef<AdminState> for AdminAuth {
+    fn from_ref(input: &AdminState) -> Self {
+        input.auth.clone()
+    }
+}
+
+/// Fallback machine admin used when the builder doesn't get a real one
+/// (mostly relevant to tests). Empty in every direction.
+#[derive(Default)]
+struct NoopMachines;
+
+#[async_trait::async_trait]
+impl MachineAdmin for NoopMachines {
+    async fn list(&self) -> Vec<MachineAdminRecord> {
+        Vec::new()
+    }
+    async fn get(&self, _: &str) -> Option<MachineAdminRecord> {
+        None
+    }
+    async fn expire(&self, id: &str) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+    async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+
+/// Build the admin router. Mount under a dedicated listener — never
+/// share with the wire layer's `:443` or the WireGuard data plane.
+pub fn router(state: AdminState) -> Router {
+    let html = Router::new()
+        .route("/admin/", get(page_dashboard))
+        .route("/admin/machines", get(page_machines))
+        .route("/admin/machines/:id", get(page_machine_detail))
+        .route("/admin/machines/:id/expire", post(post_machine_expire))
+        .route("/admin/machines/:id/delete", post(post_machine_delete))
+        .route("/admin/users", get(page_users).post(post_users_create))
+        .route("/admin/users/:name/delete", post(post_users_delete))
+        .route(
+            "/admin/preauthkeys",
+            get(page_preauth).post(post_preauth_mint),
+        )
+        .route(
+            "/admin/preauthkeys/:prefix/expire",
+            post(post_preauth_expire),
+        )
+        .route("/admin/tailnet", get(page_tailnet))
+        .route("/admin/policy", get(page_policy))
+        .route("/admin/sessions", get(page_sessions))
+        .route("/admin/login", get(page_login).post(post_login))
+        .route("/admin/logout", get(get_logout));
+
+    let api = Router::new()
+        .route("/api/v1/users", get(api_users_list).post(api_users_create))
+        .route("/api/v1/users/:name", axum::routing::delete(api_users_delete))
+        .route("/api/v1/machines", get(api_machines_list))
+        .route("/api/v1/machines/:id", get(api_machines_get))
+        .route("/api/v1/machines/:id", axum::routing::delete(api_machines_delete))
+        .route("/api/v1/machines/:id/expire", post(api_machines_expire))
+        .route(
+            "/api/v1/preauthkeys",
+            get(api_preauth_list).post(api_preauth_mint),
+        )
+        .route(
+            "/api/v1/preauthkeys/:prefix/expire",
+            post(api_preauth_expire),
+        )
+        .route("/api/v1/policy", get(api_policy_get).put(api_policy_put))
+        .route("/api/v1/tailnet", get(api_tailnet));
+
+    Router::new().merge(html).merge(api).with_state(state)
+}
+
+// ---------------------------------------------------------------------------
+// HTML guards
+// ---------------------------------------------------------------------------
+
+/// HTML auth gate: returns either an authorized `AuthOutcome` OR a
+/// redirect to `/admin/login`. The unauthenticated path is the redirect
+/// — anonymous bearer-token-less browser hits should land at the login
+/// page, not see a 401.
+///
+/// The `Err` variant carries a fully-formed `Response`; clippy's
+/// `result_large_err` lint fires on this shape because `Response` is
+/// ~128B. Boxing the response would require an extra heap alloc per
+/// auth check on every request — bad trade for a single-flag warning.
+#[allow(clippy::result_large_err)]
+fn guard_html(state: &AdminState, req: &Request) -> Result<AuthOutcome, Response> {
+    let outcome = auth::evaluate_headers(req.headers(), &state.auth);
+    if outcome.is_authenticated() {
+        Ok(outcome)
+    } else {
+        Err(auth::redirect_to_login())
+    }
+}
+
+/// JSON auth gate. Returns a 401 JSON body on anonymous access. See
+/// [`guard_html`] for the rationale on the `allow(result_large_err)`.
+#[allow(clippy::result_large_err)]
+fn guard_api(state: &AdminState, req: &Request) -> Result<AuthOutcome, Response> {
+    let outcome = auth::evaluate_headers(req.headers(), &state.auth);
+    if outcome.is_authenticated() {
+        Ok(outcome)
+    } else {
+        Err(auth::api_unauthorized())
+    }
+}
+
+/// Verify the CSRF token from a form. For bearer-token clients this is
+/// a no-op (they don't carry a session cookie). For session clients we
+/// require the form to carry the `csrf` field bound to their session.
+fn check_csrf(state: &AdminState, outcome: &AuthOutcome, form_csrf: Option<&str>) -> bool {
+    match outcome {
+        AuthOutcome::Bearer => true,
+        AuthOutcome::Session { payload } => match form_csrf {
+            Some(t) => state.auth.csrf_valid(payload, t),
+            None => false,
+        },
+        AuthOutcome::Anonymous => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTML page handlers
+// ---------------------------------------------------------------------------
+
+async fn page_dashboard(State(s): State<AdminState>, req: Request) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let machines = s.machines.list().await;
+    let online = machines.iter().filter(|m| m.online).count();
+    let preauth = s.preauth.list().await;
+    let live = preauth
+        .iter()
+        .filter(|k| k.expires_at > auth::now_unix())
+        .count();
+    let body = views::shell(
+        "Dashboard",
+        Section::Dashboard,
+        outcome.is_authenticated(),
+        views::dashboard(machines.len(), online, s.users.len(), live),
+    );
+    Html(body.into_string()).into_response()
+}
+
+async fn page_machines(State(s): State<AdminState>, req: Request) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let machines = s.machines.list().await;
+    let csrf = outcome.csrf_token(&s.auth);
+    let body = views::shell(
+        "Machines",
+        Section::Machines,
+        true,
+        views::machines_list(&machines, csrf.as_deref()),
+    );
+    Html(body.into_string()).into_response()
+}
+
+async fn page_machine_detail(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let Some(m) = s.machines.get(&id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Html(
+                views::shell(
+                    "Not found",
+                    Section::Machines,
+                    true,
+                    views::error_page(404, "machine not found"),
+                )
+                .into_string(),
+            ),
+        )
+            .into_response();
+    };
+    let csrf = outcome.csrf_token(&s.auth);
+    let body = views::shell(
+        &format!(
+            "Machine {}",
+            if m.name.is_empty() { &m.id[..8] } else { &m.name }
+        ),
+        Section::Machines,
+        true,
+        views::machine_detail(&m, csrf.as_deref()),
+    );
+    Html(body.into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct CsrfForm {
+    #[serde(default)]
+    csrf: Option<String>,
+}
+
+async fn post_machine_expire(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    // Read form body manually so we can apply CSRF before mutating.
+    let form: CsrfForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let _ = s.machines.expire(&id).await;
+    Redirect::to(&format!("/admin/machines/{id}")).into_response()
+}
+
+async fn post_machine_delete(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let form: CsrfForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let _ = s.machines.delete(&id).await;
+    Redirect::to("/admin/machines").into_response()
+}
+
+async fn page_users(State(s): State<AdminState>, RawQuery(q): RawQuery, req: Request) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let users = s.users.all();
+    let flash = q
+        .as_deref()
+        .and_then(|qs| qs.split('&').find_map(|kv| kv.strip_prefix("err=")))
+        .map(urldecode);
+    let csrf = outcome.csrf_token(&s.auth);
+    let body = views::shell(
+        "Users",
+        Section::Users,
+        true,
+        views::users_page(&users, csrf.as_deref(), flash.as_deref()),
+    );
+    Html(body.into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct UserCreateForm {
+    name: String,
+    #[serde(default)]
+    csrf: Option<String>,
+}
+
+async fn post_users_create(State(s): State<AdminState>, req: Request) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let form: UserCreateForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    match s.users.create(form.name.trim()) {
+        Ok(_) => Redirect::to("/admin/users").into_response(),
+        Err(e) => Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string())))
+            .into_response(),
+    }
+}
+
+async fn post_users_delete(
+    State(s): State<AdminState>,
+    Path(name): Path<String>,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let form: CsrfForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let _ = s.users.delete(&name);
+    Redirect::to("/admin/users").into_response()
+}
+
+async fn page_preauth(
+    State(s): State<AdminState>,
+    RawQuery(q): RawQuery,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let keys = s.preauth.list().await;
+    let mut err: Option<String> = None;
+    let mut just_minted: Option<PreauthAdminKey> = None;
+    if let Some(qs) = q.as_deref() {
+        for kv in qs.split('&') {
+            if let Some(raw) = kv.strip_prefix("err=") {
+                err = Some(urldecode(raw));
+            } else if let Some(raw) = kv.strip_prefix("minted=") {
+                // Look up the key by prefix in the live list.
+                let prefix = urldecode(raw);
+                just_minted = keys
+                    .iter()
+                    .find(|k| k.key.starts_with(&prefix))
+                    .cloned();
+            }
+        }
+    }
+    let csrf = outcome.csrf_token(&s.auth);
+    let body = views::shell(
+        "Pre-auth keys",
+        Section::PreauthKeys,
+        true,
+        views::preauthkeys_page(&keys, csrf.as_deref(), just_minted.as_ref(), err.as_deref()),
+    );
+    Html(body.into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct PreauthForm {
+    user: String,
+    #[serde(default)]
+    ttl_days: Option<u64>,
+    #[serde(default)]
+    reusable: Option<String>,
+    #[serde(default)]
+    ephemeral: Option<String>,
+    #[serde(default)]
+    tags: Option<String>,
+    #[serde(default)]
+    csrf: Option<String>,
+}
+
+async fn post_preauth_mint(State(s): State<AdminState>, req: Request) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let form: PreauthForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let req = PreauthMintRequest {
+        user: form.user.trim().to_string(),
+        ttl_secs: form.ttl_days.unwrap_or(1).saturating_mul(86400),
+        reusable: form.reusable.is_some(),
+        ephemeral: form.ephemeral.is_some(),
+        tags: form
+            .tags
+            .unwrap_or_default()
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    };
+    let user = req.user.clone();
+    match s.preauth.mint(req).await {
+        Ok(k) => {
+            s.users.touch(&user);
+            // Redirect with the key prefix so the page can splash the
+            // full token from `s.preauth.list()` on render.
+            let head_len = "octrapreauth-".len() + 8;
+            let prefix = &k.key[..head_len.min(k.key.len())];
+            Redirect::to(&format!(
+                "/admin/preauthkeys?minted={}",
+                urlencode(prefix)
+            ))
+            .into_response()
+        }
+        Err(e) => Redirect::to(&format!(
+            "/admin/preauthkeys?err={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response(),
+    }
+}
+
+async fn post_preauth_expire(
+    State(s): State<AdminState>,
+    Path(prefix): Path<String>,
+    req: Request,
+) -> Response {
+    let outcome = match guard_html(&s, &req) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let form: CsrfForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let _ = s.preauth.expire_by_prefix(&prefix).await;
+    Redirect::to("/admin/preauthkeys").into_response()
+}
+
+async fn page_tailnet(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_html(&s, &req) {
+        return r;
+    }
+    let body = views::shell(
+        "Tailnet",
+        Section::Tailnet,
+        true,
+        views::tailnet_page(s.derp_regions),
+    );
+    Html(body.into_string()).into_response()
+}
+
+async fn page_policy(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_html(&s, &req) {
+        return r;
+    }
+    let body = views::shell("Policy", Section::Policy, true, views::policy_page(false));
+    Html(body.into_string()).into_response()
+}
+
+async fn page_sessions(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_html(&s, &req) {
+        return r;
+    }
+    let body = views::shell(
+        "Sessions",
+        Section::Sessions,
+        true,
+        views::sessions_page(),
+    );
+    Html(body.into_string()).into_response()
+}
+
+// --- Login / logout --------------------------------------------------------
+
+async fn page_login(RawQuery(q): RawQuery) -> Response {
+    let err = q
+        .as_deref()
+        .and_then(|qs| qs.split('&').find_map(|kv| kv.strip_prefix("err=")))
+        .map(urldecode);
+    Html(views::login_page(err.as_deref()).into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    token: String,
+}
+
+async fn post_login(State(s): State<AdminState>, req: Request) -> Response {
+    let form: LoginForm = match read_form(req).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if !s.auth.verify_bearer(form.token.trim()) {
+        return Redirect::to(&format!(
+            "/admin/login?err={}",
+            urlencode("Invalid token")
+        ))
+        .into_response();
+    }
+    let expires = auth::now_unix().saturating_add(SESSION_TTL_SECS);
+    let payload = s.auth.mint_session(expires);
+    let cookie = s.auth.cookie_header(&payload, SESSION_TTL_SECS);
+    let mut r = Redirect::to("/admin/").into_response();
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie).expect("cookie ascii"),
+    );
+    r
+}
+
+async fn get_logout(State(s): State<AdminState>) -> Response {
+    let mut r = Redirect::to("/admin/login").into_response();
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&s.auth.cookie_clear_header()).expect("cookie ascii"),
+    );
+    r
+}
+
+// ---------------------------------------------------------------------------
+// API handlers
+// ---------------------------------------------------------------------------
+
+async fn api_users_list(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    Json(s.users.all()).into_response()
+}
+
+#[derive(Deserialize)]
+struct ApiUserCreate {
+    name: String,
+}
+
+async fn api_users_create(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    let body: ApiUserCreate = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match s.users.create(body.name.trim()) {
+        Ok(rec) => (StatusCode::CREATED, Json(rec)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_users_delete(
+    State(s): State<AdminState>,
+    Path(name): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.users.delete(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_machines_list(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    Json(s.machines.list().await).into_response()
+}
+
+async fn api_machines_get(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.machines.get(&id).await {
+        Some(m) => Json(m).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+    }
+}
+
+async fn api_machines_expire(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.machines.expire(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_machines_delete(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.machines.delete(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_preauth_list(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    Json(s.preauth.list().await).into_response()
+}
+
+#[derive(Deserialize)]
+struct ApiPreauthCreate {
+    user: String,
+    #[serde(default = "default_ttl_secs")]
+    ttl_secs: u64,
+    #[serde(default)]
+    reusable: bool,
+    #[serde(default)]
+    ephemeral: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+fn default_ttl_secs() -> u64 {
+    preauth::DEFAULT_TTL_SECS
+}
+
+async fn api_preauth_mint(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    let body: ApiPreauthCreate = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let mint = PreauthMintRequest {
+        user: body.user,
+        ttl_secs: body.ttl_secs,
+        reusable: body.reusable,
+        ephemeral: body.ephemeral,
+        tags: body.tags,
+    };
+    match s.preauth.mint(mint).await {
+        Ok(k) => (StatusCode::CREATED, Json(k)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_preauth_expire(
+    State(s): State<AdminState>,
+    Path(prefix): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.preauth.expire_by_prefix(&prefix).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    // v0 stub: no policy wired. Return an empty document.
+    Json(json!({"loaded": false, "policy": null})).into_response()
+}
+
+async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    // v0 stub: drain and discard the body so the caller's PUT semantics
+    // round-trip. #230 lands the real editor.
+    let _ = axum::body::to_bytes(req.into_body(), 1024 * 1024).await;
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"applied": false, "note": "policy editor lands in #230"})),
+    )
+        .into_response()
+}
+
+async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    Json(json!({
+        "derp_regions": s.derp_regions,
+        "dns": { "magic_dns": false, "enabled": false },
+        "policy_loaded": false,
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Body helpers
+// ---------------------------------------------------------------------------
+
+/// Buffer the request body and parse it as `application/x-www-form-urlencoded`.
+#[allow(clippy::result_large_err)]
+async fn read_form<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Response> {
+    let bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, "body").into_response());
+        }
+    };
+    serde_urlencoded::from_bytes(&bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("form: {e}")).into_response())
+}
+
+/// Buffer the request body and parse it as JSON.
+#[allow(clippy::result_large_err)]
+async fn read_json<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, Response> {
+    let bytes = match axum::body::to_bytes(req.into_body(), 256 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, "body").into_response());
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("json: {e}")})),
+        )
+            .into_response()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Misc helpers
+// ---------------------------------------------------------------------------
+
+/// Very small `application/x-www-form-urlencoded`-style escape — used
+/// only for redirect targets. We don't need a general urlencoder.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+/// Tiny urldecode, paired with [`urlencode`]. Plain `+` → space, `%XX`
+/// → byte. Errors decode to a `?`.
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => out.push(((h << 4) | l) as u8),
+                    _ => out.push(b'?'),
+                }
+                i += 3;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}

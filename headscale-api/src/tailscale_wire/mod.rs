@@ -36,8 +36,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -164,13 +164,46 @@ pub struct WireState {
     /// See [`derp_config`] + `docs/tailscale-interop-blocker.md` 2026-
     /// 05-19 §"Wall 6 closed".
     pub derp_map: Arc<wire::DerpMap>,
+    /// Live policy store. `/map` reads
+    /// [`crate::policy::PolicyStore::filter_rules`] to populate
+    /// `MapResponse.PacketFilter`; the admin PUT route mutates the
+    /// store and the store's `Notify` wakes every parked long-poller
+    /// so stock daemons get the new filter on their next chunk
+    /// (< 1 s in the common case).
+    ///
+    /// Defaults to an empty store ⇒ the wire layer falls back to the
+    /// open `allow_all_packet_filter` recipe for backward compat with
+    /// the interop test (which predates the policy surface).
+    pub policy: Arc<crate::policy::PolicyStore>,
 }
 
-/// In-memory machine registry. Each successful `register` inserts here;
-/// `map` reads here.
+/// In-memory machine registry.
+///
+/// # Storage shape (#238: `all()` no-clone)
+///
+/// Internally backed by a copy-on-write `Arc<HashMap<…>>` swapped under
+/// a short-lived `RwLock`. Reads (`snapshot`, `get`, `len`, `is_empty`)
+/// take the read lock for one Arc clone or one HashMap lookup; writes
+/// (`upsert`) take the write lock just long enough to clone the inner
+/// map, insert, and swap the new Arc in.
+///
+/// The previous `all() -> Vec<(String, MachineRecord)>` shape allocated
+/// one `String` + one full `MachineRecord` clone *per machine* on every
+/// `/machine/map` rebuild (and again on every long-poll wake). With
+/// `disco_key` + `endpoints` now landed on the record (Wall 7), each
+/// clone allocates ≥ 7 strings and a `Vec<String>` — measurable
+/// pressure on the steady-state allocator under a populated tailnet.
+///
+/// The new `snapshot()` accessor returns `Arc<HashMap<String,
+/// MachineRecord>>` — one Arc-bump per call, zero per-record clones.
+/// Callers iterate the borrowed map directly. The map-building hot path
+/// in [`map::map_inner`] consumes this shape.
 #[derive(Default)]
 pub struct MachineRegistry {
-    inner: RwLock<HashMap<String, MachineRecord>>,
+    /// COW: write paths clone the map, mutate, and swap a new `Arc` in.
+    /// Read paths take a read lock just long enough to bump the Arc's
+    /// strong count.
+    inner: RwLock<Arc<HashMap<String, MachineRecord>>>,
     /// Wakes pending `/map` long-polls when a new machine registers.
     pub(crate) notify: Arc<Notify>,
 }
@@ -182,21 +215,37 @@ impl MachineRegistry {
 
     /// Insert or replace a machine record. Wakes every pending
     /// `/map` long-poll.
+    ///
+    /// Writes are O(n) in the map size — we clone the underlying map
+    /// once per write — but registration is rare relative to map reads
+    /// in steady state, so this trade is the right one.
     pub fn upsert(&self, node_key_hex: String, rec: MachineRecord) {
-        let mut g = self.inner.write();
-        g.insert(node_key_hex, rec);
-        drop(g);
+        {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            next.insert(node_key_hex, rec);
+            *g = Arc::new(next);
+        }
         self.notify.notify_waiters();
     }
 
-    /// Snapshot all known machines. Used by `/map` to build the peer
-    /// list.
-    pub fn all(&self) -> Vec<(String, MachineRecord)> {
-        let g = self.inner.read();
-        g.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    /// Snapshot all known machines as a single `Arc<HashMap>`. The
+    /// snapshot is a point-in-time view: subsequent `upsert` calls
+    /// publish a new Arc; existing snapshots stay valid (and unchanged)
+    /// for as long as their holder keeps them alive.
+    ///
+    /// One Arc clone, zero per-record clones — replaces the legacy
+    /// `all()` accessor that cloned every record into a `Vec`.
+    pub fn snapshot(&self) -> Arc<HashMap<String, MachineRecord>> {
+        self.inner.read().clone()
     }
 
     /// Look up a single machine by its hex-encoded node key.
+    ///
+    /// Still returns an owned `MachineRecord` — call sites read the
+    /// record outside of any borrow against the registry, so the clone
+    /// is the cleanest shape. Use `snapshot()` if you need cross-record
+    /// iteration without per-record allocation.
     pub fn get(&self, node_key_hex: &str) -> Option<MachineRecord> {
         self.inner.read().get(node_key_hex).cloned()
     }
@@ -209,6 +258,127 @@ impl MachineRegistry {
     /// True if no machines are registered.
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    //! #238: documents the new `snapshot()` allocation profile.
+    //!
+    //! The legacy `all()` shape returned `Vec<(String, MachineRecord)>` —
+    //! one Vec, N Strings, N full `MachineRecord` clones (each
+    //! `MachineRecord` itself owns 5 Strings + a `Vec<String>` of
+    //! endpoints, so the per-record cost climbs as `disco_key` /
+    //! `endpoints` populate). The new `snapshot()` returns an `Arc<…>`
+    //! — one strong-count bump, zero record clones.
+    //!
+    //! A criterion-style microbench would add a new dev-dep just for
+    //! one number; the `--ignored` test below exposes a wall-clock
+    //! comparison on demand without changing the dep graph.
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn mk_record(host: u32) -> MachineRecord {
+        MachineRecord {
+            node_key_hex: format!("nodekey-{host:08x}"),
+            machine_key_hex: format!("mkey-{host:08x}"),
+            user: "alice".to_string(),
+            hostname: format!("host-{host}"),
+            ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
+            disco_key: Some(format!("disco-{host:08x}")),
+            endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],
+        }
+    }
+
+    #[test]
+    fn snapshot_returns_arc_pointer_equal_until_write() {
+        let reg = MachineRegistry::new();
+        for i in 0u32..16 {
+            reg.upsert(format!("nk-{i}"), mk_record(i));
+        }
+        let s1 = reg.snapshot();
+        let s2 = reg.snapshot();
+        // Two snapshots taken without any intervening write share the
+        // same backing allocation — pointer equality, not deep clone.
+        assert!(Arc::ptr_eq(&s1, &s2), "snapshots between writes must alias");
+        assert_eq!(s1.len(), 16);
+
+        // After an upsert the snapshots diverge — the writer publishes
+        // a fresh Arc, but the existing s1/s2 keep their old view.
+        reg.upsert("nk-99".to_string(), mk_record(99));
+        let s3 = reg.snapshot();
+        assert!(!Arc::ptr_eq(&s1, &s3));
+        assert_eq!(s1.len(), 16, "old snapshot unchanged");
+        assert_eq!(s3.len(), 17, "new snapshot sees the write");
+    }
+
+    #[test]
+    fn snapshot_cow_isolates_concurrent_readers() {
+        // The whole point of COW: a long-running map handler that
+        // captured a snapshot can iterate forever without blocking
+        // writes, and writes don't tear the reader's view.
+        let reg = MachineRegistry::new();
+        for i in 0u32..8 {
+            reg.upsert(format!("nk-{i}"), mk_record(i));
+        }
+        let snap = reg.snapshot();
+        for i in 100u32..200 {
+            reg.upsert(format!("nk-{i}"), mk_record(i));
+        }
+        assert_eq!(snap.len(), 8, "old snapshot must not see new writes");
+        assert_eq!(reg.snapshot().len(), 108);
+    }
+
+    /// Microbench: 1000 iterations of "snapshot then walk every
+    /// peer-MapNode-shaped field" against a 256-machine registry.
+    /// Compares the new `snapshot()` path against a manual emulation of
+    /// the old `all()` shape so an operator can verify the win locally
+    /// with
+    /// `cargo test -p headscale-api -- --ignored --nocapture
+    /// snapshot_vs_legacy_all_microbench`.
+    #[test]
+    #[ignore = "wall-clock microbench; opt in with --ignored"]
+    fn snapshot_vs_legacy_all_microbench() {
+        use std::time::Instant;
+        let reg = MachineRegistry::new();
+        for i in 0u32..256 {
+            reg.upsert(format!("nk-{i:04}"), mk_record(i));
+        }
+        let iters = 1000u32;
+
+        let t0 = Instant::now();
+        let mut sink = 0u64;
+        for _ in 0..iters {
+            let snap = reg.snapshot();
+            for (k, v) in snap.iter() {
+                sink ^= k.len() as u64;
+                sink ^= v.endpoints.len() as u64;
+                sink ^= v.disco_key.as_ref().map_or(0, String::len) as u64;
+            }
+        }
+        let snap_elapsed = t0.elapsed();
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            // Emulate the legacy `all()` shape: one Vec of cloned pairs.
+            let snap = reg.snapshot();
+            let cloned: Vec<(String, MachineRecord)> =
+                snap.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (k, v) in &cloned {
+                sink ^= k.len() as u64;
+                sink ^= v.endpoints.len() as u64;
+                sink ^= v.disco_key.as_ref().map_or(0, String::len) as u64;
+            }
+        }
+        let legacy_elapsed = t0.elapsed();
+        eprintln!(
+            "registry-snapshot microbench (256 machines × {iters} iters):\n  snapshot()       {snap_elapsed:?}\n  legacy all() emu {legacy_elapsed:?}\n  sink={sink:#x}"
+        );
+        // Per-iter allocation count:
+        //   snapshot()       : 1 Arc strong-count bump (zero heap allocs)
+        //   legacy all() emu : 1 Vec + 256 String clones + 256 record
+        //                      clones (each itself ~5 strings + 1 Vec)
+        // i.e. ~1538 heap allocs per call vs 0 on the new path.
     }
 }
 

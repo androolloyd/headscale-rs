@@ -3,24 +3,21 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Extension, State},
     http::StatusCode,
     response::{
-        sse::{Event, Sse},
         IntoResponse, Response,
+        sse::{Event, Sse},
     },
-    Json,
 };
-use futures::stream::{self, Stream};
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::auth::GatewayIdentity;
 use super::quota::QuotaManager;
-use super::types::{
-    BackendCapacity, BackendStatus, GatewayErrorResponse, GatewayResourceType, MeteringUnit,
-    ServiceBackend, UsageRecord,
-};
+use super::types::{BackendStatus, GatewayErrorResponse, GatewayResourceType, ServiceBackend};
 
 /// Inference handler state.
 #[derive(Clone)]
@@ -30,7 +27,7 @@ pub struct InferenceHandler {
     /// Quota manager
     quota: Arc<QuotaManager>,
     /// HTTP client for backend calls
-    client: reqwest::Client,
+    _client: reqwest::Client,
 }
 
 impl InferenceHandler {
@@ -38,7 +35,7 @@ impl InferenceHandler {
         Self {
             backends: Arc::new(RwLock::new(Vec::new())),
             quota,
-            client: reqwest::Client::new(),
+            _client: reqwest::Client::new(),
         }
     }
 
@@ -213,7 +210,11 @@ pub async fn chat_completions(
     // Check quota
     match handler
         .quota
-        .check(&lease_id, GatewayResourceType::Inference, estimated_total as u64)
+        .check(
+            &lease_id,
+            GatewayResourceType::Inference,
+            estimated_total as u64,
+        )
         .await
     {
         Ok(_) => {}
@@ -260,7 +261,7 @@ pub async fn chat_completions(
 async fn handle_blocking_chat(
     handler: &InferenceHandler,
     lease_id: &str,
-    backend: &ServiceBackend,
+    _backend: &ServiceBackend,
     req: &ChatRequest,
 ) -> Response {
     // In production, this would proxy to the actual backend.
@@ -307,7 +308,10 @@ async fn handle_blocking_chat(
     (
         StatusCode::OK,
         [
-            ("X-Usage-Units", (prompt_tokens + completion_tokens).to_string()),
+            (
+                "X-Usage-Units",
+                (prompt_tokens + completion_tokens).to_string(),
+            ),
             ("X-Usage-Type", "tokens".to_string()),
             (
                 "X-Quota-Remaining",
@@ -325,9 +329,9 @@ async fn handle_blocking_chat(
 }
 
 async fn handle_streaming_chat(
-    handler: &InferenceHandler,
-    lease_id: &str,
-    backend: &ServiceBackend,
+    _handler: &InferenceHandler,
+    _lease_id: &str,
+    _backend: &ServiceBackend,
     req: &ChatRequest,
 ) -> Response {
     let model = req.model.clone();
@@ -368,7 +372,11 @@ async fn handle_streaming_chat(
             choices: vec![ChunkChoice {
                 index: 0,
                 delta,
-                finish_reason: if is_last { Some("stop".to_string()) } else { None },
+                finish_reason: if is_last {
+                    Some("stop".to_string())
+                } else {
+                    None
+                },
             }],
             usage: if is_last {
                 Some(TokenUsage {
@@ -407,7 +415,11 @@ pub async fn embeddings(
     // Check quota
     match handler
         .quota
-        .check(&lease_id, GatewayResourceType::Inference, total_tokens as u64)
+        .check(
+            &lease_id,
+            GatewayResourceType::Inference,
+            total_tokens as u64,
+        )
         .await
     {
         Ok(_) => {}
@@ -430,7 +442,11 @@ pub async fn embeddings(
     // Record usage
     handler
         .quota
-        .consume(&lease_id, GatewayResourceType::Inference, total_tokens as u64)
+        .consume(
+            &lease_id,
+            GatewayResourceType::Inference,
+            total_tokens as u64,
+        )
         .await;
 
     // Mock embeddings (in production, proxy to backend)
@@ -491,6 +507,7 @@ pub async fn list_models_handler(State(handler): State<InferenceHandler>) -> Res
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::BackendCapacity;
     use super::*;
 
     #[tokio::test]

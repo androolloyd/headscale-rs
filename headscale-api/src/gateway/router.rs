@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 
 use super::auth::{AuthLayer, InMemoryLeaseStore, LeaseStore};
 use super::inference::{self, InferenceHandler};
 use super::quota::QuotaManager;
-use super::types::{GatewayErrorResponse, GatewayResourceType, ServiceBackend};
+use super::types::{GatewayErrorResponse, ServiceBackend};
 
 /// Resource Gateway state.
 #[derive(Clone)]
@@ -94,13 +94,18 @@ impl ResourceGateway {
         // Compute routes (stub for now)
         let compute_routes = Router::new()
             .route("/jobs", post(submit_job))
-            .route("/jobs/{id}", get(get_job).delete(cancel_job))
+            .route("/jobs/:id", get(get_job).delete(cancel_job))
             .with_state(gateway_state.clone())
             .layer(auth_layer.clone());
 
         // Storage routes (stub for now)
+        // NOTE: axum 0.7 uses `/*path` for catch-all (0.8 brace syntax `/{*path}`
+        // is not yet supported by this workspace's axum pin).
         let storage_routes = Router::new()
-            .route("/{*path}", get(storage_get).put(storage_put).delete(storage_delete))
+            .route(
+                "/*path",
+                get(storage_get).put(storage_put).delete(storage_delete),
+            )
             .with_state(gateway_state.clone())
             .layer(auth_layer.clone());
 
@@ -168,10 +173,7 @@ pub struct JobResponse {
     pub created_at: u64,
 }
 
-async fn submit_job(
-    State(_state): State<GatewayState>,
-    Json(req): Json<JobRequest>,
-) -> Response {
+async fn submit_job(State(_state): State<GatewayState>, Json(_req): Json<JobRequest>) -> Response {
     // Stub: In production, this would submit to compute backend
     let response = JobResponse {
         job_id: format!("job_{}", super::types::now_secs()),
@@ -203,7 +205,7 @@ async fn get_job(
 
 async fn cancel_job(
     State(_state): State<GatewayState>,
-    axum::extract::Path(job_id): axum::extract::Path<String>,
+    axum::extract::Path(_job_id): axum::extract::Path<String>,
 ) -> Response {
     // Stub
     (StatusCode::NO_CONTENT, ()).into_response()
@@ -213,7 +215,7 @@ async fn cancel_job(
 
 async fn storage_get(
     State(_state): State<GatewayState>,
-    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Path(_path): axum::extract::Path<String>,
 ) -> Response {
     // Stub: In production, proxy to MinIO/S3
     (
@@ -225,16 +227,20 @@ async fn storage_get(
 
 async fn storage_put(
     State(_state): State<GatewayState>,
-    axum::extract::Path(path): axum::extract::Path<String>,
-    body: axum::body::Bytes,
+    axum::extract::Path(_path): axum::extract::Path<String>,
+    _body: axum::body::Bytes,
 ) -> Response {
     // Stub
-    (StatusCode::OK, Json(serde_json::json!({ "etag": "mock-etag" }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "etag": "mock-etag" })),
+    )
+        .into_response()
 }
 
 async fn storage_delete(
     State(_state): State<GatewayState>,
-    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Path(_path): axum::extract::Path<String>,
 ) -> Response {
     // Stub
     (StatusCode::NO_CONTENT, ()).into_response()
@@ -277,8 +283,8 @@ async fn gateway_status(State(state): State<GatewayState>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{BackendCapacity, BackendStatus, GatewayResourceType};
     use super::*;
-    use super::super::types::{BackendCapacity, BackendStatus, LeaseTokenPayload};
 
     #[tokio::test]
     async fn test_gateway_creation() {

@@ -8,15 +8,21 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::{
+    Json,
     body::Body,
     extract::Request,
-    http::{header, HeaderMap, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    Json,
 };
+use base64::prelude::*;
+use headscale_identity::{Did, KeyPair};
 use tower::{Layer, Service};
 
-// Note: headscale_identity::Did is available for DID operations
+const DID_HEADER: &str = "X-DID";
+const DID_SIGNATURE_HEADER: &str = "X-DID-Signature";
+const DID_TIMESTAMP_HEADER: &str = "X-DID-Timestamp";
+const DID_NONCE_HEADER: &str = "X-DID-Nonce";
+const DID_SIGNATURE_WINDOW_MILLIS: u64 = 5 * 60 * 1000;
 
 use super::types::{GatewayErrorResponse, GatewayResourceType, LeaseTokenPayload};
 
@@ -40,6 +46,9 @@ pub trait LeaseStore: Send + Sync {
 
     /// Check if a renter DID has credit balance for one-off requests.
     fn has_credit(&self, renter_did: &str) -> bool;
+
+    /// Atomically record a DID-auth nonce. Returns false on replay.
+    fn check_and_store_nonce(&self, renter_did: &str, nonce: &str, timestamp_millis: u64) -> bool;
 }
 
 /// In-memory lease store for testing.
@@ -47,6 +56,9 @@ pub trait LeaseStore: Send + Sync {
 pub struct InMemoryLeaseStore {
     tokens: std::sync::RwLock<std::collections::HashMap<String, LeaseTokenPayload>>,
     credits: std::sync::RwLock<std::collections::HashSet<String>>,
+    nonces: std::sync::RwLock<
+        std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
+    >,
 }
 
 impl InMemoryLeaseStore {
@@ -82,6 +94,24 @@ impl LeaseStore for InMemoryLeaseStore {
     fn has_credit(&self, renter_did: &str) -> bool {
         self.credits.read().unwrap().contains(renter_did)
     }
+
+    fn check_and_store_nonce(&self, renter_did: &str, nonce: &str, timestamp_millis: u64) -> bool {
+        if nonce.is_empty() || nonce.len() > 128 {
+            return false;
+        }
+
+        let mut nonces = self.nonces.write().unwrap();
+        let did_nonces = nonces.entry(renter_did.to_string()).or_default();
+        let oldest_allowed = timestamp_millis.saturating_sub(DID_SIGNATURE_WINDOW_MILLIS);
+        did_nonces.retain(|_, seen_at| *seen_at >= oldest_allowed);
+
+        if did_nonces.contains_key(nonce) {
+            return false;
+        }
+
+        did_nonces.insert(nonce.to_string(), timestamp_millis);
+        true
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +128,8 @@ pub enum AuthError {
     InvalidSignature,
     #[error("Timestamp too old")]
     TimestampTooOld,
+    #[error("Signature nonce was already used")]
+    NonceReplay,
     #[error("No credit balance")]
     NoCredit,
     #[error("Resource type mismatch")]
@@ -140,7 +172,9 @@ pub struct AuthMiddleware<S> {
 
 impl<S> AuthMiddleware<S> {
     /// Extract identity from request headers.
-    fn authenticate(&self, headers: &HeaderMap) -> Result<GatewayIdentity, AuthError> {
+    fn authenticate(&self, req: &Request<Body>) -> Result<GatewayIdentity, AuthError> {
+        let headers = req.headers();
+
         // Try Bearer token first
         if let Some(auth) = headers.get(header::AUTHORIZATION) {
             let auth_str = auth.to_str().map_err(|_| AuthError::InvalidFormat)?;
@@ -157,11 +191,23 @@ impl<S> AuthMiddleware<S> {
         }
 
         // Try DID signature
-        if let (Some(sig), Some(timestamp)) = (
-            headers.get("X-DID-Signature"),
-            headers.get("X-DID-Timestamp"),
+        if let (Some(did), Some(sig), Some(timestamp), Some(nonce)) = (
+            headers.get(DID_HEADER),
+            headers.get(DID_SIGNATURE_HEADER),
+            headers.get(DID_TIMESTAMP_HEADER),
+            headers.get(DID_NONCE_HEADER),
         ) {
-            return self.validate_did_signature(headers, sig, timestamp);
+            return self.validate_did_signature(
+                req.method().as_str(),
+                req.uri()
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/"),
+                did,
+                sig,
+                timestamp,
+                nonce,
+            );
         }
 
         Err(AuthError::MissingAuth)
@@ -169,9 +215,12 @@ impl<S> AuthMiddleware<S> {
 
     fn validate_did_signature(
         &self,
-        headers: &HeaderMap,
+        method: &str,
+        path_and_query: &str,
+        did: &axum::http::HeaderValue,
         sig: &axum::http::HeaderValue,
         timestamp: &axum::http::HeaderValue,
+        nonce: &axum::http::HeaderValue,
     ) -> Result<GatewayIdentity, AuthError> {
         // Parse timestamp
         let timestamp_str = timestamp.to_str().map_err(|_| AuthError::InvalidFormat)?;
@@ -181,22 +230,50 @@ impl<S> AuthMiddleware<S> {
 
         // Check timestamp is within 5 minutes
         let now = super::types::now_secs() * 1000;
-        let five_minutes = 5 * 60 * 1000;
-        if now.saturating_sub(timestamp_millis) > five_minutes {
+        if timestamp_millis > now.saturating_add(DID_SIGNATURE_WINDOW_MILLIS)
+            || now.saturating_sub(timestamp_millis) > DID_SIGNATURE_WINDOW_MILLIS
+        {
             return Err(AuthError::TimestampTooOld);
         }
 
-        // Parse DID from signature (format: did:key:...|base64sig)
-        let sig_str = sig.to_str().map_err(|_| AuthError::InvalidFormat)?;
-        let parts: Vec<&str> = sig_str.split('|').collect();
-        if parts.len() != 2 {
+        let renter_did = did
+            .to_str()
+            .map_err(|_| AuthError::InvalidFormat)?
+            .to_string();
+        let did = Did::parse(&renter_did).map_err(|_| AuthError::InvalidFormat)?;
+        let public_key = did.public_key().map_err(|_| AuthError::InvalidFormat)?;
+        let nonce = nonce.to_str().map_err(|_| AuthError::InvalidFormat)?;
+        if nonce.is_empty() || nonce.len() > 128 || nonce.bytes().any(|b| !b.is_ascii_graphic()) {
             return Err(AuthError::InvalidFormat);
         }
 
-        let renter_did = parts[0].to_string();
+        let sig_str = sig.to_str().map_err(|_| AuthError::InvalidFormat)?;
+        let sig_bytes = BASE64_STANDARD
+            .decode(sig_str)
+            .map_err(|_| AuthError::InvalidSignature)?;
+        let signature: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AuthError::InvalidSignature)?;
 
-        // In production, we'd verify the signature here using the DID's public key.
-        // For now, just check if the DID has credit.
+        let message = canonical_did_auth_message(
+            method,
+            path_and_query,
+            &renter_did,
+            timestamp_millis,
+            nonce,
+        );
+        if !KeyPair::verify(&public_key, &message, &signature) {
+            return Err(AuthError::InvalidSignature);
+        }
+
+        if !self
+            .store
+            .check_and_store_nonce(&renter_did, nonce, timestamp_millis)
+        {
+            return Err(AuthError::NonceReplay);
+        }
+
         if !self.store.has_credit(&renter_did) {
             return Err(AuthError::NoCredit);
         }
@@ -208,6 +285,20 @@ impl<S> AuthMiddleware<S> {
             expires_at: None,
         })
     }
+}
+
+/// Canonical bytes signed for one-off DID-authenticated gateway requests.
+pub fn canonical_did_auth_message(
+    method: &str,
+    path_and_query: &str,
+    did: &str,
+    timestamp_millis: u64,
+    nonce: &str,
+) -> Vec<u8> {
+    format!(
+        "headscale-gateway-did-auth-v1\n{method}\n{path_and_query}\n{did}\n{timestamp_millis}\n{nonce}\n"
+    )
+    .into_bytes()
 }
 
 impl<S> Service<Request<Body>> for AuthMiddleware<S>
@@ -231,12 +322,9 @@ where
 
         Box::pin(async move {
             // Authenticate
-            let auth_middleware = AuthMiddleware {
-                inner: (),
-                store,
-            };
+            let auth_middleware = AuthMiddleware { inner: (), store };
 
-            match auth_middleware.authenticate(req.headers()) {
+            match auth_middleware.authenticate(&req) {
                 Ok(identity) => {
                     // Add identity to request extensions
                     req.extensions_mut().insert(identity);
@@ -244,41 +332,37 @@ where
                 }
                 Err(e) => {
                     let response = match e {
-                        AuthError::MissingAuth | AuthError::InvalidFormat => {
-                            (
-                                StatusCode::UNAUTHORIZED,
-                                Json(GatewayErrorResponse::unauthorized("Missing or invalid authorization")),
-                            )
-                                .into_response()
-                        }
-                        AuthError::InvalidToken | AuthError::InvalidSignature => {
-                            (
-                                StatusCode::UNAUTHORIZED,
-                                Json(GatewayErrorResponse::unauthorized("Invalid credentials")),
-                            )
-                                .into_response()
-                        }
-                        AuthError::TokenExpired | AuthError::TimestampTooOld => {
-                            (
-                                StatusCode::UNAUTHORIZED,
-                                Json(GatewayErrorResponse::unauthorized("Credentials expired")),
-                            )
-                                .into_response()
-                        }
-                        AuthError::NoCredit => {
-                            (
-                                StatusCode::PAYMENT_REQUIRED,
-                                Json(GatewayErrorResponse::quota_exceeded(0, 0)),
-                            )
-                                .into_response()
-                        }
-                        AuthError::ResourceMismatch => {
-                            (
-                                StatusCode::FORBIDDEN,
-                                Json(GatewayErrorResponse::unauthorized("Resource not allowed for this lease")),
-                            )
-                                .into_response()
-                        }
+                        AuthError::MissingAuth | AuthError::InvalidFormat => (
+                            StatusCode::UNAUTHORIZED,
+                            Json(GatewayErrorResponse::unauthorized(
+                                "Missing or invalid authorization",
+                            )),
+                        )
+                            .into_response(),
+                        AuthError::InvalidToken | AuthError::InvalidSignature => (
+                            StatusCode::UNAUTHORIZED,
+                            Json(GatewayErrorResponse::unauthorized("Invalid credentials")),
+                        )
+                            .into_response(),
+                        AuthError::TokenExpired
+                        | AuthError::TimestampTooOld
+                        | AuthError::NonceReplay => (
+                            StatusCode::UNAUTHORIZED,
+                            Json(GatewayErrorResponse::unauthorized("Credentials expired")),
+                        )
+                            .into_response(),
+                        AuthError::NoCredit => (
+                            StatusCode::PAYMENT_REQUIRED,
+                            Json(GatewayErrorResponse::quota_exceeded(0, 0)),
+                        )
+                            .into_response(),
+                        AuthError::ResourceMismatch => (
+                            StatusCode::FORBIDDEN,
+                            Json(GatewayErrorResponse::unauthorized(
+                                "Resource not allowed for this lease",
+                            )),
+                        )
+                            .into_response(),
                     };
                     Ok(response)
                 }
@@ -290,6 +374,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Method;
+
+    fn signed_request(keypair: &KeyPair, method: Method, uri: &str, nonce: &str) -> Request<Body> {
+        let did = keypair.did().to_string();
+        let timestamp = super::super::types::now_secs() * 1000;
+        let message = canonical_did_auth_message(method.as_str(), uri, &did, timestamp, nonce);
+        let signature = BASE64_STANDARD.encode(keypair.sign(&message));
+
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(DID_HEADER, did)
+            .header(DID_TIMESTAMP_HEADER, timestamp.to_string())
+            .header(DID_NONCE_HEADER, nonce)
+            .header(DID_SIGNATURE_HEADER, signature)
+            .body(Body::empty())
+            .unwrap()
+    }
 
     #[test]
     fn test_in_memory_store() {
@@ -339,5 +441,80 @@ mod tests {
 
         store.grant_credit("did:key:test");
         assert!(store.has_credit("did:key:test"));
+    }
+
+    #[test]
+    fn test_did_signature_authenticates_request() {
+        let keypair = KeyPair::generate();
+        let did = keypair.did().to_string();
+        let store = Arc::new(InMemoryLeaseStore::new());
+        store.grant_credit(&did);
+
+        let middleware = AuthMiddleware {
+            inner: (),
+            store: store.clone(),
+        };
+        let req = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-1");
+
+        let identity = middleware.authenticate(&req).unwrap();
+        assert_eq!(identity.renter_did, did);
+        assert_eq!(identity.lease_id, None);
+    }
+
+    #[test]
+    fn test_did_signature_rejects_replay() {
+        let keypair = KeyPair::generate();
+        let did = keypair.did().to_string();
+        let store = Arc::new(InMemoryLeaseStore::new());
+        store.grant_credit(&did);
+
+        let middleware = AuthMiddleware {
+            inner: (),
+            store: store.clone(),
+        };
+        let req = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-2");
+        let replay = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-2");
+
+        assert!(middleware.authenticate(&req).is_ok());
+        assert!(matches!(
+            middleware.authenticate(&replay),
+            Err(AuthError::NonceReplay)
+        ));
+    }
+
+    #[test]
+    fn test_did_signature_binds_method_and_path() {
+        let keypair = KeyPair::generate();
+        let did = keypair.did().to_string();
+        let store = Arc::new(InMemoryLeaseStore::new());
+        store.grant_credit(&did);
+
+        let middleware = AuthMiddleware {
+            inner: (),
+            store: store.clone(),
+        };
+        let signed = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-3");
+        let mut tampered = signed;
+        *tampered.uri_mut() = "/v1/inference/models".parse().unwrap();
+
+        assert!(matches!(
+            middleware.authenticate(&tampered),
+            Err(AuthError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_did_signature_requires_credit_after_signature_verification() {
+        let keypair = KeyPair::generate();
+        let middleware = AuthMiddleware {
+            inner: (),
+            store: Arc::new(InMemoryLeaseStore::new()),
+        };
+        let req = signed_request(&keypair, Method::POST, "/v1/inference/chat", "nonce-4");
+
+        assert!(matches!(
+            middleware.authenticate(&req),
+            Err(AuthError::NoCredit)
+        ));
     }
 }

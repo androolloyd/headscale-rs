@@ -15,6 +15,8 @@
 pub mod generated;
 
 #[cfg(feature = "full")]
+pub mod control_auth;
+#[cfg(feature = "full")]
 pub mod gateway;
 #[cfg(feature = "full")]
 pub mod grpc;

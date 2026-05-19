@@ -1,8 +1,8 @@
 //! Quota management for gateway resources.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -184,15 +184,11 @@ impl QuotaManager {
         }
 
         // Create from defaults
-        let default = self
-            .defaults
-            .get(&resource_type)
-            .cloned()
-            .unwrap_or(Quota {
-                resource_type,
-                limit: 0, // No quota = blocked
-                reset_period: None,
-            });
+        let default = self.defaults.get(&resource_type).cloned().unwrap_or(Quota {
+            resource_type,
+            limit: 0, // No quota = blocked
+            reset_period: None,
+        });
 
         let state = Arc::new(QuotaState::new(default));
         lease_quotas.insert(resource_type, state.clone());

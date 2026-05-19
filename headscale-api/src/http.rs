@@ -3,23 +3,28 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
-    routing::{get, post},
     Json, Router,
+    extract::{Path, State},
+    http::HeaderMap,
+    routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
+use crate::control_auth::{
+    NonceStore, SignedRegisterRequest, SignedTransferRequest, verify_node_heartbeat,
+    verify_node_registration, verify_transfer,
+};
 use headscale_core::{MeshCoordinator, Node, mesh_metrics};
-use headscale_core::node::RegisterRequest;
 use headscale_payments::Ledger;
-use headscale_resources::{global_metrics, ResourceRegistry};
+use headscale_resources::{ResourceRegistry, global_metrics};
 
 /// Shared state for handlers.
 #[derive(Clone)]
 pub struct AppState {
     mesh: Arc<MeshCoordinator>,
     ledger: Arc<Ledger>,
-    resources: Arc<ResourceRegistry>,
+    _resources: Arc<ResourceRegistry>,
+    node_nonces: Arc<NonceStore>,
 }
 
 /// Build the HTTP router.
@@ -31,12 +36,14 @@ pub fn build_router(
     let state = AppState {
         mesh,
         ledger,
-        resources,
+        _resources: resources,
+        node_nonces: Arc::new(NonceStore::new()),
     };
 
     Router::new()
         // Node management
         .route("/api/v1/nodes", get(list_nodes).post(register_node))
+        .route("/api/v1/register", post(register_node))
         .route("/api/v1/nodes/:id", get(get_node))
         .route("/api/v1/nodes/:id/heartbeat", post(heartbeat))
         // Payments
@@ -59,11 +66,14 @@ async fn list_nodes(State(state): State<AppState>) -> Json<Vec<Node>> {
 
 async fn register_node(
     State(state): State<AppState>,
-    Json(req): Json<RegisterRequest>,
+    Json(req): Json<SignedRegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
+    verify_node_registration(&req, &state.node_nonces)
+        .map_err(|e| ApiError::Unauthorized(e.to_string()))?;
+
     let response = state
         .mesh
-        .register(req)
+        .register(req.request)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -88,7 +98,12 @@ async fn get_node(
 async fn heartbeat(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
+    let path = format!("/api/v1/nodes/{id}/heartbeat");
+    verify_node_heartbeat(&headers, "POST", &path, &id, &state.node_nonces)
+        .map_err(|e| ApiError::Unauthorized(e.to_string()))?;
+
     state
         .mesh
         .heartbeat(&id)
@@ -112,8 +127,10 @@ async fn get_balance(
 
 async fn transfer(
     State(state): State<AppState>,
-    Json(req): Json<TransferRequest>,
+    Json(req): Json<SignedTransferRequest>,
 ) -> Result<Json<TransferResponse>, ApiError> {
+    verify_transfer(&req, &state.node_nonces).map_err(|e| ApiError::Unauthorized(e.to_string()))?;
+
     let tx = state
         .ledger
         .transfer(&req.from, &req.to, req.amount, &req.description)
@@ -205,14 +222,6 @@ pub struct BalanceResponse {
     pub available: i64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TransferRequest {
-    pub from: String,
-    pub to: String,
-    pub amount: u64,
-    pub description: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct TransferResponse {
     pub tx_id: String,
@@ -253,6 +262,7 @@ pub struct StatusCapabilities {
 
 #[derive(Debug)]
 pub enum ApiError {
+    Unauthorized(String),
     NotFound(String),
     Payment(String),
     Internal(String),
@@ -261,6 +271,7 @@ pub enum ApiError {
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
+            ApiError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
             ApiError::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
             ApiError::Payment(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
             ApiError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),

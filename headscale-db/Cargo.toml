@@ -23,3 +23,6 @@ headscale-core.workspace = true
 headscale-identity.workspace = true
 headscale-resources.workspace = true
 headscale-payments.workspace = true
+
+[lints]
+workspace = true

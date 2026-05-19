@@ -13,6 +13,113 @@ exclude = [
     "headscale-core/fuzz",
 ]
 
+[workspace.lints.clippy]
+# Mirrors octra/Cargo.toml + octra-foundry/Cargo.toml at the
+# same level of strictness — `all + pedantic + nursery` at warn,
+# enforced via `-D warnings` on CI. PR #241 added this block; the
+# headscale-rs workspace previously had no lints config and shipped
+# ~6k LOC of new tailscale_wire/* code with default-clippy as the
+# only gate.
+all              = { level = "warn", priority = -1 }
+pedantic         = { level = "warn", priority = -1 }
+nursery          = { level = "warn", priority = -1 }
+# Pragmatic relaxations — copied verbatim from the octra workspace
+# so the three repos agree on what's a real signal vs noise.
+module_name_repetitions = "allow"
+must_use_candidate      = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+multiple_crate_versions = "allow"
+similar_names           = "allow"
+too_many_lines          = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss          = "allow"
+cast_lossless           = "allow"
+cast_possible_wrap      = "allow"
+items_after_statements  = "allow"
+significant_drop_tightening = "allow"
+significant_drop_in_scrutinee = "allow"
+unused_async            = "allow"
+future_not_send         = "allow"
+return_self_not_must_use = "allow"
+missing_const_for_fn    = "allow"
+struct_excessive_bools  = "allow"
+struct_field_names      = "allow"
+redundant_pub_crate     = "allow"
+option_if_let_else      = "allow"
+or_fun_call             = "allow"
+unwrap_used             = "allow"
+cognitive_complexity    = "allow"
+too_many_arguments      = "allow"
+doc_markdown            = "allow"
+doc_overindented_list_items = "allow"
+too_long_first_doc_paragraph = "allow"
+# Headscale-rs-specific relaxations layered on top of the octra
+# baseline. Each one fires >5× across the workspace today; turning
+# them on without a 6k-LOC cleanup PR would drown the signal. Revisit
+# in PR #241-followup (target: drop each one as the cleanup lands).
+# Counts noted on initial audit (PR #241, 2026-05-19).
+uninlined_format_args   = "allow"  # 46 sites; cosmetic, `format!("…{x}")` vs `("…{}", x)`
+needless_raw_string_hashes = "allow"  # 68 sites; the `r#"…"#` forms are intentional in test fixtures + DB query strings
+redundant_closure_for_method_calls = "allow"  # 51 sites; many are `.map(|x| x.into())` style — readability call
+derive_partial_eq_without_eq = "allow"  # 34 sites; adding Eq is mostly mechanical but spreads across DB models
+use_self                = "allow"  # 23 sites; mixing Self vs Type::variant in matches is a style preference
+collapsible_if          = "allow"  # 19 sites; some predicate combos read more clearly as nested
+map_unwrap_or           = "allow"  # 16 sites; `.map(...).unwrap_or(...)` is idiomatic for short closures
+match_same_arms         = "allow"  # 9 sites; mostly explicit fall-throughs in protocol state machines
+unreadable_literal      = "allow"  # 8 sites; protocol-constant hex literals (e.g. 0xFFFFFFFF flag masks)
+needless_continue       = "allow"  # 8 sites; explicit `continue` aids readability inside long loop bodies
+default_trait_access    = "allow"  # 8 sites; `Vec::default()` vs `Vec::new()` is fine either way
+non_std_lazy_statics    = "allow"  # 4 sites; `once_cell::sync::Lazy` predates `LazyLock` stabilisation
+derivable_impls         = "allow"  # 4 sites; some manual Default impls document field intent
+cast_precision_loss     = "allow"  # 4 sites; u64 -> f64 for stats / metrics math, intentional
+redundant_clone         = "allow"  # 4 sites; ownership-clarifying clones in async paths
+manual_let_else         = "allow"  # 3 sites; readability — explicit match arms are sometimes clearer
+unused_self             = "allow"  # 3 sites; trait-method shape forces &self
+large_futures           = "allow"  # 3 sites; control-plane state machines, intentional
+unwrap_or_default       = "allow"  # 2 sites; explicit `.unwrap_or(<value>)` documents the default intent
+unnecessary_literal_bound = "allow"  # 2 sites
+trivially_copy_pass_by_ref = "allow"  # 2 sites; ABI parity with surrounding by-ref methods
+result_large_err        = "allow"  # 2 sites; the large variants carry diagnostic context
+never_loop              = "allow"  # 2 sites; intentional break-as-control-flow in protocol parsers
+# Long-tail of single-site lints surfaced by the audit. Each is one
+# call site; the spec for PR #241 forbids in-PR fixes, so allow and
+# add a follow-up note. Drop these as the cleanup PR lands.
+useless_vec             = "allow"  # 1 site; endpoint.rs:361 `vec![...]` -> array form
+manual_div_ceil         = "allow"  # 1 site; metering.rs:222 — pre-existing arithmetic shape
+large_stack_arrays      = "allow"  # 1 site; derp.rs:298 — packet-buffer constant, intentional
+ip_constant             = "allow"  # 1 site; packet.rs:372 — protocol-mandated literal
+decimal_bitwise_operands = "allow"  # 1 site; keys_wg.rs:60 — wg-protocol mask, decimal is fine
+clone_on_copy           = "allow"  # 2 sites; routing.rs IpNet — readability call
+if_same_then_else       = "allow"  # 1 site; headscale-payments has intentional same-branch placeholders for future divergence
+branches_sharing_code   = "allow"  # 1 site; ledger.rs:68 — auto-suggestion isn't a clean refactor for this branch shape
+ignored_unit_patterns   = "allow"  # 2 sites; `_ = ...` shape inside tokio::select! is idiomatic
+wildcard_imports        = "allow"  # 1 site; intentional in admin/mod.rs to re-export
+needless_pass_by_value  = "allow"  # 1 site; trait-impl ABI parity
+format_push_string      = "allow"  # 1 site; encoding/url helpers
+
+[workspace.lints.rust]
+unsafe_code             = "deny"
+# unreachable_pub: headscale-rs has 12 sites at audit time. Octra
+# keeps this at warn (-> deny via -D warnings on CI); allow it for
+# now and clean up in PR #241-followup.
+unreachable_pub         = "allow"
+# Dead-code / unused-import lints surface ~7 sites in
+# headscale-core (derp.rs / endpoint.rs / swarm_transport.rs /
+# routing.rs) plus 2 in headscale-resources. All are pre-existing
+# scaffolding for features still under construction by sibling
+# subagents — fixing them here would conflict. Allowed for PR #241;
+# track the cleanup separately.
+dead_code               = "allow"
+unused_imports          = "allow"
+unused_variables        = "allow"
+unused_must_use         = "deny"
+# trivial_casts: 2 sites in headscale-api admin/* are `Arc<Impl>` ->
+# `Arc<dyn Trait>` upcasts that read clearer with the explicit cast.
+# Allowed for headscale-rs; octra keeps it at warn.
+trivial_casts           = "allow"
+trivial_numeric_casts   = "warn"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

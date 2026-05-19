@@ -1,0 +1,71 @@
+# headscale-rs CI — PR #241.
+#
+# Adds the lint + test gate the workspace previously had only as
+# honor-system. Modeled on the octra repo's ci.yml (the canonical CI
+# template across the three sibling repos: octra, octra-foundry,
+# headscale-rs). Three jobs: fmt, clippy (default + wire-only), test
+# (workspace + wire-only).
+#
+# The wire-only pass exercises `headscale-api --no-default-features`,
+# which is the surface `octravpn-mesh` consumes (tailscale_wire/* with
+# no boringtun-flavoured x25519). A regression here breaks the cross-
+# repo path-dependency in octra; the default-features pass alone would
+# not catch it.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Workspace-wide gate. The `[workspace.lints]` block in the
+      # root Cargo.toml is `warn`-level; `-D warnings` promotes it to
+      # deny, matching the octra workspace CI lane.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Wire-only build path: `headscale-api --no-default-features`
+      # drops the boringtun-flavoured x25519-dalek pull. This is the
+      # surface octravpn-mesh consumes; a regression here breaks the
+      # cross-repo path-dependency.
+      - run: cargo clippy -p headscale-api --no-default-features --tests -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      # Wire-only test run — same rationale as the wire-only clippy
+      # pass above. Keeps the `default-features = false` path live.
+      - run: cargo test -p headscale-api --no-default-features

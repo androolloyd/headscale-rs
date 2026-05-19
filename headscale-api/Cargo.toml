@@ -173,3 +173,6 @@ serde_json = { workspace = true }
 # Admin GUI integration test crate uses `hex` to build a fixture
 # node-key hex string.
 hex = "0.4"
+
+[lints]
+workspace = true

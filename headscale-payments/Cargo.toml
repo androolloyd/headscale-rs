@@ -16,3 +16,6 @@ sqlx.workspace = true
 
 headscale-identity = { workspace = true }
 headscale-resources = { workspace = true }
+
+[lints]
+workspace = true

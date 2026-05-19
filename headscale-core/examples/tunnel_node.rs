@@ -16,8 +16,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use base64::prelude::*;
-use headscale_core::keys_wg::WgKeyPair;
 use boringtun::noise::{Tunn, TunnResult};
+use headscale_core::keys_wg::WgKeyPair;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -40,7 +40,8 @@ fn main() {
 }
 
 fn print_usage() {
-    println!(r#"
+    println!(
+        r#"
 WireGuard Tunnel Test Node
 
 COMMANDS:
@@ -69,19 +70,30 @@ EXAMPLES:
     cargo run --example tunnel_node -- initiator \
         --peer-pubkey <RESPONDER_PUB_KEY> \
         --peer-endpoint 192.168.1.100:51820
-"#);
+"#
+    );
 }
 
 fn keygen() {
     let keypair = WgKeyPair::generate();
     println!("Generated WireGuard keypair:");
-    println!("  Private key: {}", BASE64_STANDARD.encode(keypair.secret_bytes()));
+    println!(
+        "  Private key: {}",
+        BASE64_STANDARD.encode(keypair.secret_bytes())
+    );
     println!("  Public key:  {}", keypair.public_key_base64());
     println!();
     println!("Share the public key with your peer.");
 }
 
-fn parse_args(args: &[String]) -> (SocketAddr, Option<String>, Option<SocketAddr>, Option<String>) {
+fn parse_args(
+    args: &[String],
+) -> (
+    SocketAddr,
+    Option<String>,
+    Option<SocketAddr>,
+    Option<String>,
+) {
     let mut listen_addr: SocketAddr = "0.0.0.0:51820".parse().unwrap();
     let mut peer_pubkey: Option<String> = None;
     let mut peer_endpoint: Option<SocketAddr> = None;
@@ -125,12 +137,14 @@ fn parse_args(args: &[String]) -> (SocketAddr, Option<String>, Option<SocketAddr
 fn get_or_generate_keypair(secret_key: Option<String>) -> WgKeyPair {
     match secret_key {
         Some(key) => {
-            let bytes = BASE64_STANDARD.decode(&key).expect("Invalid base64 secret key");
+            let bytes = BASE64_STANDARD
+                .decode(&key)
+                .expect("Invalid base64 secret key");
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
             WgKeyPair::from_secret(arr)
         }
-        None => WgKeyPair::generate()
+        None => WgKeyPair::generate(),
     }
 }
 
@@ -143,7 +157,10 @@ fn run_responder(args: &[String]) {
     // Generate or use provided keypair
     let keypair = get_or_generate_keypair(secret_key);
     println!("Our public key: {}", keypair.public_key_base64());
-    println!("Our private key: {}", BASE64_STANDARD.encode(keypair.secret_bytes()));
+    println!(
+        "Our private key: {}",
+        BASE64_STANDARD.encode(keypair.secret_bytes())
+    );
     println!();
     println!("Share the PUBLIC key with the initiator.");
     println!("Waiting for incoming connections...");
@@ -160,22 +177,28 @@ fn run_responder(args: &[String]) {
     // For simplicity, we'll prompt for peer pubkey
     println!("Enter initiator's public key (base64):");
     let mut peer_pubkey_input = String::new();
-    std::io::stdin().read_line(&mut peer_pubkey_input).expect("Failed to read input");
+    std::io::stdin()
+        .read_line(&mut peer_pubkey_input)
+        .expect("Failed to read input");
     let peer_pubkey_input = peer_pubkey_input.trim();
 
-    let peer_key_bytes = BASE64_STANDARD.decode(peer_pubkey_input).expect("Invalid peer public key");
-    let peer_key_array: [u8; 32] = peer_key_bytes.try_into().expect("Public key must be 32 bytes");
+    let peer_key_bytes = BASE64_STANDARD
+        .decode(peer_pubkey_input)
+        .expect("Invalid peer public key");
+    let peer_key_array: [u8; 32] = peer_key_bytes
+        .try_into()
+        .expect("Public key must be 32 bytes");
     let peer_key = x25519_dalek::PublicKey::from(peer_key_array);
 
-    // Create tunnel
+    // Create tunnel (boringtun 0.7.x `Tunn::new` returns `Self`, not `Result`)
     let mut tunn = Tunn::new(
         keypair.secret_key_x25519(),
         peer_key,
-        None,      // preshared key
-        Some(25),  // persistent keepalive
-        0,         // index
-        None,      // rate limiter
-    ).expect("Failed to create tunnel");
+        None,     // preshared key
+        Some(25), // persistent keepalive
+        0,        // index
+        None,     // rate limiter
+    );
 
     println!("Tunnel created, waiting for handshake...");
 
@@ -198,17 +221,20 @@ fn run_responder(args: &[String]) {
                         println!("[SEND] {} bytes to {}", data.len(), src);
                     }
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                        println!("[DATA] Received {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
+                        println!(
+                            "[DATA] Received {} bytes: {:?}",
+                            data.len(),
+                            String::from_utf8_lossy(data)
+                        );
 
                         // Echo it back
                         let echo_msg = format!("ECHO: {}", String::from_utf8_lossy(data));
                         let mut echo_buf = [0u8; 2048];
-                        match tunn.encapsulate(echo_msg.as_bytes(), &mut echo_buf) {
-                            TunnResult::WriteToNetwork(response) => {
-                                socket.send_to(response, src).ok();
-                                println!("[ECHO] Sent {} bytes back", response.len());
-                            }
-                            _ => {}
+                        if let TunnResult::WriteToNetwork(response) =
+                            tunn.encapsulate(echo_msg.as_bytes(), &mut echo_buf)
+                        {
+                            socket.send_to(response, src).ok();
+                            println!("[ECHO] Sent {} bytes back", response.len());
                         }
                     }
                     TunnResult::Err(e) => {
@@ -218,14 +244,11 @@ fn run_responder(args: &[String]) {
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Timeout - run timer tick
-                match tunn.update_timers(&mut dst_buf) {
-                    TunnResult::WriteToNetwork(data) => {
-                        if let Some(addr) = peer_addr {
-                            socket.send_to(data, addr).ok();
-                            println!("[TIMER] Sent {} bytes", data.len());
-                        }
-                    }
-                    _ => {}
+                if let TunnResult::WriteToNetwork(data) = tunn.update_timers(&mut dst_buf)
+                    && let Some(addr) = peer_addr
+                {
+                    socket.send_to(data, addr).ok();
+                    println!("[TIMER] Sent {} bytes", data.len());
                 }
             }
             Err(e) => {
@@ -263,19 +286,23 @@ fn run_initiator(args: &[String]) {
     println!();
 
     // Parse peer public key
-    let peer_key_bytes = BASE64_STANDARD.decode(&peer_pubkey).expect("Invalid peer public key");
-    let peer_key_array: [u8; 32] = peer_key_bytes.try_into().expect("Public key must be 32 bytes");
+    let peer_key_bytes = BASE64_STANDARD
+        .decode(&peer_pubkey)
+        .expect("Invalid peer public key");
+    let peer_key_array: [u8; 32] = peer_key_bytes
+        .try_into()
+        .expect("Public key must be 32 bytes");
     let peer_key = x25519_dalek::PublicKey::from(peer_key_array);
 
-    // Create tunnel
+    // Create tunnel (boringtun 0.7.x `Tunn::new` returns `Self`, not `Result`)
     let mut tunn = Tunn::new(
         keypair.secret_key_x25519(),
         peer_key,
-        None,      // preshared key
-        Some(25),  // persistent keepalive every 25s
-        0,         // index
-        None,      // rate limiter
-    ).expect("Failed to create tunnel");
+        None,     // preshared key
+        Some(25), // persistent keepalive every 25s
+        0,        // index
+        None,     // rate limiter
+    );
 
     // Bind UDP socket
     let socket = UdpSocket::bind(listen_addr).expect("Failed to bind socket");
@@ -288,7 +315,9 @@ fn run_initiator(args: &[String]) {
     println!("[INFO] Initiating handshake...");
     match tunn.format_handshake_initiation(&mut dst_buf, false) {
         TunnResult::WriteToNetwork(data) => {
-            socket.send_to(data, peer_endpoint).expect("Failed to send handshake");
+            socket
+                .send_to(data, peer_endpoint)
+                .expect("Failed to send handshake");
             println!("[SEND] Handshake initiation ({} bytes)", data.len());
         }
         _ => {
@@ -326,7 +355,11 @@ fn run_initiator(args: &[String]) {
                         }
                     }
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                        println!("[DATA] Received {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
+                        println!(
+                            "[DATA] Received {} bytes: {:?}",
+                            data.len(),
+                            String::from_utf8_lossy(data)
+                        );
                     }
                     TunnResult::Err(e) => {
                         println!("[ERROR] Decapsulate error: {:?}", e);
@@ -335,12 +368,9 @@ fn run_initiator(args: &[String]) {
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Timeout - run timer tick
-                match tunn.update_timers(&mut dst_buf) {
-                    TunnResult::WriteToNetwork(data) => {
-                        socket.send_to(data, peer_endpoint).ok();
-                        println!("[TIMER] Sent {} bytes", data.len());
-                    }
-                    _ => {}
+                if let TunnResult::WriteToNetwork(data) = tunn.update_timers(&mut dst_buf) {
+                    socket.send_to(data, peer_endpoint).ok();
+                    println!("[TIMER] Sent {} bytes", data.len());
                 }
             }
             Err(e) => {
@@ -351,12 +381,20 @@ fn run_initiator(args: &[String]) {
         // Send test data periodically after handshake
         if handshake_complete && last_ping.elapsed() > Duration::from_secs(5) {
             ping_count += 1;
-            let test_data = format!("PING #{} from initiator at {:?}", ping_count, start.elapsed());
+            let test_data = format!(
+                "PING #{} from initiator at {:?}",
+                ping_count,
+                start.elapsed()
+            );
 
             match tunn.encapsulate(test_data.as_bytes(), &mut dst_buf) {
                 TunnResult::WriteToNetwork(encrypted) => {
                     socket.send_to(encrypted, peer_endpoint).ok();
-                    println!("[PING] Sent: {} ({} encrypted bytes)", test_data, encrypted.len());
+                    println!(
+                        "[PING] Sent: {} ({} encrypted bytes)",
+                        test_data,
+                        encrypted.len()
+                    );
                 }
                 _ => {
                     println!("[WARN] Could not encapsulate ping");
@@ -369,7 +407,14 @@ fn run_initiator(args: &[String]) {
         if start.elapsed() > Duration::from_secs(60) {
             println!();
             println!("[DONE] Test complete after 60 seconds");
-            println!("  Handshake: {}", if handshake_complete { "SUCCESS" } else { "FAILED" });
+            println!(
+                "  Handshake: {}",
+                if handshake_complete {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
             println!("  Pings sent: {}", ping_count);
             break;
         }

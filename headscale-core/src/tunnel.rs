@@ -4,15 +4,15 @@
 //! with multiple peers using the userspace boringtun implementation.
 
 use crate::keys_wg::WgKeyPair;
-use crate::routing::{host_route, Route, RoutingTable};
+use crate::routing::{Route, RoutingTable, host_route};
 use boringtun::noise::{Tunn, TunnResult};
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// Default WireGuard port.
 pub const DEFAULT_WG_PORT: u16 = 51820;
@@ -82,8 +82,11 @@ impl Tunnel {
         let static_secret = boringtun::x25519::StaticSecret::from(local_keypair.secret_bytes());
         let peer_public = boringtun::x25519::PublicKey::from(peer_public_key);
 
-        let tunn = Tunn::new(static_secret, peer_public, None, keepalive, index, None)
-            .map_err(|e| TunnelError::Creation(e.to_string()))?;
+        // boringtun 0.7.x changed `Tunn::new` to be infallible (returns `Self`
+        // directly instead of `Result<Self, _>`). Keep the function signature
+        // `Result<Self, TunnelError>` for forward compat with peer-id /
+        // keypair validation that the caller still relies on.
+        let tunn = Tunn::new(static_secret, peer_public, None, keepalive, index, None);
 
         Ok(Self {
             tunn,
@@ -314,8 +317,13 @@ impl TunnelManager {
     ) -> Result<(), TunnelError> {
         let index = self.next_index.fetch_add(1, Ordering::SeqCst);
 
-        let mut tunnel =
-            Tunnel::new(&self.local_keypair, peer_id.clone(), peer_public_key, index, keepalive)?;
+        let mut tunnel = Tunnel::new(
+            &self.local_keypair,
+            peer_id.clone(),
+            peer_public_key,
+            index,
+            keepalive,
+        )?;
 
         tunnel.endpoint = endpoint;
         for prefix in &allowed_ips {
@@ -450,6 +458,16 @@ impl TunnelManager {
     pub async fn route_by_ip(&self, dst_ip: IpAddr) -> Option<String> {
         let routing = self.routing_table.read().await;
         routing.lookup(dst_ip).map(|s| s.to_string())
+    }
+
+    /// Check whether a peer is allowed to send packets claiming `ip` as source.
+    pub async fn peer_allows_ip(&self, peer_id: &str, ip: IpAddr) -> Result<bool, TunnelError> {
+        let tunnels = self.tunnels.read().await;
+        let tunnel = tunnels
+            .get(peer_id)
+            .ok_or_else(|| TunnelError::PeerNotFound(peer_id.to_string()))?;
+
+        Ok(tunnel.allowed_ips.iter().any(|prefix| prefix.contains(&ip)))
     }
 
     /// Add an advertised route for a peer (e.g., subnet route or exit route).
@@ -588,7 +606,7 @@ impl TunnelManager {
 
         let _receiver_idx = match packet_type {
             1 => return None, // Handshake init - no receiver index, need to try all
-            2 | 3 | 4 => {
+            2..=4 => {
                 // Handshake response, cookie reply, data - have receiver index at bytes 4-7
                 // But we need to check if this matches any of our tunnel indices
                 // For now, return None and let caller try all peers
@@ -760,6 +778,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_peer_source_ip_ownership() {
+        let local_keypair = WgKeyPair::generate();
+        let peer_keypair = WgKeyPair::generate();
+        let manager = TunnelManager::new(local_keypair, DEFAULT_WG_PORT);
+
+        let peer_id = "owned-peer".to_string();
+        manager
+            .add_peer_with_ips(
+                peer_id.clone(),
+                peer_keypair.public_key_bytes(),
+                None,
+                vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            manager
+                .peer_allows_ip(&peer_id, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .peer_allows_ip(&peer_id, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6)))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn test_subnet_routing() {
         let local_keypair = WgKeyPair::generate();
         let peer_keypair = WgKeyPair::generate();
@@ -781,17 +831,23 @@ mod tests {
 
         // Any IP in subnet should route
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)))
+                .await,
             Some(peer_id.clone())
         );
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255)))
+                .await,
             Some(peer_id.clone())
         );
 
         // IP outside subnet should not route
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1)))
+                .await,
             None
         );
     }
@@ -829,13 +885,17 @@ mod tests {
 
         // Specific route should win
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
+                .await,
             Some("specific-peer".to_string())
         );
 
         // Other IPs go to exit
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+                .await,
             Some("exit-node".to_string())
         );
     }
@@ -868,7 +928,9 @@ mod tests {
 
         // Should not route through unapproved exit
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+                .await,
             None
         );
 
@@ -880,7 +942,9 @@ mod tests {
 
         // Now it should route
         assert_eq!(
-            manager.route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).await,
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+                .await,
             Some(peer_id.clone())
         );
     }

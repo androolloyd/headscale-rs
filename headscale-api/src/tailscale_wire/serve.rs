@@ -167,6 +167,7 @@ mod tests {
             preauth: Arc::new(MockRedeemer::new()),
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
+            derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
         };
         (state, dir)
     }

@@ -46,6 +46,7 @@ use tokio::sync::Notify;
 
 pub mod be_transport;
 pub mod controlbase;
+pub mod derp_config;
 pub mod key_handler;
 pub mod map;
 pub mod noise;
@@ -56,7 +57,10 @@ pub mod tls;
 pub mod wire;
 
 pub use noise::ServerNoiseKey;
-pub use wire::{MachineRecord, MapRequest, MapResponse, RegisterRequest, RegisterResponse};
+pub use wire::{
+    DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,
+    RegisterResponse,
+};
 
 /// Error type for the Tailscale-wire handlers.
 #[derive(Debug, Error)]
@@ -149,6 +153,17 @@ pub struct WireState {
     /// node_key (hex) → machine record. Map long-poll reads this to
     /// build the peer list; register writes to it on success.
     pub machines: Arc<MachineRegistry>,
+    /// DERP map served on `/machine/map`. `Arc` because it's shared
+    /// across every map handler invocation and never mutated after
+    /// startup. Defaults to empty (`DerpMap::default()`) — non-interop
+    /// deployments rely on the public Tailscale DERP fleet, which our
+    /// stock-client interop test can't use because the daemon refuses
+    /// to dial out from a sealed docker network. The interop harness
+    /// sets `OCTRAVPN_DERP_MAP_PATH` and the loader populates this
+    /// field with a one-region fixture pointing at the `derp-1` sidecar.
+    /// See [`derp_config`] + `docs/tailscale-interop-blocker.md` 2026-
+    /// 05-19 §"Wall 6 closed".
+    pub derp_map: Arc<wire::DerpMap>,
 }
 
 /// In-memory machine registry. Each successful `register` inserts here;

@@ -61,7 +61,8 @@ use serde::Serialize;
 
 use super::register::record_to_map_node;
 use super::wire::{
-    stable_id_from_key, strip_key_prefix, DerpMap, DnsConfig, MapNode, MapRequest, MapResponse,
+    stable_id_from_key, strip_key_prefix, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse,
+    NetPortRange, PortRange,
 };
 use super::WireState;
 
@@ -78,6 +79,27 @@ pub const MAP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// MagicDNS domain emitted on every map response. Static for the
 /// interop test.
 const TAILNET_DOMAIN: &str = "octra.test";
+
+/// Wall 7 (closed in the same commit batch as Wall 6 for the interop
+/// path): the canonical "everyone can reach everyone on every port"
+/// packet filter. Stock `tailscale` v1.78+ rejects inter-peer traffic
+/// with `unknown peer` when `MapResponse.PacketFilter` is empty —
+/// even though the netmap holds the target node. Production
+/// deployments derive this list from the ACL surface; the interop
+/// test runs with an open default so the ping assertion lands.
+pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
+    vec![FilterRule {
+        src_ips: vec!["*".into()],
+        dst_ports: vec![NetPortRange {
+            ip: "*".into(),
+            ports: PortRange {
+                first: 0,
+                last: 65535,
+            },
+        }],
+        ip_proto: Vec::new(),
+    }]
+}
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -187,8 +209,15 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         node: own_node,
         peers,
         dns_config: DnsConfig::default(),
-        derp_map: DerpMap::default(),
+        // Wall 6: serve whatever DERP map the embedder loaded at
+        // startup. Empty for non-interop deployments; the interop test
+        // populates a one-region fixture pointing at the `derp-1`
+        // sidecar (see `derp_config::load_derp_map`).
+        derp_map: (*state.derp_map).clone(),
         domain: TAILNET_DOMAIN.into(),
+        // Wall 7: open packet filter. Required for inter-peer
+        // traffic to land — see `allow_all_packet_filter`.
+        packet_filter: allow_all_packet_filter(),
         // FULL MapResponse — NOT a keepalive. Upstream
         // `controlclient/direct.go::sendMapRequest` `continue`s past
         // the netmap-update handler when `KeepAlive=true`, which
@@ -230,13 +259,14 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         let machines = state.machines.clone();
         let notify = state.machines.notify.clone();
         let self_node_key = node_key_hex.clone();
+        let derp_map_for_stream = state.derp_map.clone();
         let stream = futures_util::stream::unfold(
-            (Some(first), machines, notify, self_node_key),
-            move |(first_opt, machines, notify, self_node_key)| async move {
+            (Some(first), machines, notify, self_node_key, derp_map_for_stream),
+            move |(first_opt, machines, notify, self_node_key, machines_derp_map)| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),
-                        (None, machines, notify, self_node_key),
+                        (None, machines, notify, self_node_key, machines_derp_map),
                     ));
                 }
                 // Wait for either a registry change or a keepalive
@@ -267,8 +297,11 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                                 node: own_node,
                                 peers,
                                 dns_config: DnsConfig::default(),
-                                derp_map: DerpMap::default(),
+                                // Wall 6 — see comment in map_inner.
+                                derp_map: (*machines_derp_map).clone(),
                                 domain: TAILNET_DOMAIN.into(),
+                                // Wall 7 — open packet filter.
+                                packet_filter: allow_all_packet_filter(),
                                 // Full payload — see comment in
                                 // `map_inner` for why this must be
                                 // `false`.
@@ -286,7 +319,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 };
                 Some((
                     Ok(chunk),
-                    (None, machines, notify, self_node_key),
+                    (None, machines, notify, self_node_key, machines_derp_map),
                 ))
             },
         );
@@ -353,6 +386,7 @@ mod tests {
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
+        wire::DerpMap,
         MachineRecord, MachineRegistry, WireState,
     };
     use axum::body::to_bytes;
@@ -369,6 +403,7 @@ mod tests {
             preauth: Arc::new(MockRedeemer::new()),
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
+            derp_map: Arc::new(DerpMap::default()),
         };
         (state, dir)
     }
@@ -759,6 +794,7 @@ mod tests {
             derp_map: DerpMap::default(),
             domain: TAILNET_DOMAIN.into(),
             keep_alive: true,
+            packet_filter: allow_all_packet_filter(),
         };
         let bytes = build_framed_chunk(&mr).expect("framed chunk encodes");
         // Decode the way upstream does.

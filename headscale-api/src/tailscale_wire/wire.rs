@@ -238,6 +238,55 @@ pub struct MapResponse {
     /// Whether the client should keep polling. `true` matches stock
     /// expectations.
     pub keep_alive: bool,
+    /// Wall 7 (post-Wall-6): `tailcfg.MapResponse.PacketFilter`. Stock
+    /// `tailscale` v1.78+ default-denies inter-peer traffic if this
+    /// list is empty/null — the daemon reports "unknown peer" on
+    /// `tailscale ping <peer-IP>` even though the netmap holds the
+    /// target. We emit the canonical "allow everything to everywhere"
+    /// rule for the interop tailnet; production deployments will
+    /// derive this from the embedded ACL surface.
+    ///
+    /// Upstream JSON tag is `PacketFilter`; the type is `[]FilterRule`.
+    /// We model only the fields the matcher actually reads — `SrcIPs`
+    /// and `DstPorts`. The IPProto field is omitted ⇒ all protocols.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packet_filter: Vec<FilterRule>,
+}
+
+/// `tailcfg.FilterRule`. The default zero-value here is unreachable —
+/// every rule must carry at least one SrcIP / DstPort entry to be
+/// matchable. We never construct empty rules; the only call site is
+/// [`crate::tailscale_wire::map::allow_all_packet_filter`] which
+/// returns the "allow everything" recipe.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct FilterRule {
+    /// Source IPs / CIDRs / `*`. Upstream tag is `SrcIPs`.
+    #[serde(rename = "SrcIPs", default)]
+    pub src_ips: Vec<String>,
+    /// Per-destination port range entries.
+    #[serde(default)]
+    pub dst_ports: Vec<NetPortRange>,
+    /// IP protocol restrictions. Empty ⇒ all protocols allowed.
+    #[serde(default, rename = "IPProto", skip_serializing_if = "Vec::is_empty")]
+    pub ip_proto: Vec<i32>,
+}
+
+/// `tailcfg.NetPortRange`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct NetPortRange {
+    #[serde(rename = "IP")]
+    pub ip: String,
+    pub ports: PortRange,
+}
+
+/// `tailcfg.PortRange`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct PortRange {
+    pub first: u16,
+    pub last: u16,
 }
 
 /// A single node record inside a `MapResponse`.
@@ -323,34 +372,84 @@ pub struct DnsConfig {
     pub domains: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DerpMap {
-    /// region_id → region info. Empty in the interop test.
+    /// region_id → region info. Empty for non-interop deployments;
+    /// the interop test populates a single region via
+    /// `OCTRAVPN_DERP_MAP_PATH` → [`derp_config::load_derp_map`].
     #[serde(default)]
     pub regions: HashMap<u16, DerpRegion>,
+    /// Discovered upstream as `OmitDefaultRegions` — when true, the
+    /// client must NOT augment our DERPMap with the public Tailscale
+    /// region list. We always emit `true` for the interop test so the
+    /// client only ever talks to our sidecar.
+    #[serde(default, rename = "OmitDefaultRegions")]
+    pub omit_default_regions: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DerpRegion {
+    /// Numeric region ID. Must match the map key in `DerpMap.regions`.
+    /// Upstream `tailcfg.DERPRegion.RegionID` is an `int`; we serialise
+    /// as a plain integer.
+    #[serde(rename = "RegionID")]
+    pub region_id: u16,
     pub region_code: String,
     pub region_name: String,
+    /// Whether the region should be skipped for new sessions. Defaults
+    /// to false (region is healthy).
+    #[serde(default)]
+    pub avoid: bool,
     pub nodes: Vec<DerpRegionNode>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Mirrors `tailscale/tailcfg/derpmap.go::DERPNode`. Only the fields
+/// the interop test needs to bootstrap a derper sidecar are non-
+/// optional; everything else is `Option<…> + skip_serializing_if`.
+///
+/// Field-for-field shape verified against upstream commit at the time
+/// of Wall 6 closure: `HostName`, `IPv4`, `IPv6`, `DERPPort`,
+/// `STUNPort`, `STUNOnly`, `InsecureForTests` are all `omitempty` on
+/// the Go side; emitting them as `None` produces a byte-identical
+/// payload to omitting them.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DerpRegionNode {
     pub name: String,
     #[serde(rename = "RegionID")]
     pub region_id: u16,
     pub host_name: String,
-    /// Upstream JSON tag is `IPv4`, not `IPv4` -> `IPv4`. PascalCase
-    /// emits `IPv4` for `i_pv4` only because the camel-to-pascal step
-    /// in serde mishandles single-letter prefixes; rename explicitly.
-    #[serde(rename = "IPv4")]
+    /// Upstream JSON tag is `IPv4` (all-caps); PascalCase rename keeps
+    /// the wire byte-identical (camel-to-pascal mishandles single-letter
+    /// prefixes).
+    #[serde(default, rename = "IPv4", skip_serializing_if = "String::is_empty")]
     pub ipv4: String,
+    #[serde(default, rename = "IPv6", skip_serializing_if = "String::is_empty")]
+    pub ipv6: String,
+    /// DERP HTTPS port. `0` ⇒ omit ⇒ client defaults to 443.
+    #[serde(rename = "DERPPort", default, skip_serializing_if = "is_zero_u16")]
+    pub derp_port: u16,
+    /// STUN UDP port. `0` ⇒ omit ⇒ client defaults to 3478.
+    #[serde(rename = "STUNPort", default, skip_serializing_if = "is_zero_i32")]
+    pub stun_port: i32,
+    /// `true` ⇒ the node serves STUN only, no DERP. Defaults to false.
+    #[serde(rename = "STUNOnly", default, skip_serializing_if = "std::ops::Not::not")]
+    pub stun_only: bool,
+    /// `true` ⇒ accept a self-signed TLS certificate on the DERP HTTPS
+    /// endpoint. Required for the docker-network sidecar — we mint a
+    /// fresh cert at `run-interop.sh` time and don't bind it to any
+    /// public CA.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure_for_tests: bool,
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
 }
 
 /// Strip a Tailscale key prefix (`mkey:`, `nodekey:`, `discokey:`)

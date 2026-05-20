@@ -14,17 +14,16 @@ standalone_manifests=(
 
 cargo llvm-cov clean --workspace
 
-cargo llvm-cov \
+eval "$(cargo llvm-cov show-env --sh)"
+
+cargo test \
   --workspace \
-  --all-features \
-  --no-report
+  --all-features
 
 for manifest in "${standalone_manifests[@]}"; do
-  cargo llvm-cov \
+  cargo test \
     --manifest-path "${manifest}" \
-    --all-features \
-    --no-report \
-    --no-clean
+    --all-features
 done
 
 cargo llvm-cov report \
@@ -33,8 +32,5 @@ cargo llvm-cov report \
   --ignore-filename-regex "${ignore_regex}"
 
 cargo llvm-cov report \
-  --text \
-  --output-path target/coverage/summary.txt \
-  --ignore-filename-regex "${ignore_regex}"
-
-cat target/coverage/summary.txt
+  --ignore-filename-regex "${ignore_regex}" \
+  | tee target/coverage/summary.txt

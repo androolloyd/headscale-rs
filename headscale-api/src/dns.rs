@@ -76,7 +76,7 @@ pub const EXTRA_RECORDS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Field semantics deliberately track the gap-analysis P1 deliverable
 /// list rather than upstream Go field-for-field — operators are the
 /// audience here, not the stock daemon.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DnsConfigSpec {
     /// Enable MagicDNS. Defaults to `true`: when an operator drops in
@@ -134,6 +134,26 @@ const fn default_true() -> bool {
 
 fn default_base_domain() -> String {
     "octravpn.example.org".to_string()
+}
+
+impl Default for DnsConfigSpec {
+    /// Operator-friendly defaults: MagicDNS on, base domain
+    /// `octravpn.example.org`, no resolvers / records / search
+    /// domains. Mirrors what `#[serde(default)]` produces when an
+    /// empty `[dns]` block lands in `node.toml`.
+    fn default() -> Self {
+        Self {
+            magic_dns: default_true(),
+            base_domain: default_base_domain(),
+            nameservers: Vec::new(),
+            restricted_nameservers: HashMap::new(),
+            extra_records: None,
+            search_domains: Vec::new(),
+            fallback_nameservers: Vec::new(),
+            exit_node_filtered_set: Vec::new(),
+            authoritative_suffixes: None,
+        }
+    }
 }
 
 /// One machine's record-set input. Wire layer hands these to

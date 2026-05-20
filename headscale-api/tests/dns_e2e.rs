@@ -361,6 +361,7 @@ fn mapresponse_omits_default_dnsconfig_field() {
         derp_map: DerpMap::default(),
         domain: "octra.test".into(),
         keep_alive: false,
+        node_key_expired: false,
         packet_filter: vec![],
     };
     let json = serde_json::to_string(&r).unwrap();

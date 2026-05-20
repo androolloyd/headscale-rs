@@ -251,6 +251,7 @@ fn rule_with_empty_dst_is_dropped() {
             dst: vec!["group:unknown".into()],
             ports: vec!["*/*".into()],
         }],
+        ..Default::default()
     };
     assert!(acl_to_filter_rules(&doc).is_empty());
 }
@@ -266,6 +267,7 @@ fn invalid_port_pattern_drops_rule() {
             dst: vec!["*".into()],
             ports: vec!["tcp/notanumber".into()],
         }],
+        ..Default::default()
     };
     // The single port pattern is unparseable, so port_ranges is empty
     // and the rule is dropped (default-deny on garbage).
@@ -283,6 +285,7 @@ fn legacy_star_colon_port_form_is_accepted() {
             dst: vec!["*".into()],
             ports: vec!["*:tcp/22".into()],
         }],
+        ..Default::default()
     };
     let rs = acl_to_filter_rules(&doc);
     assert_eq!(rs.len(), 1);
@@ -301,6 +304,7 @@ fn port_range_with_hi_below_lo_drops_pattern() {
             dst: vec!["*".into()],
             ports: vec!["tcp/100-50".into()],
         }],
+        ..Default::default()
     };
     assert!(acl_to_filter_rules(&doc).is_empty(), "hi<lo must drop rule");
 }
@@ -326,6 +330,7 @@ fn src_dedupes_repeated_principals() {
             dst: vec!["*".into()],
             ports: vec!["*/*".into()],
         }],
+        ..Default::default()
     };
     let rs = acl_to_filter_rules(&doc);
     assert_eq!(rs.len(), 1);

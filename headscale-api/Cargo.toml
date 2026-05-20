@@ -55,6 +55,14 @@ headscale-core = { workspace = true, optional = true }
 headscale-identity = { workspace = true, optional = true }
 headscale-resources = { workspace = true, optional = true }
 headscale-payments = { workspace = true, optional = true }
+# Canonical ACL evaluator. Pulled out into its own leaf crate on
+# 2026-05-20 so `octravpn-mesh` and `headscale-api` share the same
+# implementation without forming a dep cycle. See
+# `headscale-api-acl/Cargo.toml` for the rationale; the
+# `headscale-api::policy` module is a thin facade over the types
+# exported here plus the local `PolicyStore` admin shell and the
+# `FilterRule` translator.
+headscale-api-acl = { workspace = true }
 # Persistent preauth-key store — sqlx-backed, bcrypt-hashed. Lives
 # behind the `admin` feature because today only the admin module
 # touches it; the wire layer continues to talk to whatever

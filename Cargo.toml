@@ -11,6 +11,7 @@ resolver = "2"
 # `CHANGES.md` (2026-05-20) and the per-crate README notes.
 members = [
     "headscale-api",
+    "headscale-api-acl",
     "headscale-db",
     "headscale-cli",
 ]
@@ -134,6 +135,7 @@ headscale-identity = { path = "headscale-identity" }
 headscale-resources = { path = "headscale-resources" }
 headscale-payments = { path = "headscale-payments" }
 headscale-api = { path = "headscale-api" }
+headscale-api-acl = { path = "headscale-api-acl" }
 headscale-db = { path = "headscale-db" }
 headscale-cli = { path = "headscale-cli" }
 

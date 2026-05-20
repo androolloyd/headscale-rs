@@ -6,6 +6,7 @@
 *.swo
 .idea/
 .vscode/
+fuzz-runs/
 
 # Local headscale-db runtime artifacts; schema/docs/migrations remain tracked.
 /headscale-db/.env

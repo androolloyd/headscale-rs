@@ -78,9 +78,11 @@ jobs:
       - run: cargo test -p headscale-api --no-default-features --features admin
 
   fuzz:
-    name: cargo fuzz smoke
+    name: cargo fuzz 10k
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      FUZZ_RUNS: "10000"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -101,12 +103,12 @@ jobs:
             cargo fuzz build "${target}"
             echo "::endgroup::"
           done < /tmp/headscale-fuzz-targets
-      - name: Smoke run all fuzz targets
+      - name: 10k run all fuzz targets
         working-directory: headscale-core/fuzz
         run: |
           set -euo pipefail
           while IFS= read -r target; do
-            echo "::group::run ${target}"
-            cargo fuzz run "${target}" -- -runs=32
+            echo "::group::run ${target} (${FUZZ_RUNS} inputs)"
+            cargo fuzz run "${target}" -- -runs="${FUZZ_RUNS}"
             echo "::endgroup::"
           done < /tmp/headscale-fuzz-targets

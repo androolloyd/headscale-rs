@@ -199,9 +199,20 @@ impl DnsStore {
     /// (matches the pre-MagicDNS wire shape) — embedders that want
     /// MagicDNS on call [`Self::from_spec`].
     pub fn new() -> Self {
+        // Truly empty: MagicDNS off, base_domain empty, no
+        // search_domains, no authoritative-suffix override. Building
+        // a DnsConfig from this store produces `{}` byte-for-byte —
+        // preserves the pre-MagicDNS wire shape.
         Self::from_spec(DnsConfigSpec {
             magic_dns: false,
-            ..DnsConfigSpec::default()
+            base_domain: String::new(),
+            nameservers: Vec::new(),
+            restricted_nameservers: HashMap::new(),
+            extra_records: None,
+            search_domains: Vec::new(),
+            fallback_nameservers: Vec::new(),
+            exit_node_filtered_set: Vec::new(),
+            authoritative_suffixes: Some(Vec::new()),
         })
     }
 
@@ -333,9 +344,13 @@ pub fn build_dns_config(
 
     // Domains: the base_domain is always first — search-resolution
     // order matters to the daemon (it walks left-to-right). Operator-
-    // supplied search_domains follow.
+    // supplied search_domains follow. An empty base_domain (e.g. the
+    // `DnsStore::new()` empty-default) drops the leading entry so the
+    // wire output is `{}` byte-for-byte.
     let mut domains = Vec::with_capacity(1 + spec.search_domains.len());
-    domains.push(spec.base_domain.clone());
+    if !spec.base_domain.is_empty() {
+        domains.push(spec.base_domain.clone());
+    }
     for d in &spec.search_domains {
         if d != &spec.base_domain {
             domains.push(d.clone());

@@ -144,6 +144,13 @@ base64 = "0.22"
 # our output is byte-compatible with klauspost's `zstdframe` package
 # that upstream consumes.
 zstd = { version = "0.13", default-features = false }
+# `tailscale_wire::map::control_time_now` formats the server clock as
+# RFC3339-nano for `MapResponse.ControlTime`. We pick `time` (not
+# `chrono`) because it's already in the workspace's transitive graph
+# via the auth / session layers, and its `well_known::Rfc3339`
+# description matches Go's `time.RFC3339Nano` byte-for-byte for the
+# fractional-seconds suffix.
+time = { version = "0.3", default-features = false, features = ["formatting", "parsing"] }
 
 # Admin GUI v0 deps — only pulled in when the `admin` feature is on
 # (default). `maud` is the type-safe HTML template engine; `hmac` +

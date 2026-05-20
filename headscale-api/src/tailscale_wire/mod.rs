@@ -60,8 +60,9 @@ pub mod wire;
 pub use knock::{KnockConfig, KNOCK_HEADER, KNOCK_PATH_PREFIX, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
-    DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,
-    RegisterResponse,
+    DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, MapResponseDebug,
+    PeerChange, PingRequest, RegisterRequest, RegisterResponse, SSHAction, SSHPolicy, SSHPrincipal,
+    SSHRule, UserProfile,
 };
 
 /// Error type for the Tailscale-wire handlers.
@@ -186,6 +187,48 @@ pub struct WireState {
     /// unknown". See [`knock`] for the rationale + math. Defaults to
     /// disabled so existing deployments keep working unchanged.
     pub knock: KnockConfig,
+    /// Static MapResponse metadata: SSH policy expansion +
+    /// `CollectServices` switch + optional `Debug` block + optional
+    /// `PingRequest`. None of these touch the registry / packet
+    /// filter; they're surfaced on every MapResponse so operator-side
+    /// defaults stick.
+    ///
+    /// Defaults to [`MapMetaConfig::default`] which omits every field
+    /// on the wire — reproducing the pre-feature MapResponse shape
+    /// byte-for-byte.
+    pub map_meta: Arc<MapMetaConfig>,
+}
+
+/// Static MapResponse metadata read once at server startup and held
+/// by reference on every `/map` invocation.
+///
+/// Operator-supplied content surfaced on each MapResponse that *isn't*
+/// derived from the live `MachineRegistry` / `PolicyStore`:
+///
+/// * `ssh_policy` — full `SSHPolicy` block. Empty rules ⇒ field
+///   omitted on the wire (matches upstream `omitempty`).
+/// * `collect_services_disabled` — true ⇒ `MapResponse.CollectServices
+///   = "false"`. False ⇒ field omitted.
+/// * `debug` — optional `tailcfg.MapResponse.Debug`. `None` ⇒ omitted.
+/// * `ping_request` — optional one-shot ping target. `None` ⇒ omitted.
+///   We don't expose an admin "force-ping" route yet; this is wired
+///   for downstream consumers that want to set the field directly on
+///   `WireState` at startup (e.g. a probe-suite harness).
+///
+/// All fields default to their zero-value ⇒ wire output is identical
+/// to a pre-feature MapResponse.
+#[derive(Clone, Default)]
+pub struct MapMetaConfig {
+    /// SSH policy expanded to wire rules. Empty rules list ⇒ the
+    /// MapResponse omits the `SSHPolicy` field entirely.
+    pub ssh_policy: wire::SSHPolicy,
+    /// True ⇒ MapResponse carries `CollectServices = "false"`. False
+    /// ⇒ field omitted ⇒ client default.
+    pub collect_services_disabled: bool,
+    /// Optional debug block surfaced via `MapResponse.Debug`.
+    pub debug: Option<wire::MapResponseDebug>,
+    /// One-shot ping request. `None` ⇒ no ping requested.
+    pub ping_request: Option<wire::PingRequest>,
 }
 
 /// In-memory machine registry.

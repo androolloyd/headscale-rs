@@ -27,10 +27,15 @@
 //!   layer because the prefix is part of the on-wire identity. A
 //!   helper `strip_key_prefix` lives below for handlers that need the
 //!   raw bytes.
-//! - **`MapResponse.Peers` is the *only* peer-emission path we use.**
-//!   Tailscale's incremental update mechanism
-//!   (`PeersChanged{,Patch}`, `PeerSeenChange`) is intentionally not
-//!   modelled — the interop test only needs the first full snapshot.
+//! - **Delta updates** (`PeersChanged`, `PeersChangedPatch`,
+//!   `PeersRemoved`) ride alongside the full-snapshot `Peers` field.
+//!   The streaming `/map` handler sends a full snapshot in its first
+//!   chunk; subsequent chunks emit only the deltas. The non-streaming
+//!   path keeps emitting full snapshots for backward compat. See
+//!   `tailscale/tailcfg/tailcfg.go::MapResponse` for the spec; the
+//!   server tracks each parked poller's last-sent `PeerView` and diffs
+//!   on every wake. See `map::PeerView` in `map.rs` for the diff
+//!   algorithm + the per-wake cost analysis.
 
 use std::collections::HashMap;
 
@@ -285,6 +290,49 @@ pub struct MapResponse {
     /// and `DstPorts`. The IPProto field is omitted ⇒ all protocols.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packet_filter: Vec<FilterRule>,
+    /// `tailcfg.MapResponse.PeersChanged` — full `Node` records for
+    /// peers added or modified since the last MapResponse on this
+    /// stream. `None` on the first (full-snapshot) chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_changed: Option<Vec<MapNode>>,
+    /// `tailcfg.MapResponse.PeersChangedPatch` — partial deltas for
+    /// peers whose only changes are in patchable fields (endpoints,
+    /// disco_key, online, last_seen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_changed_patch: Option<Vec<PeerChange>>,
+    /// `tailcfg.MapResponse.PeersRemoved` — NodeIDs no longer in the
+    /// tailnet since the last MapResponse on this stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_removed: Option<Vec<u64>>,
+    /// `tailcfg.MapResponse.UserProfiles` — display data for each user
+    /// whose node is visible to the requesting client. Empty list ⇒
+    /// field omitted on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_profiles: Vec<UserProfile>,
+    /// `tailcfg.MapResponse.SSHPolicy` — expanded set of `SSHRule`s
+    /// derived from the tailnet's policy doc. `None` ⇒ omitted.
+    #[serde(default, rename = "SSHPolicy", skip_serializing_if = "Option::is_none")]
+    pub ssh_policy: Option<SSHPolicy>,
+    /// `tailcfg.MapResponse.ControlTime` — current server wall-clock
+    /// time as an RFC3339 string. Lets the client surface a clock-skew
+    /// warning. `None` ⇒ omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_time: Option<String>,
+    /// `tailcfg.MapResponse.Debug` — server-side debug toggles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<MapResponseDebug>,
+    /// `tailcfg.MapResponse.CollectServices` — `"true"` / `"false"`
+    /// telling the client whether to enable service-collection
+    /// telemetry. Upstream encodes the flag as a string (Go's
+    /// `opt.Bool`-style serialisation). `None` ⇒ omitted ⇒ client
+    /// retains its previous value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_services: Option<String>,
+    /// `tailcfg.MapResponse.PingRequest` — one-shot request for the
+    /// client to ping a target and POST the result. `None` when no
+    /// admin "force-ping" is pending (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_request: Option<PingRequest>,
 }
 
 /// `tailcfg.FilterRule`. The default zero-value here is unreachable —
@@ -533,6 +581,168 @@ pub fn stable_id_from_key(hex_str: &str) -> u64 {
     }
     // Clear the sign bit so the value round-trips through Go's int64.
     h & 0x7fff_ffff_ffff_ffff
+}
+
+/// `tailcfg.UserProfile`. One per user that owns a node visible to
+/// the requesting client.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserProfile {
+    /// Stable 63-bit user ID — same value as `MapNode.User` for any
+    /// node owned by this user (`stable_id_from_key(user_label)`).
+    #[serde(rename = "ID")]
+    pub id: u64,
+    /// Login name (`alice`).
+    pub login_name: String,
+    /// Display name; stub defaults to `LoginName`.
+    pub display_name: String,
+    /// HTTPS URL of the user's avatar. Empty by default. Upstream
+    /// JSON tag is `ProfilePicURL` (all-caps URL).
+    #[serde(
+        default,
+        rename = "ProfilePicURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub profile_pic_url: String,
+    /// Optional tailnet roles (admin / auditor / member). Empty by
+    /// default — we don't model roles yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+}
+
+/// `tailcfg.MapResponse.PeersChangedPatch[i]` — partial delta for a
+/// single peer whose only changes are in patchable fields. Anything
+/// outside this struct (user ID, key, addresses) forces a full
+/// `MapNode` in `PeersChanged` instead.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PeerChange {
+    /// NodeID of the peer this delta applies to.
+    #[serde(rename = "NodeID")]
+    pub node_id: u64,
+    /// Updated endpoint list. `None` ⇒ unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoints: Option<Vec<String>>,
+    /// Updated DiscoKey. `None` ⇒ unchanged.
+    #[serde(default, rename = "DiscoKey", skip_serializing_if = "Option::is_none")]
+    pub disco_key: Option<String>,
+    /// Updated online status. `None` ⇒ unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    /// Updated last-seen timestamp (RFC3339). `None` ⇒ unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    /// Updated key-signature material (`tailcfg.PeerChange.KeySignature`).
+    /// Reserved for upstream-compat; we don't emit it today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_signature: Option<String>,
+}
+
+/// `tailcfg.SSHPolicy`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SSHPolicy {
+    /// Ordered list of rules. Empty ⇒ default-deny.
+    pub rules: Vec<SSHRule>,
+}
+
+/// `tailcfg.SSHRule`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SSHRule {
+    /// Optional expiration. RFC3339 string; `None` ⇒ never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_expires: Option<String>,
+    /// Principals (source-side) this rule applies to.
+    pub principals: Vec<SSHPrincipal>,
+    /// Map of accepted local SSH user names ⇒ local-account-name to
+    /// log in as. Upstream tag is `SSHUsers`.
+    #[serde(rename = "SSHUsers")]
+    pub ssh_users: std::collections::BTreeMap<String, String>,
+    /// What to do on a match.
+    pub action: SSHAction,
+}
+
+/// `tailcfg.SSHPrincipal`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SSHPrincipal {
+    /// Tailnet node owner.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    /// Source IP / CIDR.
+    #[serde(default, rename = "NodeIP", skip_serializing_if = "String::is_empty")]
+    pub node_ip: String,
+    /// Tailnet user login (`alice@example.com`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_login: String,
+    /// Allowed SSH public keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pub_keys: Vec<String>,
+}
+
+/// `tailcfg.SSHAction`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SSHAction {
+    /// Optional rejection message shown to the client.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    /// True ⇒ reject the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reject: bool,
+    /// True ⇒ accept the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept: bool,
+    /// Session duration cap (Go `time.Duration` nanoseconds). 0 ⇒
+    /// unbounded.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub session_duration: i64,
+    /// Allow ssh-agent forwarding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_agent_forwarding: bool,
+    /// Allow local port forwarding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_local_port_forwarding: bool,
+}
+
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
+/// `tailcfg.MapResponse.Debug`. Empty in normal operation; the
+/// upstream struct carries ~30 fields, we surface only the load-
+/// bearing ones.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MapResponseDebug {
+    /// Force-disable log tail upload.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_log_tail: bool,
+    /// Force the client to route through DERP even when a direct path
+    /// exists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_background_stun: bool,
+    /// `Sleep` — server-requested delay before the next MapRequest.
+    /// Go `time.Duration` (nanoseconds, as a number). 0 ⇒ no delay.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub sleep: i64,
+}
+
+/// `tailcfg.PingRequest`. One-shot ping target sent by the server.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PingRequest {
+    /// HTTPS URL the client POSTs the ping result to.
+    #[serde(rename = "URL")]
+    pub url: String,
+    /// Target IP. Empty ⇒ ping the URL itself.
+    #[serde(rename = "IP", default, skip_serializing_if = "String::is_empty")]
+    pub ip: String,
+    /// Ping kind (`disco`, `TSMP`, `ICMP`, `peerapi`). Empty ⇒
+    /// upstream-default (`disco`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub types: String,
 }
 
 #[cfg(test)]

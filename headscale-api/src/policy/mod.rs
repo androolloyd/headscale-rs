@@ -34,7 +34,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
-pub use doc::{PolicyAction, PolicyDoc, PolicyRule};
+pub use doc::{
+    AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, SshRule,
+};
 pub use filter::acl_to_filter_rules;
 pub use hujson::{PolicyParseError, parse_hujson_policy};
 
@@ -117,6 +119,39 @@ impl PolicyStore {
     /// Snapshot the parsed doc. `None` until the first successful PUT.
     pub fn doc(&self) -> Option<PolicyDoc> {
         self.inner.state.read().doc.clone()
+    }
+
+    /// Capability flags `node` should receive per the loaded policy's
+    /// `node_attrs` block. Empty vec when no policy is loaded.
+    ///
+    /// The wire layer drives this from `MapResponse` construction so
+    /// every emitted peer carries the correct
+    /// `tailcfg.Node.CapMap` (`funnel`, `exit-node`, `ssh`, …).
+    pub fn node_attrs_for(&self, node: &NodeView<'_>) -> Vec<String> {
+        match self.inner.state.read().doc.as_ref() {
+            Some(doc) => doc.node_attrs_for(node),
+            None => Vec::new(),
+        }
+    }
+
+    /// True iff `node` should have a route covering `prefix`
+    /// auto-approved. Returns false when no policy is loaded — the
+    /// admin path must then require an explicit operator action
+    /// (i.e. `headscale nodes routes enable`).
+    pub fn auto_approves_route(&self, node: &NodeView<'_>, prefix: &str) -> bool {
+        match self.inner.state.read().doc.as_ref() {
+            Some(doc) => doc.auto_approves_route(node, prefix),
+            None => false,
+        }
+    }
+
+    /// True iff `node` is auto-approved as an exit-node. Returns false
+    /// when no policy is loaded.
+    pub fn auto_approves_exit_node(&self, node: &NodeView<'_>) -> bool {
+        match self.inner.state.read().doc.as_ref() {
+            Some(doc) => doc.auto_approves_exit_node(node),
+            None => false,
+        }
     }
 
     /// Handle to the broadcast. Map long-pollers register

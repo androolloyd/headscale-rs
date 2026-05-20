@@ -66,6 +66,29 @@ use super::wire::{
     stable_id_from_key, strip_key_prefix,
 };
 
+use crate::dns::{DnsStore, MachineDnsRecord};
+
+/// Snapshot the registry into MagicDNS-record shape and ask the
+/// operator-configured [`DnsStore`] to build the `DnsConfig` for this
+/// MapResponse. Pulled into a helper so both the initial `map_inner`
+/// build and the streaming `rebuild_map_chunk` use the same code path
+/// — drift here would mean an ExtraRecords hot-reload only lands on
+/// one of the two emission sites.
+fn build_dns_for_snapshot(
+    dns: &DnsStore,
+    snapshot: &std::collections::HashMap<String, super::MachineRecord>,
+) -> DnsConfig {
+    let machines: Vec<MachineDnsRecord> = snapshot
+        .iter()
+        .map(|(node_hex, rec)| MachineDnsRecord {
+            hostname: rec.hostname.clone(),
+            ipv4: rec.ipv4,
+            node_id: stable_id_from_key(node_hex),
+        })
+        .collect();
+    dns.build(&machines)
+}
+
 /// How long we wait for a second peer to join before returning an
 /// empty-peers `MapResponse`.
 pub const MAP_LONGPOLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -259,11 +282,12 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // Stable order so tests are deterministic.
     peers.sort_by_key(|n| n.id);
 
+    let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
     let resp = MapResponse {
         key_expiry_extension: 0,
         node: own_node,
         peers,
-        dns_config: DnsConfig::default(),
+        dns_config,
         // Wall 6: serve whatever DERP map the embedder loaded at
         // startup. Empty for non-interop deployments; the interop test
         // populates a one-region fixture pointing at the `derp-1`
@@ -313,12 +337,13 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         };
 
         // The stream's carried state is enough to re-build MapResponse
-        // on each registry / policy wake.
+        // on each registry / policy / DNS wake.
         let machines = state.machines.clone();
         let notify = state.machines.notify.clone();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let derp_map_for_stream = state.derp_map.clone();
+        let dns_for_stream = state.dns.clone();
         let stream = futures_util::stream::unfold(
             (
                 Some(first),
@@ -327,8 +352,9 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 policy,
                 self_node_key,
                 derp_map_for_stream,
+                dns_for_stream,
             ),
-            move |(first_opt, machines, notify, policy, self_node_key, machines_derp_map)| async move {
+            move |(first_opt, machines, notify, policy, self_node_key, machines_derp_map, dns)| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),
@@ -339,30 +365,41 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             policy,
                             self_node_key,
                             machines_derp_map,
+                            dns,
                         ),
                     ));
                 }
                 // Wait for either a registry change, a policy change,
-                // or a keepalive tick, whichever fires first. We park
-                // each `Notified` future inside a small scope so the
-                // Arcs aren't borrowed when we re-wrap the state for
-                // the next iteration.
+                // a DNS extra-records edit, or a keepalive tick,
+                // whichever fires first. We park each `Notified`
+                // future inside a small scope so the Arcs aren't
+                // borrowed when we re-wrap the state for the next
+                // iteration.
                 let chunk = {
                     let notify_for_wait = notify.clone();
                     let notified = notify_for_wait.notified();
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
+                    let dns_for_wait = dns.clone();
+                    let dns_changed = dns_for_wait.wait_for_change();
                     tokio::pin!(notified);
                     tokio::pin!(policy_changed);
+                    tokio::pin!(dns_changed);
                     tokio::select! {
                     () = &mut notified => {
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map)
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
                     }
                     () = &mut policy_changed => {
                         // Policy edited via admin PUT — every parked
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map)
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                    }
+                    () = &mut dns_changed => {
+                        // Extra-records file edited (or DnsStore.set_spec
+                        // called) — wake every parked poller so the
+                        // next chunk carries the refreshed `DNSConfig`.
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
                         build_keepalive_chunk()
@@ -378,6 +415,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         policy,
                         self_node_key,
                         machines_derp_map,
+                        dns,
                     ),
                 ))
             },
@@ -409,6 +447,7 @@ fn rebuild_map_chunk(
     policy: &Arc<crate::policy::PolicyStore>,
     self_node_key: &str,
     derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
+    dns: &Arc<DnsStore>,
 ) -> Vec<u8> {
     let Some(own) = machines.get(self_node_key) else {
         return build_keepalive_chunk();
@@ -421,11 +460,12 @@ fn rebuild_map_chunk(
         .map(|(_, rec)| record_to_map_node(rec, TAILNET_DOMAIN))
         .collect();
     peers.sort_by_key(|n| n.id);
+    let dns_config = build_dns_for_snapshot(dns, &snapshot);
     let mr = MapResponse {
         key_expiry_extension: 0,
         node: own_node,
         peers,
-        dns_config: DnsConfig::default(),
+        dns_config,
         derp_map: (**derp_map).clone(),
         domain: TAILNET_DOMAIN.into(),
         packet_filter: packet_filter_for(policy),
@@ -502,6 +542,7 @@ mod tests {
             derp_map: Arc::new(DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
+            dns: Arc::new(crate::dns::DnsStore::new()),
         };
         (state, dir)
     }

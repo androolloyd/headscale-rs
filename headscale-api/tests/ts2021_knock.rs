@@ -64,6 +64,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         derp_map: Arc::new(tailscale_wire::wire::DerpMap::default()),
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock,
+        dns: Arc::new(headscale_api::dns::DnsStore::new()),
     };
     (state, dir)
 }

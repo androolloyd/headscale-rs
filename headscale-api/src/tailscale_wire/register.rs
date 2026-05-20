@@ -302,6 +302,7 @@ mod tests {
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
+            dns: Arc::new(crate::dns::DnsStore::new()),
         };
         (state, redeemer, dir)
     }

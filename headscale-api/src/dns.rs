@@ -50,7 +50,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -325,21 +325,25 @@ pub fn build_dns_config(
     machines: &[MachineDnsRecord],
     extra: &[DnsRecord],
 ) -> DnsConfig {
-    let resolvers = spec.nameservers.iter().map(string_to_resolver).collect();
+    let resolvers = spec
+        .nameservers
+        .iter()
+        .map(|s| string_to_resolver(s))
+        .collect();
     let routes: HashMap<String, Vec<DnsResolver>> = spec
         .restricted_nameservers
         .iter()
         .map(|(suffix, addrs)| {
             (
                 suffix.clone(),
-                addrs.iter().map(string_to_resolver).collect(),
+                addrs.iter().map(|s| string_to_resolver(s)).collect(),
             )
         })
         .collect();
     let fallback_resolvers = spec
         .fallback_nameservers
         .iter()
-        .map(string_to_resolver)
+        .map(|s| string_to_resolver(s))
         .collect();
 
     // Domains: the base_domain is always first — search-resolution
@@ -382,9 +386,9 @@ pub fn build_dns_config(
     }
 }
 
-fn string_to_resolver(s: &String) -> DnsResolver {
+fn string_to_resolver(s: &str) -> DnsResolver {
     DnsResolver {
-        addr: s.clone(),
+        addr: s.to_string(),
         bootstrap_resolution: Vec::new(),
         use_with_exit_node: false,
     }
@@ -397,10 +401,11 @@ fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + spec.restricted_nameservers.len());
     out.push(spec.base_domain.clone());
     // Sorted for determinism — HashMap iteration order is otherwise
-    // non-deterministic and our tests would flake.
-    let sorted: BTreeMap<&String, ()> =
-        spec.restricted_nameservers.keys().map(|k| (k, ())).collect();
-    for k in sorted.keys() {
+    // non-deterministic and our tests would flake. BTreeSet is the
+    // zero-value-friendly form of the BTreeMap<K, ()> pattern.
+    let sorted: std::collections::BTreeSet<&String> =
+        spec.restricted_nameservers.keys().collect();
+    for k in &sorted {
         if k.as_str() != spec.base_domain {
             out.push((*k).clone());
         }
@@ -552,13 +557,12 @@ pub fn spawn_extra_records_watcher(
             tokio::time::sleep(poll).await;
             match tokio::fs::metadata(&path).await {
                 Ok(meta) => match meta.modified() {
-                    Ok(m) => {
-                        if Some(m) != last_mtime {
-                            if let Some(new) = load_and_apply(&store, &path).await {
-                                last_mtime = Some(new);
-                            }
+                    Ok(m) if Some(m) != last_mtime => {
+                        if let Some(new) = load_and_apply(&store, &path).await {
+                            last_mtime = Some(new);
                         }
                     }
+                    Ok(_) => {}
                     Err(e) => tracing::warn!(?path, ?e, "extra-records mtime read failed"),
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

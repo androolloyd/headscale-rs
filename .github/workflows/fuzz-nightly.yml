@@ -44,7 +44,7 @@ jobs:
       MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
       RSS_LIMIT_MB: ${{ github.event.inputs.rss_limit_mb || '4096' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
@@ -66,7 +66,7 @@ jobs:
             2>&1 | tee "logs/${{ matrix.target }}/run.log"
       - name: Upload fuzz logs and artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-${{ matrix.target }}-${{ github.run_id }}
           if-no-files-found: ignore

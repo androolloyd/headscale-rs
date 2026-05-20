@@ -310,6 +310,15 @@ fn map_response_emits_all_caps_derp_and_dns() {
         domain: "octra.test".into(),
         keep_alive: true,
         packet_filter: vec![],
+        peers_changed: None,
+        peers_changed_patch: None,
+        peers_removed: None,
+        user_profiles: Vec::new(),
+        ssh_policy: None,
+        control_time: None,
+        debug: None,
+        collect_services: None,
+        ping_request: None,
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     assert!(v.get("DNSConfig").is_some(), "DNSConfig (all-caps)");
@@ -344,6 +353,15 @@ fn map_response_packet_filter_populated_when_nonempty() {
             }],
             ip_proto: vec![],
         }],
+        peers_changed: None,
+        peers_changed_patch: None,
+        peers_removed: None,
+        user_profiles: Vec::new(),
+        ssh_policy: None,
+        control_time: None,
+        debug: None,
+        collect_services: None,
+        ping_request: None,
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     let pf = v.get("PacketFilter").expect("PacketFilter present");

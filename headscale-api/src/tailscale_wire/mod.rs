@@ -717,7 +717,7 @@ mod registry_tests {
         c.last_seen = Utc::now() - chrono::Duration::days(7); // ancient but not ephemeral
         reg.upsert("nk-c".to_string(), c);
 
-        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
         assert_eq!(removed, vec!["nk-a".to_string()]);
         assert!(reg.get("nk-a").is_none());
         assert!(reg.get("nk-b").is_some(), "fresh ephemeral survives");
@@ -732,7 +732,7 @@ mod registry_tests {
         a.ephemeral = true;
         a.last_seen = Utc::now();
         reg.upsert("nk-a".to_string(), a);
-        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
         assert!(removed.is_empty());
         assert_eq!(reg.len(), 1);
     }

@@ -119,7 +119,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
     async fn list(&self) -> Vec<PreauthAdminKey> {
         let g = self.inner.lock();
         let mut v: Vec<_> = g.values().cloned().collect();
-        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v.sort_by_key(|key| std::cmp::Reverse(key.created_at));
         v
     }
 

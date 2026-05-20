@@ -412,15 +412,96 @@ pub struct MapNode {
     pub endpoints: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+/// `tailcfg.DNSConfig`. Mirrors the upstream Go struct field-for-field
+/// using the canonical PascalCase JSON encoding the stock daemon
+/// expects on the wire.
+///
+/// All fields are `omitempty` / `omitzero` upstream — we mirror that
+/// with `skip_serializing_if` so an unconfigured field never lands in
+/// the JSON body. The empty default (all fields zero/empty) serialises
+/// to `{}` and is byte-identical to the pre-MagicDNS shape.
+///
+/// Field set verified against
+/// `tailscale/tailcfg/tailcfg.go::DNSConfig` at upstream `main` as of
+/// 2026-05-19. `TempCorpIssue13969` is intentionally omitted (upstream
+/// debug-only field).
+///
+/// `AuthoritativeSuffixes` is **non-stock**: a headscale-rs operator
+/// extension allowing embedders to assert "the control plane is
+/// authoritative for these suffixes; do not ask the upstream
+/// resolver." Stock clients ignore unknown fields, so emitting it is
+/// safe; servers that don't set it never emit it.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DnsConfig {
-    /// MagicDNS resolvers. Empty = use system DNS.
-    #[serde(default)]
-    pub resolvers: Vec<String>,
-    /// Domains tailnet members can reach by short name.
-    #[serde(default)]
+    /// `tailcfg.DNSConfig.Resolvers` — default resolvers MagicDNS
+    /// uses for any name not covered by `Routes`. Empty ⇒ client
+    /// falls back to system DNS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolvers: Vec<DnsResolver>,
+    /// `tailcfg.DNSConfig.Routes` — split-DNS / restricted-resolver
+    /// table. Suffix → resolver list. Empty ⇒ no split DNS.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub routes: HashMap<String, Vec<DnsResolver>>,
+    /// `tailcfg.DNSConfig.FallbackResolvers` — last-resort resolvers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_resolvers: Vec<DnsResolver>,
+    /// `tailcfg.DNSConfig.Domains` — search-domain list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domains: Vec<String>,
+    /// `tailcfg.DNSConfig.Proxied` — MagicDNS enable bit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proxied: bool,
+    /// `tailcfg.DNSConfig.Nameservers` — legacy field (deprecated).
+    /// String form of `[]netip.Addr`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nameservers: Vec<String>,
+    /// `tailcfg.DNSConfig.CertDomains` — TLS-cert SAN list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cert_domains: Vec<String>,
+    /// `tailcfg.DNSConfig.ExtraRecords` — operator-supplied static
+    /// A / AAAA / CNAME records merged into MagicDNS responses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_records: Vec<DnsRecord>,
+    /// `tailcfg.DNSConfig.ExitNodeFilteredSet` — DNS suffixes the
+    /// client must not resolve through an exit node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exit_node_filtered_set: Vec<String>,
+    /// **Non-stock field.** Operator-grade extension: suffixes the
+    /// control plane is authoritative for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoritative_suffixes: Vec<String>,
+}
+
+/// `tailscale/types/dnstype/dnstype.go::Resolver`. JSON tags are
+/// `omitempty` upstream — every field is `skip_serializing_if` here
+/// so the wire stays byte-identical.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DnsResolver {
+    /// `IP[:port]` or `https://…/dns-query`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub addr: String,
+    /// IPs the client uses to bootstrap-resolve `Addr` (DoH/DoT).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bootstrap_resolution: Vec<String>,
+    /// `true` ⇒ keep using this resolver even with exit node selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_with_exit_node: bool,
+}
+
+/// `tailcfg.DNSRecord`. Operator-supplied A/AAAA/CNAME entries.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DnsRecord {
+    /// FQDN. Trailing dot optional.
+    pub name: String,
+    /// Record type — `""` ⇒ A or AAAA inferred from `Value`,
+    /// `"CNAME"`, `"AAAA"`, `"A"`.
+    #[serde(default, rename = "Type", skip_serializing_if = "String::is_empty")]
+    pub record_type: String,
+    /// Record value (IP literal for A/AAAA; hostname for CNAME).
+    pub value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

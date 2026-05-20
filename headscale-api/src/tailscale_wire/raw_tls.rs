@@ -316,8 +316,17 @@ fn is_ts2021_upgrade(buf: &[u8]) -> bool {
     let path = tokens.next().unwrap_or(b"");
     // Accept any path that *starts with* `/ts2021` so a `?key=` query
     // string variant (used by some client versions) still matches.
-    let path_ok =
-        path == b"/ts2021" || path.starts_with(b"/ts2021?") || path.starts_with(b"/ts2021/");
+    // Also accept the knock-prefixed variant `/k/<knock>/ts2021` —
+    // stock tailscale clients dial that path when the operator enables
+    // the PSK gate (see `tailscale_wire::knock`). The knock itself is
+    // VALIDATED downstream by the axum router; this peek-and-dispatch
+    // step just needs to recognise the request as a ts2021 upgrade so
+    // we hand the unbuffered TLS stream to `drive_ts2021` instead of
+    // routing it through the hyper http1 fallback.
+    let path_ok = path == b"/ts2021"
+        || path.starts_with(b"/ts2021?")
+        || path.starts_with(b"/ts2021/")
+        || super::knock::path_is_knocked_ts2021(path);
     if !path_ok {
         return false;
     }
@@ -491,6 +500,7 @@ mod tests {
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
+            knock: crate::tailscale_wire::KnockConfig::disabled(),
         };
         (state, dir)
     }

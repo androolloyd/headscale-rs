@@ -48,6 +48,7 @@ pub mod be_transport;
 pub mod controlbase;
 pub mod derp_config;
 pub mod key_handler;
+pub mod knock;
 pub mod map;
 pub mod noise;
 pub mod raw_tls;
@@ -56,6 +57,7 @@ pub mod serve;
 pub mod tls;
 pub mod wire;
 
+pub use knock::{KnockConfig, KNOCK_HEADER, KNOCK_PATH_PREFIX, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
     DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,
@@ -175,6 +177,15 @@ pub struct WireState {
     /// open `allow_all_packet_filter` recipe for backward compat with
     /// the interop test (which predates the policy surface).
     pub policy: Arc<crate::policy::PolicyStore>,
+    /// PSK-gated handshake config — third layer of the four-layer
+    /// active-probe shield. When `enabled = true`, every request to
+    /// the wire surface must carry a valid knock cookie (either as the
+    /// `X-OctraVPN-Knock` header or as a `/k/<knock_hex>/<path>` URL
+    /// prefix); otherwise the request receives a canonical nginx 404
+    /// indistinguishable from "this host runs nginx and the path is
+    /// unknown". See [`knock`] for the rationale + math. Defaults to
+    /// disabled so existing deployments keep working unchanged.
+    pub knock: KnockConfig,
 }
 
 /// In-memory machine registry.
@@ -390,7 +401,8 @@ mod registry_tests {
 /// (for `register`) or via possession of a registered node-key (for
 /// `map`).
 pub fn router(state: WireState) -> Router {
-    Router::new()
+    let knock_cfg = state.knock.clone();
+    let inner = Router::new()
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))
         .route(
@@ -404,7 +416,13 @@ pub fn router(state: WireState) -> Router {
         // and our own integration tests keep working.
         .route("/machine/register", post(register::handle_register_flat))
         .route("/machine/map", post(map::handle_map_flat))
-        .with_state(state)
+        .with_state(state);
+
+    // PSK-gated handshake — third layer of the active-probe shield.
+    // Default-off (KnockConfig::disabled()) → exact pass-through.
+    // When enabled, requests must carry a valid knock cookie or get a
+    // canonical nginx 404. See `tailscale_wire::knock` for the math.
+    knock::wrap_router(inner, knock_cfg)
 }
 
 #[cfg(test)]

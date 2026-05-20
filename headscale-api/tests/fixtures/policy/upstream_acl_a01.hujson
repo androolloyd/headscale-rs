@@ -7,15 +7,10 @@
 //   - `tagOwners` accepts both `tagOwners` and our `tag_owners`
 {
     "version": 1,
+    // Upstream's field name is `acls`; our parser accepts both `acls`
+    // and `rules` via the serde alias. Operators porting an upstream
+    // policy file don't need to rename anything.
     "acls": [
-        // upstream's `acls` array name is the legacy spelling; our
-        // parser maps it to `rules` via the unknown-field check below
-        // — see `parse_hujson_policy::rejects_acls_alias` in the
-        // tests. Operators porting an upstream policy should rename
-        // `acls` → `rules`. For this fixture we use `rules` directly
-        // so the parser accepts it as-is.
-    ],
-    "rules": [
         {"action": "accept", "src": ["autogroup:member"], "dst": ["*"], "ports": ["*/*"]}
     ],
     "auto_approvers": {

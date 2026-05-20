@@ -245,7 +245,6 @@ fn rule_with_empty_dst_is_dropped() {
     let doc = PolicyDoc {
         version: 1,
         groups: std::collections::BTreeMap::new(),
-        tags: std::collections::BTreeMap::new(),
         rules: vec![PolicyRule {
             action: PolicyAction::Accept,
             src: vec!["*".into()],
@@ -261,7 +260,6 @@ fn invalid_port_pattern_drops_rule() {
     let doc = PolicyDoc {
         version: 1,
         groups: std::collections::BTreeMap::new(),
-        tags: std::collections::BTreeMap::new(),
         rules: vec![PolicyRule {
             action: PolicyAction::Accept,
             src: vec!["*".into()],
@@ -279,7 +277,6 @@ fn legacy_star_colon_port_form_is_accepted() {
     let doc = PolicyDoc {
         version: 1,
         groups: std::collections::BTreeMap::new(),
-        tags: std::collections::BTreeMap::new(),
         rules: vec![PolicyRule {
             action: PolicyAction::Accept,
             src: vec!["*".into()],
@@ -298,7 +295,6 @@ fn port_range_with_hi_below_lo_drops_pattern() {
     let doc = PolicyDoc {
         version: 1,
         groups: std::collections::BTreeMap::new(),
-        tags: std::collections::BTreeMap::new(),
         rules: vec![PolicyRule {
             action: PolicyAction::Accept,
             src: vec!["*".into()],

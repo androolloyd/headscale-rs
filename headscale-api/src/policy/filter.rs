@@ -173,6 +173,12 @@ mod tests {
             version: 1,
             groups,
             tags: BTreeMap::new(),
+            tag_owners: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            ipsets: BTreeMap::new(),
+            auto_approvers: Default::default(),
+            node_attrs: Vec::new(),
+            ssh: Vec::new(),
             rules,
         }
     }

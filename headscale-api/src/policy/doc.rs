@@ -117,7 +117,11 @@ pub struct PolicyDoc {
     /// `ssh` grants. Parsed only — not yet compiled into `SSHPolicy`.
     #[serde(default)]
     pub ssh: Vec<SshRule>,
-    #[serde(default)]
+    /// Rule list. Upstream `juanfont/headscale` calls this field
+    /// `acls`; we accept either spelling so an operator's existing
+    /// upstream policy file round-trips through our parser without
+    /// renaming.
+    #[serde(default, alias = "acls")]
     pub rules: Vec<PolicyRule>,
 }
 

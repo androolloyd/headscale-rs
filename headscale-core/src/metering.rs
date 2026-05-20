@@ -94,9 +94,13 @@ impl MeteringSession {
             return Err(MeteringError::SessionInactive);
         }
 
+        let current = self.checked_total_bytes()?;
+        let new_total = current
+            .checked_add(bytes)
+            .ok_or(MeteringError::CounterOverflow)?;
+
         if let Some(limit) = self.config.bandwidth_limit {
-            let current = self.total_bytes();
-            if current + bytes > limit {
+            if new_total > limit {
                 return Err(MeteringError::BandwidthExceeded {
                     limit,
                     current,
@@ -115,9 +119,13 @@ impl MeteringSession {
             return Err(MeteringError::SessionInactive);
         }
 
+        let current = self.checked_total_bytes()?;
+        let new_total = current
+            .checked_add(bytes)
+            .ok_or(MeteringError::CounterOverflow)?;
+
         if let Some(limit) = self.config.bandwidth_limit {
-            let current = self.total_bytes();
-            if current + bytes > limit {
+            if new_total > limit {
                 return Err(MeteringError::BandwidthExceeded {
                     limit,
                     current,
@@ -136,10 +144,16 @@ impl MeteringSession {
             return Err(MeteringError::SessionInactive);
         }
 
-        let total_new = bytes_in + bytes_out;
+        let total_new = bytes_in
+            .checked_add(bytes_out)
+            .ok_or(MeteringError::CounterOverflow)?;
+        let current = self.checked_total_bytes()?;
+        let new_total = current
+            .checked_add(total_new)
+            .ok_or(MeteringError::CounterOverflow)?;
+
         if let Some(limit) = self.config.bandwidth_limit {
-            let current = self.total_bytes();
-            if current + total_new > limit {
+            if new_total > limit {
                 return Err(MeteringError::BandwidthExceeded {
                     limit,
                     current,
@@ -155,7 +169,9 @@ impl MeteringSession {
 
     /// Get total bytes (in + out).
     pub fn total_bytes(&self) -> u64 {
-        self.bytes_in.load(Ordering::Relaxed) + self.bytes_out.load(Ordering::Relaxed)
+        self.bytes_in
+            .load(Ordering::Relaxed)
+            .saturating_add(self.bytes_out.load(Ordering::Relaxed))
     }
 
     /// Get remaining bandwidth (if limited).
@@ -184,6 +200,13 @@ impl MeteringSession {
             active: self.active,
         }
     }
+
+    fn checked_total_bytes(&self) -> Result<u64, MeteringError> {
+        self.bytes_in
+            .load(Ordering::Relaxed)
+            .checked_add(self.bytes_out.load(Ordering::Relaxed))
+            .ok_or(MeteringError::CounterOverflow)
+    }
 }
 
 /// Snapshot of metering state (for reporting to an external billing layer).
@@ -203,7 +226,7 @@ pub struct MeteringSnapshot {
 impl MeteringSnapshot {
     /// Total bytes (in + out).
     pub fn total_bytes(&self) -> u64 {
-        self.bytes_in + self.bytes_out
+        self.bytes_in.saturating_add(self.bytes_out)
     }
 
     /// Convert to KB (for billing purposes).
@@ -230,6 +253,9 @@ pub enum MeteringError {
 
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
+
+    #[error("Metering counter overflow")]
+    CounterOverflow,
 }
 
 /// The metering service tracks bandwidth for all active sessions.
@@ -431,6 +457,39 @@ mod tests {
 
         let usage = service.get_usage(&session_id).await.unwrap();
         assert_eq!(usage.remaining, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_metering_counter_overflow_rejected() {
+        let service = MeteringService::new();
+
+        let session_id = MeteringSessionId::new("overflow-session");
+        let config = MeteringConfig {
+            bandwidth_limit: None,
+            rate_limit: None,
+            consumer_did: "did:key:alice".to_string(),
+            provider_did: "did:key:bob".to_string(),
+        };
+
+        service
+            .start_session(session_id.clone(), config)
+            .await
+            .unwrap();
+
+        service
+            .record_usage(&session_id, u64::MAX, 0)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            service.record_usage(&session_id, 1, 0).await,
+            Err(MeteringError::CounterOverflow)
+        ));
+
+        assert!(matches!(
+            service.record_usage(&session_id, u64::MAX, 1).await,
+            Err(MeteringError::CounterOverflow)
+        ));
     }
 
     #[tokio::test]

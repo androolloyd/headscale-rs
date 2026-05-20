@@ -14,12 +14,13 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 tokio = { version = "1.42", features = ["rt"] }
+ipnet = "2.9"
 
 [dependencies.headscale-core]
 path = ".."
 
 [dependencies.boringtun]
-version = "0.6"
+version = "0.7.1"
 
 # STUN parsing fuzz target
 [[bin]]
@@ -93,18 +94,18 @@ test = false
 doc = false
 bench = false
 
-# Rental lease token fuzz target
+# Metering session fuzz target
 [[bin]]
-name = "fuzz_rental"
-path = "fuzz_targets/fuzz_rental.rs"
+name = "fuzz_metering"
+path = "fuzz_targets/fuzz_metering.rs"
 test = false
 doc = false
 bench = false
 
-# Accounting pipeline fuzz target
+# Routing table fuzz target
 [[bin]]
-name = "fuzz_accounting"
-path = "fuzz_targets/fuzz_accounting.rs"
+name = "fuzz_routing"
+path = "fuzz_targets/fuzz_routing.rs"
 test = false
 doc = false
 bench = false

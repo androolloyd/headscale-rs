@@ -276,15 +276,15 @@ fn principal_one_matches(
 }
 
 fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
-    if let Some(a) = principal.addr {
-        if entry == a {
-            return true;
-        }
+    if let Some(a) = principal.addr
+        && entry == a
+    {
+        return true;
     }
-    if let Some(u) = principal.user {
-        if entry == u {
-            return true;
-        }
+    if let Some(u) = principal.user
+        && entry == u
+    {
+        return true;
     }
     false
 }

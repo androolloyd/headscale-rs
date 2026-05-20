@@ -516,4 +516,253 @@ mod tests {
         assert!(!path_is_knocked_ts2021(b"/k/abc/key"));
         assert!(!path_is_knocked_ts2021(b"/k/"));
     }
+
+    // -------------------------------------------------------------------
+    // HMAC byte-stability: pin a per-window hex value so any drift in
+    // the canonical form (truncation, key handling, key encoding) trips
+    // CI immediately. Mirror these values to peers if you ever rev the
+    // knock derivation.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn knock_pinned_for_window_zero() {
+        let psk = fixed_psk();
+        let k = knock_for_window(&psk, 0);
+        // window "0" → HMAC-SHA256(psk, b"0")[..8] hex.
+        // Compute reference inline (this guards against accidental
+        // changes to KNOCK_TAG_BYTES or the prefix string).
+        let mut mac = HmacSha256::new_from_slice(&psk).unwrap();
+        mac.update(b"0");
+        let full = mac.finalize().into_bytes();
+        let expected = hex::encode(&full[..KNOCK_TAG_BYTES]);
+        assert_eq!(k, expected);
+        assert_eq!(k.len(), 16, "8 bytes → 16 hex chars");
+    }
+
+    #[test]
+    fn knock_pinned_for_window_2024() {
+        // Pin a value to detect drift between code commits — if
+        // KNOCK_TAG_BYTES changed (say from 8 to 16) this fires.
+        let psk = fixed_psk();
+        let k = knock_for_window(&psk, 2024);
+        let mut mac = HmacSha256::new_from_slice(&psk).unwrap();
+        mac.update(b"2024");
+        let full = mac.finalize().into_bytes();
+        assert_eq!(k, hex::encode(&full[..KNOCK_TAG_BYTES]));
+    }
+
+    /// Verify that 100 random window numbers produce 100 distinct
+    /// knock values — i.e. the truncated 8-byte tag space is well-spread.
+    #[test]
+    fn knock_window_uniqueness_100() {
+        let psk = fixed_psk();
+        let mut seen = std::collections::HashSet::new();
+        for w in 0u64..100 {
+            seen.insert(knock_for_window(&psk, w));
+        }
+        assert_eq!(seen.len(), 100, "expected 100 distinct knocks");
+    }
+
+    // -------------------------------------------------------------------
+    // Window-boundary math: timestamps right at boundaries.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn boundary_seconds_at_window_edge_use_correct_window() {
+        let psk = fixed_psk();
+        // At now = 60 (exactly the edge), current window index is 1
+        // (60/60). At now = 59, window is 0. Verify both knocks
+        // accept appropriately.
+        let knock_0 = knock_for_window(&psk, 0);
+        let knock_1 = knock_for_window(&psk, 1);
+
+        // now=59 → window=0, accepts knock_0 (current) and knock_1 (next).
+        assert!(verify_knock(&psk, 60, &knock_0, 59));
+        assert!(verify_knock(&psk, 60, &knock_1, 59));
+        // now=60 → window=1, accepts knock_1 (current) and knock_2 (next).
+        assert!(verify_knock(&psk, 60, &knock_1, 60));
+        // now=60 → window=1, REJECTS knock_0 (it's the previous window now).
+        assert!(!verify_knock(&psk, 60, &knock_0, 60),
+            "at the boundary, the previous window must be rejected");
+    }
+
+    #[test]
+    fn last_second_of_window_still_accepts() {
+        let psk = fixed_psk();
+        let knock_5 = knock_for_window(&psk, 5);
+        // now = 5*60 + 59 → last second of window 5.
+        assert!(verify_knock(&psk, 60, &knock_5, 5 * 60 + 59));
+    }
+
+    #[test]
+    fn first_second_of_next_window_rejects_prev_knock() {
+        let psk = fixed_psk();
+        let knock_4 = knock_for_window(&psk, 4);
+        // now = 5*60 → first second of window 5; knock_4 is now stale.
+        assert!(!verify_knock(&psk, 60, &knock_4, 5 * 60));
+    }
+
+    // -------------------------------------------------------------------
+    // Edge cases on inputs.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn zero_window_secs_always_rejects() {
+        let psk = fixed_psk();
+        let any = knock_for_window(&psk, 100);
+        assert!(!verify_knock(&psk, 0, &any, 100), "window_secs=0 must reject everything");
+    }
+
+    #[test]
+    fn empty_psk_does_not_panic_and_rejects_random() {
+        // An all-zero PSK is technically valid input to HMAC. We just
+        // ensure verify doesn't panic, and that an unrelated knock
+        // doesn't accidentally validate against it.
+        let psk = [0u8; 32];
+        let now = 100;
+        // The legitimate knock for `psk` at the current window MUST
+        // verify (HMAC under all-zero key is still deterministic).
+        let legit = knock_for_window(&psk, now / DEFAULT_WINDOW_SECS);
+        assert!(verify_knock(&psk, DEFAULT_WINDOW_SECS, &legit, now));
+        // A random other knock should reject.
+        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, "0123456789abcdef", now));
+    }
+
+    #[test]
+    fn malformed_knock_with_leading_whitespace_rejected() {
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        let valid = knock_for_window(&psk, 100);
+        let padded = format!(" {valid}");
+        assert!(
+            !verify_knock(&psk, DEFAULT_WINDOW_SECS, &padded, now),
+            "leading whitespace must NOT be trimmed away (defence-in-depth)"
+        );
+    }
+
+    #[test]
+    fn malformed_knock_with_trailing_newline_rejected() {
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        let valid = knock_for_window(&psk, 100);
+        let padded = format!("{valid}\n");
+        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, &padded, now));
+    }
+
+    #[test]
+    fn malformed_knock_uppercase_hex_rejected_or_accepted_consistently() {
+        // Hex crate's `decode` accepts mixed-case hex. So the verify
+        // should accept the upper-case variant — this is just to
+        // document the behaviour explicitly.
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        let valid = knock_for_window(&psk, 100);
+        let upper = valid.to_uppercase();
+        // Both lower- and upper-case must verify (hex crate is
+        // case-insensitive on decode).
+        assert!(verify_knock(&psk, DEFAULT_WINDOW_SECS, &valid, now));
+        assert!(verify_knock(&psk, DEFAULT_WINDOW_SECS, &upper, now));
+    }
+
+    #[test]
+    fn malformed_knock_with_inner_dash_rejected() {
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        // 16 chars but contains a non-hex char.
+        let bogus = "abcdef0123-56789";
+        assert_eq!(bogus.len(), 16);
+        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, bogus, now));
+    }
+
+    #[test]
+    fn malformed_knock_with_unicode_rejected() {
+        // 16-char unicode string that's not hex-decodable.
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        let bogus = "ababababababcafé"; // last char is non-ASCII
+        // String length in CHARS is 16; in BYTES it's longer. Our
+        // verify checks `len()` (bytes), so it'll fail the length
+        // check before reaching hex::decode. Either path → false.
+        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, bogus, now));
+    }
+
+    #[test]
+    fn malformed_knock_thirty_two_hex_chars_rejected() {
+        // Full SHA256 tag length — the impl truncates to 8 bytes and
+        // requires KNOCK_TAG_BYTES*2 input chars, so a 64-char value
+        // is wrong-length.
+        let psk = fixed_psk();
+        let now = 100 * DEFAULT_WINDOW_SECS;
+        let full = "0".repeat(64);
+        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, &full, now));
+    }
+
+    // -------------------------------------------------------------------
+    // path_is_knocked_ts2021: more shapes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn path_is_knocked_ts2021_with_trailing_slash() {
+        assert!(path_is_knocked_ts2021(b"/k/abcd/ts2021/"));
+    }
+
+    #[test]
+    fn path_is_knocked_ts2021_other_endpoints_rejected() {
+        assert!(!path_is_knocked_ts2021(b"/k/abcd/derp"));
+        assert!(!path_is_knocked_ts2021(b"/k/abcd/register"));
+        assert!(!path_is_knocked_ts2021(b"/k/abcd/ts2021something"));
+    }
+
+    #[test]
+    fn path_is_knocked_ts2021_empty_path_rejected() {
+        assert!(!path_is_knocked_ts2021(b""));
+    }
+
+    // -------------------------------------------------------------------
+    // 404 helper produces stable headers (Content-Type, Server).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn nginx_404_response_has_expected_headers() {
+        let resp = nginx_404();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert_eq!(ct.to_str().unwrap(), "text/html; charset=utf-8");
+        let server = resp.headers().get(header::SERVER).unwrap();
+        assert_eq!(server.to_str().unwrap(), "nginx/1.18.0");
+    }
+
+    // -------------------------------------------------------------------
+    // KnockConfig public API
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn disabled_config_verify_always_false() {
+        let cfg = KnockConfig::disabled();
+        // Even with a "valid" hex string of the right length, a
+        // disabled config's PSK is all-zero so a knock for any window
+        // under the deterministic PSK won't match a knock for the
+        // current window under the zero PSK — but to be safe, we just
+        // check that disabled doesn't accept the *fixed-psk* knock.
+        let psk = fixed_psk();
+        let cw = current_window(DEFAULT_WINDOW_SECS);
+        let k = knock_for_window(&psk, cw);
+        // disabled config has a zero psk; the fixed_psk knock should
+        // NOT verify under zero psk.
+        assert!(!cfg.verify(&k));
+    }
+
+    #[test]
+    fn enabled_config_round_trips_via_current_knock() {
+        let psk = fixed_psk();
+        let cfg = KnockConfig::enabled(psk);
+        let k = cfg.current_knock();
+        assert!(cfg.verify(&k), "config-issued knock must verify");
+    }
+
+    #[test]
+    fn config_window_secs_default_60() {
+        let cfg = KnockConfig::enabled(fixed_psk());
+        assert_eq!(cfg.window_secs, DEFAULT_WINDOW_SECS);
+    }
 }

@@ -43,7 +43,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 
 pub mod be_transport;
 pub mod controlbase;
@@ -274,19 +274,72 @@ pub struct WireState {
 /// MachineRecord>>` — one Arc-bump per call, zero per-record clones.
 /// Callers iterate the borrowed map directly. The map-building hot path
 /// in [`map::map_inner`] consumes this shape.
-#[derive(Default)]
 pub struct MachineRegistry {
     /// COW: write paths clone the map, mutate, and swap a new `Arc` in.
     /// Read paths take a read lock just long enough to bump the Arc's
     /// strong count.
     inner: RwLock<Arc<HashMap<String, MachineRecord>>>,
-    /// Wakes pending `/map` long-polls when a new machine registers.
+    /// Legacy wake channel — `Notify::notify_waiters()` fires on every
+    /// upsert / lifecycle change.
+    ///
+    /// **Race note (audit-2 C-1 fix):** `notify_waiters` only delivers
+    /// to listeners already parked on `Notified`. Long-running unfold
+    /// streams (see `tailscale_wire::map`) used to re-register the
+    /// `Notified` AFTER returning a built chunk — leaving a brief gap
+    /// where wakes were dropped. The companion [`gen_tx`] /
+    /// [`gen_rx`] watch channel below is the missed-update-tolerant
+    /// path; the `Notify` stays for any caller that still wants
+    /// fan-out wake without polling a counter. Both are bumped from
+    /// the same call sites (`upsert`, `update_with`).
     pub(crate) notify: Arc<Notify>,
+    /// audit-2 C-1: generation-counter wake channel. Each mutating
+    /// call bumps the value by 1. Stream consumers hold a
+    /// [`watch::Receiver`] and await `changed()`; the receiver's
+    /// last-seen value lags the sender so any change between two
+    /// `changed()` awaits is captured by the next one. This closes
+    /// the `Notify`-only lost-wake race.
+    pub(crate) gen_tx: Arc<watch::Sender<u64>>,
+}
+
+impl Default for MachineRegistry {
+    fn default() -> Self {
+        let (gen_tx, _gen_rx) = watch::channel(0u64);
+        Self {
+            inner: RwLock::default(),
+            notify: Arc::new(Notify::new()),
+            gen_tx: Arc::new(gen_tx),
+        }
+    }
 }
 
 impl MachineRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Subscribe to the generation-counter wake channel. Each mutating
+    /// call (`upsert`, `update_with`, the lifecycle setters that route
+    /// through `update_with`) bumps the counter. Holders of a
+    /// [`watch::Receiver`] poll `changed()` from any async context;
+    /// the receiver remembers the last-seen value across `.await`
+    /// boundaries, so a change between two awaits surfaces on the
+    /// next one. See the comment on [`Self::notify`] for the
+    /// audit-2 C-1 motivation.
+    #[must_use]
+    pub fn subscribe_gen(&self) -> watch::Receiver<u64> {
+        self.gen_tx.subscribe()
+    }
+
+    /// Bump the generation counter alongside the `Notify` fan-out.
+    /// Pulled out so both `upsert` and `update_with` route through
+    /// one place — keeps the wake-channel contract DRY.
+    fn wake_waiters(&self) {
+        // `send_modify` returns the previous value but we don't need
+        // it; this just records the bump and broadcasts to every
+        // subscribed receiver. Overflow is a non-issue: u64::MAX
+        // bumps at 1 per ns is 585 years.
+        self.gen_tx.send_modify(|g| *g = g.wrapping_add(1));
+        self.notify.notify_waiters();
     }
 
     /// Insert or replace a machine record. Wakes every pending
@@ -302,7 +355,7 @@ impl MachineRegistry {
             next.insert(node_key_hex, rec);
             *g = Arc::new(next);
         }
-        self.notify.notify_waiters();
+        self.wake_waiters();
     }
 
     /// Snapshot all known machines as a single `Arc<HashMap>`. The
@@ -359,7 +412,7 @@ impl MachineRegistry {
             *g = Arc::new(next);
             r
         };
-        self.notify.notify_waiters();
+        self.wake_waiters();
         r
     }
 

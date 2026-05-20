@@ -355,8 +355,23 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
 
         // The stream's carried state is enough to re-build MapResponse
         // on each registry / policy / DNS wake.
+        //
+        // # audit-2 C-1: lost-wake fix (commit follow-up)
+        //
+        // We subscribe to the registry's generation-counter watch
+        // channel **before** taking the first chunk. The receiver
+        // remembers its last-seen generation across `.await` boundaries
+        // — any `upsert` / `update_with` that fires while this unfold
+        // is *between* iterations bumps the sender, and the next
+        // `changed().await` on the receiver returns immediately. This
+        // closes the `notify_waiters` lost-wake gap the prior
+        // implementation had (the `Notified` was re-registered AFTER
+        // the chunk was returned, so wakes fired in the gap were
+        // dropped). The companion `tokio::sync::Notify` stays on the
+        // registry for any caller that wants raw fan-out wake, but the
+        // long-poll path now consumes the watch channel exclusively.
         let machines = state.machines.clone();
-        let notify = state.machines.notify.clone();
+        let gen_rx = state.machines.subscribe_gen();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let derp_map_for_stream = state.derp_map.clone();
@@ -365,20 +380,20 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             (
                 Some(first),
                 machines,
-                notify,
+                gen_rx,
                 policy,
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
             ),
-            move |(first_opt, machines, notify, policy, self_node_key, machines_derp_map, dns)| async move {
+            move |(first_opt, machines, mut gen_rx, policy, self_node_key, machines_derp_map, dns)| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),
                         (
                             None,
                             machines,
-                            notify,
+                            gen_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
@@ -388,23 +403,34 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 }
                 // Wait for either a registry change, a policy change,
                 // a DNS extra-records edit, or a keepalive tick,
-                // whichever fires first. We park each `Notified`
-                // future inside a small scope so the Arcs aren't
-                // borrowed when we re-wrap the state for the next
-                // iteration.
+                // whichever fires first.
+                //
+                // `gen_rx.changed()` is missed-update tolerant: if the
+                // sender bumped the value between the previous chunk
+                // emission and this select, the `changed()` future
+                // returns immediately rather than parking. That's the
+                // load-bearing property that closes the audit-2 C-1
+                // race — see the registry's `wake_waiters` doc.
                 let chunk = {
-                    let notify_for_wait = notify.clone();
-                    let notified = notify_for_wait.notified();
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
                     let dns_for_wait = dns.clone();
                     let dns_changed = dns_for_wait.wait_for_change();
-                    tokio::pin!(notified);
                     tokio::pin!(policy_changed);
                     tokio::pin!(dns_changed);
                     tokio::select! {
-                    () = &mut notified => {
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                    biased;
+                    res = gen_rx.changed() => {
+                        // `Err` only happens if every sender has been
+                        // dropped — would mean the entire registry's
+                        // gone, in which case we degrade to a
+                        // keepalive frame and let the next iteration
+                        // (or stream end) handle teardown.
+                        if res.is_err() {
+                            build_keepalive_chunk()
+                        } else {
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                        }
                     }
                     () = &mut policy_changed => {
                         // Policy edited via admin PUT — every parked
@@ -428,7 +454,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                     (
                         None,
                         machines,
-                        notify,
+                        gen_rx,
                         policy,
                         self_node_key,
                         machines_derp_map,
@@ -838,12 +864,18 @@ mod tests {
         let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(first_mr.peers.len(), 0);
 
-        // Schedule the registry change for AFTER the unfold has parked
-        // on `notify.notified()`. `notify_waiters` only wakes already-
-        // parked waiters (it does NOT enqueue a pending notification),
-        // so the spawn-with-delay ordering is required — without it
-        // the wake fires before the listener is registered and the
-        // subsequent `frame()` reads a keepalive instead.
+        // Schedule the registry change. **audit-2 C-1 fix landed**:
+        // since the stream now consumes a `watch::Receiver<u64>` (see
+        // the wake-channel doc on `MachineRegistry`), the receiver's
+        // last-seen generation lags the sender across `.await`
+        // boundaries — a bump fired BEFORE the receiver is parked on
+        // `changed()` is still captured by the next call. We keep the
+        // 50ms spawn-delay here for readability (it preserves the
+        // "first chunk → wait → second chunk" pacing that makes the
+        // test easy to read), but the previous "registered listener
+        // is mandatory before the wake" hazard is gone — see the
+        // companion `stream_true_wake_during_chunk_build_is_not_lost`
+        // test below for the load-bearing proof.
         let state_for_spawn = state.clone();
         let b_clone = b.clone();
         tokio::spawn(async move {
@@ -862,6 +894,78 @@ mod tests {
             mr.peers.len(),
             1,
             "second chunk should include the newly-registered peer"
+        );
+        assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
+    }
+
+    /// audit-2 C-1: a registry change fired **before** the unfold
+    /// re-parks on `changed()` MUST still wake the next chunk.
+    ///
+    /// The prior `Notify::notified()` implementation lost wakes
+    /// emitted in the window between "previous chunk yielded" and
+    /// "next iteration registers the listener". The watch-channel
+    /// receiver is missed-update tolerant: the sender's value is
+    /// stored in the channel; if the receiver hasn't observed the
+    /// latest yet, `changed()` returns immediately. This test fires
+    /// the registry change with NO `sleep` first, exercising exactly
+    /// the gap the prior implementation lost.
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_wake_during_chunk_build_is_not_lost() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Consume the initial chunk.
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = frame.into_data().unwrap();
+
+        // CRITICAL: bump the registry IMMEDIATELY — no sleep, no yield.
+        // Under the old `Notify`-only implementation, the unfold has
+        // returned the first chunk into the framed body and is now
+        // re-entering its async block; the `Notified` listener for
+        // the second iteration has not yet been registered. The
+        // `notify_waiters()` call below would have been dropped on
+        // the floor. Under the watch-channel implementation, the
+        // sender's new value is stored; the next `changed().await`
+        // returns immediately.
+        insert_peer(&state, &b, "peer-b", 11);
+
+        // Now read the next chunk — must be the refreshed MapResponse
+        // (peers.len == 1), NOT a keepalive.
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            mr.peers.len(),
+            1,
+            "wake fired during chunk-build window must surface on the next chunk; \
+             got keepalive instead, indicating the lost-wake race regressed"
         );
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
     }

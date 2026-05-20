@@ -4,7 +4,6 @@
 //! longest-prefix-match lookups, enabling exit nodes and subnet routing.
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use std::collections::HashMap;
 use std::net::IpAddr;
 
 /// A route entry in the routing table.
@@ -33,8 +32,6 @@ pub struct RoutingTable {
     ipv4_routes: Vec<Route>,
     /// IPv6 routes, sorted by prefix length (longest first).
     ipv6_routes: Vec<Route>,
-    /// Quick lookup for exact /32 and /128 host routes.
-    host_routes: HashMap<IpAddr, String>,
 }
 
 impl RoutingTable {
@@ -47,19 +44,6 @@ impl RoutingTable {
     ///
     /// If `approved` is false, the route will be stored but not used for routing.
     pub fn add_route(&mut self, route: Route) {
-        // For host routes (/32 or /128), also add to fast lookup
-        match &route.prefix {
-            IpNet::V4(net) if net.prefix_len() == 32 && route.approved => {
-                self.host_routes
-                    .insert(IpAddr::V4(net.addr()), route.peer_id.clone());
-            }
-            IpNet::V6(net) if net.prefix_len() == 128 && route.approved => {
-                self.host_routes
-                    .insert(IpAddr::V6(net.addr()), route.peer_id.clone());
-            }
-            _ => {}
-        }
-
         // Add to appropriate list and re-sort
         // Sort by: prefix_len descending (longest first), then priority ascending (lower first)
         match &route.prefix {
@@ -92,31 +76,18 @@ impl RoutingTable {
     pub fn remove_peer_routes(&mut self, peer_id: &str) {
         self.ipv4_routes.retain(|r| r.peer_id != peer_id);
         self.ipv6_routes.retain(|r| r.peer_id != peer_id);
-        self.host_routes.retain(|_, pid| pid != peer_id);
     }
 
     /// Remove a specific route.
     pub fn remove_route(&mut self, prefix: &IpNet, peer_id: &str) {
         match prefix {
-            IpNet::V4(net) => {
+            IpNet::V4(_) => {
                 self.ipv4_routes
                     .retain(|r| !(r.prefix == *prefix && r.peer_id == peer_id));
-                if net.prefix_len() == 32 {
-                    let ip = IpAddr::V4(net.addr());
-                    if self.host_routes.get(&ip) == Some(&peer_id.to_string()) {
-                        self.host_routes.remove(&ip);
-                    }
-                }
             }
-            IpNet::V6(net) => {
+            IpNet::V6(_) => {
                 self.ipv6_routes
                     .retain(|r| !(r.prefix == *prefix && r.peer_id == peer_id));
-                if net.prefix_len() == 128 {
-                    let ip = IpAddr::V6(net.addr());
-                    if self.host_routes.get(&ip) == Some(&peer_id.to_string()) {
-                        self.host_routes.remove(&ip);
-                    }
-                }
             }
         }
     }
@@ -126,12 +97,6 @@ impl RoutingTable {
     /// Uses longest-prefix-match: the most specific matching route wins.
     /// Among routes with the same prefix length, lower priority wins.
     pub fn lookup(&self, dst: IpAddr) -> Option<&str> {
-        // Fast path: check host routes first
-        if let Some(peer_id) = self.host_routes.get(&dst) {
-            return Some(peer_id);
-        }
-
-        // Slow path: LPM through sorted routes
         let routes = match dst {
             IpAddr::V4(_) => &self.ipv4_routes,
             IpAddr::V6(_) => &self.ipv6_routes,
@@ -360,6 +325,23 @@ mod tests {
             table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
             Some("high-priority")
         );
+    }
+
+    #[test]
+    fn test_host_route_priority_and_removal() {
+        let mut table = RoutingTable::new();
+
+        table.add_route(make_route("10.0.0.5/32", "peer-lower-priority", 10));
+        table.add_route(make_route("10.0.0.5/32", "peer-higher-priority", 0));
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(table.lookup(addr), Some("peer-higher-priority"));
+
+        table.remove_route(&"10.0.0.5/32".parse().unwrap(), "peer-higher-priority");
+        assert_eq!(table.lookup(addr), Some("peer-lower-priority"));
+
+        table.remove_peer_routes("peer-lower-priority");
+        assert_eq!(table.lookup(addr), None);
     }
 
     #[test]

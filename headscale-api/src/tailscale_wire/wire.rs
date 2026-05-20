@@ -34,10 +34,31 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// One registered machine's state, kept in the in-memory
 /// `MachineRegistry` after a successful `register`.
+///
+/// ## Lifecycle fields (P1 parity with upstream `juanfont/headscale`)
+///
+/// Upstream models the node lifecycle as a Postgres-backed
+/// `gorm.Model`. `MachineRecord` mirrors the subset that affects
+/// wire-layer behaviour:
+///
+/// | upstream `hscontrol/types/node.go::Node`         | Rust field         |
+/// |-------------------------------------------------|--------------------|
+/// | `Expiry *time.Time`                              | `expiry`           |
+/// | `LastSeen *time.Time`                            | `last_seen`        |
+/// | `RegisterMethod == "authkey-ephemeral"`          | `ephemeral`        |
+/// | `CreatedAt time.Time`                            | `created_at`       |
+/// | `ForcedTags []string`                            | `forced_tags`      |
+///
+/// `Expiry` is checked on every `/map` request: an elapsed expiry
+/// causes the server to emit a logout response (upstream behaviour at
+/// `hscontrol/poll.go::handlePoll`). `LastSeen` is refreshed on every
+/// `/map` arrival so the ephemeral GC sweep can identify abandoned
+/// devices.
 #[derive(Clone, Debug)]
 pub struct MachineRecord {
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
@@ -70,6 +91,71 @@ pub struct MachineRecord {
     ///
     /// Upstream JSON tag is `Endpoints` (`tailcfg.Node.Endpoints`).
     pub endpoints: Vec<String>,
+    /// P1 (lifecycle): node-key expiry. When `Some(t)` and `t <=
+    /// now()`, the `/map` handler MUST return a logout response
+    /// (mirrors upstream `Node.IsExpired()` semantics). `None` means
+    /// "never expires" — the default for fresh registrations from
+    /// non-ephemeral preauth keys.
+    pub expiry: Option<DateTime<Utc>>,
+    /// P1 (lifecycle): last `/map` arrival timestamp. Touched at the
+    /// top of every map handler so the ephemeral GC sweep can find
+    /// abandoned devices. Set to `created_at` on initial register.
+    pub last_seen: DateTime<Utc>,
+    /// P1 (lifecycle): `true` if the registering preauth key was
+    /// marked ephemeral. The GC sweep
+    /// ([`super::MachineRegistry::gc_ephemeral`]) only collects rows
+    /// where this is `true` AND `last_seen` is older than the
+    /// configured grace period.
+    pub ephemeral: bool,
+    /// P1 (lifecycle): wall-clock when the record was first inserted
+    /// into the registry. Stable across rewrites — `set_expiry`,
+    /// `rename`, `touch_last_seen`, etc. preserve the original value.
+    pub created_at: DateTime<Utc>,
+    /// P1 (lifecycle): operator-set tags that override whatever the
+    /// registration request advertised. Empty list ⇒ no override;
+    /// upstream's `Node.ForcedTags` semantics. The admin
+    /// `POST /api/v1/machines/{id}/tags` route writes here.
+    pub forced_tags: Vec<String>,
+}
+
+impl MachineRecord {
+    /// True if `expiry` is set and has elapsed against `now`. Mirrors
+    /// upstream `Node.IsExpired()` from
+    /// `juanfont/headscale@main:hscontrol/types/node.go`.
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        match self.expiry {
+            Some(t) => now >= t,
+            None => false,
+        }
+    }
+
+    /// Build a record with the lifecycle fields stamped at `now`.
+    /// Used by [`super::register::register_inner`] + every test that
+    /// inserts a `MachineRecord` synthetically.
+    pub fn new_at(
+        now: DateTime<Utc>,
+        node_key_hex: String,
+        machine_key_hex: String,
+        user: String,
+        hostname: String,
+        ipv4: std::net::Ipv4Addr,
+        ephemeral: bool,
+    ) -> Self {
+        Self {
+            node_key_hex,
+            machine_key_hex,
+            user,
+            hostname,
+            ipv4,
+            disco_key: None,
+            endpoints: Vec::new(),
+            expiry: None,
+            last_seen: now,
+            ephemeral,
+            created_at: now,
+            forced_tags: Vec::new(),
+        }
+    }
 }
 
 /// Body of `POST /machine/{node_key}/register`.
@@ -272,6 +358,19 @@ pub struct MapResponse {
     /// Whether the client should keep polling. `true` matches stock
     /// expectations.
     pub keep_alive: bool,
+    /// P1 lifecycle: mirrors `tailcfg.MapResponse.NodeKeyExpired`. When
+    /// `true` the stock daemon treats the response as a forced
+    /// logout — it tears down its session and falls back to a fresh
+    /// register/login flow. We emit `true` here only when the server
+    /// detected an elapsed `MachineRecord.expiry` at the top of the
+    /// `/map` handler; the normal happy path stays `false` (omitted by
+    /// `skip_serializing_if`).
+    #[serde(
+        default,
+        rename = "NodeKeyExpired",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub node_key_expired: bool,
     /// Wall 7 (post-Wall-6): `tailcfg.MapResponse.PacketFilter`. Stock
     /// `tailscale` v1.78+ default-denies inter-peer traffic if this
     /// list is empty/null — the daemon reports "unknown peer" on

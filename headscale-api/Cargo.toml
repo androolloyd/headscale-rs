@@ -127,6 +127,7 @@ http = "1"
 parking_lot = "0.12"
 bytes = "1"
 hex = "0.4"
+chrono = { workspace = true }
 # `tailscale_wire::raw_tls` decodes the `X-Tailscale-Handshake` request
 # header (StdEncoding base64 — the entire controlbase-framed Initiation
 # frame). Stock Tailscale clients v1.42+ ship the Initiation in the

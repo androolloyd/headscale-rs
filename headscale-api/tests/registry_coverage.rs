@@ -12,15 +12,15 @@ use std::sync::Arc;
 use headscale_api::tailscale_wire::{MachineRecord, MachineRegistry};
 
 fn mk(host: u32, user: &str) -> MachineRecord {
-    MachineRecord {
-        node_key_hex: format!("nk-{host:08x}"),
-        machine_key_hex: format!("mk-{host:08x}"),
-        user: user.to_string(),
-        hostname: format!("h-{host}"),
-        ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
-        disco_key: None,
-        endpoints: Vec::new(),
-    }
+    MachineRecord::new_at(
+        chrono::Utc::now(),
+        format!("nk-{host:08x}"),
+        format!("mk-{host:08x}"),
+        user.to_string(),
+        format!("h-{host}"),
+        Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
+        false,
+    )
 }
 
 #[test]

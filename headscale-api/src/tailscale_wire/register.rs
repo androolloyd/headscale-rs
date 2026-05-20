@@ -145,8 +145,8 @@ async fn register_inner(
             .into_response();
     }
 
-    let user = match state.preauth.redeem(authkey).await {
-        Ok(u) => u,
+    let redeemed = match state.preauth.redeem(authkey).await {
+        Ok(ok) => ok,
         Err(RedeemError::Unknown) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -166,6 +166,7 @@ async fn register_inner(
                 .into_response();
         }
     };
+    let user = redeemed.user.clone();
 
     // Allocate a tailnet IPv4. The allocator is deterministic given
     // the user label, so a repeated register with the same user keeps
@@ -191,6 +192,12 @@ async fn register_inner(
         .as_ref()
         .map(|h| h.hostname.clone())
         .unwrap_or_default();
+    // P1 lifecycle: stamp `created_at` / `last_seen` at registration
+    // time + propagate the preauth's `ephemeral` flag. `forced_tags`
+    // adopts the preauth's tag list verbatim so the very first /map
+    // call emits the operator's intended tags; later
+    // `POST /api/v1/machines/{id}/tags` overrides on demand.
+    let now = chrono::Utc::now();
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
         machine_key_hex: String::new(),
@@ -202,6 +209,11 @@ async fn register_inner(
         // with the populated fields on the client's first map request.
         disco_key: None,
         endpoints: Vec::new(),
+        expiry: None,
+        last_seen: now,
+        ephemeral: redeemed.ephemeral,
+        created_at: now,
+        forced_tags: redeemed.tags,
     };
     state.machines.upsert(node_key_hex, rec);
 

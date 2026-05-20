@@ -153,10 +153,38 @@ pub enum NodesCmd {
         #[arg(value_name = "ID_OR_NAME")]
         id_or_name: String,
     },
-    /// Mark a node expired.
+    /// Mark a node expired. Without `--at`, expires immediately
+    /// (forces re-register on the node's next /map). With `--at`,
+    /// schedules expiry for the supplied ISO-8601 timestamp.
     Expire {
         #[arg(value_name = "ID")]
         id: String,
+        /// ISO-8601 timestamp to schedule expiry at. Defaults to "now".
+        #[arg(long, value_name = "ISO8601")]
+        at: Option<String>,
+    },
+    /// Force-logout a node — clears Noise/disco keys + stamps
+    /// expiry=now so the next /map round-trip returns a logout
+    /// response. Mirrors upstream `headscale nodes logout`.
+    Logout {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Rename a node (operator-driven hostname rewrite).
+    Rename {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(value_name = "HOSTNAME")]
+        hostname: String,
+    },
+    /// Replace the node's forced-tags list. Empty list clears the
+    /// override; tags are matched by exact string against the policy.
+    Tags {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Comma-separated tag list, e.g. `tag:prod,tag:web`.
+        #[arg(value_name = "TAGS", value_delimiter = ',')]
+        tags: Vec<String>,
     },
     /// Delete a node.
     Delete {
@@ -239,7 +267,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
     match cmd {
         NodesCmd::List { user } => nodes::list(&client, user.as_deref(), conn.fmt()).await,
         NodesCmd::Show { id_or_name } => nodes::show(&client, id_or_name, conn.fmt()).await,
-        NodesCmd::Expire { id } => nodes::expire(&client, id).await,
+        NodesCmd::Expire { id, at } => nodes::expire(&client, id, at.as_deref()).await,
+        NodesCmd::Logout { id } => nodes::logout(&client, id).await,
+        NodesCmd::Rename { id, hostname } => nodes::rename(&client, id, hostname).await,
+        NodesCmd::Tags { id, tags } => nodes::tags(&client, id, tags.clone()).await,
         NodesCmd::Delete { id } => nodes::delete(&client, id).await,
     }
 }

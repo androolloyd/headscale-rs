@@ -52,10 +52,47 @@ pub async fn show(
     Ok(())
 }
 
-pub async fn expire(client: &AdminClient, id: &str) -> Result<(), AdminError> {
+pub async fn expire(client: &AdminClient, id: &str, at: Option<&str>) -> Result<(), AdminError> {
     let path = format!("/machines/{id}/expire");
+    // Body is `{}` for immediate expiry, `{"expiry": "<rfc3339>"}` for
+    // a scheduled one. The admin route accepts an empty body too —
+    // we always send `{}` so the wire is consistent across CLI runs.
+    let body = match at {
+        Some(t) => serde_json::json!({ "expiry": t }),
+        None => serde_json::json!({}),
+    };
+    let _: serde_json::Value = post_json_no_content(client, &path, &body).await?;
+    match at {
+        Some(t) => println!("Scheduled expiry on node '{id}' at {t}"),
+        None => println!("Expired node '{id}'"),
+    }
+    Ok(())
+}
+
+pub async fn logout(client: &AdminClient, id: &str) -> Result<(), AdminError> {
+    let path = format!("/machines/{id}/logout");
     client.post_no_content(&path).await?;
-    println!("Expired node '{id}'");
+    println!("Forced logout on node '{id}'");
+    Ok(())
+}
+
+pub async fn rename(client: &AdminClient, id: &str, hostname: &str) -> Result<(), AdminError> {
+    let path = format!("/machines/{id}/rename");
+    let body = serde_json::json!({ "hostname": hostname });
+    post_json_no_content(client, &path, &body).await?;
+    println!("Renamed node '{id}' to '{hostname}'");
+    Ok(())
+}
+
+pub async fn tags(client: &AdminClient, id: &str, tags: Vec<String>) -> Result<(), AdminError> {
+    let path = format!("/machines/{id}/tags");
+    let body = serde_json::json!({ "tags": tags });
+    post_json_no_content(client, &path, &body).await?;
+    if tags.is_empty() {
+        println!("Cleared forced tags on node '{id}'");
+    } else {
+        println!("Set forced tags on node '{id}': {}", tags.join(", "));
+    }
     Ok(())
 }
 
@@ -64,6 +101,33 @@ pub async fn delete(client: &AdminClient, id: &str) -> Result<(), AdminError> {
     client.delete_no_content(&path).await?;
     println!("Deleted node '{id}'");
     Ok(())
+}
+
+/// Tiny helper: POST a JSON body and discard the (possibly empty)
+/// response. The admin route returns `204 No Content` on success; on
+/// `400`/`404` we want the error body surfaced through the standard
+/// `AdminError` mapping. Adding a fully-typed `post_json` overload to
+/// [`AdminClient`] would force callers to specify a phantom response
+/// type even when there isn't one — this shim sidesteps that.
+async fn post_json_no_content(
+    client: &AdminClient,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, AdminError> {
+    // Reuse the existing `post_json` path; the admin server's
+    // `204 No Content` arms still set Content-Length: 0 so reqwest's
+    // `json::<Value>()` call would fail. We tolerate that by treating
+    // an empty body as `Null`.
+    match client
+        .post_json::<serde_json::Value, serde_json::Value>(path, body)
+        .await
+    {
+        Ok(v) => Ok(v),
+        // `Decode` is reqwest's "couldn't json-parse the empty body"
+        // failure — equivalent to a 204 success.
+        Err(AdminError::Decode(_)) => Ok(serde_json::Value::Null),
+        Err(e) => Err(e),
+    }
 }
 
 fn render_nodes(nodes: &[MachineAdminRecord]) {

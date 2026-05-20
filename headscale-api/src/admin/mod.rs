@@ -192,7 +192,20 @@ impl MachineAdmin for NoopMachines {
     async fn get(&self, _: &str) -> Option<MachineAdminRecord> {
         None
     }
-    async fn expire(&self, id: &str) -> Result<(), MachineAdminError> {
+    async fn expire_at(
+        &self,
+        id: &str,
+        _expiry: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+    async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+    async fn rename(&self, id: &str, _h: &str) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+    async fn set_tags(&self, id: &str, _t: Vec<String>) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
@@ -242,6 +255,9 @@ pub fn router(state: AdminState) -> Router {
             axum::routing::delete(api_machines_delete),
         )
         .route("/api/v1/machines/:id/expire", post(api_machines_expire))
+        .route("/api/v1/machines/:id/logout", post(api_machines_logout))
+        .route("/api/v1/machines/:id/rename", post(api_machines_rename))
+        .route("/api/v1/machines/:id/tags", post(api_machines_tags))
         .route(
             "/api/v1/preauthkeys",
             get(api_preauth_list).post(api_preauth_mint),
@@ -756,6 +772,13 @@ async fn api_machines_get(
     }
 }
 
+#[derive(Deserialize, Default)]
+struct ApiExpireBody {
+    /// Optional ISO-8601 timestamp. Absent ⇒ expire immediately.
+    #[serde(default)]
+    expiry: Option<String>,
+}
+
 async fn api_machines_expire(
     State(s): State<AdminState>,
     Path(id): Path<String>,
@@ -764,7 +787,104 @@ async fn api_machines_expire(
     if let Err(r) = guard_api(&s, &req) {
         return r;
     }
-    match s.machines.expire(&id).await {
+    // Body is optional — empty body ⇒ expire immediately.
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 4096).await else {
+        return (StatusCode::BAD_REQUEST, "body").into_response();
+    };
+    let body: ApiExpireBody = if bytes.is_empty() {
+        ApiExpireBody::default()
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("json: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let parsed_expiry = match body.expiry.as_deref() {
+        None | Some("") => None,
+        Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
+            Ok(t) => Some(t.with_timezone(&chrono::Utc)),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid expiry: {e}")})),
+                )
+                    .into_response();
+            }
+        },
+    };
+    match s.machines.expire_at(&id, parsed_expiry).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_machines_logout(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    match s.machines.logout(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiRenameBody {
+    hostname: String,
+}
+
+async fn api_machines_rename(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    let body: ApiRenameBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match s.machines.rename(&id, &body.hostname).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::BadRequest(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiTagsBody {
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn api_machines_tags(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, &req) {
+        return r;
+    }
+    let body: ApiTagsBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match s.machines.set_tags(&id, body.tags).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }

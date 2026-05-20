@@ -310,6 +310,7 @@ fn map_response_emits_all_caps_derp_and_dns() {
         domain: "octra.test".into(),
         keep_alive: true,
         packet_filter: vec![],
+        node_key_expired: false,
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     assert!(v.get("DNSConfig").is_some(), "DNSConfig (all-caps)");
@@ -344,6 +345,7 @@ fn map_response_packet_filter_populated_when_nonempty() {
             }],
             ip_proto: vec![],
         }],
+        node_key_expired: false,
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     let pf = v.get("PacketFilter").expect("PacketFilter present");
@@ -437,19 +439,23 @@ fn derp_map_omit_default_regions_round_trip() {
 
 #[test]
 fn machine_record_clone_preserves_wall7_fields() {
-    let rec = MachineRecord {
-        node_key_hex: "nk".into(),
-        machine_key_hex: "mk".into(),
-        user: "u".into(),
-        hostname: "h".into(),
-        ipv4: std::net::Ipv4Addr::new(100, 64, 0, 5),
-        disco_key: Some("dk".into()),
-        endpoints: vec!["1.2.3.4:5".into(), "5.6.7.8:9".into()],
-    };
+    let mut rec = MachineRecord::new_at(
+        chrono::Utc::now(),
+        "nk".into(),
+        "mk".into(),
+        "u".into(),
+        "h".into(),
+        std::net::Ipv4Addr::new(100, 64, 0, 5),
+        false,
+    );
+    rec.disco_key = Some("dk".into());
+    rec.endpoints = vec!["1.2.3.4:5".into(), "5.6.7.8:9".into()];
     let cloned = rec.clone();
     assert_eq!(cloned.disco_key, rec.disco_key);
     assert_eq!(cloned.endpoints, rec.endpoints);
     assert_eq!(cloned.ipv4, rec.ipv4);
+    assert_eq!(cloned.created_at, rec.created_at);
+    assert_eq!(cloned.last_seen, rec.last_seen);
 }
 
 // ---------------------------------------------------------------------------

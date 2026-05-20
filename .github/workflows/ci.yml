@@ -88,7 +88,7 @@ jobs:
         with:
           workspaces: |
             headscale-core/fuzz -> target
-      - run: cargo install cargo-fuzz --locked
+      - run: cargo install cargo-fuzz
       - name: Build all fuzz targets
         working-directory: headscale-core/fuzz
         run: |

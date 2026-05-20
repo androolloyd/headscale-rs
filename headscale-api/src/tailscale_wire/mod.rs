@@ -43,7 +43,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use thiserror::Error;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{Notify, watch};
 
 pub mod be_transport;
 pub mod controlbase;

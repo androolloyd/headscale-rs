@@ -386,7 +386,15 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 derp_map_for_stream,
                 dns_for_stream,
             ),
-            move |(first_opt, machines, mut gen_rx, policy, self_node_key, machines_derp_map, dns)| async move {
+            move |(
+                first_opt,
+                machines,
+                mut gen_rx,
+                policy,
+                self_node_key,
+                machines_derp_map,
+                dns,
+            )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),

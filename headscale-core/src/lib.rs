@@ -17,6 +17,7 @@
 //! events from the `metering` module.
 
 pub mod acl;
+pub mod authorization;
 pub mod config;
 pub mod derp;
 pub mod endpoint;

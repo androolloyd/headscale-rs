@@ -113,6 +113,11 @@ anyhow = "1.0"
 prometheus-client = "0.22"
 once_cell = "1.20"
 
+# Timestamps — UTC `DateTime`s for machine lifecycle (expiry / last_seen /
+# created_at). Matches upstream `juanfont/headscale`'s use of
+# `gorm.DeletedAt` + `time.Time` on the `Node` model.
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+
 # Internal crates
 headscale-core = { path = "headscale-core" }
 headscale-identity = { path = "headscale-identity" }

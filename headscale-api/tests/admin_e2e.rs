@@ -29,27 +29,27 @@ fn fixture_state() -> AdminState {
     // Two fixture machines so list-vs-detail tests can't false-positive.
     reg.upsert(
         hex::encode([0xaa; 32]),
-        MachineRecord {
-            node_key_hex: hex::encode([0xaa; 32]),
-            machine_key_hex: hex::encode([0xbb; 32]),
-            user: "alice".into(),
-            hostname: "alice-laptop".into(),
-            ipv4: std::net::Ipv4Addr::new(100, 64, 0, 5),
-            disco_key: None,
-            endpoints: Vec::new(),
-        },
+        MachineRecord::new_at(
+            chrono::Utc::now(),
+            hex::encode([0xaa; 32]),
+            hex::encode([0xbb; 32]),
+            "alice".into(),
+            "alice-laptop".into(),
+            std::net::Ipv4Addr::new(100, 64, 0, 5),
+            false,
+        ),
     );
     reg.upsert(
         hex::encode([0xcc; 32]),
-        MachineRecord {
-            node_key_hex: hex::encode([0xcc; 32]),
-            machine_key_hex: hex::encode([0xdd; 32]),
-            user: "bob".into(),
-            hostname: "bob-server".into(),
-            ipv4: std::net::Ipv4Addr::new(100, 64, 0, 6),
-            disco_key: None,
-            endpoints: Vec::new(),
-        },
+        MachineRecord::new_at(
+            chrono::Utc::now(),
+            hex::encode([0xcc; 32]),
+            hex::encode([0xdd; 32]),
+            "bob".into(),
+            "bob-server".into(),
+            std::net::Ipv4Addr::new(100, 64, 0, 6),
+            false,
+        ),
     );
     AdminState::builder()
         .bearer_token(BEARER)

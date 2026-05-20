@@ -29,15 +29,15 @@ fn fixture_state_with_policy(policy: PolicyStore) -> AdminState {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert(
         "aa".repeat(32),
-        MachineRecord {
-            node_key_hex: "aa".repeat(32),
-            machine_key_hex: "bb".repeat(32),
-            user: "alice".into(),
-            hostname: "node-1".into(),
-            ipv4: std::net::Ipv4Addr::new(100, 64, 0, 5),
-            disco_key: None,
-            endpoints: Vec::new(),
-        },
+        MachineRecord::new_at(
+            chrono::Utc::now(),
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "alice".into(),
+            "node-1".into(),
+            std::net::Ipv4Addr::new(100, 64, 0, 5),
+            false,
+        ),
     );
     AdminState::builder()
         .bearer_token(BEARER)

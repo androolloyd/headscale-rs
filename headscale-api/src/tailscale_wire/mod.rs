@@ -39,6 +39,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -63,6 +64,10 @@ pub use wire::{
     DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,
     RegisterResponse,
 };
+
+// Re-export the lifecycle helper so downstream crates can spawn the GC
+// sweep without reaching into the module path.
+pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
 
 /// Error type for the Tailscale-wire handlers.
 #[derive(Debug, Error)]
@@ -110,19 +115,72 @@ pub enum AllocError {
     Internal(String),
 }
 
+/// What a successful preauth redemption produces. Carries the user
+/// label (legacy single-field contract) plus the lifecycle flags the
+/// register handler needs to stamp the resulting `MachineRecord`.
+///
+/// Constructed via `RedeemOk::for_user("alice")` for the simple case;
+/// callers that mint ephemeral preauth keys set `.ephemeral(true)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedeemOk {
+    /// User label bound to the redeemed preauth key.
+    pub user: String,
+    /// True if the redeemed key was minted ephemeral. The wire layer
+    /// stamps the resulting `MachineRecord.ephemeral` accordingly so
+    /// the ephemeral-GC sweep can find the device after it goes
+    /// silent.
+    pub ephemeral: bool,
+    /// Tags the preauth key embedded. Empty list ⇒ no tag binding;
+    /// non-empty lists land on `MachineRecord.forced_tags` so the
+    /// rendered MapNode carries them. Operators can later override
+    /// via `POST /api/v1/machines/{id}/tags`.
+    pub tags: Vec<String>,
+}
+
+impl RedeemOk {
+    /// Construct the "plain success" shape — user-only, no ephemeral,
+    /// no tags. Backwards-compatible with the original `String` return
+    /// type.
+    pub fn for_user(user: impl Into<String>) -> Self {
+        Self {
+            user: user.into(),
+            ephemeral: false,
+            tags: Vec::new(),
+        }
+    }
+    pub fn ephemeral(mut self, e: bool) -> Self {
+        self.ephemeral = e;
+        self
+    }
+    pub fn tags(mut self, t: Vec<String>) -> Self {
+        self.tags = t;
+        self
+    }
+}
+
+impl From<String> for RedeemOk {
+    fn from(user: String) -> Self {
+        Self::for_user(user)
+    }
+}
+
 /// Redeems Tailscale preauth tokens against whatever policy / billing
 /// surface the embedding host enforces.
 ///
 /// The wire layer hands a token string off to this trait and receives
-/// either a bound `user` label (which lands in the `MachineRecord` +
-/// `RegisterResponse`) or a [`RedeemError`].
+/// either a [`RedeemOk`] (bound user + ephemeral/tags flags) or a
+/// [`RedeemError`].
 ///
 /// Async because production impls may need to talk to a database or
 /// rate-limit service; the in-tree OctraVPN bridge is sync but adopts
 /// the async signature trivially.
+///
+/// Legacy impls that return only a `String` user label can call
+/// `redeem` → `Ok(user_string.into())` to satisfy the trait — `From<String>`
+/// is implemented for [`RedeemOk`].
 #[async_trait]
 pub trait PreauthRedeemer: Send + Sync {
-    async fn redeem(&self, key: &str) -> Result<String, RedeemError>;
+    async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError>;
 }
 
 /// Allocates a tailnet IPv4 for a registering node.
@@ -270,6 +328,192 @@ impl MachineRegistry {
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
     }
+
+    // ---- P1 lifecycle parity (juanfont/headscale@main:hscontrol/db/node.go) ----
+
+    /// Copy-on-write mutate the map: clones the current inner Arc once,
+    /// applies `f`, swaps the new Arc in atomically, and wakes every
+    /// long-poll waiter.
+    ///
+    /// All lifecycle mutators (`set_expiry`, `rename`, `logout`,
+    /// `delete`, `touch_last_seen`, `set_forced_tags`,
+    /// `gc_ephemeral`) route through this helper so the COW pattern is
+    /// expressed exactly once. Returns whatever `f` returns — typically
+    /// a Result so callers can distinguish "node not found" from
+    /// "applied".
+    pub fn update_with<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
+    {
+        let r = {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            let r = f(&mut next);
+            *g = Arc::new(next);
+            r
+        };
+        self.notify.notify_waiters();
+        r
+    }
+
+    /// Re-key a machine's `expiry`. `None` ⇒ "never expires"; the most
+    /// common admin action is `Some(now())` which forces an immediate
+    /// logout on the next `/map` request.
+    ///
+    /// Returns `true` if the node existed and was updated, `false`
+    /// otherwise. Mirrors `db.SetExpiry` in
+    /// `juanfont/headscale@main:hscontrol/db/node.go`.
+    pub fn set_expiry(&self, node_key_hex: &str, expiry: Option<DateTime<Utc>>) -> bool {
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.expiry = expiry;
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Rename a machine. Upstream's `db.NodeRenameNode` validates
+    /// against a regex; we trust the admin layer to have done that. An
+    /// empty `new_hostname` is rejected as a no-op (returns `false`)
+    /// because the upstream behaviour is identical.
+    pub fn rename(&self, node_key_hex: &str, new_hostname: String) -> bool {
+        if new_hostname.is_empty() {
+            return false;
+        }
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.hostname = new_hostname;
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Logout a machine: clears the Noise/ed25519 key material so the
+    /// next request can't fast-path past register, and stamps
+    /// `expiry = now()` so the next `/map` round-trip returns a logout
+    /// response.
+    ///
+    /// Mirrors `db.NodeLogout`. The record stays in the registry —
+    /// upstream behaviour is "logged-out node still exists, but must
+    /// re-authenticate." `delete` is the destructive counterpart.
+    pub fn logout(&self, node_key_hex: &str) -> bool {
+        let now = Utc::now();
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.machine_key_hex.clear();
+                rec.disco_key = None;
+                rec.endpoints.clear();
+                rec.expiry = Some(now);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Remove a machine from the registry entirely. Mirrors
+    /// `db.DeleteNode`. Returns `true` on success.
+    pub fn delete(&self, node_key_hex: &str) -> bool {
+        self.update_with(|map| map.remove(node_key_hex).is_some())
+    }
+
+    /// Stamp `last_seen = now()` on the given node. Called from the
+    /// top of every `/map` handler so the ephemeral GC sweep can find
+    /// abandoned devices.
+    ///
+    /// **Perf note:** the COW clone is O(n) in the registry size. For
+    /// the in-memory profile we expect (≤ low thousands of nodes per
+    /// embedder) the clone runs in ~50µs on a populated registry — the
+    /// `snapshot_vs_legacy_all_microbench` in this module's tests
+    /// covers the same allocation profile, and the legacy `all()`
+    /// emulation (which clones the same map) runs at ~5 µs per 256-row
+    /// iter, so the touch is firmly in the sub-100 µs band even on a
+    /// 4096-row registry. If that proves too hot under sustained
+    /// /map traffic we can move `last_seen` into a separate
+    /// `DashMap<String, AtomicI64>` so touches don't clone the main
+    /// registry; the API stays the same.
+    pub fn touch_last_seen(&self, node_key_hex: &str) -> bool {
+        let now = Utc::now();
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.last_seen = now;
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Replace a machine's `forced_tags` list. Empty list ⇒ clear the
+    /// override. Mirrors upstream's `db.SetTags` (the writer of
+    /// `Node.ForcedTags`).
+    pub fn set_forced_tags(&self, node_key_hex: &str, tags: Vec<String>) -> bool {
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.forced_tags = tags;
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Remove every ephemeral node whose `last_seen` is older than
+    /// `grace`. Returns the list of `node_key_hex` strings that were
+    /// removed. Mirrors `db.EphemeralGarbageCollect` /
+    /// `db.ListEphemeralNodes` from
+    /// `juanfont/headscale@main:hscontrol/db/node.go`.
+    ///
+    /// Non-ephemeral nodes are ignored. Ephemeral nodes that have been
+    /// seen within `grace` are also ignored — operators wire this to a
+    /// 60s tokio task and the upstream default grace is ~120s.
+    pub fn gc_ephemeral(&self, grace: std::time::Duration) -> Vec<String> {
+        let now = Utc::now();
+        let cutoff_chrono =
+            chrono::Duration::from_std(grace).unwrap_or(chrono::Duration::seconds(0));
+        let deadline = now - cutoff_chrono;
+        self.update_with(|map| {
+            let to_drop: Vec<String> = map
+                .iter()
+                .filter(|(_, rec)| rec.ephemeral && rec.last_seen < deadline)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in &to_drop {
+                map.remove(k);
+            }
+            to_drop
+        })
+    }
+}
+
+/// Background sweep that calls [`MachineRegistry::gc_ephemeral`] every
+/// `interval`. Spawn at server startup; the returned `JoinHandle` aborts
+/// on drop. Upstream's default tick is 60s.
+///
+/// `grace` is forwarded verbatim to `gc_ephemeral`. The first sweep runs
+/// after `interval` has elapsed (matches Tailscale's behaviour — no
+/// startup sweep so a still-restarting fleet doesn't get reaped).
+pub fn spawn_ephemeral_gc(
+    machines: Arc<MachineRegistry>,
+    interval: std::time::Duration,
+    grace: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        // `interval` fires immediately by default; skip the first one so
+        // newly-registered ephemerals get their grace.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let removed = machines.gc_ephemeral(grace);
+            if !removed.is_empty() {
+                tracing::info!(
+                    target = "tailscale_wire::gc",
+                    count = removed.len(),
+                    "ephemeral GC removed nodes"
+                );
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -290,6 +534,7 @@ mod registry_tests {
     use std::net::Ipv4Addr;
 
     fn mk_record(host: u32) -> MachineRecord {
+        let now = Utc::now();
         MachineRecord {
             node_key_hex: format!("nodekey-{host:08x}"),
             machine_key_hex: format!("mkey-{host:08x}"),
@@ -298,6 +543,11 @@ mod registry_tests {
             ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
             disco_key: Some(format!("disco-{host:08x}")),
             endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],
+            expiry: None,
+            last_seen: now,
+            ephemeral: false,
+            created_at: now,
+            forced_tags: Vec::new(),
         }
     }
 
@@ -338,6 +588,162 @@ mod registry_tests {
         }
         assert_eq!(snap.len(), 8, "old snapshot must not see new writes");
         assert_eq!(reg.snapshot().len(), 108);
+    }
+
+    // ---- P1 lifecycle parity tests -------------------------------------
+
+    /// `set_expiry` writes the field + survives subsequent snapshots.
+    /// Upstream `db.SetExpiry` parity.
+    #[test]
+    fn set_expiry_persists_and_survives_snapshot() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(1));
+        let when = Utc::now() + chrono::Duration::seconds(60);
+        assert!(reg.set_expiry("nk-a", Some(when)));
+        let snap = reg.snapshot();
+        let rec = snap.get("nk-a").unwrap();
+        assert_eq!(rec.expiry, Some(when));
+
+        // Clear it.
+        assert!(reg.set_expiry("nk-a", None));
+        assert!(reg.get("nk-a").unwrap().expiry.is_none());
+
+        // Unknown key → false (no mutation).
+        assert!(!reg.set_expiry("nk-zzz", Some(when)));
+    }
+
+    /// `rename` rewrites hostname; empty input is a no-op.
+    #[test]
+    fn rename_writes_hostname() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(2));
+        assert!(reg.rename("nk-a", "newhost".into()));
+        assert_eq!(reg.get("nk-a").unwrap().hostname, "newhost");
+
+        // Empty rejected.
+        assert!(!reg.rename("nk-a", String::new()));
+        assert_eq!(reg.get("nk-a").unwrap().hostname, "newhost");
+
+        // Unknown rejected.
+        assert!(!reg.rename("nk-zzz", "x".into()));
+    }
+
+    /// `logout` clears Noise/disco keys + endpoints AND stamps expiry.
+    #[test]
+    fn logout_clears_keys_and_stamps_expiry() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(3));
+        let before = Utc::now();
+        assert!(reg.logout("nk-a"));
+        let rec = reg.get("nk-a").unwrap();
+        assert!(rec.machine_key_hex.is_empty());
+        assert!(rec.disco_key.is_none());
+        assert!(rec.endpoints.is_empty());
+        // Expiry set to ~now (no more than 1s in the future since `logout` ran).
+        let exp = rec.expiry.expect("expiry stamped");
+        assert!(exp >= before);
+        assert!(exp <= Utc::now() + chrono::Duration::seconds(1));
+        assert!(rec.is_expired_at(Utc::now()));
+    }
+
+    /// `delete` removes the record entirely.
+    #[test]
+    fn delete_removes_record() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        reg.upsert("nk-b".to_string(), mk_record(5));
+        assert!(reg.delete("nk-a"));
+        assert!(reg.get("nk-a").is_none());
+        assert_eq!(reg.len(), 1);
+        // Idempotency: second delete returns false.
+        assert!(!reg.delete("nk-a"));
+    }
+
+    /// `touch_last_seen` advances the timestamp.
+    #[test]
+    fn touch_last_seen_advances() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(6));
+        let before = reg.get("nk-a").unwrap().last_seen;
+        // Spin briefly to ensure the wall-clock ticks past `before`.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(reg.touch_last_seen("nk-a"));
+        let after = reg.get("nk-a").unwrap().last_seen;
+        assert!(after > before, "touch should advance last_seen");
+        assert!(!reg.touch_last_seen("nk-zzz"));
+    }
+
+    /// `set_forced_tags` round-trip + override semantics.
+    #[test]
+    fn set_forced_tags_replaces_list() {
+        let reg = MachineRegistry::new();
+        reg.upsert("nk-a".to_string(), mk_record(7));
+        assert!(reg.set_forced_tags("nk-a", vec!["tag:dev".into(), "tag:ci".into()]));
+        let rec = reg.get("nk-a").unwrap();
+        assert_eq!(rec.forced_tags, vec!["tag:dev", "tag:ci"]);
+        // Replace, not merge.
+        assert!(reg.set_forced_tags("nk-a", vec!["tag:prod".into()]));
+        assert_eq!(reg.get("nk-a").unwrap().forced_tags, vec!["tag:prod"]);
+        // Empty list clears.
+        assert!(reg.set_forced_tags("nk-a", Vec::new()));
+        assert!(reg.get("nk-a").unwrap().forced_tags.is_empty());
+    }
+
+    /// `gc_ephemeral` only collects ephemeral rows where last_seen is
+    /// older than `grace`. Non-ephemeral rows are never touched.
+    #[test]
+    fn gc_ephemeral_only_collects_stale_ephemerals() {
+        let reg = MachineRegistry::new();
+
+        let mut a = mk_record(10);
+        a.ephemeral = true;
+        a.last_seen = Utc::now() - chrono::Duration::seconds(120);
+        reg.upsert("nk-a".to_string(), a);
+
+        let mut b = mk_record(11);
+        b.ephemeral = true;
+        b.last_seen = Utc::now(); // fresh, must survive
+        reg.upsert("nk-b".to_string(), b);
+
+        let mut c = mk_record(12);
+        c.ephemeral = false;
+        c.last_seen = Utc::now() - chrono::Duration::days(7); // ancient but not ephemeral
+        reg.upsert("nk-c".to_string(), c);
+
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        assert_eq!(removed, vec!["nk-a".to_string()]);
+        assert!(reg.get("nk-a").is_none());
+        assert!(reg.get("nk-b").is_some(), "fresh ephemeral survives");
+        assert!(reg.get("nk-c").is_some(), "non-ephemeral never touched");
+    }
+
+    /// `gc_ephemeral` returns an empty list when nothing matches.
+    #[test]
+    fn gc_ephemeral_noop_when_nothing_stale() {
+        let reg = MachineRegistry::new();
+        let mut a = mk_record(20);
+        a.ephemeral = true;
+        a.last_seen = Utc::now();
+        reg.upsert("nk-a".to_string(), a);
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        assert!(removed.is_empty());
+        assert_eq!(reg.len(), 1);
+    }
+
+    /// `is_expired_at` mirrors upstream `Node.IsExpired`: `None` means
+    /// "never"; `Some(t)` with `t <= now` is expired.
+    #[test]
+    fn is_expired_at_semantics() {
+        let mut r = mk_record(99);
+        // No expiry.
+        assert!(!r.is_expired_at(Utc::now()));
+        // Expiry in the future.
+        let later = Utc::now() + chrono::Duration::seconds(60);
+        r.expiry = Some(later);
+        assert!(!r.is_expired_at(Utc::now()));
+        // At/after expiry.
+        r.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert!(r.is_expired_at(Utc::now()));
     }
 
     /// Microbench: 1000 iterations of "snapshot then walk every
@@ -434,7 +840,8 @@ pub(crate) mod test_support {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
-    /// In-memory preauth redeemer: keys → user labels.
+    /// In-memory preauth redeemer: keys → user labels (+ optional
+    /// ephemeral / tags metadata).
     ///
     /// Single-use: a successful redeem removes the key from the map so
     /// the second redeem of the same token returns
@@ -442,15 +849,25 @@ pub(crate) mod test_support {
     /// non-reusable default.
     #[derive(Default, Clone)]
     pub struct MockRedeemer {
-        pub inner: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+        pub inner: Arc<parking_lot::RwLock<HashMap<String, RedeemOk>>>,
     }
 
     impl MockRedeemer {
         pub fn new() -> Self {
             Self::default()
         }
+        /// Insert a plain key → user mapping (non-ephemeral, no tags).
         pub fn insert(&self, key: impl Into<String>, user: impl Into<String>) {
-            self.inner.write().insert(key.into(), user.into());
+            self.inner
+                .write()
+                .insert(key.into(), RedeemOk::for_user(user.into()));
+        }
+        /// Insert a key with explicit lifecycle metadata (ephemeral
+        /// flag + tags). Used by the lifecycle tests to exercise the
+        /// ephemeral-GC path.
+        #[allow(dead_code)] // used by external integration tests
+        pub fn insert_full(&self, key: impl Into<String>, ok: RedeemOk) {
+            self.inner.write().insert(key.into(), ok);
         }
         pub fn contains(&self, key: &str) -> bool {
             self.inner.read().contains_key(key)
@@ -459,10 +876,10 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl PreauthRedeemer for MockRedeemer {
-        async fn redeem(&self, key: &str) -> Result<String, RedeemError> {
+        async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
             let mut g = self.inner.write();
             match g.remove(key) {
-                Some(user) => Ok(user),
+                Some(ok) => Ok(ok),
                 None => Err(RedeemError::Unknown),
             }
         }

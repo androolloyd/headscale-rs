@@ -37,7 +37,7 @@ struct AlwaysRejectRedeemer;
 
 #[async_trait]
 impl PreauthRedeemer for AlwaysRejectRedeemer {
-    async fn redeem(&self, _key: &str) -> Result<String, RedeemError> {
+    async fn redeem(&self, _key: &str) -> Result<headscale_api::tailscale_wire::RedeemOk, RedeemError> {
         Err(RedeemError::Unknown)
     }
 }

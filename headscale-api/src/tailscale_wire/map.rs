@@ -186,6 +186,22 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             .into_response();
     };
 
+    // P1 lifecycle: stamp `last_seen` on every /map arrival.
+    // (Mirrors upstream's `db.UpdateNodeFromMapRequest`.) The COW
+    // update is O(n) in registry size; the perf concern is documented
+    // on `MachineRegistry::touch_last_seen` itself.
+    state.machines.touch_last_seen(&node_key_hex);
+
+    // P1 lifecycle: if `expiry` is set and elapsed, return a logout
+    // response so the client tears down its session and re-registers.
+    // Upstream behaviour at `hscontrol/poll.go::handlePoll` — a
+    // `MapResponse` carrying `NodeKeyExpired: true` (plus the same
+    // fields a fresh map would have, sans peers) tells stock
+    // `tailscale` to fall back to its login flow.
+    if own.is_expired_at(chrono::Utc::now()) {
+        return logout_map_response(&own, &node_key_hex);
+    }
+
     // Wall 7: persist client-provided DiscoKey + Endpoints from
     // `MapRequest` into the `MachineRecord` so subsequent map calls
     // for OTHER peers see them on this peer's `MapNode`. Stock
@@ -285,6 +301,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // [`build_keepalive_chunk`]'s separate `{"KeepAlive":true}`
         // payload — never inlined here.
         keep_alive: false,
+        node_key_expired: false,
     };
     let _ = stable_id_from_key(&node_key_hex); // tickle import-used assertion
 
@@ -430,8 +447,29 @@ fn rebuild_map_chunk(
         domain: TAILNET_DOMAIN.into(),
         packet_filter: packet_filter_for(policy),
         keep_alive: false,
+        node_key_expired: false,
     };
     build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
+}
+
+/// P1 lifecycle: emit a `MapResponse` flagged as a forced logout. The
+/// stock daemon reads `NodeKeyExpired: true` and falls back to its
+/// register/login flow. We strip peers + packet_filter to keep the
+/// payload minimal — the client only needs the expired bit.
+fn logout_map_response(rec: &crate::tailscale_wire::MachineRecord, node_key_hex: &str) -> Response {
+    let mr = MapResponse {
+        key_expiry_extension: 0,
+        node: super::register::record_to_map_node(rec, TAILNET_DOMAIN),
+        peers: Vec::new(),
+        dns_config: DnsConfig::default(),
+        derp_map: crate::tailscale_wire::wire::DerpMap::default(),
+        domain: TAILNET_DOMAIN.into(),
+        packet_filter: Vec::new(),
+        keep_alive: false,
+        node_key_expired: true,
+    };
+    let _ = node_key_hex; // node_key_hex is part of the caller's context — pin for future logging.
+    Json(mr).into_response()
 }
 
 /// Encode a MapResponse into the wire framing the streaming
@@ -509,15 +547,15 @@ mod tests {
     fn insert_peer(state: &WireState, node_hex: &str, host: &str, last_octet: u8) {
         state.machines.upsert(
             node_hex.to_string(),
-            MachineRecord {
-                node_key_hex: node_hex.to_string(),
-                machine_key_hex: String::new(),
-                user: "u".into(),
-                hostname: host.into(),
-                ipv4: Ipv4Addr::new(100, 64, 0, last_octet),
-                disco_key: None,
-                endpoints: Vec::new(),
-            },
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_hex.to_string(),
+                String::new(),
+                "u".into(),
+                host.into(),
+                Ipv4Addr::new(100, 64, 0, last_octet),
+                false,
+            ),
         );
     }
 
@@ -996,6 +1034,7 @@ mod tests {
             domain: TAILNET_DOMAIN.into(),
             keep_alive: true,
             packet_filter: allow_all_packet_filter(),
+            node_key_expired: false,
         };
         let bytes = build_framed_chunk(&mr).expect("framed chunk encodes");
         // Decode the way upstream does.

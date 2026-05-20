@@ -501,6 +501,7 @@ mod tests {
             machines: Arc::new(MachineRegistry::new()),
             derp_map: Arc::new(DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
+            knock: crate::tailscale_wire::KnockConfig::disabled(),
         };
         (state, dir)
     }

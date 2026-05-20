@@ -32,8 +32,9 @@ full = [
 # maud dep entirely.
 admin = [
     "dep:maud",
-    "dep:hmac",
-    "dep:sha2",
+    # `hmac` + `sha2` are non-optional now (the knock layer needs them
+    # outside the admin gate); admin shares the same crates without a
+    # separate dep activation.
     "dep:serde_urlencoded",
     "dep:rand_core",
 ]
@@ -59,6 +60,15 @@ headscale-payments = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tower = { version = "0.5", features = ["util"] }
 futures = { version = "0.3", optional = true }
+
+# Knock layer (PSK-gated handshake; `tailscale_wire::knock`). Lives in
+# the wire-default feature set because every wire-layer embedder gets
+# the knock middleware whether or not they enable the admin GUI. The
+# admin feature reuses the same `hmac` + `sha2` crates (see the
+# `admin` feature block above — it forces the `dep:` activations even
+# when downstream callers disable `default-features`).
+hmac = "0.12"
+sha2 = "0.10"
 
 # Tailscale wire-protocol layer (migrated from
 # octravpn-mesh::tailscale_wire 2026-05-19). The Noise IK handshake
@@ -134,8 +144,9 @@ zstd = { version = "0.13", default-features = false }
 # already live in the transitive dep tree, so this adds zero net
 # crates to the build graph — only their `dep:` activation.
 maud = { version = "0.27", features = ["axum"], optional = true }
-hmac = { version = "0.12", optional = true }
-sha2 = { version = "0.10", optional = true }
+# `hmac` + `sha2` are now non-optional (declared above) because the
+# knock layer (`tailscale_wire::knock`) needs them in the wire-default
+# feature set. Listing them here would shadow that.
 serde_urlencoded = { version = "0.7", optional = true }
 rand_core = { workspace = true, optional = true }
 

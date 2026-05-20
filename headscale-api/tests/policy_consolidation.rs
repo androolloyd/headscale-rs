@@ -72,7 +72,8 @@ fn raw_round_trip_preserves_url_with_double_slashes() {
 #[test]
 fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let store = PolicyStore::new();
-    let raw = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+    let raw =
+        r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc.clone(), raw.to_string());
     let store_rules = store.filter_rules();

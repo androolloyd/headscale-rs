@@ -150,16 +150,10 @@ fn pure_comments_yields_json_error() {
 }
 
 #[test]
-fn missing_required_version_field_is_schema_error() {
-    // `version` is non-default — without it serde_json fails the
-    // schema check, surfaced as `PolicyParseError::Schema`.
+fn missing_version_defaults_to_headscale_go_policy_version() {
     let raw = r#"{ "rules": [] }"#;
-    let err = parse_hujson_policy(raw).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("missing field") && msg.contains("version"),
-        "expected schema diagnostic naming 'version', got: {msg}"
-    );
+    let doc = parse_hujson_policy(raw).unwrap();
+    assert_eq!(doc.version, 1);
 }
 
 #[test]

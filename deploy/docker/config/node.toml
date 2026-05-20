@@ -14,6 +14,23 @@ storage = false
 compute = false
 seed = false
 
+# Embedded DERP server (P1, `docs/headscale-gap-analysis.md` §5).
+# Disabled by default. When enabled, mounts `/derp/probe`,
+# `/bootstrap-dns`, `/verify`, optionally binds a UDP STUN
+# responder, and optionally spawns the upstream `derper` Go binary
+# to handle `/derp` upgrades. See
+# `headscale-api/src/tailscale_wire/derp/mod.rs` for the toml shape.
+[derp]
+enabled = false
+# host_name = "derp.example.com"
+# derp_port = 443
+# sidecar_listen_addr = "127.0.0.1:8443"
+# derper_binary = "/usr/local/bin/derper"
+# stun_addr = "0.0.0.0:3478"
+# region_id = 900
+# region_code = "embedded"
+# region_name = "Embedded headscale-rs DERP"
+
 [logging]
 level = "info"
 format = "pretty"

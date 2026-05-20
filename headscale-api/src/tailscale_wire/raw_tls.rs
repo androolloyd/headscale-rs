@@ -501,6 +501,7 @@ mod tests {
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
+            derp: crate::tailscale_wire::derp::DerpHttpState::disabled(),
         };
         (state, dir)
     }

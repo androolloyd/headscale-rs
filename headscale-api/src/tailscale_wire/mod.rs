@@ -47,6 +47,7 @@ use tokio::sync::Notify;
 
 pub mod be_transport;
 pub mod controlbase;
+pub mod derp;
 pub mod derp_config;
 pub mod key_handler;
 pub mod knock;
@@ -244,6 +245,12 @@ pub struct WireState {
     /// unknown". See [`knock`] for the rationale + math. Defaults to
     /// disabled so existing deployments keep working unchanged.
     pub knock: KnockConfig,
+    /// Embedded DERP layer state — `/derp/probe`, `/bootstrap-dns`,
+    /// `/verify`, plus the STUN responder + sidecar lifecycle when
+    /// `derp.cfg.enabled = true`. Defaults to the disabled-by-default
+    /// [`derp::DerpConfig`] so existing deployments keep working
+    /// unchanged.
+    pub derp: derp::DerpHttpState,
 }
 
 /// In-memory machine registry.
@@ -808,6 +815,7 @@ mod registry_tests {
 /// `map`).
 pub fn router(state: WireState) -> Router {
     let knock_cfg = state.knock.clone();
+    let derp_state = state.derp.clone();
     let inner = Router::new()
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))
@@ -823,6 +831,13 @@ pub fn router(state: WireState) -> Router {
         .route("/machine/register", post(register::handle_register_flat))
         .route("/machine/map", post(map::handle_map_flat))
         .with_state(state);
+
+    // Embedded DERP layer (P1, headscale-gap-analysis.md §5). Returns
+    // an empty router when `derp.cfg.enabled = false`, so the merge
+    // is a no-op for the disabled-by-default case. The DERP routes
+    // are intentionally NOT knock-gated — `/derp/probe` and `/verify`
+    // are public per upstream's handlers.go.
+    let inner = inner.merge(derp::router(derp_state));
 
     // PSK-gated handshake — third layer of the active-probe shield.
     // Default-off (KnockConfig::disabled()) → exact pass-through.

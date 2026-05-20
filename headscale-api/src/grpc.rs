@@ -17,7 +17,18 @@ use tonic::Status as TonicStatus;
 
 /// Service trait implementations
 pub mod services {
-    use super::*;
+    use super::{
+        CloseChannelRequest, CreateChannelRequest, DeleteNodeRequest, DepositRequest,
+        GetBalanceRequest, GetBalanceResponse, GetChannelsRequest, GetChannelsResponse,
+        GetHistoryRequest, GetHistoryResponse, GetNodeRequest, GetPeersRequest, GetPeersResponse,
+        GetPricingRequest, GetPricingResponse, GetUsageRequest, GetUsageResponse,
+        HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, ListNodesRequest,
+        ListNodesResponse, MetricsRequest, MetricsResponse, Node, PaymentChannel,
+        QueryResourcesRequest, QueryResourcesResponse, RecordUsageRequest, RegisterRequest,
+        RegisterResourceRequest, RegisterResponse, Request, Response, SetCreditLimitRequest,
+        Status, TonicStatus, Transaction, TransferRequest, UpdateChannelRequest, UpdateNodeRequest,
+        async_trait,
+    };
 
     /// Node service implementation trait
     #[async_trait]

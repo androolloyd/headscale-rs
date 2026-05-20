@@ -62,11 +62,7 @@ impl Ledger {
         let balance = self.balance(account).await;
         let credit = *self.credit_limits.read().await.get(account).unwrap_or(&0) as i64;
 
-        if balance >= 0 {
-            balance + credit
-        } else {
-            credit + balance // balance is negative, so this reduces available
-        }
+        balance + credit
     }
 
     /// Deposit funds to an account.

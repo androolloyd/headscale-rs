@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::ledger::{Ledger, LedgerError};
+use crate::ledger::Ledger;
 
 /// Escrow manager for work bounties.
 pub struct Escrow {
@@ -77,14 +77,14 @@ impl Escrow {
 
         // Transfer funds to escrow account
         let escrow_id = generate_escrow_id();
-        let escrow_account = format!("escrow:{}", escrow_id);
+        let escrow_account = format!("escrow:{escrow_id}");
 
         self.ledger
             .transfer(
                 funder,
                 &escrow_account,
                 total,
-                &format!("Escrow for work {}", work_id),
+                &format!("Escrow for work {work_id}"),
             )
             .await
             .map_err(|_| EscrowError::InsufficientFunds)?;
@@ -136,7 +136,7 @@ impl Escrow {
         record.state = EscrowState::Active;
 
         // Distribute to recipients
-        let escrow_account = format!("escrow:{}", escrow_id);
+        let escrow_account = format!("escrow:{escrow_id}");
         for (recipient, share) in &record.recipients {
             let recipient_amount = (amount * *share as u64) / 100;
             self.ledger
@@ -182,7 +182,7 @@ impl Escrow {
         }
 
         // Distribute to recipients
-        let escrow_account = format!("escrow:{}", escrow_id);
+        let escrow_account = format!("escrow:{escrow_id}");
         for (recipient, share) in &record.recipients {
             let recipient_amount = (remaining * *share as u64) / 100;
             self.ledger
@@ -212,7 +212,7 @@ impl Escrow {
         record.state = EscrowState::Refunded;
 
         // Return to funder
-        let escrow_account = format!("escrow:{}", escrow_id);
+        let escrow_account = format!("escrow:{escrow_id}");
         self.ledger
             .transfer(
                 &escrow_account,

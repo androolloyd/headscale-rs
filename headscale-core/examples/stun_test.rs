@@ -28,24 +28,25 @@ fn main() {
     socket.set_read_timeout(Some(Duration::from_secs(3))).ok();
 
     let local_addr = socket.local_addr().unwrap();
-    println!("Local socket: {}\n", local_addr);
+    println!("Local socket: {local_addr}\n");
 
     let mut success_count = 0;
 
     for server in STUN_SERVERS {
-        println!("Testing STUN server: {}", server);
+        println!("Testing STUN server: {server}");
 
         // Resolve server address
         let server_addr: SocketAddr = match std::net::ToSocketAddrs::to_socket_addrs(server) {
-            Ok(mut addrs) => match addrs.next() {
-                Some(addr) => addr,
-                None => {
-                    println!("  [FAIL] Could not resolve {}\n", server);
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    addr
+                } else {
+                    println!("  [FAIL] Could not resolve {server}\n");
                     continue;
                 }
-            },
+            }
             Err(e) => {
-                println!("  [FAIL] DNS error: {}\n", e);
+                println!("  [FAIL] DNS error: {e}\n");
                 continue;
             }
         };
@@ -55,7 +56,7 @@ fn main() {
         let request = build_binding_request(&txn_id);
 
         if let Err(e) = socket.send_to(&request, server_addr) {
-            println!("  [FAIL] Send error: {}\n", e);
+            println!("  [FAIL] Send error: {e}\n");
             continue;
         }
         println!("  Sent binding request ({} bytes)", request.len());
@@ -64,22 +65,22 @@ fn main() {
         let mut buf = [0u8; 1024];
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                println!("  Received {} bytes from {}", len, from);
+                println!("  Received {len} bytes from {from}");
 
                 // Parse the response
                 match parse_binding_response(&buf[..len], &txn_id) {
                     Ok(mapped_addr) => {
-                        println!("  [SUCCESS] Mapped address: {}", mapped_addr);
-                        println!("  Our public endpoint is: {}\n", mapped_addr);
+                        println!("  [SUCCESS] Mapped address: {mapped_addr}");
+                        println!("  Our public endpoint is: {mapped_addr}\n");
                         success_count += 1;
                     }
                     Err(e) => {
-                        println!("  [FAIL] Parse error: {}\n", e);
+                        println!("  [FAIL] Parse error: {e}\n");
                     }
                 }
             }
             Err(e) => {
-                println!("  [FAIL] Receive timeout/error: {}\n", e);
+                println!("  [FAIL] Receive timeout/error: {e}\n");
             }
         }
     }

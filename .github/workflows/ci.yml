@@ -54,6 +54,9 @@ jobs:
       # surface octravpn-mesh consumes; a regression here breaks the
       # cross-repo path-dependency.
       - run: cargo clippy -p headscale-api --no-default-features --tests -- -D warnings
+      # Admin is intentionally opt-in, so keep its route/tests surface
+      # covered explicitly instead of relying on default feature tests.
+      - run: cargo clippy -p headscale-api --no-default-features --features admin --tests -- -D warnings
 
   test:
     name: cargo test
@@ -69,3 +72,5 @@ jobs:
       # Wire-only test run — same rationale as the wire-only clippy
       # pass above. Keeps the `default-features = false` path live.
       - run: cargo test -p headscale-api --no-default-features
+      # Admin-only test run — admin is not a default feature.
+      - run: cargo test -p headscale-api --no-default-features --features admin

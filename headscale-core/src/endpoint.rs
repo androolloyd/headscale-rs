@@ -7,7 +7,6 @@
 use crate::stun::{StunClient, StunError};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{RwLock, broadcast};
@@ -169,7 +168,7 @@ impl EndpointTracker {
             }
 
             // Remove stale endpoints
-            local.retain(|e| e.is_valid());
+            local.retain(Endpoint::is_valid);
         }
 
         *self.last_stun_refresh.write().await = Some(Instant::now());
@@ -217,15 +216,10 @@ impl EndpointTracker {
         }
 
         // Remove stale endpoints
-        endpoints.retain(|e| e.is_valid());
+        endpoints.retain(Endpoint::is_valid);
 
         // Sort by priority
-        endpoints.sort_by_key(|e| {
-            (
-                e.priority,
-                e.latency.map(|l| l.as_millis()).unwrap_or(u128::MAX),
-            )
-        });
+        endpoints.sort_by_key(|e| (e.priority, e.latency.map_or(u128::MAX, |l| l.as_millis())));
 
         let _ = self.event_tx.send(EndpointEvent::PeerEndpointUpdated {
             peer_id: peer_id.to_string(),
@@ -243,10 +237,10 @@ impl EndpointTracker {
     ) {
         let mut peers = self.peer_endpoints.write().await;
 
-        if let Some(endpoints) = peers.get_mut(peer_id) {
-            if let Some(ep) = endpoints.iter_mut().find(|e| e.addr == endpoint) {
-                ep.mark_success(latency);
-            }
+        if let Some(endpoints) = peers.get_mut(peer_id)
+            && let Some(ep) = endpoints.iter_mut().find(|e| e.addr == endpoint)
+        {
+            ep.mark_success(latency);
         }
     }
 
@@ -279,9 +273,8 @@ impl EndpointTracker {
             let priority_score = e.priority as u64 * 1000;
             let success_score = e
                 .last_success
-                .map(|t| t.elapsed().as_millis() as u64)
-                .unwrap_or(u64::MAX / 2);
-            let latency_score = e.latency.map(|l| l.as_millis() as u64).unwrap_or(1000);
+                .map_or(u64::MAX / 2, |t| t.elapsed().as_millis() as u64);
+            let latency_score = e.latency.map_or(1000, |l| l.as_millis() as u64);
             priority_score + success_score / 1000 + latency_score
         });
 
@@ -318,7 +311,7 @@ impl EndpointTracker {
         let mut peers = self.peer_endpoints.write().await;
 
         for endpoints in peers.values_mut() {
-            endpoints.retain(|e| e.is_valid());
+            endpoints.retain(Endpoint::is_valid);
         }
 
         // Remove peers with no endpoints
@@ -362,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_priority() {
-        let mut endpoints = vec![
+        let mut endpoints = [
             Endpoint::new("1.2.3.4:1000".parse().unwrap(), EndpointType::Direct, 1),
             Endpoint::new("1.2.3.4:2000".parse().unwrap(), EndpointType::Stun, 10),
             Endpoint::new("1.2.3.4:3000".parse().unwrap(), EndpointType::Derp, 100),

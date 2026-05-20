@@ -54,7 +54,10 @@ impl NonceStore {
             return false;
         }
 
-        let mut nonces = self.nonces.write().unwrap_or_else(|e| e.into_inner());
+        let mut nonces = self
+            .nonces
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let did_nonces = nonces.entry(did.to_string()).or_default();
         let oldest_allowed = timestamp_millis.saturating_sub(SIGNATURE_WINDOW_MILLIS);
         did_nonces.retain(|_, seen_at| *seen_at >= oldest_allowed);
@@ -362,7 +365,7 @@ mod tests {
 
         assert!(verify_transfer(&req, &store).is_ok());
 
-        let mut tampered = req.clone();
+        let mut tampered = req;
         tampered.from = KeyPair::generate().did().to_string();
         tampered.nonce = "transfer-nonce-2".to_string();
         assert!(matches!(

@@ -158,8 +158,8 @@ base64 = "0.22"
 # that upstream consumes.
 zstd = { version = "0.13", default-features = false }
 
-# Admin GUI v0 deps — only pulled in when the `admin` feature is on
-# (default). `maud` is the type-safe HTML template engine; `hmac` +
+# Admin GUI v0 deps — only pulled in when the `admin` feature is on.
+# `maud` is the type-safe HTML template engine; `hmac` +
 # `sha2` back the session-cookie + CSRF tokens; `serde_urlencoded`
 # parses `application/x-www-form-urlencoded` POST bodies; `rand_core`
 # (with the `getrandom` feature, set at workspace level) seeds the

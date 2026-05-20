@@ -165,7 +165,7 @@ fn port_pattern_to_range(pat: &str) -> Option<PortRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{PolicyAction, PolicyDoc, PolicyRule};
+    use crate::policy::{AutoApprovers, PolicyAction, PolicyDoc, PolicyRule};
     use std::collections::BTreeMap;
 
     fn doc(rules: Vec<PolicyRule>, groups: BTreeMap<String, Vec<String>>) -> PolicyDoc {
@@ -176,7 +176,7 @@ mod tests {
             tag_owners: BTreeMap::new(),
             hosts: BTreeMap::new(),
             ipsets: BTreeMap::new(),
-            auto_approvers: Default::default(),
+            auto_approvers: AutoApprovers::default(),
             node_attrs: Vec::new(),
             ssh: Vec::new(),
             rules,

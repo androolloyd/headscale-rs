@@ -100,6 +100,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         derp_map: Arc::new(headscale_api::tailscale_wire::DerpMap::default()),
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
+        dns: Arc::new(headscale_api::dns::DnsStore::new()),
     };
     // tempdir held only inside this fn; the wire layer never reads
     // from it after construction, so leaking is fine for the test.

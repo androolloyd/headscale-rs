@@ -1,7 +1,7 @@
 //! Resource registry persistence operations.
 
 use crate::{
-    DbError, Result,
+    Result,
     models::{ResourceRow, ResourceUsageRow},
 };
 use headscale_resources::{
@@ -26,12 +26,12 @@ pub async fn register_resource(
         .as_secs() as i64;
 
     let result = sqlx::query(
-        r#"
+        r"
         INSERT INTO resources (
             provider, resource_type, resource_spec, pricing, available, last_updated
         )
         VALUES (?, ?, ?, ?, 1, ?)
-        "#,
+        ",
     )
     .bind(provider)
     .bind(&type_name)
@@ -50,20 +50,20 @@ pub async fn find_providers(
     resource_type_name: &str,
 ) -> Result<Vec<ProviderResource>> {
     let rows = sqlx::query_as::<_, ResourceRow>(
-        r#"
+        r"
         SELECT id, provider, resource_type, resource_spec, pricing,
                available, last_updated, created_at, updated_at
         FROM resources
         WHERE resource_type = ? AND available = 1
         ORDER BY id DESC
-        "#,
+        ",
     )
     .bind(resource_type_name)
     .fetch_all(pool)
     .await?;
 
     rows.iter()
-        .map(|row| row.to_provider_resource())
+        .map(super::models::ResourceRow::to_provider_resource)
         .collect::<Result<Vec<_>>>()
 }
 
@@ -73,20 +73,20 @@ pub async fn get_provider_resources(
     provider: &str,
 ) -> Result<Vec<ProviderResource>> {
     let rows = sqlx::query_as::<_, ResourceRow>(
-        r#"
+        r"
         SELECT id, provider, resource_type, resource_spec, pricing,
                available, last_updated, created_at, updated_at
         FROM resources
         WHERE provider = ?
         ORDER BY id DESC
-        "#,
+        ",
     )
     .bind(provider)
     .fetch_all(pool)
     .await?;
 
     rows.iter()
-        .map(|row| row.to_provider_resource())
+        .map(super::models::ResourceRow::to_provider_resource)
         .collect::<Result<Vec<_>>>()
 }
 
@@ -102,11 +102,11 @@ pub async fn mark_resource_unavailable(
         .as_secs() as i64;
 
     sqlx::query(
-        r#"
+        r"
         UPDATE resources
         SET available = 0, last_updated = ?, updated_at = unixepoch()
         WHERE provider = ? AND resource_type = ?
-        "#,
+        ",
     )
     .bind(now)
     .bind(provider)
@@ -129,11 +129,11 @@ pub async fn mark_resource_available(
         .as_secs() as i64;
 
     sqlx::query(
-        r#"
+        r"
         UPDATE resources
         SET available = 1, last_updated = ?, updated_at = unixepoch()
         WHERE provider = ? AND resource_type = ?
-        "#,
+        ",
     )
     .bind(now)
     .bind(provider)
@@ -147,9 +147,9 @@ pub async fn mark_resource_available(
 /// Delete a resource.
 pub async fn delete_resource(pool: &SqlitePool, resource_id: i64) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         DELETE FROM resources WHERE id = ?
-        "#,
+        ",
     )
     .bind(resource_id)
     .execute(pool)
@@ -173,12 +173,12 @@ pub async fn record_usage(
         .as_secs() as i64;
 
     let result = sqlx::query(
-        r#"
+        r"
         INSERT INTO resource_usage (
             resource_type, resource_spec, consumer, provider, started_at, units_consumed, cost_millitokens
         )
         VALUES (?, ?, ?, ?, ?, 0, 0)
-        "#,
+        ",
     )
     .bind(&type_name)
     .bind(&resource_spec)
@@ -204,11 +204,11 @@ pub async fn complete_usage(
         .as_secs() as i64;
 
     sqlx::query(
-        r#"
+        r"
         UPDATE resource_usage
         SET ended_at = ?, units_consumed = ?, cost_millitokens = ?
         WHERE id = ?
-        "#,
+        ",
     )
     .bind(now)
     .bind(units_consumed as i64)
@@ -229,14 +229,14 @@ pub async fn get_consumer_usage(
     let limit = limit.unwrap_or(100);
 
     let rows = sqlx::query_as::<_, ResourceUsageRow>(
-        r#"
+        r"
         SELECT id, resource_type, resource_spec, consumer, provider,
                started_at, ended_at, units_consumed, cost_millitokens, created_at
         FROM resource_usage
         WHERE consumer = ?
         ORDER BY started_at DESC
         LIMIT ?
-        "#,
+        ",
     )
     .bind(consumer)
     .bind(limit)
@@ -244,7 +244,7 @@ pub async fn get_consumer_usage(
     .await?;
 
     rows.iter()
-        .map(|row| row.to_resource_usage())
+        .map(super::models::ResourceUsageRow::to_resource_usage)
         .collect::<Result<Vec<_>>>()
 }
 
@@ -257,14 +257,14 @@ pub async fn get_provider_usage(
     let limit = limit.unwrap_or(100);
 
     let rows = sqlx::query_as::<_, ResourceUsageRow>(
-        r#"
+        r"
         SELECT id, resource_type, resource_spec, consumer, provider,
                started_at, ended_at, units_consumed, cost_millitokens, created_at
         FROM resource_usage
         WHERE provider = ?
         ORDER BY started_at DESC
         LIMIT ?
-        "#,
+        ",
     )
     .bind(provider)
     .bind(limit)
@@ -272,26 +272,26 @@ pub async fn get_provider_usage(
     .await?;
 
     rows.iter()
-        .map(|row| row.to_resource_usage())
+        .map(super::models::ResourceUsageRow::to_resource_usage)
         .collect::<Result<Vec<_>>>()
 }
 
 /// Get active resource usage (not yet completed).
 pub async fn get_active_usage(pool: &SqlitePool) -> Result<Vec<ResourceUsage>> {
     let rows = sqlx::query_as::<_, ResourceUsageRow>(
-        r#"
+        r"
         SELECT id, resource_type, resource_spec, consumer, provider,
                started_at, ended_at, units_consumed, cost_millitokens, created_at
         FROM resource_usage
         WHERE ended_at IS NULL
         ORDER BY started_at DESC
-        "#,
+        ",
     )
     .fetch_all(pool)
     .await?;
 
     rows.iter()
-        .map(|row| row.to_resource_usage())
+        .map(super::models::ResourceUsageRow::to_resource_usage)
         .collect::<Result<Vec<_>>>()
 }
 
@@ -309,7 +309,7 @@ fn get_resource_type_name(resource_type: &ResourceType) -> String {
 mod tests {
     use super::*;
     use crate::Database;
-    use headscale_resources::types::{InferenceSpec, StorageSpec, StorageType};
+    use headscale_resources::types::InferenceSpec;
 
     #[tokio::test]
     async fn test_resource_operations() {

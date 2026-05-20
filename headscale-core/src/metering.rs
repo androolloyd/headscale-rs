@@ -42,7 +42,7 @@ impl std::fmt::Display for MeteringSessionId {
 }
 
 /// Configuration for a metering session (supplied by the integration layer).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MeteringConfig {
     /// Maximum bytes allowed (None = unlimited).
     pub bandwidth_limit: Option<u64>,
@@ -52,17 +52,6 @@ pub struct MeteringConfig {
     pub consumer_did: String,
     /// Provider DID (for logging/attribution).
     pub provider_did: String,
-}
-
-impl Default for MeteringConfig {
-    fn default() -> Self {
-        Self {
-            bandwidth_limit: None,
-            rate_limit: None,
-            consumer_did: String::new(),
-            provider_did: String::new(),
-        }
-    }
 }
 
 /// A metering session tracks bandwidth for a single integration-layer work item.
@@ -219,7 +208,7 @@ impl MeteringSnapshot {
 
     /// Convert to KB (for billing purposes).
     pub fn total_kb(&self) -> u64 {
-        (self.total_bytes() + 1023) / 1024
+        self.total_bytes().div_ceil(1024)
     }
 }
 
@@ -296,7 +285,7 @@ impl MeteringService {
             .read()
             .await
             .get(session_id)
-            .map(|s| s.snapshot())
+            .map(MeteringSession::snapshot)
     }
 
     /// End a metering session and return final snapshot.
@@ -320,7 +309,7 @@ impl MeteringService {
             .await
             .values()
             .filter(|s| s.active)
-            .map(|s| s.snapshot())
+            .map(MeteringSession::snapshot)
             .collect()
     }
 
@@ -331,7 +320,7 @@ impl MeteringService {
             .await
             .values()
             .filter(|s| s.config.consumer_did == consumer_did)
-            .map(|s| s.snapshot())
+            .map(MeteringSession::snapshot)
             .collect()
     }
 
@@ -342,7 +331,7 @@ impl MeteringService {
             .await
             .values()
             .filter(|s| s.config.provider_did == provider_did)
-            .map(|s| s.snapshot())
+            .map(MeteringSession::snapshot)
             .collect()
     }
 
@@ -351,7 +340,7 @@ impl MeteringService {
         self.provider_sessions(provider_did)
             .await
             .iter()
-            .map(|s| s.total_bytes())
+            .map(MeteringSnapshot::total_bytes)
             .sum()
     }
 }
@@ -450,7 +439,7 @@ mod tests {
 
         // Start sessions for different work items
         for i in 0..3 {
-            let session_id = MeteringSessionId::new(format!("work-{}", i));
+            let session_id = MeteringSessionId::new(format!("work-{i}"));
             let config = MeteringConfig {
                 bandwidth_limit: None,
                 rate_limit: None,

@@ -419,8 +419,7 @@ where
                                 return Poll::Ready(Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!(
-                                        "be_noise: record body {len} exceeds max ciphertext {}",
-                                        MAX_CIPHERTEXT_PER_RECORD,
+                                        "be_noise: record body {len} exceeds max ciphertext {MAX_CIPHERTEXT_PER_RECORD}",
                                     ),
                                 )));
                             }
@@ -781,7 +780,7 @@ mod tests {
             .remote_public_key(&resp_static.public)
             .build_initiator()
             .unwrap();
-        let mut resp = Builder::new(params.clone())
+        let mut resp = Builder::new(params)
             .local_private_key(&resp_static.private)
             .build_responder()
             .unwrap();

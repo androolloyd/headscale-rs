@@ -15,10 +15,10 @@ pub enum GatewayResourceType {
 impl std::fmt::Display for GatewayResourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GatewayResourceType::Inference => write!(f, "inference"),
-            GatewayResourceType::Compute => write!(f, "compute"),
-            GatewayResourceType::Storage => write!(f, "storage"),
-            GatewayResourceType::Bandwidth => write!(f, "bandwidth"),
+            Self::Inference => write!(f, "inference"),
+            Self::Compute => write!(f, "compute"),
+            Self::Storage => write!(f, "storage"),
+            Self::Bandwidth => write!(f, "bandwidth"),
         }
     }
 }
@@ -46,13 +46,13 @@ pub enum MeteringUnit {
 impl std::fmt::Display for MeteringUnit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MeteringUnit::Tokens => write!(f, "tokens"),
-            MeteringUnit::CpuSeconds => write!(f, "cpu_seconds"),
-            MeteringUnit::GpuSeconds => write!(f, "gpu_seconds"),
-            MeteringUnit::MemoryGbSeconds => write!(f, "memory_gb_seconds"),
-            MeteringUnit::BytesStored => write!(f, "bytes_stored"),
-            MeteringUnit::Requests => write!(f, "requests"),
-            MeteringUnit::BytesTransferred => write!(f, "bytes_transferred"),
+            Self::Tokens => write!(f, "tokens"),
+            Self::CpuSeconds => write!(f, "cpu_seconds"),
+            Self::GpuSeconds => write!(f, "gpu_seconds"),
+            Self::MemoryGbSeconds => write!(f, "memory_gb_seconds"),
+            Self::BytesStored => write!(f, "bytes_stored"),
+            Self::Requests => write!(f, "requests"),
+            Self::BytesTransferred => write!(f, "bytes_transferred"),
         }
     }
 }

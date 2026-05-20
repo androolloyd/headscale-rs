@@ -78,7 +78,11 @@ async fn register_node(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(RegisterResponse {
-        addresses: response.addresses.iter().map(|a| a.to_string()).collect(),
+        addresses: response
+            .addresses
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         peer_count: response.peers.len(),
     }))
 }
@@ -200,7 +204,7 @@ async fn metrics(State(state): State<AppState>) -> String {
     mesh_metrics().nodes_registered.set(nodes.len() as i64);
     mesh_metrics().nodes_online.set(online_count as i64);
 
-    format!("{}\n{}", resource_metrics, mesh_metrics_output)
+    format!("{resource_metrics}\n{mesh_metrics_output}")
 }
 
 // Request/Response types
@@ -271,10 +275,10 @@ pub enum ApiError {
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
-            ApiError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
-            ApiError::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
-            ApiError::Payment(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
-            ApiError::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
+            Self::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg),
+            Self::NotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg),
+            Self::Payment(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
+            Self::Internal(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
 
         let body = serde_json::json!({ "error": message });

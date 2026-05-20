@@ -1,0 +1,1 @@
+ignore = ["headscale-api/src/generated/headscale.v1.rs"]

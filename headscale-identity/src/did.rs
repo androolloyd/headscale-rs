@@ -13,7 +13,7 @@ impl Did {
     /// Create a DID from a public key using proper multibase/multicodec encoding.
     pub fn from_public_key(pubkey: &[u8; 32]) -> Self {
         let encoded = multibase_encode(pubkey);
-        Self(format!("did:key:{}", encoded))
+        Self(format!("did:key:{encoded}"))
     }
 
     /// Parse a DID string.

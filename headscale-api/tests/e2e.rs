@@ -4,19 +4,26 @@
 //! 1. Start a control plane server
 //! 2. Register multiple nodes
 //! 3. Verify mesh formation
-//! 4. Test rental/accounting flows
+//! 4. Test resource metering flows
 //! 5. Test API endpoints
+
+#![cfg(feature = "full")]
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::prelude::*;
 use headscale_api::Server;
+use headscale_api::control_auth::{
+    SignedRegisterRequest, canonical_node_register_message, now_millis,
+};
 use headscale_core::{
-    AccountingPipeline, LeaseRequest, MeshCoordinator, RentalService,
+    MeshCoordinator,
     node::{NodeCapabilities, RegisterRequest},
 };
+use headscale_identity::KeyPair;
 use headscale_payments::Ledger;
-use headscale_resources::ResourceRegistry;
+use headscale_resources::{BandwidthSpec, Meter, ResourceRegistry, ResourceType};
 use tokio::net::TcpListener;
 
 /// Get an available port for testing.
@@ -31,8 +38,6 @@ struct TestContext {
     mesh: Arc<MeshCoordinator>,
     ledger: Arc<Ledger>,
     resources: Arc<ResourceRegistry>,
-    accounting: Arc<AccountingPipeline>,
-    rental: Arc<RentalService>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -42,16 +47,12 @@ impl TestContext {
         let mesh = Arc::new(MeshCoordinator::new("100.64.0.0/10"));
         let ledger = Arc::new(Ledger::new());
         let resources = Arc::new(ResourceRegistry::new());
-        let accounting = Arc::new(AccountingPipeline::new());
-        let rental = Arc::new(RentalService::new(accounting.clone()));
 
         Self {
             port,
             mesh,
             ledger,
             resources,
-            accounting,
-            rental,
             server_handle: None,
         }
     }
@@ -82,6 +83,38 @@ impl TestContext {
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
         }
+    }
+}
+
+fn bandwidth_resource() -> ResourceType {
+    ResourceType::Bandwidth(BandwidthSpec {
+        upload_mbps: 100,
+        download_mbps: 100,
+    })
+}
+
+fn signed_register(name: &str, capabilities: NodeCapabilities) -> SignedRegisterRequest {
+    let keypair = KeyPair::generate();
+    let request = RegisterRequest {
+        id: keypair.did().to_string(),
+        name: name.to_string(),
+        wg_pubkey: BASE64_STANDARD.encode([0x42u8; 32]),
+        endpoints: vec!["127.0.0.1:51820".to_string()],
+        capabilities,
+    };
+    let timestamp_millis = now_millis();
+    let nonce = format!("e2e-register-{timestamp_millis}");
+    let signature = BASE64_STANDARD.encode(keypair.sign(&canonical_node_register_message(
+        &request,
+        timestamp_millis,
+        &nonce,
+    )));
+
+    SignedRegisterRequest {
+        request,
+        signature,
+        timestamp_millis,
+        nonce,
     }
 }
 
@@ -136,9 +169,9 @@ async fn test_multi_node_mesh_formation() {
     // Register multiple nodes
     for i in 1..=5 {
         let req = RegisterRequest {
-            id: format!("node-{}", i),
-            name: format!("TestNode{}", i),
-            wg_pubkey: format!("test-pubkey-{}", i),
+            id: format!("node-{i}"),
+            name: format!("TestNode{i}"),
+            wg_pubkey: format!("test-pubkey-{i}"),
             endpoints: vec![format!("192.168.1.{}:51820", 100 + i)],
             capabilities: NodeCapabilities::default(),
         };
@@ -239,7 +272,7 @@ async fn test_node_capabilities_filtering() {
         let req = RegisterRequest {
             id: id.to_string(),
             name: id.to_string(),
-            wg_pubkey: format!("pubkey-{}", id),
+            wg_pubkey: format!("pubkey-{id}"),
             endpoints: vec!["192.168.1.1:51820".to_string()],
             capabilities: caps,
         };
@@ -343,255 +376,31 @@ async fn test_ledger_credit_limit() {
 }
 
 // ============================================================================
-// Accounting Pipeline Tests
+// Resource Metering Tests
 // ============================================================================
 
 #[tokio::test]
-async fn test_escrow_creation_and_session() {
-    let ctx = TestContext::new().await;
-
-    use headscale_core::accounting::{Pricing, ResourceKind};
-
-    // Create escrow
-    let escrow_id = ctx
-        .accounting
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            50_000,
-            ResourceKind::Bandwidth,
-            Pricing::default(),
-            None,
+async fn test_metering_session_lifecycle() {
+    let meter = Meter::new();
+    let session_id = meter
+        .start_session(
+            "did:key:consumer",
+            "did:key:provider",
+            bandwidth_resource(),
+            2,
         )
         .await;
 
-    // Verify escrow
-    let escrow = ctx.accounting.get_escrow(&escrow_id).await.unwrap();
-    assert_eq!(escrow.deposited, 50_000);
-    assert!(escrow.active);
+    meter.record_usage(&session_id, 1_000).await.unwrap();
+    meter.record_usage(&session_id, 2_000).await.unwrap();
 
-    // Start session
-    let session_id = ctx.accounting.start_session(&escrow_id).await.unwrap();
+    assert_eq!(meter.current_cost(&session_id).await.unwrap(), 6_000);
 
-    // Record usage
-    ctx.accounting
-        .record_usage(&session_id, 1000)
-        .await
-        .unwrap();
-    ctx.accounting
-        .record_usage(&session_id, 2000)
-        .await
-        .unwrap();
-
-    // Settle
-    let settlement = ctx
-        .accounting
-        .settle_session(&session_id, false)
-        .await
-        .unwrap();
-    assert!(settlement.is_some());
-    let settlement = settlement.unwrap();
-    assert_eq!(settlement.units, 3000);
-
-    // Verify escrow updated
-    let escrow = ctx.accounting.get_escrow(&escrow_id).await.unwrap();
-    assert_eq!(escrow.spent, 3000);
-}
-
-#[tokio::test]
-async fn test_accounting_multiple_sessions() {
-    let ctx = TestContext::new().await;
-
-    use headscale_core::accounting::{Pricing, ResourceKind};
-
-    let escrow_id = ctx
-        .accounting
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            100_000,
-            ResourceKind::Inference,
-            Pricing {
-                rate_per_unit: 10,
-                minimum_units: 1,
-                settlement_interval_secs: 60,
-            },
-            None,
-        )
-        .await;
-
-    // Start multiple sessions
-    let session1 = ctx.accounting.start_session(&escrow_id).await.unwrap();
-    let session2 = ctx.accounting.start_session(&escrow_id).await.unwrap();
-
-    // Record on both
-    ctx.accounting.record_usage(&session1, 100).await.unwrap();
-    ctx.accounting.record_usage(&session2, 200).await.unwrap();
-
-    // Get active sessions
-    let active = ctx.accounting.active_sessions().await;
-    assert_eq!(active.len(), 2);
-
-    // End both
-    let snap1 = ctx.accounting.end_session(&session1).await.unwrap();
-    let snap2 = ctx.accounting.end_session(&session2).await.unwrap();
-
-    assert_eq!(snap1.cost_settled, 1000); // 100 * 10
-    assert_eq!(snap2.cost_settled, 2000); // 200 * 10
-
-    // Total spent
-    let escrow = ctx.accounting.get_escrow(&escrow_id).await.unwrap();
-    assert_eq!(escrow.spent, 3000);
-}
-
-// ============================================================================
-// Rental Service Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_rental_full_lifecycle() {
-    let ctx = TestContext::new().await;
-
-    // Consumer creates escrow
-    let escrow_id = ctx
-        .rental
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            100_000,
-            Some(Duration::from_secs(3600)),
-        )
-        .await;
-
-    // Verify escrow
-    let escrow = ctx.rental.get_escrow(&escrow_id).await.unwrap();
-    assert!(escrow.active);
-
-    // Request lease
-    let request = LeaseRequest {
-        consumer_did: "did:key:consumer".to_string(),
-        provider_did: "did:key:provider".to_string(),
-        duration: Duration::from_secs(3600),
-        bandwidth_limit: Some(1_000_000_000), // 1GB
-        escrow_id: escrow_id.clone(),
-    };
-
-    let response = ctx.rental.request_lease(request).await.unwrap();
-    let lease_id = response.lease_id.clone();
-
-    // Verify lease is active
-    let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert!(matches!(
-        status.status,
-        headscale_core::rental::LeaseStatus::Active
-    ));
-
-    // Simulate bandwidth usage
-    for _ in 0..10 {
-        ctx.rental
-            .record_bandwidth(&lease_id, 10_000)
-            .await
-            .unwrap(); // 10KB each
-    }
-
-    // Check metering
-    let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert_eq!(status.bandwidth_used, 100_000); // 100KB total
-
-    // Settle
-    let settlement = ctx.rental.settle_lease(&lease_id).await.unwrap();
-    assert!(settlement.is_some());
-
-    // End lease
-    let result = ctx.rental.end_lease(&lease_id).await.unwrap();
-    assert_eq!(result.total_bytes, 100_000);
-
-    // Lease should be gone
-    assert!(ctx.rental.get_lease_status(&lease_id).await.is_none());
-}
-
-#[tokio::test]
-async fn test_rental_bandwidth_exhaustion() {
-    let ctx = TestContext::new().await;
-
-    let escrow_id = ctx
-        .rental
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            1_000_000,
-            None,
-        )
-        .await;
-
-    let request = LeaseRequest {
-        consumer_did: "did:key:consumer".to_string(),
-        provider_did: "did:key:provider".to_string(),
-        duration: Duration::from_secs(3600),
-        bandwidth_limit: Some(50_000), // 50KB limit
-        escrow_id,
-    };
-
-    let response = ctx.rental.request_lease(request).await.unwrap();
-    let lease_id = response.lease_id;
-
-    // Use most of bandwidth
-    ctx.rental
-        .record_bandwidth(&lease_id, 40_000)
-        .await
-        .unwrap();
-
-    // Exceed limit
-    let result = ctx.rental.record_bandwidth(&lease_id, 20_000).await;
-    assert!(result.is_err());
-
-    // Verify lease is exhausted
-    let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert!(matches!(
-        status.status,
-        headscale_core::rental::LeaseStatus::Exhausted
-    ));
-}
-
-#[tokio::test]
-async fn test_rental_provider_leases() {
-    let ctx = TestContext::new().await;
-
-    // Create escrow for multiple leases
-    let escrow_id = ctx
-        .rental
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            1_000_000,
-            None,
-        )
-        .await;
-
-    // Create multiple leases
-    for i in 0..3 {
-        let request = LeaseRequest {
-            consumer_did: format!("did:key:consumer-{}", i),
-            provider_did: "did:key:provider".to_string(),
-            duration: Duration::from_secs(3600),
-            bandwidth_limit: None,
-            escrow_id: escrow_id.clone(),
-        };
-        ctx.rental.request_lease(request).await.unwrap();
-    }
-
-    // Provider should see all leases
-    let provider_leases = ctx.rental.provider_leases("did:key:provider").await;
-    assert_eq!(provider_leases.len(), 3);
-
-    // Each consumer should see their own lease
-    for i in 0..3 {
-        let consumer_leases = ctx
-            .rental
-            .consumer_leases(&format!("did:key:consumer-{}", i))
-            .await;
-        assert_eq!(consumer_leases.len(), 1);
-    }
+    let usage = meter.end_session(&session_id).await.unwrap();
+    assert_eq!(usage.units_consumed, 3_000);
+    assert_eq!(usage.cost_millitokens, 6_000);
+    assert_eq!(meter.consumer_total_cost("did:key:consumer").await, 6_000);
+    assert!(meter.current_cost(&session_id).await.is_err());
 }
 
 // ============================================================================
@@ -609,17 +418,10 @@ async fn test_api_health_endpoint() {
     let client = reqwest::Client::new();
     let resp = client.get(format!("{}/health", ctx.api_url())).send().await;
 
-    match resp {
-        Ok(r) => {
-            assert!(r.status().is_success());
-            let body: serde_json::Value = r.json().await.unwrap();
-            assert_eq!(body["status"], "healthy");
-        }
-        Err(e) => {
-            // Server might not be fully ready in CI, mark as skipped
-            eprintln!("Health check failed (may be expected in CI): {}", e);
-        }
-    }
+    let resp = resp.unwrap();
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "healthy");
 
     ctx.stop_server().await;
 }
@@ -634,19 +436,13 @@ async fn test_api_node_registration() {
     let client = reqwest::Client::new();
 
     // Register via API
-    let req = serde_json::json!({
-        "id": "api-node-1",
-        "name": "APITestNode",
-        "wg_pubkey": "api-pubkey-1",
-        "endpoints": ["192.168.1.1:51820"],
-        "capabilities": {
-            "inference": false,
-            "storage": false,
-            "compute": true,
-            "relay": false,
-            "seed": false
-        }
-    });
+    let req = signed_register(
+        "APITestNode",
+        NodeCapabilities {
+            compute: true,
+            ..Default::default()
+        },
+    );
 
     let resp = client
         .post(format!("{}/api/v1/nodes", ctx.api_url()))
@@ -654,17 +450,10 @@ async fn test_api_node_registration() {
         .send()
         .await;
 
-    match resp {
-        Ok(r) => {
-            if r.status().is_success() {
-                let body: serde_json::Value = r.json().await.unwrap();
-                assert!(body["addresses"].as_array().unwrap().len() > 0);
-            }
-        }
-        Err(e) => {
-            eprintln!("Node registration failed (may be expected in CI): {}", e);
-        }
-    }
+    let resp = resp.unwrap();
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(!body["addresses"].as_array().unwrap().is_empty());
 
     ctx.stop_server().await;
 }
@@ -682,21 +471,10 @@ async fn test_api_metrics_endpoint() {
         .send()
         .await;
 
-    match resp {
-        Ok(r) => {
-            assert!(r.status().is_success());
-            let body = r.text().await.unwrap();
-            // Should contain Prometheus metrics
-            assert!(
-                body.contains("mesh_nodes")
-                    || body.contains("inference_tokens")
-                    || body.is_empty() == false
-            );
-        }
-        Err(e) => {
-            eprintln!("Metrics check failed (may be expected in CI): {}", e);
-        }
-    }
+    let resp = resp.unwrap();
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("mesh_nodes") || body.contains("inference_tokens") || !body.is_empty());
 
     ctx.stop_server().await;
 }
@@ -716,9 +494,9 @@ async fn test_concurrent_registrations() {
             let mesh = mesh.clone();
             tokio::spawn(async move {
                 let req = RegisterRequest {
-                    id: format!("concurrent-node-{}", i),
-                    name: format!("ConcurrentNode{}", i),
-                    wg_pubkey: format!("concurrent-pubkey-{}", i),
+                    id: format!("concurrent-node-{i}"),
+                    name: format!("ConcurrentNode{i}"),
+                    wg_pubkey: format!("concurrent-pubkey-{i}"),
                     endpoints: vec![format!("192.168.{}.1:51820", i % 256)],
                     capabilities: NodeCapabilities::default(),
                 };
@@ -743,37 +521,23 @@ async fn test_concurrent_registrations() {
 
 #[tokio::test]
 async fn test_rapid_bandwidth_recording() {
-    let ctx = TestContext::new().await;
-
-    let escrow_id = ctx
-        .rental
-        .create_escrow(
-            "did:key:consumer".to_string(),
-            "did:key:provider".to_string(),
-            10_000_000,
-            None,
+    let meter = Arc::new(Meter::new());
+    let session_id = meter
+        .start_session(
+            "did:key:consumer",
+            "did:key:provider",
+            bandwidth_resource(),
+            1,
         )
         .await;
 
-    let request = LeaseRequest {
-        consumer_did: "did:key:consumer".to_string(),
-        provider_did: "did:key:provider".to_string(),
-        duration: Duration::from_secs(3600),
-        bandwidth_limit: None,
-        escrow_id,
-    };
-
-    let response = ctx.rental.request_lease(request).await.unwrap();
-    let lease_id = response.lease_id;
-
     // Rapid-fire bandwidth recording
-    let rental = ctx.rental.clone();
-    let lease_id_clone = lease_id.clone();
+    let session_id_clone = session_id.clone();
     let handles: Vec<_> = (0..1000)
         .map(|_| {
-            let rental = rental.clone();
-            let lid = lease_id_clone.clone();
-            tokio::spawn(async move { rental.record_bandwidth(&lid, 1000).await })
+            let meter = meter.clone();
+            let sid = session_id_clone.clone();
+            tokio::spawn(async move { meter.record_usage(&sid, 1000).await })
         })
         .collect();
 
@@ -787,6 +551,6 @@ async fn test_rapid_bandwidth_recording() {
     assert!(successes > 900); // Most should succeed
 
     // Verify total bandwidth
-    let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert!(status.bandwidth_used >= 900_000); // At least 900 successful recordings * 1000 bytes
+    let usage = meter.end_session(&session_id).await.unwrap();
+    assert!(usage.units_consumed >= 900_000); // At least 900 successful recordings * 1000 bytes
 }

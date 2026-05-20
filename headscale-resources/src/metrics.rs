@@ -1,6 +1,6 @@
 //! Prometheus metrics for resource metering.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use prometheus_client::encoding::{EncodeLabelSet, text::encode};
 use prometheus_client::metrics::counter::Counter;
@@ -205,8 +205,7 @@ impl Default for ResourceMetrics {
 }
 
 /// Global metrics instance.
-static METRICS: once_cell::sync::Lazy<Arc<ResourceMetrics>> =
-    once_cell::sync::Lazy::new(|| Arc::new(ResourceMetrics::new()));
+static METRICS: LazyLock<Arc<ResourceMetrics>> = LazyLock::new(|| Arc::new(ResourceMetrics::new()));
 
 /// Get the global metrics instance.
 pub fn global_metrics() -> Arc<ResourceMetrics> {

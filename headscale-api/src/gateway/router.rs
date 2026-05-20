@@ -80,7 +80,7 @@ impl ResourceGateway {
     pub fn build_router(self) -> Router {
         let auth_layer = AuthLayer::new(self.state.lease_store.clone());
         let inference_state = self.state.inference.clone();
-        let gateway_state = self.state.clone();
+        let gateway_state = self.state;
 
         // Inference routes (protected by auth)
         let inference_routes = Router::new()
@@ -107,7 +107,7 @@ impl ResourceGateway {
                 get(storage_get).put(storage_put).delete(storage_delete),
             )
             .with_state(gateway_state.clone())
-            .layer(auth_layer.clone());
+            .layer(auth_layer);
 
         // Health/status routes (no auth required)
         let health_routes = Router::new()

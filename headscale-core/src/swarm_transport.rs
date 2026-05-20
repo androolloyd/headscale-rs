@@ -141,16 +141,14 @@ pub enum MeshTransportError {
 
 /// Connection to a peer over the mesh.
 struct PeerConnection {
-    node_id: String,
     mesh_addr: SocketAddr,
     last_activity: u64,
     stream: Option<TcpStream>,
 }
 
 impl PeerConnection {
-    fn new(node_id: String, mesh_addr: SocketAddr) -> Self {
+    fn new(mesh_addr: SocketAddr) -> Self {
         Self {
-            node_id,
             mesh_addr,
             last_activity: now(),
             stream: None,
@@ -238,7 +236,7 @@ impl MeshTransport {
     }
 
     /// Get transport name.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &'static str {
         "mesh"
     }
 
@@ -279,7 +277,7 @@ impl MeshTransport {
         let mut connections = self.connections.write().unwrap();
         let conn = connections
             .entry(to.to_string())
-            .or_insert_with(|| PeerConnection::new(to.to_string(), mesh_addr));
+            .or_insert_with(|| PeerConnection::new(mesh_addr));
 
         // Connect and send
         let stream = conn.connect(self.connect_timeout)?;
@@ -382,10 +380,10 @@ impl MeshTransport {
 
     /// Close a peer connection.
     pub fn disconnect(&self, node_id: &str) {
-        if let Ok(mut connections) = self.connections.write() {
-            if let Some(conn) = connections.get_mut(node_id) {
-                conn.close();
-            }
+        if let Ok(mut connections) = self.connections.write()
+            && let Some(conn) = connections.get_mut(node_id)
+        {
+            conn.close();
         }
     }
 

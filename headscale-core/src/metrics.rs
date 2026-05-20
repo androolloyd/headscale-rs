@@ -1,6 +1,6 @@
 //! Prometheus metrics for mesh coordination.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use prometheus_client::encoding::{EncodeLabelSet, text::encode};
 use prometheus_client::metrics::counter::Counter;
@@ -249,8 +249,7 @@ impl Default for MeshMetrics {
 }
 
 /// Global mesh metrics instance.
-static MESH_METRICS: once_cell::sync::Lazy<Arc<MeshMetrics>> =
-    once_cell::sync::Lazy::new(|| Arc::new(MeshMetrics::new()));
+static MESH_METRICS: LazyLock<Arc<MeshMetrics>> = LazyLock::new(|| Arc::new(MeshMetrics::new()));
 
 /// Get the global mesh metrics instance.
 pub fn mesh_metrics() -> Arc<MeshMetrics> {

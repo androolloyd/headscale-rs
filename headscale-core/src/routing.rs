@@ -387,12 +387,7 @@ mod proptests {
 
     /// Strategy for generating valid peer identifiers.
     fn arb_peer_id() -> impl Strategy<Value = String> {
-        "[a-z][a-z0-9_-]{0,15}".prop_map(|s| format!("peer-{}", s))
-    }
-
-    /// Strategy for generating valid IPv4 CIDR prefix lengths.
-    fn arb_prefix_len() -> impl Strategy<Value = u8> {
-        0u8..=32
+        "[a-z][a-z0-9_-]{0,15}".prop_map(|s| format!("peer-{s}"))
     }
 
     proptest! {
@@ -443,7 +438,7 @@ mod proptests {
             let mut table = RoutingTable::new();
 
             // Add /8 route
-            let prefix8 = format!("{}.0.0.0/8", base_octet);
+            let prefix8 = format!("{base_octet}.0.0.0/8");
             table.add_route(Route {
                 prefix: prefix8.parse().unwrap(),
                 peer_id: "peer-8".to_string(),
@@ -453,7 +448,7 @@ mod proptests {
             });
 
             // Add /24 route within the /8
-            let prefix24 = format!("{}.0.0.0/24", base_octet);
+            let prefix24 = format!("{base_octet}.0.0.0/24");
             table.add_route(Route {
                 prefix: prefix24.parse().unwrap(),
                 peer_id: "peer-24".to_string(),
@@ -464,7 +459,7 @@ mod proptests {
 
             // Add /32 route within the /24
             let ip = Ipv4Addr::new(base_octet, 0, 0, host_octet);
-            let prefix32 = format!("{}/32", ip);
+            let prefix32 = format!("{ip}/32");
             table.add_route(Route {
                 prefix: prefix32.parse().unwrap(),
                 peer_id: "peer-32".to_string(),
@@ -533,7 +528,7 @@ mod proptests {
             let mut table = RoutingTable::new();
             table.add_route(Route {
                 prefix: "0.0.0.0/0".parse().unwrap(),
-                peer_id: peer_id.clone(),
+                peer_id,
                 priority: 0,
                 approved: false, // NOT approved
                 advertised: true,
@@ -588,7 +583,7 @@ mod proptests {
 
             // Add route
             table.add_route(Route {
-                prefix: prefix.clone(),
+                prefix,
                 peer_id: peer_id.clone(),
                 priority: 0,
                 approved: true,
@@ -611,11 +606,11 @@ mod proptests {
             let mut table = RoutingTable::new();
 
             // Add a /24 route
-            let prefix = format!("{}.{}.0.0/24", base_octet, subnet_octet);
+            let prefix = format!("{base_octet}.{subnet_octet}.0.0/24");
             let net: IpNet = prefix.parse().unwrap();
 
             table.add_route(Route {
-                prefix: net.clone(),
+                prefix: net,
                 peer_id: "test-peer".to_string(),
                 priority: 0,
                 approved: true,
@@ -670,7 +665,7 @@ mod proptests {
             let mut expected_len = 0;
 
             for (peer_id, octet) in operations {
-                let prefix = format!("10.0.{}.0/24", octet);
+                let prefix = format!("10.0.{octet}.0/24");
                 table.add_route(Route {
                     prefix: prefix.parse().unwrap(),
                     peer_id,

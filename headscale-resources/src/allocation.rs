@@ -1,6 +1,6 @@
 //! Resource allocation and scheduling.
 
-use crate::registry::{ProviderResource, ResourceRegistry};
+use crate::registry::ResourceRegistry;
 use crate::types::ResourceType;
 
 /// Allocates resources from the mesh.

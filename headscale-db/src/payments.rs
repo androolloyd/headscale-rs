@@ -19,12 +19,12 @@ pub async fn insert_transaction(pool: &SqlitePool, tx: &Transaction) -> Result<(
     };
 
     sqlx::query(
-        r#"
+        r"
         INSERT INTO transactions (
             id, from_account, to_account, amount, description, tx_type, timestamp
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
+        ",
     )
     .bind(&tx.id)
     .bind(&tx.from)
@@ -48,13 +48,13 @@ pub async fn get_transaction_history(
     let limit = limit.unwrap_or(100);
 
     let rows = sqlx::query_as::<_, TransactionRow>(
-        r#"
+        r"
         SELECT id, from_account, to_account, amount, description, tx_type, timestamp, created_at
         FROM transactions
         WHERE from_account = ? OR to_account = ?
         ORDER BY timestamp DESC
         LIMIT ?
-        "#,
+        ",
     )
     .bind(account)
     .bind(account)
@@ -62,7 +62,10 @@ pub async fn get_transaction_history(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.iter().map(|row| row.to_transaction()).collect())
+    Ok(rows
+        .iter()
+        .map(super::models::TransactionRow::to_transaction)
+        .collect())
 }
 
 /// Get all transactions (admin use).
@@ -73,62 +76,65 @@ pub async fn get_all_transactions(
     let limit = limit.unwrap_or(100);
 
     let rows = sqlx::query_as::<_, TransactionRow>(
-        r#"
+        r"
         SELECT id, from_account, to_account, amount, description, tx_type, timestamp, created_at
         FROM transactions
         ORDER BY timestamp DESC
         LIMIT ?
-        "#,
+        ",
     )
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.iter().map(|row| row.to_transaction()).collect())
+    Ok(rows
+        .iter()
+        .map(super::models::TransactionRow::to_transaction)
+        .collect())
 }
 
 /// Get account balance.
 pub async fn get_balance(pool: &SqlitePool, account: &str) -> Result<i64> {
     let row = sqlx::query_as::<_, AccountBalanceRow>(
-        r#"
+        r"
         SELECT account, balance, credit_limit, updated_at
         FROM account_balances
         WHERE account = ?
-        "#,
+        ",
     )
     .bind(account)
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.balance).unwrap_or(0))
+    Ok(row.map_or(0, |r| r.balance))
 }
 
 /// Get account available balance (balance + credit limit).
 pub async fn get_available_balance(pool: &SqlitePool, account: &str) -> Result<i64> {
     let row = sqlx::query_as::<_, AccountBalanceRow>(
-        r#"
+        r"
         SELECT account, balance, credit_limit, updated_at
         FROM account_balances
         WHERE account = ?
-        "#,
+        ",
     )
     .bind(account)
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.balance + r.credit_limit).unwrap_or(0))
+    Ok(row.map_or(0, |r| r.balance + r.credit_limit))
 }
 
 /// Update account balance.
 pub async fn update_balance(pool: &SqlitePool, account: &str, delta: i64) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         INSERT INTO account_balances (account, balance, updated_at)
         VALUES (?, ?, unixepoch())
         ON CONFLICT(account) DO UPDATE SET
             balance = balance + ?,
             updated_at = unixepoch()
-        "#,
+        ",
     )
     .bind(account)
     .bind(delta)
@@ -142,13 +148,13 @@ pub async fn update_balance(pool: &SqlitePool, account: &str, delta: i64) -> Res
 /// Set credit limit for an account.
 pub async fn set_credit_limit(pool: &SqlitePool, account: &str, limit: i64) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         INSERT INTO account_balances (account, credit_limit, updated_at)
         VALUES (?, ?, unixepoch())
         ON CONFLICT(account) DO UPDATE SET
             credit_limit = ?,
             updated_at = unixepoch()
-        "#,
+        ",
     )
     .bind(account)
     .bind(limit)
@@ -173,20 +179,19 @@ pub async fn transfer(
     let available = get_available_balance(pool, from).await?;
     if available < amount as i64 {
         return Err(DbError::Constraint(format!(
-            "Insufficient funds: available {} < required {}",
-            available, amount
+            "Insufficient funds: available {available} < required {amount}"
         )));
     }
 
     // Update balances
     sqlx::query(
-        r#"
+        r"
         INSERT INTO account_balances (account, balance, updated_at)
         VALUES (?, ?, unixepoch())
         ON CONFLICT(account) DO UPDATE SET
             balance = balance - ?,
             updated_at = unixepoch()
-        "#,
+        ",
     )
     .bind(from)
     .bind(-(amount as i64))
@@ -195,13 +200,13 @@ pub async fn transfer(
     .await?;
 
     sqlx::query(
-        r#"
+        r"
         INSERT INTO account_balances (account, balance, updated_at)
         VALUES (?, ?, unixepoch())
         ON CONFLICT(account) DO UPDATE SET
             balance = balance + ?,
             updated_at = unixepoch()
-        "#,
+        ",
     )
     .bind(to)
     .bind(amount as i64)
@@ -215,7 +220,7 @@ pub async fn transfer(
         .unwrap_or_default()
         .as_secs();
 
-    let tx_id = format!("tx_{}", now);
+    let tx_id = format!("tx_{now}");
 
     let transaction = Transaction {
         id: tx_id.clone(),
@@ -228,12 +233,12 @@ pub async fn transfer(
     };
 
     sqlx::query(
-        r#"
+        r"
         INSERT INTO transactions (
             id, from_account, to_account, amount, description, tx_type, timestamp
         )
         VALUES (?, ?, ?, ?, ?, 'transfer', ?)
-        "#,
+        ",
     )
     .bind(&tx_id)
     .bind(from)
@@ -274,6 +279,7 @@ mod tests {
         let tx = transfer(db.pool(), account1, account2, 100, "Test transfer")
             .await
             .unwrap();
+        assert_eq!(tx.amount, 100);
 
         // Check updated balances
         let balance1 = get_balance(db.pool(), account1).await.unwrap();

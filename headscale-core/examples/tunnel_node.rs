@@ -41,7 +41,7 @@ fn main() {
 
 fn print_usage() {
     println!(
-        r#"
+        r"
 WireGuard Tunnel Test Node
 
 COMMANDS:
@@ -70,7 +70,7 @@ EXAMPLES:
     cargo run --example tunnel_node -- initiator \
         --peer-pubkey <RESPONDER_PUB_KEY> \
         --peer-endpoint 192.168.1.100:51820
-"#
+"
     );
 }
 
@@ -152,7 +152,7 @@ fn run_responder(args: &[String]) {
     let (listen_addr, _, _, secret_key) = parse_args(args);
 
     println!("=== WireGuard Responder ===");
-    println!("Listen address: {}", listen_addr);
+    println!("Listen address: {listen_addr}");
 
     // Generate or use provided keypair
     let keypair = get_or_generate_keypair(secret_key);
@@ -209,7 +209,7 @@ fn run_responder(args: &[String]) {
         // Handle incoming packets
         match socket.recv_from(&mut buf) {
             Ok((len, src)) => {
-                println!("[RECV] {} bytes from {}", len, src);
+                println!("[RECV] {len} bytes from {src}");
                 peer_addr = Some(src);
 
                 match tunn.decapsulate(None, &buf[..len], &mut dst_buf) {
@@ -238,7 +238,7 @@ fn run_responder(args: &[String]) {
                         }
                     }
                     TunnResult::Err(e) => {
-                        println!("[ERROR] Decapsulate error: {:?}", e);
+                        println!("[ERROR] Decapsulate error: {e:?}");
                     }
                 }
             }
@@ -252,7 +252,7 @@ fn run_responder(args: &[String]) {
                 }
             }
             Err(e) => {
-                eprintln!("[ERROR] Socket error: {}", e);
+                eprintln!("[ERROR] Socket error: {e}");
             }
         }
 
@@ -276,9 +276,9 @@ fn run_initiator(args: &[String]) {
     let peer_endpoint = peer_endpoint.expect("--peer-endpoint is required");
 
     println!("=== WireGuard Initiator ===");
-    println!("Listen address: {}", listen_addr);
-    println!("Peer endpoint: {}", peer_endpoint);
-    println!("Peer pubkey: {}", peer_pubkey);
+    println!("Listen address: {listen_addr}");
+    println!("Peer endpoint: {peer_endpoint}");
+    println!("Peer pubkey: {peer_pubkey}");
 
     // Generate or use provided keypair
     let keypair = get_or_generate_keypair(secret_key);
@@ -313,17 +313,15 @@ fn run_initiator(args: &[String]) {
 
     // Initiate handshake
     println!("[INFO] Initiating handshake...");
-    match tunn.format_handshake_initiation(&mut dst_buf, false) {
-        TunnResult::WriteToNetwork(data) => {
-            socket
-                .send_to(data, peer_endpoint)
-                .expect("Failed to send handshake");
-            println!("[SEND] Handshake initiation ({} bytes)", data.len());
-        }
-        _ => {
-            eprintln!("[ERROR] Failed to create handshake");
-            return;
-        }
+    if let TunnResult::WriteToNetwork(data) = tunn.format_handshake_initiation(&mut dst_buf, false)
+    {
+        socket
+            .send_to(data, peer_endpoint)
+            .expect("Failed to send handshake");
+        println!("[SEND] Handshake initiation ({} bytes)", data.len());
+    } else {
+        eprintln!("[ERROR] Failed to create handshake");
+        return;
     }
 
     let mut handshake_complete = false;
@@ -335,7 +333,7 @@ fn run_initiator(args: &[String]) {
         // Handle incoming packets
         match socket.recv_from(&mut buf) {
             Ok((len, src)) => {
-                println!("[RECV] {} bytes from {}", len, src);
+                println!("[RECV] {len} bytes from {src}");
 
                 match tunn.decapsulate(None, &buf[..len], &mut dst_buf) {
                     TunnResult::Done => {
@@ -362,7 +360,7 @@ fn run_initiator(args: &[String]) {
                         );
                     }
                     TunnResult::Err(e) => {
-                        println!("[ERROR] Decapsulate error: {:?}", e);
+                        println!("[ERROR] Decapsulate error: {e:?}");
                     }
                 }
             }
@@ -374,7 +372,7 @@ fn run_initiator(args: &[String]) {
                 }
             }
             Err(e) => {
-                eprintln!("[ERROR] Socket error: {}", e);
+                eprintln!("[ERROR] Socket error: {e}");
             }
         }
 
@@ -415,7 +413,7 @@ fn run_initiator(args: &[String]) {
                     "FAILED"
                 }
             );
-            println!("  Pings sent: {}", ping_count);
+            println!("  Pings sent: {ping_count}");
             break;
         }
     }

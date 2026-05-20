@@ -9,10 +9,10 @@ pub async fn create_session(pool: &SqlitePool, session: &Session) -> Result<()> 
     let capabilities = serde_json::to_string(&session.capabilities)?;
 
     sqlx::query(
-        r#"
+        r"
         INSERT INTO sessions (token, did, created_at, expires_at, capabilities)
         VALUES (?, ?, ?, ?, ?)
-        "#,
+        ",
     )
     .bind(&session.token)
     .bind(session.did.as_str())
@@ -28,17 +28,17 @@ pub async fn create_session(pool: &SqlitePool, session: &Session) -> Result<()> 
 /// Get a session by token.
 pub async fn get_session(pool: &SqlitePool, token: &str) -> Result<Session> {
     let row = sqlx::query_as::<_, SessionRow>(
-        r#"
+        r"
         SELECT token, did, created_at, expires_at, capabilities
         FROM sessions
         WHERE token = ?
-        "#,
+        ",
     )
     .bind(token)
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
-        sqlx::Error::RowNotFound => DbError::NotFound(format!("Session not found: {}", token)),
+        sqlx::Error::RowNotFound => DbError::NotFound(format!("Session not found: {token}")),
         e => DbError::from(e),
     })?;
 
@@ -48,28 +48,28 @@ pub async fn get_session(pool: &SqlitePool, token: &str) -> Result<Session> {
 /// Get all sessions for a DID.
 pub async fn get_sessions_by_did(pool: &SqlitePool, did: &str) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, SessionRow>(
-        r#"
+        r"
         SELECT token, did, created_at, expires_at, capabilities
         FROM sessions
         WHERE did = ? AND expires_at > unixepoch()
         ORDER BY created_at DESC
-        "#,
+        ",
     )
     .bind(did)
     .fetch_all(pool)
     .await?;
 
     rows.iter()
-        .map(|row| row.to_session())
+        .map(super::models::SessionRow::to_session)
         .collect::<Result<Vec<_>>>()
 }
 
 /// Delete a session.
 pub async fn delete_session(pool: &SqlitePool, token: &str) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         DELETE FROM sessions WHERE token = ?
-        "#,
+        ",
     )
     .bind(token)
     .execute(pool)
@@ -81,9 +81,9 @@ pub async fn delete_session(pool: &SqlitePool, token: &str) -> Result<()> {
 /// Delete all sessions for a DID.
 pub async fn delete_sessions_by_did(pool: &SqlitePool, did: &str) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         DELETE FROM sessions WHERE did = ?
-        "#,
+        ",
     )
     .bind(did)
     .execute(pool)
@@ -95,9 +95,9 @@ pub async fn delete_sessions_by_did(pool: &SqlitePool, did: &str) -> Result<()> 
 /// Cleanup expired sessions.
 pub async fn cleanup_expired_sessions(pool: &SqlitePool) -> Result<u64> {
     let result = sqlx::query(
-        r#"
+        r"
         DELETE FROM sessions WHERE expires_at < unixepoch()
-        "#,
+        ",
     )
     .execute(pool)
     .await?;
@@ -108,11 +108,11 @@ pub async fn cleanup_expired_sessions(pool: &SqlitePool) -> Result<u64> {
 /// Check if a session is valid (exists and not expired).
 pub async fn is_session_valid(pool: &SqlitePool, token: &str) -> Result<bool> {
     let count: (i64,) = sqlx::query_as(
-        r#"
+        r"
         SELECT COUNT(*) as count
         FROM sessions
         WHERE token = ? AND expires_at > unixepoch()
-        "#,
+        ",
     )
     .bind(token)
     .fetch_one(pool)

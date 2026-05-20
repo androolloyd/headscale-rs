@@ -11,14 +11,35 @@ layer that consumes the `MeteringSnapshot` events surfaced by
 
 ## Workspace layout
 
+Three crates are first-class workspace members and participate in
+`cargo build --workspace` / `cargo test --workspace` / `cargo clippy
+--workspace`:
+
 ```
-headscale-core      mesh, WireGuard keys, DERP, metering, routing
-headscale-identity  node identity + auth
-headscale-resources resource discovery / advertisement
-headscale-payments  reference ledger / channel / x402 — replace with your own
-headscale-api       gRPC + HTTP control plane
-headscale-db        sqlite-backed persistence
-headscale-cli       headscale-rs daemon + CLI
+headscale-api       gRPC + HTTP control plane, Tailscale wire, admin GUI
+headscale-db        sqlite-backed persistence (preauth keys, nodes, ...)
+headscale-cli       headscale-rs daemon + operator CLI
+```
+
+Four crates are **on disk but not workspace members** as of
+2026-05-20 (see [`CHANGES.md`](./CHANGES.md)). They are still
+compiled when the active crates above pull them in via path
+dependencies, so production builds are byte-identical; they just no
+longer get their own per-crate test/clippy scope at the workspace
+level.
+
+```
+headscale-core      mesh, WireGuard, DERP, metering, routing, authorization
+headscale-identity  Ed25519 + DID + session primitives
+headscale-resources resource registry + metering
+headscale-payments  reference ledger / x402 / escrow / channels (deletion candidate)
+```
+
+To work on one of the demoted crates directly:
+
+```
+cd headscale-<name> && cargo build --release
+cd headscale-<name> && cargo test
 ```
 
 ## Build

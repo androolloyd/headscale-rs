@@ -1,19 +1,30 @@
 [package]
 name = "headscale-resources"
 description = "Resource registry and metering"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Excluded from `[workspace.members]` as of 2026-05-20; kept on disk
+# because the active crates (`headscale-db`, `headscale-cli`,
+# `headscale-api[full]`) still consume it via path dependency. Not
+# published to crates.io. Package metadata is inlined (not
+# `.workspace = true`) so the crate can be cargo-built from its own
+# directory without a workspace root. See `CHANGES.md` for the
+# deprecation contract — kept in case we revisit metering integration
+# here.
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
 
+# NOTE: dependency declarations were inlined (not `.workspace = true`)
+# on 2026-05-20 when this crate was removed from `[workspace.members]`.
 [dependencies]
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-thiserror.workspace = true
-prometheus-client.workspace = true
+tokio = { version = "1.42", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+thiserror = "2.0"
+prometheus-client = "0.22"
 
-headscale-identity = { workspace = true }
+headscale-identity = { path = "../headscale-identity" }
 
-[lints]
-workspace = true
+# No `[lints] workspace = true` here — this crate is no longer a
+# workspace member.

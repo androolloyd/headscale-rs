@@ -37,6 +37,8 @@ admin = [
     # separate dep activation.
     "dep:serde_urlencoded",
     "dep:rand_core",
+    "dep:headscale-db",
+    "dep:sqlx",
 ]
 
 [dependencies]
@@ -54,6 +56,14 @@ headscale-core = { workspace = true, optional = true }
 headscale-identity = { workspace = true, optional = true }
 headscale-resources = { workspace = true, optional = true }
 headscale-payments = { workspace = true, optional = true }
+# Persistent preauth-key store — sqlx-backed, bcrypt-hashed. Lives
+# behind the `admin` feature because today only the admin module
+# touches it; the wire layer continues to talk to whatever
+# `PreauthRedeemer` the embedder injects.
+headscale-db = { workspace = true, optional = true }
+# Re-exposed at workspace level so the persistent admin store can
+# share the same SqlitePool as the embedder.
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "sqlite"] }
 
 # Gateway dependencies (only when `full` is on; otherwise the wire
 # layer doesn't need them).

@@ -11,6 +11,7 @@ pub mod error;
 pub mod models;
 pub mod nodes;
 pub mod payments;
+pub mod preauth_keys;
 pub mod resources;
 pub mod sessions;
 

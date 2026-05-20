@@ -244,6 +244,13 @@ pub struct WireState {
     /// unknown". See [`knock`] for the rationale + math. Defaults to
     /// disabled so existing deployments keep working unchanged.
     pub knock: KnockConfig,
+    /// MagicDNS / `DNSConfig` build state. Defaults to
+    /// [`crate::dns::DnsStore::new`] — MagicDNS off, no resolvers, no
+    /// records. Embedders opt into MagicDNS by calling
+    /// [`crate::dns::DnsStore::from_spec`] at startup. The store's
+    /// `Notify` wakes parked `/map` long-pollers on extra-records
+    /// file edits + runtime spec swaps.
+    pub dns: Arc<crate::dns::DnsStore>,
 }
 
 /// In-memory machine registry.

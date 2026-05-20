@@ -1,0 +1,32 @@
+// Mirrors juanfont/headscale@main:hscontrol/policy/v2/testdata/nodeattrs_results/*
+// in shape — exercises the `node_attrs` block with both `*` and tag
+// targets, plus the camelCase alias. Used by `tests/policy_e2e.rs::
+// parses_upstream_nodeattrs_fixture`.
+{
+    "version": 1,
+    "rules": [
+        // Minimum allow-all so the policy validates against operators
+        // who push only a node_attrs block.
+        {"action": "accept", "src": ["*"], "dst": ["*"], "ports": ["*/*"]}
+    ],
+    "tag_owners": {
+        "tag:exit":   ["alice@example.com"],
+        "tag:funnel": ["alice@example.com"]
+    },
+    // camelCase form intentional — the parser must accept `nodeAttrs`
+    // as an alias for `node_attrs`.
+    "nodeAttrs": [
+        {
+            "target": ["*"],
+            "attr":   ["mullvad-exit-node"]
+        },
+        {
+            "target": ["tag:funnel"],
+            "attr":   ["funnel"]
+        },
+        {
+            "target": ["tag:exit"],
+            "attr":   ["exit-node"]
+        }
+    ]
+}

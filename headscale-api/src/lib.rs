@@ -33,6 +33,13 @@ pub mod tailscale_wire;
 // needs the policy store to populate the packet filter.
 pub mod policy;
 
+// MagicDNS / `tailcfg.DNSConfig` build + hot-reload. Consumed by
+// `tailscale_wire::map` to populate `MapResponse.DNSConfig` on every
+// rebuild. Closes the P1 entry in `docs/headscale-gap-analysis.md`
+// (§MagicDNS). Lives in the wire-default feature set: a wire-only
+// embedder still needs the DnsStore to emit MagicDNS records.
+pub mod dns;
+
 // Admin GUI v0 — Tailscale-admin-equivalent web panel + JSON API.
 // Gated behind the `admin` feature (default-on); downstream wire-only
 // consumers can disable it with `default-features = false`. See

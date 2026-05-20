@@ -79,6 +79,12 @@ futures = { version = "0.3", optional = true }
 # when downstream callers disable `default-features`).
 hmac = "0.12"
 sha2 = "0.10"
+# Policy v2: CIDR / IPNet parsing for `hosts`, `ipsets`, and
+# `auto_approvers.routes` prefix matching. The `auto_approves_route`
+# logic compares an operator-declared CIDR key against a node's
+# advertised prefix using prefix-covers semantics — needs structured
+# parsing, not string compare.
+ipnet = "2"
 
 # Tailscale wire-protocol layer (migrated from
 # octravpn-mesh::tailscale_wire 2026-05-19). The Noise IK handshake
@@ -125,6 +131,13 @@ http-body = "1"
 http-body-util = "0.1"
 http = "1"
 parking_lot = "0.12"
+# Embedded DERP sidecar lifecycle (`tailscale_wire::derp::sidecar`)
+# uses `nix::sys::signal::kill` to send SIGTERM to the spawned
+# `derper` Go binary before falling through to SIGKILL. The workspace
+# bans `unsafe_code`, so we can't call libc directly. `nix` is
+# Unix-only — guarded by `#[cfg(unix)]` at the use site so the crate
+# still compiles on non-Unix hosts.
+nix = { version = "0.29", default-features = false, features = ["signal"] }
 bytes = "1"
 hex = "0.4"
 chrono = { workspace = true }
@@ -195,6 +208,9 @@ serde_json = { workspace = true }
 # Admin GUI integration test crate uses `hex` to build a fixture
 # node-key hex string.
 hex = "0.4"
+# `dns::tests::config_spec_round_trips_toml` parses a `[dns]` block to
+# verify the spec deserialises from the operator-facing config format.
+toml = { workspace = true }
 
 [lints]
 workspace = true

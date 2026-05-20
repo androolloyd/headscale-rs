@@ -41,6 +41,16 @@
 use super::{PolicyAction, PolicyDoc};
 use crate::tailscale_wire::wire::{FilterRule, NetPortRange, PortRange};
 
+// `expand_principal` (in `super::doc`) handles the SrcIP/DstIP token
+// expansion for groups, hosts, ipsets, and the flattenable autogroups
+// (`internet`, `member`). The non-flattenable autogroups (`self`,
+// `nonroot`, `tagged`, `tag:*`) need per-evaluation NodeView context
+// and cannot be expressed in a static `tailcfg.FilterRule.SrcIPs`
+// list — they're silently dropped from this layer and enforced only
+// by the on-host `octravpn-mesh::acl` evaluator. Documented here so
+// an operator who writes such a rule sees the same default-deny they
+// would for an unresolved group.
+
 /// Translate a parsed [`PolicyDoc`] into the on-wire
 /// `tailcfg.FilterRule` list the stock Tailscale daemon consumes.
 ///
@@ -163,6 +173,12 @@ mod tests {
             version: 1,
             groups,
             tags: BTreeMap::new(),
+            tag_owners: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            ipsets: BTreeMap::new(),
+            auto_approvers: Default::default(),
+            node_attrs: Vec::new(),
+            ssh: Vec::new(),
             rules,
         }
     }

@@ -1,0 +1,29 @@
+// Exercise `ipsets` + `hosts` + `ipset:`/`host:` token expansion in
+// rule src/dst — both forms.
+{
+    "version": 1,
+    "ipsets": {
+        "office": ["10.0.0.0/8", "192.168.0.0/16"],
+        "lab":    ["172.16.0.0/12"]
+    },
+    "hosts": {
+        "monitor": "10.1.2.3/32",
+        "router":  "10.0.0.1/32"
+    },
+    "rules": [
+        // Office endpoints can reach the lab subnet over any port.
+        {
+            "action": "accept",
+            "src":    ["ipset:office"],
+            "dst":    ["ipset:lab"],
+            "ports":  ["*/*"]
+        },
+        // Monitor host can SSH the router.
+        {
+            "action": "accept",
+            "src":    ["host:monitor"],
+            "dst":    ["host:router"],
+            "ports":  ["tcp/22"]
+        }
+    ]
+}

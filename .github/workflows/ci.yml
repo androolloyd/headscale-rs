@@ -45,6 +45,7 @@ jobs:
             cargo fmt --manifest-path "${manifest}" --all -- --check
           done
       - run: cargo fmt --manifest-path headscale-core/fuzz/Cargo.toml --all -- --check
+      - run: cargo fmt --manifest-path tools/parity/headscale-rs/Cargo.toml --all -- --check
 
   clippy:
     name: cargo clippy
@@ -147,3 +148,22 @@ jobs:
             cargo fuzz run "${target}" -- -runs="${FUZZ_RUNS}"
             echo "::endgroup::"
           done < /tmp/headscale-fuzz-targets
+
+  parity:
+    name: headscale-go parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/parity/headscale-go/go.mod
+          cache-dependency-path: tools/parity/headscale-go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tools/parity/headscale-rs -> target
+      - run: ./scripts/headscale_go_diff.sh

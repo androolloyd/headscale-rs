@@ -18,7 +18,7 @@
 //!   →  FilterRule {
 //!         SrcIPs:   expand_principal(src),
 //!         DstPorts: [{ IP: dst_i, Ports: { first, last } } for each dst, port],
-//!         IPProto:  []  // empty ⇒ all protocols
+//!         IPProto:  protocol_numbers(ports)
 //!      }
 //! ```
 //!
@@ -29,13 +29,6 @@
 //! accept-only ACLs; explicit denies are caught by the on-host
 //! `headscale-api-acl` evaluator but never reach the Tailscale
 //! daemon's packet filter".
-//!
-//! ## Fields intentionally left empty
-//!
-//! * `IPProto` — the ACL `ports` syntax is `<proto>/<port>` but
-//!   stock `tailcfg.FilterRule.IPProto` is a list of IANA protocol
-//!   *numbers*. Empty `IPProto` = all protocols, which is what `*/*`
-//!   wants. Per-proto filtering is a follow-up.
 //!
 //! ## Static-vs-dynamic principal expansion
 //!
@@ -89,36 +82,28 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
             continue;
         }
 
-        let port_ranges: Vec<PortRange> = if rule.ports.is_empty() {
-            vec![PortRange {
-                first: 0,
-                last: 65535,
-            }]
-        } else {
-            rule.ports
-                .iter()
-                .filter_map(|p| port_pattern_to_range(p))
-                .collect()
-        };
-        if port_ranges.is_empty() {
+        let port_groups = compile_port_groups(&rule.ports);
+        if port_groups.is_empty() {
             continue;
         }
 
-        let mut dst_ports: Vec<NetPortRange> = Vec::new();
-        for ip in &dst_ips {
-            for r in &port_ranges {
-                dst_ports.push(NetPortRange {
-                    ip: ip.clone(),
-                    ports: r.clone(),
-                });
+        for (ip_proto, port_ranges) in port_groups {
+            let mut dst_ports: Vec<NetPortRange> = Vec::new();
+            for ip in &dst_ips {
+                for r in &port_ranges {
+                    dst_ports.push(NetPortRange {
+                        ip: ip.clone(),
+                        ports: r.clone(),
+                    });
+                }
             }
-        }
 
-        out.push(FilterRule {
-            src_ips,
-            dst_ports,
-            ip_proto: Vec::new(),
-        });
+            out.push(FilterRule {
+                src_ips: src_ips.clone(),
+                dst_ports,
+                ip_proto,
+            });
+        }
     }
     out
 }
@@ -151,6 +136,111 @@ fn port_pattern_to_range(pat: &str) -> Option<PortRange> {
     }
     let p: u16 = port_part.parse().ok()?;
     Some(PortRange { first: p, last: p })
+}
+
+fn compile_port_groups(ports: &[String]) -> Vec<(Vec<i32>, Vec<PortRange>)> {
+    if ports.is_empty() {
+        return vec![(
+            Vec::new(),
+            vec![PortRange {
+                first: 0,
+                last: 65535,
+            }],
+        )];
+    }
+
+    let mut compiled: Vec<(PortRange, Vec<i32>)> = Vec::new();
+    for pat in ports {
+        let (Some(range), Some(ip_proto)) = (port_pattern_to_range(pat), ip_proto_for_pattern(pat))
+        else {
+            continue;
+        };
+
+        if let Some((_, existing_proto)) = compiled
+            .iter_mut()
+            .find(|(existing_range, _)| same_port_range(existing_range, &range))
+        {
+            merge_ip_proto(existing_proto, &ip_proto);
+        } else {
+            compiled.push((range, ip_proto));
+        }
+    }
+
+    let mut groups: Vec<(Vec<i32>, Vec<PortRange>)> = Vec::new();
+    for (range, ip_proto) in compiled {
+        if let Some((_, ranges)) = groups
+            .iter_mut()
+            .find(|(existing_proto, _)| *existing_proto == ip_proto)
+        {
+            ranges.push(range);
+        } else {
+            groups.push((ip_proto, vec![range]));
+        }
+    }
+    groups
+}
+
+fn ip_proto_for_pattern(pat: &str) -> Option<Vec<i32>> {
+    let pat = pat.strip_prefix("*:").unwrap_or(pat);
+    let (proto_part, _port_part) = pat.split_once('/').unwrap_or((pat, "*"));
+    if proto_part == "*" {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    append_protocol_numbers(proto_part, &mut out)?;
+    Some(out)
+}
+
+fn same_port_range(a: &PortRange, b: &PortRange) -> bool {
+    a.first == b.first && a.last == b.last
+}
+
+fn merge_ip_proto(existing: &mut Vec<i32>, incoming: &[i32]) {
+    if existing.is_empty() || incoming.is_empty() {
+        existing.clear();
+        return;
+    }
+    for n in incoming {
+        push_unique(existing, *n);
+    }
+}
+
+fn append_protocol_numbers(proto: &str, out: &mut Vec<i32>) -> Option<()> {
+    let lower = proto.to_ascii_lowercase();
+    let nums: &[i32] = match lower.as_str() {
+        "" => &[6, 17],
+        "icmp" => &[1, 58],
+        "igmp" => &[2],
+        "ipv4" | "ip-in-ip" => &[4],
+        "tcp" => &[6],
+        "egp" => &[8],
+        "igp" => &[9],
+        "udp" => &[17],
+        "gre" => &[47],
+        "esp" => &[50],
+        "ah" => &[51],
+        "ipv6-icmp" => &[58],
+        "sctp" => &[132],
+        "fc" => &[133],
+        _ => {
+            let n: i32 = lower.parse().ok()?;
+            if !(1..=255).contains(&n) {
+                return None;
+            }
+            push_unique(out, n);
+            return Some(());
+        }
+    };
+    for n in nums {
+        push_unique(out, *n);
+    }
+    Some(())
+}
+
+fn push_unique(out: &mut Vec<i32>, n: i32) {
+    if !out.contains(&n) {
+        out.push(n);
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +283,42 @@ mod tests {
         assert_eq!(rs[0].dst_ports[0].ports.first, 0);
         assert_eq!(rs[0].dst_ports[0].ports.last, 65535);
         assert!(rs[0].ip_proto.is_empty());
+    }
+
+    #[test]
+    fn tcp_udp_ports_emit_headscale_go_default_ip_proto() {
+        let d = doc(
+            vec![PolicyRule {
+                action: PolicyAction::Accept,
+                src: vec!["100.64.0.1/32".into()],
+                dst: vec!["100.64.0.2/32".into()],
+                ports: vec!["tcp/22".into(), "udp/22".into()],
+            }],
+            BTreeMap::new(),
+        );
+        let rs = acl_to_filter_rules(&d);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].dst_ports.len(), 1);
+        assert_eq!(rs[0].ip_proto, vec![6, 17]);
+    }
+
+    #[test]
+    fn mixed_protocol_ports_do_not_cross_apply() {
+        let d = doc(
+            vec![PolicyRule {
+                action: PolicyAction::Accept,
+                src: vec!["100.64.0.1/32".into()],
+                dst: vec!["100.64.0.2/32".into()],
+                ports: vec!["tcp/22".into(), "udp/53".into()],
+            }],
+            BTreeMap::new(),
+        );
+        let rs = acl_to_filter_rules(&d);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].ip_proto, vec![6]);
+        assert_eq!(rs[0].dst_ports[0].ports.first, 22);
+        assert_eq!(rs[1].ip_proto, vec![17]);
+        assert_eq!(rs[1].dst_ports[0].ports.first, 53);
     }
 
     #[test]

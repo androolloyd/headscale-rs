@@ -2,8 +2,8 @@
 
 This repo has three quality gates:
 
-- Pull-request CI: formatting, clippy, tests, and a 10k-input fuzz smoke run
-  across every checked-in fuzz target.
+- Pull-request CI: formatting, clippy, tests, a 10k-input fuzz smoke run across
+  every checked-in fuzz target, and headscale-go policy differential scenarios.
 - Coverage CI: `cargo llvm-cov` over the active workspace plus the excluded
   support crates, with `target/coverage/lcov.info` and a text summary uploaded
   as artifacts.
@@ -15,6 +15,7 @@ This repo has three quality gates:
 ```sh
 cargo fmt --all -- --check
 cargo fmt --manifest-path headscale-core/fuzz/Cargo.toml --all -- --check
+cargo fmt --manifest-path tools/parity/headscale-rs/Cargo.toml --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 for manifest in \
@@ -30,6 +31,7 @@ done
 cargo deny check advisories licenses sources
 cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-0071
 cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
+./scripts/headscale_go_diff.sh
 ```
 
 `cargo audit` is lockfile-only and currently reports `RUSTSEC-2023-0071`
@@ -68,11 +70,14 @@ Parity work should be proven with fixtures or differential tests, not comments.
 The current fixtures cover:
 
 - preauth persistence semantics against upstream headscale-go test names;
+- `tools/parity/scenarios/*.json` differential cases against pinned
+  `github.com/juanfont/headscale v0.28.0` policy-to-`tailcfg.FilterRule`
+  output;
 - Tailscale wire acronym fields such as `AuthURL`, `DNSConfig`, `DERPMap`,
   `AllowedIPs`, `DiscoKey`, and `ID`;
 - ACL default-deny, first-match-wins, group ordering canonicalisation, node
   attrs, ipsets, hosts, auto-approvers, and HuJSON compatibility.
 
-The next parity layer should run a small headscale-go instance and headscale-rs
+The next parity layer should run small headscale-go and headscale-rs instances
 side by side, then compare observable JSON responses and state transitions for
 registration, map polling, route approval, policy updates, and preauth-key use.

@@ -82,7 +82,7 @@ pub enum AclAction {
 ///
 /// `#[serde(deny_unknown_fields)]`: a misspelled rule field is a
 /// loud error, not a silently permissive ACL.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclRule {
     pub action: AclAction,
@@ -90,6 +90,58 @@ pub struct AclRule {
     pub dst: Vec<String>,
     #[serde(default)]
     pub ports: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for AclRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            action: AclAction,
+            #[serde(default)]
+            proto: Option<String>,
+            src: Vec<String>,
+            dst: Vec<String>,
+            #[serde(default)]
+            ports: Vec<String>,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        let proto = raw.proto.as_deref().map(|p| p.trim().to_ascii_lowercase());
+        if let Some(proto) = proto.as_deref() {
+            validate_upstream_proto(proto).map_err(serde::de::Error::custom)?;
+        }
+        let legacy_proto = proto.as_deref().unwrap_or("*");
+        let upstream_proto = proto.as_deref().unwrap_or("");
+        let mut dst = Vec::with_capacity(raw.dst.len());
+        let mut ports = Vec::new();
+
+        for port in raw.ports {
+            validate_proto_port_compat(legacy_proto, &port).map_err(serde::de::Error::custom)?;
+            ports.extend(normalize_port_spec(legacy_proto, &port));
+        }
+
+        for raw_dst in raw.dst {
+            if let Some((alias, port_spec)) = split_upstream_dst_ports(&raw_dst) {
+                validate_proto_port_compat(upstream_proto, port_spec)
+                    .map_err(serde::de::Error::custom)?;
+                dst.push(alias.to_string());
+                ports.extend(normalize_port_spec(upstream_proto, port_spec));
+            } else {
+                dst.push(raw_dst);
+            }
+        }
+
+        Ok(Self {
+            action: raw.action,
+            src: raw.src,
+            dst,
+            ports,
+        })
+    }
 }
 
 /// One `nodeAttrs` grant. Mirrors upstream
@@ -137,6 +189,7 @@ pub struct SshRule {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclDoc {
+    #[serde(default = "default_policy_version")]
     pub version: u32,
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
@@ -170,6 +223,10 @@ pub struct AclDoc {
     /// either spelling acceptable.
     #[serde(default, alias = "acls")]
     pub rules: Vec<AclRule>,
+}
+
+const fn default_policy_version() -> u32 {
+    1
 }
 
 /// A node's identity facets used during principal / autogroup
@@ -572,6 +629,9 @@ impl AclDoc {
             }
             return Vec::new();
         }
+        if let Some(cidr) = self.hosts.get(token) {
+            return vec![cidr.clone()];
+        }
         vec![token.to_string()]
     }
 
@@ -621,6 +681,9 @@ impl AclDoc {
                 return cidrs.iter().any(|c| addr_in_cidr(principal.addr, c));
             }
             return false;
+        }
+        if let Some(cidr) = self.hosts.get(entry) {
+            return addr_in_cidr(principal.addr, cidr);
         }
         if entry.contains('/') {
             return addr_in_cidr(principal.addr, entry);
@@ -714,16 +777,144 @@ fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
     net.contains(&parsed)
 }
 
+fn split_upstream_dst_ports(dst: &str) -> Option<(&str, &str)> {
+    let (alias, port_spec) = dst.rsplit_once(':')?;
+    if alias.is_empty() || alias.ends_with(':') || !is_upstream_port_spec(port_spec) {
+        return None;
+    }
+    Some((alias, port_spec))
+}
+
+fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
+    if spec.contains('/') || spec.starts_with("*:") {
+        return vec![spec.to_string()];
+    }
+    let mut out = Vec::new();
+    for part in spec.split(',').map(str::trim) {
+        if !is_single_port_spec(part) {
+            continue;
+        }
+        if proto.is_empty() {
+            out.push(format!("tcp/{part}"));
+            out.push(format!("udp/{part}"));
+        } else {
+            out.push(format!("{proto}/{part}"));
+        }
+    }
+    out
+}
+
+fn validate_upstream_proto(proto: &str) -> Result<(), String> {
+    match proto {
+        "" | "icmp" | "igmp" | "ipv4" | "ip-in-ip" | "tcp" | "egp" | "igp" | "udp" | "gre"
+        | "esp" | "ah" | "sctp" => Ok(()),
+        "*" => Err(
+            "proto name \"*\" not known; use protocol number 0-255 or protocol name (icmp, tcp, udp, etc.)"
+                .to_string(),
+        ),
+        other => {
+            if other == "0" || (other.len() > 1 && other.starts_with('0')) {
+                return Err(format!(
+                    "leading 0 not permitted in protocol number \"{other}\""
+                ));
+            }
+            match other.parse::<u16>() {
+                Ok(1..=255) => Ok(()),
+                Ok(n) => Err(format!("protocol number {n} out of range (0-255)")),
+                Err(_) => Err(format!(
+                    "invalid protocol {other:?}: must be a known protocol name or valid protocol number 0-255"
+                )),
+            }
+        }
+    }
+}
+
+fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
+    if matches!(proto, "" | "*" | "tcp" | "udp" | "sctp") || spec.contains('/') {
+        return Ok(());
+    }
+    let has_specific_port = spec.split(',').map(str::trim).any(|part| part != "*");
+    if has_specific_port {
+        return Err(format!(
+            "protocol {proto:?} does not support specific ports; only \"*\" is allowed"
+        ));
+    }
+    Ok(())
+}
+
+fn is_upstream_port_spec(spec: &str) -> bool {
+    spec.split(',').all(is_single_port_spec)
+}
+
+fn is_single_port_spec(spec: &str) -> bool {
+    if spec == "*" {
+        return true;
+    }
+    if let Some((lo, hi)) = spec.split_once('-') {
+        return !lo.is_empty()
+            && !hi.is_empty()
+            && lo.parse::<u16>().is_ok()
+            && hi.parse::<u16>().is_ok();
+    }
+    spec.parse::<u16>().is_ok()
+}
+
 fn port_matches(pattern: &str, port: PortRef<'_>) -> bool {
     let pat = pattern.strip_prefix("*:").unwrap_or(pattern);
     let (proto_part, port_part) = pat.split_once('/').unwrap_or((pat, "*"));
-    let proto_ok = proto_part == "*" || port.proto.is_none_or(|p| p == proto_part);
-    let port_ok = port_part == "*"
-        || match (port.port, port_part.parse::<u16>()) {
-            (Some(p), Ok(want)) => p == want,
-            _ => false,
-        };
+    let proto_ok = proto_part == "*" || port.proto.is_none_or(|p| proto_matches(proto_part, p));
+    let port_ok = port_part == "*" || port.port.is_none_or(|p| port_part_matches(port_part, p));
     proto_ok && port_ok
+}
+
+fn proto_matches(pattern: &str, actual: &str) -> bool {
+    if pattern.eq_ignore_ascii_case(actual) {
+        return true;
+    }
+    let Some(pattern_nums) = proto_numbers(pattern) else {
+        return false;
+    };
+    let Some(actual_nums) = proto_numbers(actual) else {
+        return false;
+    };
+    pattern_nums.iter().any(|p| actual_nums.contains(p))
+}
+
+fn proto_numbers(proto: &str) -> Option<Vec<u16>> {
+    let lower = proto.to_ascii_lowercase();
+    let nums: &[u16] = match lower.as_str() {
+        "icmp" => &[1, 58],
+        "igmp" => &[2],
+        "ipv4" | "ip-in-ip" => &[4],
+        "tcp" => &[6],
+        "egp" => &[8],
+        "igp" => &[9],
+        "udp" => &[17],
+        "gre" => &[47],
+        "esp" => &[50],
+        "ah" => &[51],
+        "ipv6-icmp" => &[58],
+        "sctp" => &[132],
+        "fc" => &[133],
+        _ => {
+            let n: u16 = lower.parse().ok()?;
+            if !(1..=255).contains(&n) {
+                return None;
+            }
+            return Some(vec![n]);
+        }
+    };
+    Some(nums.to_vec())
+}
+
+fn port_part_matches(port_part: &str, port: u16) -> bool {
+    if let Some((lo, hi)) = port_part.split_once('-') {
+        let (Ok(lo), Ok(hi)) = (lo.parse::<u16>(), hi.parse::<u16>()) else {
+            return false;
+        };
+        return lo <= port && port <= hi;
+    }
+    port_part.parse::<u16>().is_ok_and(|want| port == want)
 }
 
 // =====================================================================
@@ -836,6 +1027,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hujson_accepts_headscale_go_policy_without_version() {
+        let raw =
+            r#"{"acls":[{"action":"accept","src":["100.64.0.1/32"],"dst":["100.64.0.2/32:22"]}]}"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.rules.len(), 1);
+        assert_eq!(doc.rules[0].dst, vec!["100.64.0.2/32"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
+    }
+
+    #[test]
+    fn hujson_accepts_headscale_go_dst_ports_for_tag_and_proto() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["tag:client"],"dst":["tag:server:80,443"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["tag:server"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/80", "tcp/443"]);
+    }
+
+    #[test]
+    fn hujson_accepts_headscale_go_dst_ports_for_bare_host_alias() {
+        let raw = r#"{
+            "hosts": {"server": "100.64.0.2/32"},
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["100.64.0.1/32"],"dst":["server:22"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["server"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22"]);
+    }
+
+    #[test]
+    fn hujson_does_not_treat_bare_ipv6_literal_as_dst_port() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["fd7a:115c:a1e0::1"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["fd7a:115c:a1e0::1"]);
+        assert!(doc.rules[0].ports.is_empty());
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_proto_wildcard() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","proto":"*","src":["*"],"dst":["*:22"]}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        assert!(format!("{err}").contains("proto name"));
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_icmp_specific_port() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","proto":"icmp","src":["*"],"dst":["*:22"]}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        assert!(format!("{err}").contains("does not support specific ports"));
+    }
+
     // --- Evaluate --------------------------------------------------
 
     #[test]
@@ -926,6 +1187,50 @@ mod tests {
         );
         assert_eq!(
             doc.decide("a", "b", PortRef::new("udp", 22)),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
+    fn port_range_matches_inside_bounds() {
+        let doc = AclDoc {
+            version: 1,
+            rules: vec![AclRule {
+                action: AclAction::Accept,
+                src: vec!["*".into()],
+                dst: vec!["*".into()],
+                ports: vec!["tcp/8000-9000".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 8443)),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 9443)),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
+    fn numeric_proto_matches_named_port_ref() {
+        let doc = AclDoc {
+            version: 1,
+            rules: vec![AclRule {
+                action: AclAction::Accept,
+                src: vec!["*".into()],
+                dst: vec!["*".into()],
+                ports: vec!["6/443".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 443)),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("udp", 443)),
             AclAction::Deny
         );
     }
@@ -1091,6 +1396,23 @@ mod tests {
     #[test]
     fn host_alias_matches_address_inside_cidr() {
         let mut doc = doc_with_rule(&["*"], &["host:office"]);
+        doc.hosts.insert("office".into(), "10.0.0.0/8".into());
+        let s = NodeView::new("100.64.0.1");
+        let inside = NodeView::new("10.5.5.5");
+        let outside = NodeView::new("8.8.8.8");
+        assert_eq!(
+            doc.evaluate_with(&s, &inside, PortRef::any()),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.evaluate_with(&s, &outside, PortRef::any()),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
+    fn bare_host_alias_matches_address_inside_cidr() {
+        let mut doc = doc_with_rule(&["*"], &["office"]);
         doc.hosts.insert("office".into(), "10.0.0.0/8".into());
         let s = NodeView::new("100.64.0.1");
         let inside = NodeView::new("10.5.5.5");
@@ -1622,6 +1944,14 @@ mod tests {
         d.groups
             .insert("admins".to_string(), vec!["a".to_string(), "b".to_string()]);
         assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn expand_principal_bare_host_returns_cidr() {
+        let mut d = AclDoc::empty();
+        d.hosts
+            .insert("server".to_string(), "100.64.0.2/32".to_string());
+        assert_eq!(d.expand_principal("server"), vec!["100.64.0.2/32"]);
     }
 
     #[test]

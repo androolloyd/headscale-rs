@@ -716,4 +716,43 @@ mod tests {
         // second run = no-op (sqlx_migrations table tracks state).
         db.migrate().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn file_database_persists_preauth_keys_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+
+        let plaintext = {
+            let db = Database::new(&url).await.unwrap();
+            db.migrate().await.unwrap();
+            let mut p = alice();
+            p.tags = vec!["tag:router".into()];
+            let created = create_for_test(db.pool(), p).await.unwrap();
+            db.close().await;
+            created.plaintext
+        };
+
+        let reopened = Database::new(&url).await.unwrap();
+        reopened.migrate().await.unwrap();
+        let row = get_by_token(reopened.pool(), &plaintext).await.unwrap();
+        assert_eq!(row.user_id, "alice");
+        assert_eq!(row.tag_list(), vec!["tag:router".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn expired_single_use_key_is_not_marked_used() {
+        let db = fresh_db().await;
+        let mut p = alice();
+        p.expiration = Some(now_unix() - 60);
+        let created = create_for_test(db.pool(), p).await.unwrap();
+
+        assert_eq!(
+            try_use(db.pool(), &created.plaintext).await.unwrap_err(),
+            UseError::Expired
+        );
+
+        let stored = get_by_id(db.pool(), created.row.id).await.unwrap();
+        assert!(stored.used_at.is_none());
+    }
 }

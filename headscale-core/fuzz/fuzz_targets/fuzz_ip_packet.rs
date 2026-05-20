@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use headscale_core::packet::{parse_destination, parse_source};
 use headscale_core::tun_device::{parse_ipv4_destination, parse_ipv4_source};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz IP packet parsing functions

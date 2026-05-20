@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[derive(Arbitrary, Debug)]
@@ -13,7 +13,7 @@ struct EndpointFuzzInput {
 }
 
 fuzz_target!(|input: EndpointFuzzInput| {
-    use headscale_core::endpoint::{Endpoint, EndpointType, EndpointTracker};
+    use headscale_core::endpoint::{Endpoint, EndpointTracker, EndpointType};
 
     // Create an endpoint tracker
     let tracker = EndpointTracker::new();
@@ -42,12 +42,9 @@ fuzz_target!(|input: EndpointFuzzInput| {
 
     rt.block_on(async {
         // Add peer endpoint
-        tracker.update_peer_endpoint(
-            &input.peer_id,
-            addr,
-            EndpointType::Direct,
-            input.priority,
-        ).await;
+        tracker
+            .update_peer_endpoint(&input.peer_id, addr, EndpointType::Direct, input.priority)
+            .await;
 
         // Get endpoints should work
         let _ = tracker.get_peer_endpoints(&input.peer_id).await;
@@ -56,7 +53,9 @@ fuzz_target!(|input: EndpointFuzzInput| {
         let _ = tracker.get_best_endpoint(&input.peer_id).await;
 
         // Mark success should work
-        tracker.mark_endpoint_success(&input.peer_id, addr, None).await;
+        tracker
+            .mark_endpoint_success(&input.peer_id, addr, None)
+            .await;
 
         // Remove peer should work
         tracker.remove_peer(&input.peer_id).await;

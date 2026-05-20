@@ -58,11 +58,9 @@ fuzz_target!(|input: RoutingFuzzInput| {
             RoutingOp::RemoveRoute(spec) => {
                 let route = route_from_spec(spec);
                 table.remove_route(&route.prefix, &route.peer_id);
-                assert!(
-                    table
-                        .all_routes()
-                        .all(|r| r.prefix != route.prefix || r.peer_id != route.peer_id)
-                );
+                assert!(table
+                    .all_routes()
+                    .all(|r| r.prefix != route.prefix || r.peer_id != route.peer_id));
                 assert_table_invariants(&table);
             }
             RoutingOp::LookupV4(addr) => {

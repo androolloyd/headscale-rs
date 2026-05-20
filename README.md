@@ -48,6 +48,13 @@ cd headscale-<name> && cargo test
 cargo build --workspace
 ```
 
+## Quality gates
+
+See [`docs/HARDENING.md`](./docs/HARDENING.md) for the local audit, coverage,
+fuzzing, and supply-chain commands. Pull requests run a 10k-input fuzz smoke
+pass; a separate scheduled workflow runs longer fuzz campaigns and uploads crash
+artifacts.
+
 ## Origin
 
 Extracted from a private last-net swarm experiment (Radicle Heartwood

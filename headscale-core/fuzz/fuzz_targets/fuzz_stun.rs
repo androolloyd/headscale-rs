@@ -1,7 +1,9 @@
 #![no_main]
 
+use headscale_core::stun::{
+    parse_binding_response, parse_mapped_address, parse_xor_mapped_address,
+};
 use libfuzzer_sys::fuzz_target;
-use headscale_core::stun::{parse_binding_response, parse_mapped_address, parse_xor_mapped_address};
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz STUN parsing functions with arbitrary data

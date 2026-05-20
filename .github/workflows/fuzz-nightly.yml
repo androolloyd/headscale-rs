@@ -1,0 +1,75 @@
+name: Nightly fuzz
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to run each fuzz target"
+        required: false
+        default: "900"
+      rss_limit_mb:
+        description: "libFuzzer RSS limit in MiB"
+        required: false
+        default: "4096"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_acl
+          - fuzz_derp
+          - fuzz_endpoint
+          - fuzz_ip_packet
+          - fuzz_keys
+          - fuzz_metering
+          - fuzz_policy_hujson
+          - fuzz_routing
+          - fuzz_stun
+          - fuzz_tailscale_wire
+          - fuzz_transport
+          - fuzz_tun
+          - fuzz_wireguard
+    env:
+      MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
+      RSS_LIMIT_MB: ${{ github.event.inputs.rss_limit_mb || '4096' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            headscale-core/fuzz -> target
+      - run: cargo install cargo-fuzz
+      - name: Run fuzz target
+        working-directory: headscale-core/fuzz
+        run: |
+          set -euo pipefail
+          mkdir -p "logs/${{ matrix.target }}"
+          cargo fuzz build "${{ matrix.target }}"
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time="${MAX_TOTAL_TIME}" \
+            -timeout=30 \
+            -rss_limit_mb="${RSS_LIMIT_MB}" \
+            2>&1 | tee "logs/${{ matrix.target }}/run.log"
+      - name: Upload fuzz logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            headscale-core/fuzz/logs/${{ matrix.target }}/
+            headscale-core/fuzz/artifacts/${{ matrix.target }}/

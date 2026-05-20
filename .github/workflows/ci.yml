@@ -44,6 +44,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       # Workspace-wide gate. The `[workspace.lints]` block in the
       # root Cargo.toml is `warn`-level; `-D warnings` promotes it to
@@ -66,6 +67,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
       - run: cargo test --workspace

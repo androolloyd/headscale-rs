@@ -58,7 +58,7 @@ pub mod serve;
 pub mod tls;
 pub mod wire;
 
-pub use knock::{KnockConfig, KNOCK_HEADER, KNOCK_PATH_PREFIX, NGINX_404_BODY};
+pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
     DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,

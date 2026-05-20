@@ -560,7 +560,11 @@ async fn policy_validate_does_not_mutate() {
     let good = r#"{"version":1,"rules":[]}"#;
     let resp = app
         .clone()
-        .oneshot(req_post_text("/api/v1/policy/validate", good, &admin_token()))
+        .oneshot(req_post_text(
+            "/api/v1/policy/validate",
+            good,
+            &admin_token(),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

@@ -5,9 +5,9 @@
 
 use headscale_api::admin::MachineAdminRecord;
 
-use super::client::AdminClient;
-use super::output::{print_json, print_table, OutputFormat};
 use super::AdminError;
+use super::client::AdminClient;
+use super::output::{OutputFormat, print_json, print_table};
 
 pub async fn list(
     client: &AdminClient,
@@ -143,7 +143,11 @@ fn render_nodes(nodes: &[MachineAdminRecord]) {
                 n.name.clone(),
                 n.user.clone(),
                 n.ipv4.clone(),
-                if n.online { "online".into() } else { "offline".into() },
+                if n.online {
+                    "online".into()
+                } else {
+                    "offline".into()
+                },
             ]
         })
         .collect();

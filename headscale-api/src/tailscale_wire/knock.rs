@@ -256,17 +256,18 @@ pub fn wrap_router(inner: Router, cfg: KnockConfig) -> Router {
 
     // Header branch — applied to a clone of the bare inner router.
     let header_cfg = Arc::clone(&cfg);
-    let header_branch = inner.clone().layer(middleware::from_fn(
-        move |req: Request, next: Next| {
-            let cfg = Arc::clone(&header_cfg);
-            async move {
-                match check_header(req, &cfg) {
-                    Ok(req) => next.run(req).await,
-                    Err(()) => nginx_404(),
+    let header_branch =
+        inner
+            .clone()
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let cfg = Arc::clone(&header_cfg);
+                async move {
+                    match check_header(req, &cfg) {
+                        Ok(req) => next.run(req).await,
+                        Err(()) => nginx_404(),
+                    }
                 }
-            }
-        },
-    ));
+            }));
 
     // Path-prefix branch — nest the *same* inner router under
     // `/k/:knock`. Axum's `nest` re-matches the remaining path against
@@ -439,7 +440,12 @@ mod tests {
         let psk = fixed_psk();
         let now = 200 * DEFAULT_WINDOW_SECS;
         assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, "", now));
-        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, "not-hex-zzzz", now));
+        assert!(!verify_knock(
+            &psk,
+            DEFAULT_WINDOW_SECS,
+            "not-hex-zzzz",
+            now
+        ));
         assert!(!verify_knock(
             &psk,
             DEFAULT_WINDOW_SECS,
@@ -509,9 +515,7 @@ mod tests {
     #[test]
     fn path_is_knocked_ts2021_matches_prefixed() {
         assert!(path_is_knocked_ts2021(b"/k/abcdef0123456789/ts2021"));
-        assert!(path_is_knocked_ts2021(
-            b"/k/abcdef0123456789/ts2021?v=2"
-        ));
+        assert!(path_is_knocked_ts2021(b"/k/abcdef0123456789/ts2021?v=2"));
         assert!(!path_is_knocked_ts2021(b"/ts2021"));
         assert!(!path_is_knocked_ts2021(b"/k/abc/key"));
         assert!(!path_is_knocked_ts2021(b"/k/"));
@@ -582,8 +586,10 @@ mod tests {
         // now=60 → window=1, accepts knock_1 (current) and knock_2 (next).
         assert!(verify_knock(&psk, 60, &knock_1, 60));
         // now=60 → window=1, REJECTS knock_0 (it's the previous window now).
-        assert!(!verify_knock(&psk, 60, &knock_0, 60),
-            "at the boundary, the previous window must be rejected");
+        assert!(
+            !verify_knock(&psk, 60, &knock_0, 60),
+            "at the boundary, the previous window must be rejected"
+        );
     }
 
     #[test]
@@ -610,7 +616,10 @@ mod tests {
     fn zero_window_secs_always_rejects() {
         let psk = fixed_psk();
         let any = knock_for_window(&psk, 100);
-        assert!(!verify_knock(&psk, 0, &any, 100), "window_secs=0 must reject everything");
+        assert!(
+            !verify_knock(&psk, 0, &any, 100),
+            "window_secs=0 must reject everything"
+        );
     }
 
     #[test]
@@ -625,7 +634,12 @@ mod tests {
         let legit = knock_for_window(&psk, now / DEFAULT_WINDOW_SECS);
         assert!(verify_knock(&psk, DEFAULT_WINDOW_SECS, &legit, now));
         // A random other knock should reject.
-        assert!(!verify_knock(&psk, DEFAULT_WINDOW_SECS, "0123456789abcdef", now));
+        assert!(!verify_knock(
+            &psk,
+            DEFAULT_WINDOW_SECS,
+            "0123456789abcdef",
+            now
+        ));
     }
 
     #[test]

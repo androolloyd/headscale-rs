@@ -1,6 +1,6 @@
 //! Session persistence operations.
 
-use crate::{models::SessionRow, DbError, Result};
+use crate::{DbError, Result, models::SessionRow};
 use headscale_identity::session::Session;
 use sqlx::SqlitePool;
 
@@ -137,8 +137,10 @@ mod tests {
             .unwrap_or_default()
             .as_secs();
 
-        let did_alice = Did::parse("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
-        let did_bob = Did::parse("did:key:z6MkrJVnaZkeFzdQyMZu1cgjg7k1pZZ6pvBQ7XJPt4swbTQ2").unwrap();
+        let did_alice =
+            Did::parse("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+        let did_bob =
+            Did::parse("did:key:z6MkrJVnaZkeFzdQyMZu1cgjg7k1pZZ6pvBQ7XJPt4swbTQ2").unwrap();
 
         let session = Session {
             did: did_alice.clone(),

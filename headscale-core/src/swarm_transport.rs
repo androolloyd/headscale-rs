@@ -88,14 +88,12 @@ impl MeshMessage {
 
     /// Serialize to bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MeshTransportError> {
-        serde_json::to_vec(self)
-            .map_err(|e| MeshTransportError::Serialization(e.to_string()))
+        serde_json::to_vec(self).map_err(|e| MeshTransportError::Serialization(e.to_string()))
     }
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, MeshTransportError> {
-        serde_json::from_slice(data)
-            .map_err(|e| MeshTransportError::Serialization(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| MeshTransportError::Serialization(e.to_string()))
     }
 }
 
@@ -248,7 +246,9 @@ impl MeshTransport {
     pub async fn can_reach(&self, node_id: &str) -> bool {
         // Check if we have the node in our mesh
         let nodes = self.mesh.list_nodes().await;
-        nodes.iter().any(|n| n.id == node_id && n.online && !n.addresses.is_empty())
+        nodes
+            .iter()
+            .any(|n| n.id == node_id && n.online && !n.addresses.is_empty())
     }
 
     /// Send a message to a specific node.
@@ -416,7 +416,9 @@ impl MeshTransport {
 
         if len > 16 * 1024 * 1024 {
             // 16MB max
-            return Err(MeshTransportError::Internal("Message too large".to_string()));
+            return Err(MeshTransportError::Internal(
+                "Message too large".to_string(),
+            ));
         }
 
         let mut data = vec![0u8; len];

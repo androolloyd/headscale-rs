@@ -2,9 +2,9 @@
 //!
 //! [`serve`] binds the router on **two** addresses simultaneously:
 //!
-//!   1. A plaintext HTTP listener (typically `:51821`) for `GET /key`
+//!   1. A plaintext HTTP listener (typically `127.0.0.1:51821`) for `GET /key`
 //!      and any other unauthenticated probe.
-//!   2. A `rustls`-terminated HTTPS listener (typically `:443`) for the
+//!   2. A `rustls`-terminated HTTPS listener (typically `127.0.0.1:443`) for the
 //!      `Upgrade: tailscale-control-protocol` + flat `/machine/...`
 //!      paths the v1.78+ client uses after its forced-443 dial.
 //!
@@ -45,9 +45,11 @@ use super::{WireError, WireState, router};
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
 pub struct ServeConfig {
-    /// Plain-HTTP bind address. Typically `0.0.0.0:51821`.
+    /// Plain-HTTP bind address. Defaults and helpers stay loopback-only;
+    /// expose a public address explicitly in docker/interop harnesses.
     pub http_addr: SocketAddr,
-    /// HTTPS bind address. Typically `0.0.0.0:443`. `None` ⇒ skip the
+    /// HTTPS bind address. Defaults and helpers stay loopback-only.
+    /// `None` ⇒ skip the
     /// TLS listener (useful for tests + dev hosts that don't have
     /// permission to bind 443).
     pub https_addr: Option<SocketAddr>,
@@ -60,12 +62,12 @@ pub struct ServeConfig {
 
 impl ServeConfig {
     /// Minimal helper for the interop harness — bind plain HTTP on
-    /// `:51821` and HTTPS on `:443`, cache material under
+    /// loopback `:51821` and HTTPS on loopback `:443`, cache material under
     /// `state_dir`, with a SAN list rooted at `hostname`.
     pub fn for_interop(state_dir: impl AsRef<Path>, hostname: impl Into<String>) -> Self {
         Self {
-            http_addr: "0.0.0.0:51821".parse().unwrap(),
-            https_addr: Some("0.0.0.0:443".parse().unwrap()),
+            http_addr: "127.0.0.1:51821".parse().unwrap(),
+            https_addr: Some("127.0.0.1:443".parse().unwrap()),
             state_dir: state_dir.as_ref().into(),
             sans: SanConfig::with_hostname(hostname),
         }

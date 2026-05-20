@@ -6,9 +6,9 @@
 //! shape — the field set is still in flux (#230) and tightening it
 //! here would force a CLI release every time the GUI grew a field.
 
-use super::client::AdminClient;
-use super::output::{print_json, OutputFormat};
 use super::AdminError;
+use super::client::AdminClient;
+use super::output::{OutputFormat, print_json};
 
 pub async fn status(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let v: serde_json::Value = client.get_json("/tailnet").await?;

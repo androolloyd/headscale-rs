@@ -6,3 +6,7 @@
 *.swo
 .idea/
 .vscode/
+
+# Local headscale-db runtime artifacts; schema/docs/migrations remain tracked.
+/headscale-db/.env
+/headscale-db/headscale.db

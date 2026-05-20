@@ -20,8 +20,7 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/poli
 
 fn load(name: &str) -> String {
     let path = format!("{FIXTURES}/{name}");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +61,8 @@ fn parses_upstream_nodeattrs_fixture() {
 
     // `*` target grants mullvad-exit-node to every node.
     assert!(
-        doc.node_attrs_for(&exit_node).contains(&"mullvad-exit-node".to_string()),
+        doc.node_attrs_for(&exit_node)
+            .contains(&"mullvad-exit-node".to_string()),
         "tag:exit node must still inherit the universal mullvad-exit-node grant"
     );
     assert!(
@@ -70,10 +70,19 @@ fn parses_upstream_nodeattrs_fixture() {
             .contains(&"mullvad-exit-node".to_string())
     );
     // tag:exit also grants exit-node.
-    assert!(doc.node_attrs_for(&exit_node).contains(&"exit-node".to_string()));
-    assert!(!doc.node_attrs_for(&plain_node).contains(&"exit-node".to_string()));
+    assert!(
+        doc.node_attrs_for(&exit_node)
+            .contains(&"exit-node".to_string())
+    );
+    assert!(
+        !doc.node_attrs_for(&plain_node)
+            .contains(&"exit-node".to_string())
+    );
     // tag:funnel grants funnel.
-    assert!(doc.node_attrs_for(&funnel_node).contains(&"funnel".to_string()));
+    assert!(
+        doc.node_attrs_for(&funnel_node)
+            .contains(&"funnel".to_string())
+    );
 }
 
 // ---------------------------------------------------------------------------

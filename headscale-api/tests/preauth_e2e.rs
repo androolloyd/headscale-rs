@@ -224,10 +224,7 @@ async fn second_redemption_of_single_use_key_is_rejected() {
     let key = body_json(resp).await["key"].as_str().unwrap().to_string();
     let _first = store.try_use(&key).await.unwrap();
     let second = store.try_use(&key).await.unwrap_err();
-    assert_eq!(
-        second,
-        headscale_db::preauth_keys::UseError::AlreadyUsed
-    );
+    assert_eq!(second, headscale_db::preauth_keys::UseError::AlreadyUsed);
 }
 
 #[tokio::test]
@@ -242,7 +239,10 @@ async fn reusable_key_redeems_n_times_via_store() {
         .unwrap();
     let key = body_json(resp).await["key"].as_str().unwrap().to_string();
     for _ in 0..4 {
-        store.try_use(&key).await.expect("reusable can redeem again");
+        store
+            .try_use(&key)
+            .await
+            .expect("reusable can redeem again");
     }
 }
 

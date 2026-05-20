@@ -86,10 +86,9 @@ impl AdminError {
             Self::Connection(_) => ExitCode::Connection,
             Self::Auth(_) => ExitCode::Auth,
             Self::NotFound(_) => ExitCode::NotFound,
-            Self::BadRequest { .. }
-            | Self::Server { .. }
-            | Self::Decode(_)
-            | Self::Local(_) => ExitCode::Server,
+            Self::BadRequest { .. } | Self::Server { .. } | Self::Decode(_) | Self::Local(_) => {
+                ExitCode::Server
+            }
         }
     }
 }
@@ -275,10 +274,7 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
     }
 }
 
-pub async fn run_preauthkeys(
-    conn: &ConnectArgs,
-    cmd: &PreauthKeysCmd,
-) -> Result<(), AdminError> {
+pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
     match cmd {
         PreauthKeysCmd::Create {

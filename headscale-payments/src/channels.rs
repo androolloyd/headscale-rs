@@ -68,9 +68,7 @@ impl PaymentChannel {
     /// Send a micropayment through the channel.
     pub async fn send(&self, channel_id: &str, amount: u64) -> Result<u64, ChannelError> {
         let mut channels = self.channels.write().await;
-        let channel = channels
-            .get_mut(channel_id)
-            .ok_or(ChannelError::NotFound)?;
+        let channel = channels.get_mut(channel_id).ok_or(ChannelError::NotFound)?;
 
         if channel.state != ChannelStatus::Open {
             return Err(ChannelError::NotOpen);
@@ -97,9 +95,7 @@ impl PaymentChannel {
     /// Close a channel.
     pub async fn close(&self, channel_id: &str) -> Result<ChannelState, ChannelError> {
         let mut channels = self.channels.write().await;
-        let channel = channels
-            .get_mut(channel_id)
-            .ok_or(ChannelError::NotFound)?;
+        let channel = channels.get_mut(channel_id).ok_or(ChannelError::NotFound)?;
 
         channel.state = ChannelStatus::Closed;
         channel.last_update = now();

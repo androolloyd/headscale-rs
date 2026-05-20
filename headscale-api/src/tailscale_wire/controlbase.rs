@@ -180,9 +180,7 @@ where
             if type_byte != MsgType::Initiation as u8 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "expected Initiation type byte (1) in 5-byte header, got {type_byte}"
-                    ),
+                    format!("expected Initiation type byte (1) in 5-byte header, got {type_byte}"),
                 ));
             }
             let len = u16::from_be_bytes([rest[2], rest[3]]);
@@ -245,11 +243,7 @@ where
 
     /// Write an initiation (5-byte-header) frame. The protocol_version
     /// is the same one mixed into the Noise prologue.
-    pub async fn write_initiation(
-        &mut self,
-        protocol_version: u16,
-        body: &[u8],
-    ) -> io::Result<()> {
+    pub async fn write_initiation(&mut self, protocol_version: u16, body: &[u8]) -> io::Result<()> {
         if body.len() > u16::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -392,7 +386,10 @@ where
                     }
                     return Poll::Ready(Ok(()));
                 }
-                ReadState::Header { mut buf, mut filled } => {
+                ReadState::Header {
+                    mut buf,
+                    mut filled,
+                } => {
                     let mut rb = ReadBuf::new(&mut buf[filled..]);
                     match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
                         Poll::Pending => {
@@ -430,13 +427,10 @@ where
                             if !matches!(mt, MsgType::Record) {
                                 return Poll::Ready(Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
-                                    format!(
-                                        "expected Record frame in transport mode, got {mt:?}"
-                                    ),
+                                    format!("expected Record frame in transport mode, got {mt:?}"),
                                 )));
                             }
-                            let len =
-                                u16::from_be_bytes([buf[1], buf[2]]) as usize;
+                            let len = u16::from_be_bytes([buf[1], buf[2]]) as usize;
                             if len == 0 {
                                 // Empty record; treat as a no-op and keep reading.
                                 self.read_state = ReadState::Header {
@@ -452,7 +446,10 @@ where
                         }
                     }
                 }
-                ReadState::Body { mut buf, mut filled } => {
+                ReadState::Body {
+                    mut buf,
+                    mut filled,
+                } => {
                     let mut rb = ReadBuf::new(&mut buf[filled..]);
                     match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
                         Poll::Pending => {
@@ -479,16 +476,13 @@ where
                             }
                             // Full ciphertext. Decrypt.
                             let mut plaintext = vec![0u8; buf.len()];
-                            let plen = match self
-                                .transport
-                                .read_message(&buf, &mut plaintext)
-                            {
+                            let plen = match self.transport.read_message(&buf, &mut plaintext) {
                                 Ok(p) => p,
                                 Err(e) => {
                                     return Poll::Ready(Err(io::Error::new(
                                         io::ErrorKind::InvalidData,
                                         format!("noise decrypt: {e}"),
-                                    )))
+                                    )));
                                 }
                             };
                             plaintext.truncate(plen);
@@ -533,9 +527,9 @@ where
                     {
                         Ok(n) => n,
                         Err(e) => {
-                            return Poll::Ready(Err(io::Error::other(
-                                format!("noise encrypt: {e}"),
-                            )))
+                            return Poll::Ready(Err(io::Error::other(format!(
+                                "noise encrypt: {e}"
+                            ))));
                         }
                     };
                     ciphertext.truncate(clen);
@@ -544,7 +538,10 @@ where
                     framed.push(MsgType::Record as u8);
                     framed.extend_from_slice(&(clen as u16).to_be_bytes());
                     framed.extend_from_slice(&ciphertext);
-                    self.write_state = WriteState::Flushing { buf: framed, pos: 0 };
+                    self.write_state = WriteState::Flushing {
+                        buf: framed,
+                        pos: 0,
+                    };
                     // Drive at least one write before yielding so we
                     // don't always need a second poll.
                 }
@@ -614,8 +611,7 @@ where
                             if new_pos == buf.len() {
                                 self.write_state = WriteState::Idle;
                             } else {
-                                self.write_state =
-                                    WriteState::Flushing { buf, pos: new_pos };
+                                self.write_state = WriteState::Flushing { buf, pos: new_pos };
                             }
                         }
                     }
@@ -624,10 +620,7 @@ where
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Flush our buffer, then shut down the inner.
         match Pin::new(&mut *self).poll_flush(cx) {
             Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_shutdown(cx),
@@ -639,7 +632,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     /// Round-trip a Reply frame through Framed.
     #[tokio::test]
@@ -675,7 +668,10 @@ mod tests {
         writer.write_initiation(39, &body).await.unwrap();
         let (hdr, recv) = reader.read_frame().await.unwrap();
         match hdr {
-            FrameHeader::Initiation { protocol_version, len } => {
+            FrameHeader::Initiation {
+                protocol_version,
+                len,
+            } => {
                 assert_eq!(protocol_version, 39);
                 assert_eq!(len as usize, body.len());
             }
@@ -695,23 +691,38 @@ mod tests {
 
         writer.write_initiation(39, b"init body").await.unwrap();
         writer.write_reply(b"reply body").await.unwrap();
-        writer.write_frame(MsgType::Record, b"record one").await.unwrap();
+        writer
+            .write_frame(MsgType::Record, b"record one")
+            .await
+            .unwrap();
 
         let (h1, b1) = reader.read_frame().await.unwrap();
-        assert!(matches!(h1, FrameHeader::Initiation { protocol_version: 39, .. }));
+        assert!(matches!(
+            h1,
+            FrameHeader::Initiation {
+                protocol_version: 39,
+                ..
+            }
+        ));
         assert_eq!(b1, b"init body");
 
         let (h2, b2) = reader.read_frame().await.unwrap();
         assert!(matches!(
             h2,
-            FrameHeader::Regular { msg_type: MsgType::Reply, .. }
+            FrameHeader::Regular {
+                msg_type: MsgType::Reply,
+                ..
+            }
         ));
         assert_eq!(b2, b"reply body");
 
         let (h3, b3) = reader.read_frame().await.unwrap();
         assert!(matches!(
             h3,
-            FrameHeader::Regular { msg_type: MsgType::Record, .. }
+            FrameHeader::Regular {
+                msg_type: MsgType::Record,
+                ..
+            }
         ));
         assert_eq!(b3, b"record one");
     }

@@ -3,9 +3,9 @@
 
 use headscale_api::admin::{PreauthAdminKey, PreauthMintRequest};
 
-use super::client::AdminClient;
-use super::output::{print_json, print_table, OutputFormat};
 use super::AdminError;
+use super::client::AdminClient;
+use super::output::{OutputFormat, print_json, print_table};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
@@ -90,7 +90,14 @@ fn render_keys(keys: &[PreauthAdminKey]) {
         })
         .collect();
     print_table(
-        &["PREFIX", "USER", "REUSABLE", "EPHEMERAL", "EXPIRES_AT", "TAGS"],
+        &[
+            "PREFIX",
+            "USER",
+            "REUSABLE",
+            "EPHEMERAL",
+            "EXPIRES_AT",
+            "TAGS",
+        ],
         &rows,
     );
 }

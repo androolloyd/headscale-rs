@@ -362,8 +362,7 @@ pub fn build_dns_config(
     }
 
     let magic_records = magic_dns_records(&spec.base_domain, machines);
-    let mut combined: Vec<DnsRecord> =
-        Vec::with_capacity(extra.len() + magic_records.len());
+    let mut combined: Vec<DnsRecord> = Vec::with_capacity(extra.len() + magic_records.len());
     combined.extend_from_slice(extra);
     combined.extend(magic_records);
 
@@ -403,8 +402,7 @@ fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
     // Sorted for determinism — HashMap iteration order is otherwise
     // non-deterministic and our tests would flake. BTreeSet is the
     // zero-value-friendly form of the BTreeMap<K, ()> pattern.
-    let sorted: std::collections::BTreeSet<&String> =
-        spec.restricted_nameservers.keys().collect();
+    let sorted: std::collections::BTreeSet<&String> = spec.restricted_nameservers.keys().collect();
     for k in &sorted {
         if k.as_str() != spec.base_domain {
             out.push((*k).clone());
@@ -595,7 +593,11 @@ async fn load_and_apply(store: &DnsStore, path: &Path) -> Option<SystemTime> {
             Some(mtime)
         }
         Err(e) => {
-            tracing::warn!(?path, ?e, "extra-records parse failed; keeping previous set");
+            tracing::warn!(
+                ?path,
+                ?e,
+                "extra-records parse failed; keeping previous set"
+            );
             None
         }
     }
@@ -640,28 +642,28 @@ mod tests {
         assert!(cfg.proxied);
         assert_eq!(cfg.domains, vec!["octravpn.example.org".to_string()]);
         // Default authoritative-suffix list contains the base domain.
-        assert!(cfg
-            .authoritative_suffixes
-            .contains(&"octravpn.example.org".to_string()));
+        assert!(
+            cfg.authoritative_suffixes
+                .contains(&"octravpn.example.org".to_string())
+        );
     }
 
     #[test]
     fn magic_dns_records_emit_per_machine_a_records() {
-        let machines = [
-            machine("peer-1", 11, 1),
-            machine("peer-2", 22, 2),
-        ];
+        let machines = [machine("peer-1", 11, 1), machine("peer-2", 22, 2)];
         let store = DnsStore::from_spec(spec_default());
         let cfg = store.build(&machines);
         assert_eq!(cfg.extra_records.len(), 2);
-        assert!(cfg
-            .extra_records
-            .iter()
-            .any(|r| r.name == "peer-1.octravpn.example.org" && r.value == "100.64.0.11"));
-        assert!(cfg
-            .extra_records
-            .iter()
-            .any(|r| r.name == "peer-2.octravpn.example.org" && r.value == "100.64.0.22"));
+        assert!(
+            cfg.extra_records
+                .iter()
+                .any(|r| r.name == "peer-1.octravpn.example.org" && r.value == "100.64.0.11")
+        );
+        assert!(
+            cfg.extra_records
+                .iter()
+                .any(|r| r.name == "peer-2.octravpn.example.org" && r.value == "100.64.0.22")
+        );
     }
 
     #[test]
@@ -742,8 +744,14 @@ mod tests {
         // base_domain + 2 suffixes, sorted (deterministic).
         assert_eq!(cfg.authoritative_suffixes.len(), 3);
         assert_eq!(cfg.authoritative_suffixes[0], "octravpn.example.org");
-        assert!(cfg.authoritative_suffixes.contains(&"corp.internal".to_string()));
-        assert!(cfg.authoritative_suffixes.contains(&"ops.internal".to_string()));
+        assert!(
+            cfg.authoritative_suffixes
+                .contains(&"corp.internal".to_string())
+        );
+        assert!(
+            cfg.authoritative_suffixes
+                .contains(&"ops.internal".to_string())
+        );
     }
 
     #[test]
@@ -806,10 +814,11 @@ mod tests {
             value: "9.9.9.9".into(),
         }]);
         let cfg = store.build(&[]);
-        assert!(cfg
-            .extra_records
-            .iter()
-            .any(|r| r.name == "static.example.org" && r.value == "9.9.9.9"));
+        assert!(
+            cfg.extra_records
+                .iter()
+                .any(|r| r.name == "static.example.org" && r.value == "9.9.9.9")
+        );
     }
 
     #[test]
@@ -858,9 +867,10 @@ mod tests {
         // Authoritative suffixes are still derived from base_domain
         // even when MagicDNS is off — they're an independent operator
         // signal ("don't ask upstream for these names").
-        assert!(cfg
-            .authoritative_suffixes
-            .contains(&"octravpn.example.org".to_string()));
+        assert!(
+            cfg.authoritative_suffixes
+                .contains(&"octravpn.example.org".to_string())
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! server runs on an ephemeral port — no shared state between tests
 //! so they parallelise.
 
-use headscale_cli::admin::{client::AdminClient, AdminError};
+use headscale_cli::admin::{AdminError, client::AdminClient};
 use httpmock::prelude::*;
 use serde_json::json;
 
@@ -53,8 +53,7 @@ async fn users_create_posts_json_body() {
         .await;
     let client = mk_client(&s);
     let body = serde_json::json!({"name":"alice"});
-    let rec: headscale_api::admin::UserRecord =
-        client.post_json("/users", &body).await.unwrap();
+    let rec: headscale_api::admin::UserRecord = client.post_json("/users", &body).await.unwrap();
     assert_eq!(rec.name, "alice");
 }
 
@@ -79,7 +78,8 @@ async fn users_delete_404_maps_to_not_found() {
     let _m = s
         .mock_async(|when, then| {
             when.method(DELETE).path("/api/v1/users/ghost");
-            then.status(404).json_body(json!({"error":"user 'ghost' does not exist"}));
+            then.status(404)
+                .json_body(json!({"error":"user 'ghost' does not exist"}));
         })
         .await;
     let client = mk_client(&s);
@@ -147,8 +147,7 @@ async fn machines_get_one() {
         .await;
     let client = mk_client(&s);
     let path = format!("/machines/{id}");
-    let node: headscale_api::admin::MachineAdminRecord =
-        client.get_json(&path).await.unwrap();
+    let node: headscale_api::admin::MachineAdminRecord = client.get_json(&path).await.unwrap();
     assert_eq!(node.user, "alice");
 }
 
@@ -158,7 +157,8 @@ async fn machines_expire_posts() {
     let id = "aa".repeat(32);
     let _m = s
         .mock_async(|when, then| {
-            when.method(POST).path(format!("/api/v1/machines/{id}/expire"));
+            when.method(POST)
+                .path(format!("/api/v1/machines/{id}/expire"));
             then.status(204);
         })
         .await;
@@ -312,11 +312,7 @@ async fn policy_put_accepts_raw_text() {
 fn policy_check_local_valid() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("policy.hujson");
-    std::fs::write(
-        &path,
-        b"// comment\n{\n  \"acls\": [],\n}\n",
-    )
-    .unwrap();
+    std::fs::write(&path, b"// comment\n{\n  \"acls\": [],\n}\n").unwrap();
     headscale_cli::admin::policy::check(&path).unwrap();
 }
 

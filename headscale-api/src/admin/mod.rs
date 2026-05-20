@@ -857,11 +857,9 @@ async fn api_machines_rename(
     };
     match s.machines.rename(&id, &body.hostname).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(MachineAdminError::BadRequest(msg)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": msg})),
-        )
-            .into_response(),
+        Err(MachineAdminError::BadRequest(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }

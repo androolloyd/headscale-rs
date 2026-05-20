@@ -80,7 +80,12 @@ impl Escrow {
         let escrow_account = format!("escrow:{}", escrow_id);
 
         self.ledger
-            .transfer(funder, &escrow_account, total, &format!("Escrow for work {}", work_id))
+            .transfer(
+                funder,
+                &escrow_account,
+                total,
+                &format!("Escrow for work {}", work_id),
+            )
             .await
             .map_err(|_| EscrowError::InsufficientFunds)?;
 
@@ -108,9 +113,7 @@ impl Escrow {
         verifier: &str,
     ) -> Result<u64, EscrowError> {
         let mut escrows = self.escrows.write().await;
-        let record = escrows
-            .get_mut(escrow_id)
-            .ok_or(EscrowError::NotFound)?;
+        let record = escrows.get_mut(escrow_id).ok_or(EscrowError::NotFound)?;
 
         if record.state == EscrowState::Released || record.state == EscrowState::Refunded {
             return Err(EscrowError::AlreadyClosed);
@@ -141,7 +144,10 @@ impl Escrow {
                     &escrow_account,
                     recipient,
                     recipient_amount,
-                    &format!("Milestone {} release for work {}", milestone_index, record.work_id),
+                    &format!(
+                        "Milestone {} release for work {}",
+                        milestone_index, record.work_id
+                    ),
                 )
                 .await
                 .map_err(|_| EscrowError::TransferFailed)?;
@@ -157,9 +163,7 @@ impl Escrow {
     /// Release all remaining funds.
     pub async fn release_all(&self, escrow_id: &str, verifier: &str) -> Result<u64, EscrowError> {
         let mut escrows = self.escrows.write().await;
-        let record = escrows
-            .get_mut(escrow_id)
-            .ok_or(EscrowError::NotFound)?;
+        let record = escrows.get_mut(escrow_id).ok_or(EscrowError::NotFound)?;
 
         if record.state == EscrowState::Released || record.state == EscrowState::Refunded {
             return Err(EscrowError::AlreadyClosed);
@@ -198,9 +202,7 @@ impl Escrow {
     /// Refund escrow to funder.
     pub async fn refund(&self, escrow_id: &str) -> Result<u64, EscrowError> {
         let mut escrows = self.escrows.write().await;
-        let record = escrows
-            .get_mut(escrow_id)
-            .ok_or(EscrowError::NotFound)?;
+        let record = escrows.get_mut(escrow_id).ok_or(EscrowError::NotFound)?;
 
         if record.state == EscrowState::Released {
             return Err(EscrowError::AlreadyClosed);

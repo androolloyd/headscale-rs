@@ -85,7 +85,11 @@ fn main() {
     }
 
     println!("=== Test Complete ===");
-    println!("Successful discoveries: {}/{}", success_count, STUN_SERVERS.len());
+    println!(
+        "Successful discoveries: {}/{}",
+        success_count,
+        STUN_SERVERS.len()
+    );
 
     if success_count > 0 {
         println!("\nSTUN endpoint discovery is working!");

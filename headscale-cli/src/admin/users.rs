@@ -6,9 +6,9 @@
 use headscale_api::admin::UserRecord;
 use serde::Serialize;
 
-use super::client::AdminClient;
-use super::output::{print_json, print_table, OutputFormat};
 use super::AdminError;
+use super::client::AdminClient;
+use super::output::{OutputFormat, print_json, print_table};
 
 /// `POST /api/v1/users` payload.
 #[derive(Serialize)]
@@ -16,11 +16,7 @@ struct CreateUserBody<'a> {
     name: &'a str,
 }
 
-pub async fn create(
-    client: &AdminClient,
-    name: &str,
-    fmt: OutputFormat,
-) -> Result<(), AdminError> {
+pub async fn create(client: &AdminClient, name: &str, fmt: OutputFormat) -> Result<(), AdminError> {
     let body = CreateUserBody { name };
     let user: UserRecord = client.post_json("/users", &body).await?;
     match fmt {

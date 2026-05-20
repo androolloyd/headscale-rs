@@ -2,8 +2,8 @@
 
 use crate::did::Did;
 use ed25519_dalek::{
-    Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
-    SIGNATURE_LENGTH,
+    PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Signature, Signer, SigningKey,
+    Verifier, VerifyingKey,
 };
 use rand_core::{OsRng, RngCore};
 

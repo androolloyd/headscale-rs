@@ -230,10 +230,7 @@ mod tests {
             table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
             Some("peer-a")
         );
-        assert_eq!(
-            table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6))),
-            None
-        );
+        assert_eq!(table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6))), None);
     }
 
     #[test]
@@ -330,10 +327,7 @@ mod tests {
         });
 
         // Unapproved route should not match
-        assert_eq!(
-            table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-            None
-        );
+        assert_eq!(table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), None);
     }
 
     #[test]
@@ -348,10 +342,7 @@ mod tests {
         table.remove_peer_routes("peer-a");
 
         assert_eq!(table.len(), 1);
-        assert_eq!(
-            table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-            None
-        );
+        assert_eq!(table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), None);
         assert_eq!(
             table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
             Some("peer-b")

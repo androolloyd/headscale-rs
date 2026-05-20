@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["full", "admin"]
+default = ["full"]
 # Enables the HTTP gateway / gRPC / server modules + the sibling-crate
 # deps they need (`headscale-core`, `headscale-identity`,
 # `headscale-resources`, `headscale-payments`). Downstream callers
@@ -27,9 +27,8 @@ full = [
     "dep:futures",
 ]
 # Admin GUI v0 — `admin::router()` returns an axum Router with
-# server-side rendered HTML (maud) + JSON API. Default-on; downstream
-# crates can disable it with `default-features = false` to skip the
-# maud dep entirely.
+# server-side rendered HTML (maud) + JSON API. Opt-in so downstream
+# crates do not pull the admin/database stack unless they need it.
 admin = [
     "dep:maud",
     # `hmac` + `sha2` are non-optional now (the knock layer needs them
@@ -177,9 +176,9 @@ rand_core = { workspace = true, optional = true }
 # TLS termination on :443 — required by stock `tailscale up` v1.78+
 # which forces an HTTPS-on-443 dial after the initial /key probe.
 # `rcgen` mints the self-signed cert at startup (cached under
-# `<state_dir>/tls.{crt,key}`); `axum-server` is the rustls bridge for
-# axum 0.7. `rustls-pemfile` parses the cached PEM back into rustls
-# Cert/Key types. Both new in this PR.
+# `<state_dir>/tls.{crt,key}`); cached PEM is parsed through
+# `rustls-pki-types`' built-in PEM helpers, avoiding the unmaintained
+# `rustls-pemfile` crate.
 #
 # `tokio-rustls` is the raw-acceptor side used by the parallel
 # /ts2021 listener (`tailscale_wire::raw_tls`) — see the module doc
@@ -187,7 +186,6 @@ rand_core = { workspace = true, optional = true }
 # minor as above (0.23 ↔ tokio-rustls 0.26).
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
-rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 
 [build-dependencies]

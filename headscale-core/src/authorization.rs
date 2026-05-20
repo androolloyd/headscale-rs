@@ -23,7 +23,7 @@
 
 use std::net::IpAddr;
 
-use crate::acl::{Action, AclContext, AclDestination, AclEvaluator};
+use crate::acl::{AclContext, AclDestination, AclEvaluator, Action};
 use crate::routing::RoutingTable;
 
 /// Outcome of [`authorize_forward`].

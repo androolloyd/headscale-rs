@@ -26,7 +26,10 @@ impl Did {
 
     /// Get the public key bytes.
     pub fn public_key(&self) -> Result<[u8; 32], DidError> {
-        let encoded = self.0.strip_prefix("did:key:").ok_or(DidError::InvalidFormat)?;
+        let encoded = self
+            .0
+            .strip_prefix("did:key:")
+            .ok_or(DidError::InvalidFormat)?;
         multibase_decode(encoded)
     }
 
@@ -68,9 +71,7 @@ fn multibase_encode(pubkey: &[u8; 32]) -> String {
 /// Decode a multibase-encoded public key.
 fn multibase_decode(encoded: &str) -> Result<[u8; 32], DidError> {
     // Check for 'z' prefix (base58btc)
-    let encoded = encoded
-        .strip_prefix('z')
-        .ok_or(DidError::InvalidEncoding)?;
+    let encoded = encoded.strip_prefix('z').ok_or(DidError::InvalidEncoding)?;
 
     // Decode base58
     let data = bs58::decode(encoded)

@@ -1,8 +1,8 @@
 //! Payment and ledger persistence operations.
 
 use crate::{
-    models::{AccountBalanceRow, TransactionRow},
     DbError, Result,
+    models::{AccountBalanceRow, TransactionRow},
 };
 use headscale_payments::ledger::{Transaction, TransactionType};
 use sqlx::SqlitePool;
@@ -66,7 +66,10 @@ pub async fn get_transaction_history(
 }
 
 /// Get all transactions (admin use).
-pub async fn get_all_transactions(pool: &SqlitePool, limit: Option<i64>) -> Result<Vec<Transaction>> {
+pub async fn get_all_transactions(
+    pool: &SqlitePool,
+    limit: Option<i64>,
+) -> Result<Vec<Transaction>> {
     let limit = limit.unwrap_or(100);
 
     let rows = sqlx::query_as::<_, TransactionRow>(
@@ -113,9 +116,7 @@ pub async fn get_available_balance(pool: &SqlitePool, account: &str) -> Result<i
     .fetch_optional(pool)
     .await?;
 
-    Ok(row
-        .map(|r| r.balance + r.credit_limit)
-        .unwrap_or(0))
+    Ok(row.map(|r| r.balance + r.credit_limit).unwrap_or(0))
 }
 
 /// Update account balance.

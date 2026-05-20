@@ -666,7 +666,11 @@ pub struct DerpRegionNode {
     #[serde(rename = "STUNPort", default, skip_serializing_if = "is_zero_i32")]
     pub stun_port: i32,
     /// `true` ⇒ the node serves STUN only, no DERP. Defaults to false.
-    #[serde(rename = "STUNOnly", default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "STUNOnly",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub stun_only: bool,
     /// `true` ⇒ accept a self-signed TLS certificate on the DERP HTTPS
     /// endpoint. Required for the docker-network sidecar — we mint a

@@ -100,10 +100,7 @@ impl X402Handler {
         vec![
             ("X-Payment-Required".to_string(), "true".to_string()),
             ("X-Payment-Price".to_string(), request.price.to_string()),
-            (
-                "X-Payment-Recipient".to_string(),
-                request.recipient.clone(),
-            ),
+            ("X-Payment-Recipient".to_string(), request.recipient.clone()),
             (
                 "X-Payment-Expires".to_string(),
                 request.expires_at.to_string(),

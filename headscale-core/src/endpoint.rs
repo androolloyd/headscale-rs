@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// How long an endpoint is considered valid.
 pub const ENDPOINT_VALIDITY: Duration = Duration::from_secs(120);
@@ -174,7 +174,9 @@ impl EndpointTracker {
 
         *self.last_stun_refresh.write().await = Some(Instant::now());
 
-        let _ = self.event_tx.send(EndpointEvent::LocalEndpointDiscovered { endpoint });
+        let _ = self
+            .event_tx
+            .send(EndpointEvent::LocalEndpointDiscovered { endpoint });
 
         Ok(endpoint)
     }
@@ -218,7 +220,12 @@ impl EndpointTracker {
         endpoints.retain(|e| e.is_valid());
 
         // Sort by priority
-        endpoints.sort_by_key(|e| (e.priority, e.latency.map(|l| l.as_millis()).unwrap_or(u128::MAX)));
+        endpoints.sort_by_key(|e| {
+            (
+                e.priority,
+                e.latency.map(|l| l.as_millis()).unwrap_or(u128::MAX),
+            )
+        });
 
         let _ = self.event_tx.send(EndpointEvent::PeerEndpointUpdated {
             peer_id: peer_id.to_string(),
@@ -260,10 +267,7 @@ impl EndpointTracker {
     /// Get all endpoints for a peer, sorted by priority.
     pub async fn get_peer_endpoints(&self, peer_id: &str) -> Vec<Endpoint> {
         let peers = self.peer_endpoints.read().await;
-        peers
-            .get(peer_id)
-            .cloned()
-            .unwrap_or_default()
+        peers.get(peer_id).cloned().unwrap_or_default()
     }
 
     /// Get the best endpoint for a peer.
@@ -271,15 +275,15 @@ impl EndpointTracker {
         let endpoints = self.get_peer_endpoints(peer_id).await;
 
         // Prefer endpoints with recent success
-        let best = endpoints
-            .iter()
-            .filter(|e| e.is_valid())
-            .min_by_key(|e| {
-                let priority_score = e.priority as u64 * 1000;
-                let success_score = e.last_success.map(|t| t.elapsed().as_millis() as u64).unwrap_or(u64::MAX / 2);
-                let latency_score = e.latency.map(|l| l.as_millis() as u64).unwrap_or(1000);
-                priority_score + success_score / 1000 + latency_score
-            });
+        let best = endpoints.iter().filter(|e| e.is_valid()).min_by_key(|e| {
+            let priority_score = e.priority as u64 * 1000;
+            let success_score = e
+                .last_success
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(u64::MAX / 2);
+            let latency_score = e.latency.map(|l| l.as_millis() as u64).unwrap_or(1000);
+            priority_score + success_score / 1000 + latency_score
+        });
 
         best.map(|e| e.addr)
     }
@@ -376,7 +380,9 @@ mod tests {
         let tracker = EndpointTracker::new();
 
         // Add local endpoint
-        tracker.add_local_endpoint("10.0.0.1:51820".parse().unwrap(), 1).await;
+        tracker
+            .add_local_endpoint("10.0.0.1:51820".parse().unwrap(), 1)
+            .await;
 
         let local = tracker.local_endpoints().await;
         assert_eq!(local.len(), 1);
@@ -437,7 +443,9 @@ mod tests {
     async fn test_cleanup_stale() {
         let tracker = EndpointTracker::new();
 
-        tracker.add_local_endpoint("10.0.0.1:51820".parse().unwrap(), 1).await;
+        tracker
+            .add_local_endpoint("10.0.0.1:51820".parse().unwrap(), 1)
+            .await;
 
         // Should have one endpoint
         let local = tracker.local_endpoints().await;

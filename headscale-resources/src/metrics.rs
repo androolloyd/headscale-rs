@@ -104,9 +104,8 @@ impl ResourceMetrics {
         );
 
         // Initialize session duration histogram
-        let session_duration_seconds = Histogram::new(
-            [0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0].into_iter()
-        );
+        let session_duration_seconds =
+            Histogram::new([0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0].into_iter());
         registry.register(
             "session_duration_seconds",
             "Distribution of session durations",
@@ -132,7 +131,9 @@ impl ResourceMetrics {
             consumer: consumer.to_string(),
             provider: provider.to_string(),
         };
-        self.inference_tokens_total.get_or_create(&labels).inc_by(tokens);
+        self.inference_tokens_total
+            .get_or_create(&labels)
+            .inc_by(tokens);
     }
 
     /// Record storage usage.
@@ -153,7 +154,9 @@ impl ResourceMetrics {
             provider: provider.to_string(),
         };
         // Convert to microseconds for integer counter
-        self.compute_cpu_seconds.get_or_create(&labels).inc_by((seconds * 1_000_000.0) as u64);
+        self.compute_cpu_seconds
+            .get_or_create(&labels)
+            .inc_by((seconds * 1_000_000.0) as u64);
     }
 
     /// Record bandwidth usage.
@@ -163,7 +166,9 @@ impl ResourceMetrics {
             consumer: consumer.to_string(),
             provider: provider.to_string(),
         };
-        self.bandwidth_bytes_total.get_or_create(&labels).inc_by(bytes);
+        self.bandwidth_bytes_total
+            .get_or_create(&labels)
+            .inc_by(bytes);
     }
 
     /// Record a payment transaction.

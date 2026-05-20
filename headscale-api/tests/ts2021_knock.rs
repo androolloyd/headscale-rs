@@ -37,7 +37,10 @@ struct AlwaysRejectRedeemer;
 
 #[async_trait]
 impl PreauthRedeemer for AlwaysRejectRedeemer {
-    async fn redeem(&self, _key: &str) -> Result<headscale_api::tailscale_wire::RedeemOk, RedeemError> {
+    async fn redeem(
+        &self,
+        _key: &str,
+    ) -> Result<headscale_api::tailscale_wire::RedeemOk, RedeemError> {
         Err(RedeemError::Unknown)
     }
 }
@@ -83,12 +86,7 @@ async fn ts2021_knock_disabled_passes_through() {
     let (state, _dir) = fixture(KnockConfig::disabled());
     let app = tailscale_wire::router(state);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/key")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/key").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -100,12 +98,7 @@ async fn ts2021_knock_enabled_rejects_no_knock() {
     let (state, _dir) = fixture(KnockConfig::enabled(psk));
     let app = tailscale_wire::router(state);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/key")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/key").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

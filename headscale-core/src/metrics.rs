@@ -147,9 +147,8 @@ impl MeshMetrics {
         );
 
         // Latency histogram
-        let tunnel_rtt_seconds = Histogram::new(
-            [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0].into_iter()
-        );
+        let tunnel_rtt_seconds =
+            Histogram::new([0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0].into_iter());
         registry.register(
             "mesh_tunnel_rtt_seconds",
             "Tunnel round-trip time in seconds",
@@ -217,7 +216,9 @@ impl MeshMetrics {
             remote_node: remote.to_string(),
             tunnel_type: tunnel_type.to_string(),
         };
-        self.tunnel_bytes_received.get_or_create(&labels).inc_by(bytes);
+        self.tunnel_bytes_received
+            .get_or_create(&labels)
+            .inc_by(bytes);
     }
 
     /// Update endpoint count for a type.

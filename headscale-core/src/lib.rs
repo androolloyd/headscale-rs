@@ -37,21 +37,19 @@ pub mod tunnel;
 // Metering interface — the integration point for external payment /
 // settlement layers.
 pub use metering::{
-    MeteringConfig, MeteringError, MeteringService, MeteringSession,
-    MeteringSessionId, MeteringSnapshot,
+    MeteringConfig, MeteringError, MeteringService, MeteringSession, MeteringSessionId,
+    MeteringSnapshot,
 };
 
 // Core exports
-pub use acl::{
-    AclContext, AclDestination, AclEvaluator, AclPolicy, AclRule, Action as AclAction,
-};
+pub use acl::{AclContext, AclDestination, AclEvaluator, AclPolicy, AclRule, Action as AclAction};
 pub use config::Config;
 pub use derp::{DerpClient, DerpEvent, DerpServer, DerpState};
 pub use endpoint::{Endpoint, EndpointTracker, EndpointType};
 pub use events::{TopologyEvent, TopologyEventBus};
 pub use keys_wg::WgKeyPair;
 pub use mesh::MeshCoordinator;
-pub use metrics::{mesh_metrics, MeshMetrics};
+pub use metrics::{MeshMetrics, mesh_metrics};
 pub use node::Node;
 pub use packet::PacketRouter;
 pub use routing::{Route, RoutingTable};

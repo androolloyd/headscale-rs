@@ -1,8 +1,8 @@
 //! Resource registry persistence operations.
 
 use crate::{
-    models::{ResourceRow, ResourceUsageRow},
     DbError, Result,
+    models::{ResourceRow, ResourceUsageRow},
 };
 use headscale_resources::{
     registry::ProviderResource,
@@ -348,14 +348,10 @@ mod tests {
             .unwrap();
 
         // Complete usage
-        complete_usage(db.pool(), usage_id, 1000, 10)
-            .await
-            .unwrap();
+        complete_usage(db.pool(), usage_id, 1000, 10).await.unwrap();
 
         // Get usage history
-        let usage = get_consumer_usage(db.pool(), consumer, None)
-            .await
-            .unwrap();
+        let usage = get_consumer_usage(db.pool(), consumer, None).await.unwrap();
         assert_eq!(usage.len(), 1);
         assert_eq!(usage[0].units_consumed, 1000);
 

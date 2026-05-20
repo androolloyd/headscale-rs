@@ -102,10 +102,7 @@ fn mapresponse_round_trip_carries_dnsconfig_fields() {
     // own emission (covers the rename/alias attributes in both
     // directions).
     let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(
-        decoded["Resolvers"][0]["Addr"].as_str().unwrap(),
-        "1.1.1.1"
-    );
+    assert_eq!(decoded["Resolvers"][0]["Addr"].as_str().unwrap(), "1.1.1.1");
 }
 
 #[tokio::test]
@@ -127,20 +124,18 @@ async fn set_extra_records_wakes_waiters_within_1s() {
         .expect("join ok");
     // And the next build call carries the new record.
     let cfg = store.build(&[]);
-    assert!(cfg
-        .extra_records
-        .iter()
-        .any(|r| r.name == "x.example" && r.value == "1.2.3.4"));
+    assert!(
+        cfg.extra_records
+            .iter()
+            .any(|r| r.name == "x.example" && r.value == "1.2.3.4")
+    );
 }
 
 #[tokio::test]
 async fn extra_records_file_watcher_picks_up_initial_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extra.json");
-    write_records(
-        &path,
-        &[("static.example.org", "A", "10.0.0.1")],
-    );
+    write_records(&path, &[("static.example.org", "A", "10.0.0.1")]);
 
     let store = DnsStore::from_spec(DnsConfigSpec::default());
     // Poll at a tight interval so the test doesn't take 5s.
@@ -198,9 +193,7 @@ async fn extra_records_file_watcher_picks_up_changes_and_wakes_waiters() {
     // We also `set_modified` explicitly when possible.
     write_records(&path, &[("second.example", "A", "10.0.0.2")]);
     // Force mtime bump in case the fs quantises at 1s.
-    let _ = std::fs::File::open(&path).and_then(|f| {
-        f.set_modified(std::time::SystemTime::now())
-    });
+    let _ = std::fs::File::open(&path).and_then(|f| f.set_modified(std::time::SystemTime::now()));
 
     tokio::time::timeout(Duration::from_secs(3), waiter)
         .await
@@ -219,8 +212,7 @@ fn parse_extra_records_validates_required_fields() {
     // Missing `name` is rejected.
     assert!(parse_extra_records(br#"[{"value":"x"}]"#).is_err());
     // Mixed Pascal + lowercase keys still work.
-    let recs =
-        parse_extra_records(br#"[{"Name":"a","value":"1.1.1.1"}]"#).expect("parses");
+    let recs = parse_extra_records(br#"[{"Name":"a","value":"1.1.1.1"}]"#).expect("parses");
     assert_eq!(recs[0].name, "a");
 }
 
@@ -297,13 +289,11 @@ fn collision_handling_is_stable_under_node_id_reorder() {
 #[test]
 fn extra_records_combined_with_magic_dns_records() {
     let spec = DnsConfigSpec::default();
-    let extra = [
-        DnsRecord {
-            name: "ops.example.org".into(),
-            record_type: "A".into(),
-            value: "10.10.10.10".into(),
-        },
-    ];
+    let extra = [DnsRecord {
+        name: "ops.example.org".into(),
+        record_type: "A".into(),
+        value: "10.10.10.10".into(),
+    }];
     let machines = [MachineDnsRecord {
         hostname: "peer-a".into(),
         ipv4: Ipv4Addr::new(100, 64, 0, 5),
@@ -312,11 +302,16 @@ fn extra_records_combined_with_magic_dns_records() {
     let cfg = build_dns_config(&spec, &machines, &extra);
     // Both the operator-supplied record AND the MagicDNS record land.
     assert_eq!(cfg.extra_records.len(), 2);
-    assert!(cfg.extra_records.iter().any(|r| r.name == "ops.example.org"));
-    assert!(cfg
-        .extra_records
-        .iter()
-        .any(|r| r.name == "peer-a.octravpn.example.org"));
+    assert!(
+        cfg.extra_records
+            .iter()
+            .any(|r| r.name == "ops.example.org")
+    );
+    assert!(
+        cfg.extra_records
+            .iter()
+            .any(|r| r.name == "peer-a.octravpn.example.org")
+    );
 }
 
 #[test]
@@ -339,7 +334,7 @@ fn mapresponse_omits_default_dnsconfig_field() {
     // DnsConfig must still serialise (we explicitly emit the field
     // on the wire as `DNSConfig`). Just sanity-check the field name
     // — this guards against accidental rename drift.
-    use headscale_api::tailscale_wire::wire::{DnsConfig, DerpMap, MapNode};
+    use headscale_api::tailscale_wire::wire::{DerpMap, DnsConfig, MapNode};
     let r = MapResponse {
         key_expiry_extension: 0,
         node: MapNode {

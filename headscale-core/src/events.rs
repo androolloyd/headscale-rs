@@ -17,15 +17,9 @@ pub enum TopologyEvent {
         addresses: Vec<IpAddr>,
     },
     /// A node left the mesh.
-    NodeLeft {
-        node_id: String,
-        reason: String,
-    },
+    NodeLeft { node_id: String, reason: String },
     /// A node's status changed.
-    NodeStatusChanged {
-        node_id: String,
-        online: bool,
-    },
+    NodeStatusChanged { node_id: String, online: bool },
     /// A node's endpoint changed.
     EndpointChanged {
         node_id: String,
@@ -44,10 +38,7 @@ pub enum TopologyEvent {
         reason: String,
     },
     /// WireGuard handshake completed.
-    HandshakeComplete {
-        node_id: String,
-        peer_id: String,
-    },
+    HandshakeComplete { node_id: String, peer_id: String },
     /// Connection upgraded from relay to direct.
     ConnectionUpgraded {
         peer_id: String,
@@ -55,20 +46,11 @@ pub enum TopologyEvent {
         to_direct: SocketAddr,
     },
     /// Connection downgraded from direct to relay.
-    ConnectionDowngraded {
-        peer_id: String,
-        to_relay: String,
-    },
+    ConnectionDowngraded { peer_id: String, to_relay: String },
     /// DERP server availability changed.
-    DerpAvailabilityChanged {
-        server: String,
-        available: bool,
-    },
+    DerpAvailabilityChanged { server: String, available: bool },
     /// Mesh IP pool changed.
-    IpPoolChanged {
-        available: u32,
-        total: u32,
-    },
+    IpPoolChanged { available: u32, total: u32 },
 }
 
 /// Centralized event bus for topology changes.

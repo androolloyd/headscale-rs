@@ -31,7 +31,13 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
-    #[arg(short, long, default_value = "info", env = "HEADSCALE_LOG", global = true)]
+    #[arg(
+        short,
+        long,
+        default_value = "info",
+        env = "HEADSCALE_LOG",
+        global = true
+    )]
     log_level: String,
 
     #[command(flatten)]
@@ -142,14 +148,12 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // Initialize logging
-    let log_level = cli
-        .log_level
-        .parse()
-        .unwrap_or(tracing::Level::INFO);
+    let log_level = cli.log_level.parse().unwrap_or(tracing::Level::INFO);
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("headscale={log_level},headscale_core={log_level}").into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!("headscale={log_level},headscale_core={log_level}").into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
@@ -249,22 +253,24 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             IdentityAction::Generate { output } => {
                 identity_generate(&output).await.map_err(MainError::Other)
             }
-            IdentityAction::Show { file } => {
-                identity_show(&file).await.map_err(MainError::Other)
-            }
+            IdentityAction::Show { file } => identity_show(&file).await.map_err(MainError::Other),
         },
 
-        Commands::Users { action } => admin::run_users(&cli.connect, &action).await.map_err(Into::into),
-        Commands::Nodes { action } => admin::run_nodes(&cli.connect, &action).await.map_err(Into::into),
-        Commands::Preauthkeys { action } => {
-            admin::run_preauthkeys(&cli.connect, &action).await.map_err(Into::into)
-        }
-        Commands::Policy { action } => {
-            admin::run_policy(&cli.connect, &action).await.map_err(Into::into)
-        }
-        Commands::Tailnet { action } => {
-            admin::run_tailnet(&cli.connect, &action).await.map_err(Into::into)
-        }
+        Commands::Users { action } => admin::run_users(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Nodes { action } => admin::run_nodes(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Preauthkeys { action } => admin::run_preauthkeys(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Policy { action } => admin::run_policy(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Tailnet { action } => admin::run_tailnet(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -273,7 +279,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     .and_then(|c| c.node.as_ref())
                     .map(|n| n.server.clone())
             });
-            check_status(server_url.as_deref()).await.map_err(MainError::Other)
+            check_status(server_url.as_deref())
+                .await
+                .map_err(MainError::Other)
         }
 
         Commands::InitConfig { output } => init_config(&output).await.map_err(MainError::Other),
@@ -302,10 +310,8 @@ impl StoredIdentity {
 
     #[allow(dead_code)]
     fn to_keypair(&self) -> Result<headscale_identity::KeyPair> {
-        let secret_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &self.secret_key,
-        )?;
+        let secret_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.secret_key)?;
         let secret_array: [u8; 32] = secret_bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("Invalid secret key length"))?;

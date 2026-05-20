@@ -333,7 +333,10 @@ pub enum UseError {
 ///    so the caller sees a consistent snapshot.
 ///
 /// Returns the freshly-read row on success.
-pub async fn try_use(pool: &SqlitePool, candidate: &str) -> std::result::Result<PreauthKeyRow, UseError> {
+pub async fn try_use(
+    pool: &SqlitePool,
+    candidate: &str,
+) -> std::result::Result<PreauthKeyRow, UseError> {
     let row = get_by_token(pool, candidate)
         .await
         .map_err(|_| UseError::NotFound)?;
@@ -476,9 +479,7 @@ mod tests {
     async fn get_by_token_rejects_wrong_prefix() {
         let db = fresh_db().await;
         let _c = create_for_test(db.pool(), alice()).await.unwrap();
-        let e = get_by_token(db.pool(), "tskey-deadbeef")
-            .await
-            .unwrap_err();
+        let e = get_by_token(db.pool(), "tskey-deadbeef").await.unwrap_err();
         assert!(matches!(e, DbError::NotFound(_)));
     }
 
@@ -617,7 +618,10 @@ mod tests {
         p.tags = vec!["tag:dev".into(), "tag:server".into()];
         let c = create_for_test(db.pool(), p).await.unwrap();
         let r = get_by_token(db.pool(), &c.plaintext).await.unwrap();
-        assert_eq!(r.tag_list(), vec!["tag:dev".to_string(), "tag:server".into()]);
+        assert_eq!(
+            r.tag_list(),
+            vec!["tag:dev".to_string(), "tag:server".into()]
+        );
     }
 
     /// Empty tag list serialises to "[]" and round-trips clean.

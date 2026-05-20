@@ -154,5 +154,8 @@ fn test_session_expiration() {
     // Wait for expiration
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    assert!(session.is_expired(), "Session should be expired after waiting");
+    assert!(
+        session.is_expired(),
+        "Session should be expired after waiting"
+    );
 }

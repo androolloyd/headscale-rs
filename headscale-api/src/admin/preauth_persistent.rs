@@ -20,9 +20,7 @@ use parking_lot::Mutex;
 use sqlx::SqlitePool;
 
 use super::preauth::{PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest};
-use headscale_db::preauth_keys::{
-    self, CreateParams, PreauthKeyRow, TOKEN_PREFIX, UseError,
-};
+use headscale_db::preauth_keys::{self, CreateParams, PreauthKeyRow, TOKEN_PREFIX, UseError};
 
 /// Persistent admin-side preauth store.
 ///
@@ -261,7 +259,10 @@ mod tests {
         assert!(k.key.starts_with(TOKEN_PREFIX));
         let list = s.list().await;
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].key, k.key, "list should splash the cached plaintext");
+        assert_eq!(
+            list[0].key, k.key,
+            "list should splash the cached plaintext"
+        );
         assert_eq!(list[0].user, "alice");
     }
 

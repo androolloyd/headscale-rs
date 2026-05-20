@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use headscale_api::Server;
 use headscale_core::{
-    AccountingPipeline, MeshCoordinator, RentalService, LeaseRequest,
-    node::{RegisterRequest, NodeCapabilities},
+    AccountingPipeline, LeaseRequest, MeshCoordinator, RentalService,
+    node::{NodeCapabilities, RegisterRequest},
 };
 use headscale_payments::Ledger;
 use headscale_resources::ResourceRegistry;
@@ -197,11 +197,42 @@ async fn test_node_capabilities_filtering() {
 
     // Register nodes with different capabilities
     let nodes_config = vec![
-        ("inference-node", NodeCapabilities { inference: true, ..Default::default() }),
-        ("storage-node", NodeCapabilities { storage: true, ..Default::default() }),
-        ("compute-node", NodeCapabilities { compute: true, ..Default::default() }),
-        ("relay-node", NodeCapabilities { relay: true, ..Default::default() }),
-        ("multi-node", NodeCapabilities { inference: true, compute: true, ..Default::default() }),
+        (
+            "inference-node",
+            NodeCapabilities {
+                inference: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "storage-node",
+            NodeCapabilities {
+                storage: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "compute-node",
+            NodeCapabilities {
+                compute: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "relay-node",
+            NodeCapabilities {
+                relay: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "multi-node",
+            NodeCapabilities {
+                inference: true,
+                compute: true,
+                ..Default::default()
+            },
+        ),
     ];
 
     for (id, caps) in nodes_config {
@@ -237,7 +268,10 @@ async fn test_ledger_deposit_and_balance() {
     let ctx = TestContext::new().await;
 
     // Deposit funds
-    let tx = ctx.ledger.deposit("did:key:alice", 10_000, "Initial deposit").await;
+    let tx = ctx
+        .ledger
+        .deposit("did:key:alice", 10_000, "Initial deposit")
+        .await;
     assert_eq!(tx.amount, 10_000);
 
     // Check balance
@@ -257,12 +291,15 @@ async fn test_ledger_transfer() {
     ctx.ledger.deposit("did:key:alice", 10_000, "Deposit").await;
 
     // Transfer
-    let result = ctx.ledger.transfer(
-        "did:key:alice",
-        "did:key:bob",
-        3_000,
-        "Payment for services",
-    ).await;
+    let result = ctx
+        .ledger
+        .transfer(
+            "did:key:alice",
+            "did:key:bob",
+            3_000,
+            "Payment for services",
+        )
+        .await;
     assert!(result.is_ok());
 
     // Verify balances
@@ -275,12 +312,10 @@ async fn test_ledger_insufficient_funds() {
     let ctx = TestContext::new().await;
 
     // Try to transfer without funds
-    let result = ctx.ledger.transfer(
-        "did:key:alice",
-        "did:key:bob",
-        1_000,
-        "Should fail",
-    ).await;
+    let result = ctx
+        .ledger
+        .transfer("did:key:alice", "did:key:bob", 1_000, "Should fail")
+        .await;
     assert!(result.is_err());
 }
 
@@ -296,12 +331,10 @@ async fn test_ledger_credit_limit() {
     assert_eq!(available, 5_000);
 
     // Can transfer up to credit limit
-    let result = ctx.ledger.transfer(
-        "did:key:alice",
-        "did:key:bob",
-        3_000,
-        "Using credit",
-    ).await;
+    let result = ctx
+        .ledger
+        .transfer("did:key:alice", "did:key:bob", 3_000, "Using credit")
+        .await;
     assert!(result.is_ok());
 
     // Balance is negative, but available accounts for remaining credit
@@ -317,17 +350,20 @@ async fn test_ledger_credit_limit() {
 async fn test_escrow_creation_and_session() {
     let ctx = TestContext::new().await;
 
-    use headscale_core::accounting::{ResourceKind, Pricing};
+    use headscale_core::accounting::{Pricing, ResourceKind};
 
     // Create escrow
-    let escrow_id = ctx.accounting.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        50_000,
-        ResourceKind::Bandwidth,
-        Pricing::default(),
-        None,
-    ).await;
+    let escrow_id = ctx
+        .accounting
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            50_000,
+            ResourceKind::Bandwidth,
+            Pricing::default(),
+            None,
+        )
+        .await;
 
     // Verify escrow
     let escrow = ctx.accounting.get_escrow(&escrow_id).await.unwrap();
@@ -338,11 +374,21 @@ async fn test_escrow_creation_and_session() {
     let session_id = ctx.accounting.start_session(&escrow_id).await.unwrap();
 
     // Record usage
-    ctx.accounting.record_usage(&session_id, 1000).await.unwrap();
-    ctx.accounting.record_usage(&session_id, 2000).await.unwrap();
+    ctx.accounting
+        .record_usage(&session_id, 1000)
+        .await
+        .unwrap();
+    ctx.accounting
+        .record_usage(&session_id, 2000)
+        .await
+        .unwrap();
 
     // Settle
-    let settlement = ctx.accounting.settle_session(&session_id, false).await.unwrap();
+    let settlement = ctx
+        .accounting
+        .settle_session(&session_id, false)
+        .await
+        .unwrap();
     assert!(settlement.is_some());
     let settlement = settlement.unwrap();
     assert_eq!(settlement.units, 3000);
@@ -356,20 +402,23 @@ async fn test_escrow_creation_and_session() {
 async fn test_accounting_multiple_sessions() {
     let ctx = TestContext::new().await;
 
-    use headscale_core::accounting::{ResourceKind, Pricing};
+    use headscale_core::accounting::{Pricing, ResourceKind};
 
-    let escrow_id = ctx.accounting.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        100_000,
-        ResourceKind::Inference,
-        Pricing {
-            rate_per_unit: 10,
-            minimum_units: 1,
-            settlement_interval_secs: 60,
-        },
-        None,
-    ).await;
+    let escrow_id = ctx
+        .accounting
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            100_000,
+            ResourceKind::Inference,
+            Pricing {
+                rate_per_unit: 10,
+                minimum_units: 1,
+                settlement_interval_secs: 60,
+            },
+            None,
+        )
+        .await;
 
     // Start multiple sessions
     let session1 = ctx.accounting.start_session(&escrow_id).await.unwrap();
@@ -404,12 +453,15 @@ async fn test_rental_full_lifecycle() {
     let ctx = TestContext::new().await;
 
     // Consumer creates escrow
-    let escrow_id = ctx.rental.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        100_000,
-        Some(Duration::from_secs(3600)),
-    ).await;
+    let escrow_id = ctx
+        .rental
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            100_000,
+            Some(Duration::from_secs(3600)),
+        )
+        .await;
 
     // Verify escrow
     let escrow = ctx.rental.get_escrow(&escrow_id).await.unwrap();
@@ -429,11 +481,17 @@ async fn test_rental_full_lifecycle() {
 
     // Verify lease is active
     let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert!(matches!(status.status, headscale_core::rental::LeaseStatus::Active));
+    assert!(matches!(
+        status.status,
+        headscale_core::rental::LeaseStatus::Active
+    ));
 
     // Simulate bandwidth usage
     for _ in 0..10 {
-        ctx.rental.record_bandwidth(&lease_id, 10_000).await.unwrap(); // 10KB each
+        ctx.rental
+            .record_bandwidth(&lease_id, 10_000)
+            .await
+            .unwrap(); // 10KB each
     }
 
     // Check metering
@@ -456,12 +514,15 @@ async fn test_rental_full_lifecycle() {
 async fn test_rental_bandwidth_exhaustion() {
     let ctx = TestContext::new().await;
 
-    let escrow_id = ctx.rental.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        1_000_000,
-        None,
-    ).await;
+    let escrow_id = ctx
+        .rental
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            1_000_000,
+            None,
+        )
+        .await;
 
     let request = LeaseRequest {
         consumer_did: "did:key:consumer".to_string(),
@@ -475,7 +536,10 @@ async fn test_rental_bandwidth_exhaustion() {
     let lease_id = response.lease_id;
 
     // Use most of bandwidth
-    ctx.rental.record_bandwidth(&lease_id, 40_000).await.unwrap();
+    ctx.rental
+        .record_bandwidth(&lease_id, 40_000)
+        .await
+        .unwrap();
 
     // Exceed limit
     let result = ctx.rental.record_bandwidth(&lease_id, 20_000).await;
@@ -483,7 +547,10 @@ async fn test_rental_bandwidth_exhaustion() {
 
     // Verify lease is exhausted
     let status = ctx.rental.get_lease_status(&lease_id).await.unwrap();
-    assert!(matches!(status.status, headscale_core::rental::LeaseStatus::Exhausted));
+    assert!(matches!(
+        status.status,
+        headscale_core::rental::LeaseStatus::Exhausted
+    ));
 }
 
 #[tokio::test]
@@ -491,12 +558,15 @@ async fn test_rental_provider_leases() {
     let ctx = TestContext::new().await;
 
     // Create escrow for multiple leases
-    let escrow_id = ctx.rental.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        1_000_000,
-        None,
-    ).await;
+    let escrow_id = ctx
+        .rental
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            1_000_000,
+            None,
+        )
+        .await;
 
     // Create multiple leases
     for i in 0..3 {
@@ -516,7 +586,10 @@ async fn test_rental_provider_leases() {
 
     // Each consumer should see their own lease
     for i in 0..3 {
-        let consumer_leases = ctx.rental.consumer_leases(&format!("did:key:consumer-{}", i)).await;
+        let consumer_leases = ctx
+            .rental
+            .consumer_leases(&format!("did:key:consumer-{}", i))
+            .await;
         assert_eq!(consumer_leases.len(), 1);
     }
 }
@@ -534,10 +607,7 @@ async fn test_api_health_endpoint() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{}/health", ctx.api_url()))
-        .send()
-        .await;
+    let resp = client.get(format!("{}/health", ctx.api_url())).send().await;
 
     match resp {
         Ok(r) => {
@@ -617,7 +687,11 @@ async fn test_api_metrics_endpoint() {
             assert!(r.status().is_success());
             let body = r.text().await.unwrap();
             // Should contain Prometheus metrics
-            assert!(body.contains("mesh_nodes") || body.contains("inference_tokens") || body.is_empty() == false);
+            assert!(
+                body.contains("mesh_nodes")
+                    || body.contains("inference_tokens")
+                    || body.is_empty() == false
+            );
         }
         Err(e) => {
             eprintln!("Metrics check failed (may be expected in CI): {}", e);
@@ -671,12 +745,15 @@ async fn test_concurrent_registrations() {
 async fn test_rapid_bandwidth_recording() {
     let ctx = TestContext::new().await;
 
-    let escrow_id = ctx.rental.create_escrow(
-        "did:key:consumer".to_string(),
-        "did:key:provider".to_string(),
-        10_000_000,
-        None,
-    ).await;
+    let escrow_id = ctx
+        .rental
+        .create_escrow(
+            "did:key:consumer".to_string(),
+            "did:key:provider".to_string(),
+            10_000_000,
+            None,
+        )
+        .await;
 
     let request = LeaseRequest {
         consumer_did: "did:key:consumer".to_string(),
@@ -696,16 +773,17 @@ async fn test_rapid_bandwidth_recording() {
         .map(|_| {
             let rental = rental.clone();
             let lid = lease_id_clone.clone();
-            tokio::spawn(async move {
-                rental.record_bandwidth(&lid, 1000).await
-            })
+            tokio::spawn(async move { rental.record_bandwidth(&lid, 1000).await })
         })
         .collect();
 
     let results: Vec<_> = futures::future::join_all(handles).await;
 
     // Count successes
-    let successes = results.iter().filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok()).count();
+    let successes = results
+        .iter()
+        .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
+        .count();
     assert!(successes > 900); // Most should succeed
 
     // Verify total bandwidth

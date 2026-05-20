@@ -49,10 +49,7 @@ pub fn load_derp_map(path: &Path) -> std::io::Result<DerpMap> {
         )
     })?;
     let map: DerpMap = serde_json::from_slice(&bytes).map_err(|e| {
-        std::io::Error::other(format!(
-            "parse DERP map fixture at {}: {e}",
-            path.display()
-        ))
+        std::io::Error::other(format!("parse DERP map fixture at {}: {e}", path.display()))
     })?;
     Ok(map)
 }

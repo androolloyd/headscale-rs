@@ -181,7 +181,13 @@ impl WireMachineAdmin {
         // to `now_unix` only when zero (record was inserted by tests
         // that didn't stamp it).
         let last_seen = rec.last_seen.timestamp().max(0) as u64;
-        let last_seen = if is_expired { 0 } else if last_seen == 0 { now_unix() } else { last_seen };
+        let last_seen = if is_expired {
+            0
+        } else if last_seen == 0 {
+            now_unix()
+        } else {
+            last_seen
+        };
         MachineAdminRecord {
             id: id.to_string(),
             name: rec.hostname.clone(),
@@ -454,7 +460,9 @@ mod tests {
     #[test]
     fn logout_unknown_errors() {
         let (a, _) = fixture();
-        let e = rt().block_on(a.logout("zz".repeat(32).as_str())).unwrap_err();
+        let e = rt()
+            .block_on(a.logout("zz".repeat(32).as_str()))
+            .unwrap_err();
         assert!(matches!(e, MachineAdminError::NotFound(_)));
     }
 }

@@ -17,8 +17,8 @@
 //! - Fund release on close
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -171,9 +171,9 @@ impl MeteringSession {
 
     /// Get remaining bandwidth (if limited).
     pub fn remaining_bandwidth(&self) -> Option<u64> {
-        self.config.bandwidth_limit.map(|limit| {
-            limit.saturating_sub(self.total_bytes())
-        })
+        self.config
+            .bandwidth_limit
+            .map(|limit| limit.saturating_sub(self.total_bytes()))
     }
 
     /// Get session duration.
@@ -292,7 +292,11 @@ impl MeteringService {
 
     /// Get current usage for a session.
     pub async fn get_usage(&self, session_id: &MeteringSessionId) -> Option<MeteringSnapshot> {
-        self.sessions.read().await.get(session_id).map(|s| s.snapshot())
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|s| s.snapshot())
     }
 
     /// End a metering session and return final snapshot.
@@ -375,11 +379,20 @@ mod tests {
         };
 
         // Start session
-        service.start_session(session_id.clone(), config).await.unwrap();
+        service
+            .start_session(session_id.clone(), config)
+            .await
+            .unwrap();
 
         // Record usage
-        service.record_usage(&session_id, 10_000, 5_000).await.unwrap();
-        service.record_usage(&session_id, 20_000, 15_000).await.unwrap();
+        service
+            .record_usage(&session_id, 10_000, 5_000)
+            .await
+            .unwrap();
+        service
+            .record_usage(&session_id, 20_000, 15_000)
+            .await
+            .unwrap();
 
         // Check usage
         let usage = service.get_usage(&session_id).await.unwrap();
@@ -409,14 +422,20 @@ mod tests {
             provider_did: "did:key:bob".to_string(),
         };
 
-        service.start_session(session_id.clone(), config).await.unwrap();
+        service
+            .start_session(session_id.clone(), config)
+            .await
+            .unwrap();
 
         // Use most of bandwidth
         service.record_usage(&session_id, 8_000, 0).await.unwrap();
 
         // Exceed limit should fail
         let result = service.record_usage(&session_id, 5_000, 0).await;
-        assert!(matches!(result, Err(MeteringError::BandwidthExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(MeteringError::BandwidthExceeded { .. })
+        ));
 
         // Can still use remaining
         service.record_usage(&session_id, 2_000, 0).await.unwrap();
@@ -438,8 +457,14 @@ mod tests {
                 consumer_did: "did:key:alice".to_string(),
                 provider_did: "did:key:bob".to_string(),
             };
-            service.start_session(session_id.clone(), config).await.unwrap();
-            service.record_usage(&session_id, 1000 * (i + 1) as u64, 0).await.unwrap();
+            service
+                .start_session(session_id.clone(), config)
+                .await
+                .unwrap();
+            service
+                .record_usage(&session_id, 1000 * (i + 1) as u64, 0)
+                .await
+                .unwrap();
         }
 
         // Check provider total

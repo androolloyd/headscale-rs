@@ -33,7 +33,10 @@ use std::{
     sync::Arc,
 };
 
-use rustls::{pki_types::CertificateDer, pki_types::PrivateKeyDer, ServerConfig};
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
 
 use super::WireError;
 
@@ -138,7 +141,10 @@ fn read_pem(p: &Path) -> Result<String, std::io::Error> {
     let mut s = String::new();
     f.read_to_string(&mut s)?;
     if s.is_empty() {
-        return Err(std::io::Error::new(ErrorKind::InvalidData, "empty pem file"));
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "empty pem file",
+        ));
     }
     Ok(s)
 }
@@ -203,16 +209,14 @@ fn write_atomic(p: &Path, bytes: &[u8], mode: u32) -> Result<(), WireError> {
 }
 
 fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, WireError> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .map_err(|e| WireError::Internal(format!("parse cert pem: {e}")))?;
     if certs.is_empty() {
         return Err(WireError::Internal("no certificates in cert pem".into()));
     }
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .map_err(|e| WireError::Internal(format!("parse key pem: {e}")))?
-        .ok_or_else(|| WireError::Internal("no private key in key pem".into()))?;
-    let key: PrivateKeyDer<'static> = key;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| WireError::Internal(format!("parse key pem: {e}")))?;
 
     // Install a default crypto provider if one isn't set. Cheap and
     // idempotent (`install_default` returns Err on a second install,
@@ -266,8 +270,7 @@ mod tests {
             "expected PEM-encoded cert"
         );
         assert!(
-            m.key_pem.contains("BEGIN PRIVATE KEY")
-                || m.key_pem.contains("BEGIN EC PRIVATE KEY"),
+            m.key_pem.contains("BEGIN PRIVATE KEY") || m.key_pem.contains("BEGIN EC PRIVATE KEY"),
             "expected PEM-encoded private key"
         );
     }

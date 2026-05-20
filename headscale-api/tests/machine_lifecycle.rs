@@ -118,7 +118,12 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
 /// Send a `POST /api/v1/machines/{id}/<verb>` with the supplied JSON
 /// body. Returns the response status + decoded body. Bearer auth is
 /// always present.
-async fn admin_post(admin: &AdminState, id: &str, verb: &str, body: serde_json::Value) -> (StatusCode, String) {
+async fn admin_post(
+    admin: &AdminState,
+    id: &str,
+    verb: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
     let router = admin_router(admin.clone());
     let path = format!("/api/v1/machines/{id}/{verb}");
     let req = Request::builder()
@@ -383,7 +388,13 @@ async fn admin_verbs_on_unknown_id_return_404() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = admin_post(&admin, &id, "logout", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, _) = admin_post(&admin, &id, "rename", serde_json::json!({ "hostname": "x" })).await;
+    let (s, _) = admin_post(
+        &admin,
+        &id,
+        "rename",
+        serde_json::json!({ "hostname": "x" }),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = admin_post(&admin, &id, "tags", serde_json::json!({ "tags": [] })).await;
     assert_eq!(s, StatusCode::NOT_FOUND);

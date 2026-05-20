@@ -16,6 +16,6 @@ pub mod types;
 
 pub use allocation::ResourceAllocator;
 pub use metering::Meter;
-pub use metrics::{global_metrics, ResourceMetrics};
+pub use metrics::{ResourceMetrics, global_metrics};
 pub use registry::ResourceRegistry;
 pub use types::*;

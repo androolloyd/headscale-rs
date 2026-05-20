@@ -50,18 +50,18 @@ use std::{
 };
 
 use axum::{
+    Router,
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderValue, Response, StatusCode},
+    http::{HeaderValue, Response, StatusCode, header},
     response::IntoResponse,
-    Router,
 };
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
-use snow::{params::NoiseParams, Builder};
+use snow::{Builder, params::NoiseParams};
 
 use super::be_transport::{BeNoiseStream, BeTransport};
-use super::controlbase::{Framed, FrameHeader, MsgType};
+use super::controlbase::{FrameHeader, Framed, MsgType};
 use super::{WireError, WireState};
 
 /// The Tailscale capability version we advertise in the Noise
@@ -174,7 +174,10 @@ impl ServerNoiseKey {
     /// Build an IK initiator targeting `remote_static` (the peer's
     /// 32-byte X25519 public). Useful for tests and (eventually) for
     /// the wire-frame layer.
-    pub fn build_initiator(&self, remote_static: &[u8; 32]) -> Result<snow::HandshakeState, WireError> {
+    pub fn build_initiator(
+        &self,
+        remote_static: &[u8; 32],
+    ) -> Result<snow::HandshakeState, WireError> {
         let priv_g = self.private.lock();
         let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
         Builder::new(params)
@@ -268,11 +271,10 @@ fn derive_x25519_public(private: &[u8]) -> Result<[u8; 32], WireError> {
     let mut msg = [0u8; 1024];
     let n = init.write_message(&[], &mut msg).map_err(noise_err)?;
     let mut payload = [0u8; 1024];
-    resp.read_message(&msg[..n], &mut payload).map_err(noise_err)?;
+    resp.read_message(&msg[..n], &mut payload)
+        .map_err(noise_err)?;
     let recovered = resp.get_remote_static().ok_or_else(|| {
-        WireError::Noise(
-            "responder could not recover initiator static after read_message".into(),
-        )
+        WireError::Noise("responder could not recover initiator static after read_message".into())
     })?;
     if recovered.len() != 32 {
         return Err(WireError::Noise(format!(
@@ -300,9 +302,7 @@ fn noise_err<E: std::fmt::Display>(e: E) -> WireError {
 /// `NodeChallengeReply` later in the flow, which we don't implement).
 fn generate_x25519_public() -> Result<[u8; 32], WireError> {
     let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
-    let kp = Builder::new(params)
-        .generate_keypair()
-        .map_err(noise_err)?;
+    let kp = Builder::new(params).generate_keypair().map_err(noise_err)?;
     if kp.public.len() != 32 {
         return Err(WireError::Noise(format!(
             "generated x25519 public has len {}; expected 32",
@@ -346,10 +346,7 @@ const EARLY_NOISE_MAGIC: [u8; 5] = [0xff, 0xff, 0xff, b'T', b'S'];
 /// frame shapes are inferred from headscale-Go and may need tweaks.
 /// See `docs/tailscale-interop-blocker.md` 2026-05-19 continuation
 /// section for what we observed in practice.
-pub async fn handle_ts2021_post(
-    State(state): State<WireState>,
-    req: Request,
-) -> Response<Body> {
+pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) -> Response<Body> {
     // Verify the upgrade header before we commit to the hijack path.
     let wants_upgrade = req
         .headers()
@@ -466,7 +463,9 @@ where
             .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
     };
     let proto_version = match hdr {
-        FrameHeader::Initiation { protocol_version, .. } => protocol_version,
+        FrameHeader::Initiation {
+            protocol_version, ..
+        } => protocol_version,
         other @ FrameHeader::Regular { .. } => {
             return Err(WireError::Noise(format!(
                 "expected Initiation frame first, got {other:?}"
@@ -616,8 +615,7 @@ async fn dispatch_h2_request(
     // extractors). Register and map bodies are <2 KiB.
     let mut body_bytes = BytesMut::new();
     while let Some(chunk) = body.data().await {
-        let chunk = chunk
-            .map_err(|e| WireError::Noise(format!("h2 body read: {e}")))?;
+        let chunk = chunk.map_err(|e| WireError::Noise(format!("h2 body read: {e}")))?;
         let n = chunk.len();
         body_bytes.extend_from_slice(&chunk);
         let _ = body.flow_control().release_capacity(n);
@@ -673,18 +671,15 @@ async fn dispatch_h2_request(
     // `wire.rs`).
     let mut frame_count: u64 = 0;
     loop {
-        let frame_opt = std::future::poll_fn(|cx| {
-            std::pin::Pin::new(&mut resp_body).poll_frame(cx)
-        })
-        .await;
+        let frame_opt =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut resp_body).poll_frame(cx)).await;
         match frame_opt {
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(data) => {
                     if !data.is_empty() {
                         let chunk: Bytes = data;
-                        send.send_data(chunk, false).map_err(|e| {
-                            WireError::Noise(format!("h2 send_data: {e}"))
-                        })?;
+                        send.send_data(chunk, false)
+                            .map_err(|e| WireError::Noise(format!("h2 send_data: {e}")))?;
                         frame_count += 1;
                     }
                 }
@@ -708,9 +703,8 @@ async fn dispatch_h2_request(
                 // Body ended naturally — for register/non-streaming
                 // map this is the common path. Close the stream by
                 // sending an empty final frame with end_of_stream=true.
-                send.send_data(Bytes::new(), true).map_err(|e| {
-                    WireError::Noise(format!("h2 send_data eof: {e}"))
-                })?;
+                send.send_data(Bytes::new(), true)
+                    .map_err(|e| WireError::Noise(format!("h2 send_data eof: {e}")))?;
                 break;
             }
         }
@@ -735,10 +729,7 @@ fn inner_router(state: WireState) -> Router {
             "/machine/:node_key/register",
             post(super::register::handle_register),
         )
-        .route(
-            "/machine/:node_key/map",
-            post(super::map::handle_map),
-        )
+        .route("/machine/:node_key/map", post(super::map::handle_map))
         // Flat v1.78+ paths — what stock `tailscale up` actually POSTs
         // through the noise-h2 tunnel. NodeKey lives in the request
         // body, not the URL.
@@ -746,10 +737,7 @@ fn inner_router(state: WireState) -> Router {
             "/machine/register",
             post(super::register::handle_register_flat),
         )
-        .route(
-            "/machine/map",
-            post(super::map::handle_map_flat),
-        )
+        .route("/machine/map", post(super::map::handle_map_flat))
         .with_state(state)
 }
 
@@ -794,7 +782,9 @@ where
             .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
     };
     let proto_version = match hdr {
-        FrameHeader::Initiation { protocol_version, .. } => protocol_version,
+        FrameHeader::Initiation {
+            protocol_version, ..
+        } => protocol_version,
         other @ FrameHeader::Regular { .. } => {
             return Err(WireError::Noise(format!(
                 "expected Initiation frame first, got {other:?}"
@@ -958,7 +948,6 @@ pub async fn handle_ts2021_stub(State(_s): State<WireState>) -> impl IntoRespons
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,7 +961,11 @@ mod tests {
         let pub_a = a.public_bytes();
         drop(a);
         let b = ServerNoiseKey::load_or_generate(dir.path()).unwrap();
-        assert_eq!(pub_a, b.public_bytes(), "static key must persist across loads");
+        assert_eq!(
+            pub_a,
+            b.public_bytes(),
+            "static key must persist across loads"
+        );
     }
 
     #[test]

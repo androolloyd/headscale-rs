@@ -23,11 +23,7 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     pub fn from_flag(json: bool) -> Self {
-        if json {
-            Self::Json
-        } else {
-            Self::Table
-        }
+        if json { Self::Json } else { Self::Table }
     }
 }
 
@@ -135,7 +131,10 @@ mod tests {
     #[test]
     fn output_format_from_flag() {
         assert!(matches!(OutputFormat::from_flag(true), OutputFormat::Json));
-        assert!(matches!(OutputFormat::from_flag(false), OutputFormat::Table));
+        assert!(matches!(
+            OutputFormat::from_flag(false),
+            OutputFormat::Table
+        ));
     }
 
     #[test]

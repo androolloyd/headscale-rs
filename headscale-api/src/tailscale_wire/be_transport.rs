@@ -83,7 +83,7 @@ use std::{
 };
 
 use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -120,7 +120,10 @@ pub enum BeTransportError {
     #[error("be_transport: ciphertext too short ({0} < {TAG_LEN} bytes)")]
     ShortCiphertext(usize),
     /// The provided ciphertext exceeds the per-record cap.
-    #[error("be_transport: ciphertext too long ({got} > {} bytes)", MAX_CIPHERTEXT_PER_RECORD)]
+    #[error(
+        "be_transport: ciphertext too long ({got} > {} bytes)",
+        MAX_CIPHERTEXT_PER_RECORD
+    )]
     TooLong { got: usize },
     /// Send/receive nonce counter would overflow u64. 2^64 records on
     /// a single Tailscale connection is operationally impossible, but
@@ -230,7 +233,9 @@ impl BeTransport {
             return Err(BeTransportError::ShortCiphertext(ciphertext.len()));
         }
         if ciphertext.len() > MAX_CIPHERTEXT_PER_RECORD {
-            return Err(BeTransportError::TooLong { got: ciphertext.len() });
+            return Err(BeTransportError::TooLong {
+                got: ciphertext.len(),
+            });
         }
         let nonce_bytes = nonce_be(self.recv_counter);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -360,7 +365,10 @@ where
                     }
                     return Poll::Ready(Ok(()));
                 }
-                BeReadState::Header { mut buf, mut filled } => {
+                BeReadState::Header {
+                    mut buf,
+                    mut filled,
+                } => {
                     let mut rb = ReadBuf::new(&mut buf[filled..]);
                     match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
                         Poll::Pending => {
@@ -399,8 +407,7 @@ where
                                     ),
                                 )));
                             }
-                            let len =
-                                u16::from_be_bytes([buf[1], buf[2]]) as usize;
+                            let len = u16::from_be_bytes([buf[1], buf[2]]) as usize;
                             if len == 0 {
                                 self.read_state = BeReadState::Header {
                                     buf: [0u8; 3],
@@ -424,7 +431,10 @@ where
                         }
                     }
                 }
-                BeReadState::Body { mut buf, mut filled } => {
+                BeReadState::Body {
+                    mut buf,
+                    mut filled,
+                } => {
                     let mut rb = ReadBuf::new(&mut buf[filled..]);
                     match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
                         Poll::Pending => {
@@ -457,13 +467,10 @@ where
                                     return Poll::Ready(Err(io::Error::new(
                                         io::ErrorKind::InvalidData,
                                         format!("be_noise decrypt: {e}"),
-                                    )))
+                                    )));
                                 }
                             };
-                            self.read_state = BeReadState::ServingPlaintext {
-                                buf: pt,
-                                pos: 0,
-                            };
+                            self.read_state = BeReadState::ServingPlaintext { buf: pt, pos: 0 };
                         }
                     }
                 }
@@ -493,16 +500,19 @@ where
                     let ciphertext = match self.transport.encrypt(&bytes[..take]) {
                         Ok(c) => c,
                         Err(e) => {
-                            return Poll::Ready(Err(io::Error::other(
-                                format!("be_noise encrypt: {e}"),
-                            )))
+                            return Poll::Ready(Err(io::Error::other(format!(
+                                "be_noise encrypt: {e}"
+                            ))));
                         }
                     };
                     let mut framed = Vec::with_capacity(3 + ciphertext.len());
                     framed.push(MsgType::Record as u8);
                     framed.extend_from_slice(&(ciphertext.len() as u16).to_be_bytes());
                     framed.extend_from_slice(&ciphertext);
-                    self.write_state = BeWriteState::Flushing { buf: framed, pos: 0 };
+                    self.write_state = BeWriteState::Flushing {
+                        buf: framed,
+                        pos: 0,
+                    };
                 }
                 BeWriteState::Flushing { buf, pos } => {
                     let rem = &buf[pos..];
@@ -529,8 +539,7 @@ where
                                 let consumed = bytes.len().min(MAX_PLAINTEXT_PER_RECORD);
                                 return Poll::Ready(Ok(consumed));
                             }
-                            self.write_state =
-                                BeWriteState::Flushing { buf, pos: new_pos };
+                            self.write_state = BeWriteState::Flushing { buf, pos: new_pos };
                         }
                     }
                 }
@@ -568,8 +577,7 @@ where
                             if new_pos == buf.len() {
                                 self.write_state = BeWriteState::Idle;
                             } else {
-                                self.write_state =
-                                    BeWriteState::Flushing { buf, pos: new_pos };
+                                self.write_state = BeWriteState::Flushing { buf, pos: new_pos };
                             }
                         }
                     }
@@ -578,10 +586,7 @@ where
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match Pin::new(&mut *self).poll_flush(cx) {
             Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_shutdown(cx),
             other => other,
@@ -637,7 +642,10 @@ mod tests {
             .encrypt(Nonce::from_slice(&expected_nonce), pt.as_ref())
             .unwrap();
 
-        assert_eq!(actual, expected, "encrypt output must match raw chacha20poly1305 with BE nonce");
+        assert_eq!(
+            actual, expected,
+            "encrypt output must match raw chacha20poly1305 with BE nonce"
+        );
 
         // And confirm it does NOT match an LE-nonce encryption with the
         // same counter — that's the bug we're guarding against.
@@ -646,7 +654,10 @@ mod tests {
         let le_expected = ChaCha20Poly1305::new(Key::from_slice(&key))
             .encrypt(Nonce::from_slice(&le_nonce), pt.as_ref())
             .unwrap();
-        assert_ne!(actual, le_expected, "LE-nonce output must differ from BE-nonce");
+        assert_ne!(
+            actual, le_expected,
+            "LE-nonce output must differ from BE-nonce"
+        );
     }
 
     #[test]
@@ -761,7 +772,12 @@ mod tests {
 
         // Build initiator + responder.
         let mut init = Builder::new(params.clone())
-            .local_private_key(&Builder::new(params.clone()).generate_keypair().unwrap().private)
+            .local_private_key(
+                &Builder::new(params.clone())
+                    .generate_keypair()
+                    .unwrap()
+                    .private,
+            )
             .remote_public_key(&resp_static.public)
             .build_initiator()
             .unwrap();
@@ -810,7 +826,7 @@ mod tests {
     /// BE-nonced encryption.
     #[tokio::test]
     async fn be_noise_stream_round_trip() {
-        use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
         let k1 = [0x11u8; 32];
         let k2 = [0x22u8; 32];
@@ -844,7 +860,7 @@ mod tests {
     /// Record frames + reassembles transparently.
     #[tokio::test]
     async fn be_noise_stream_chunks_large_writes() {
-        use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
         let k1 = [0x33u8; 32];
         let k2 = [0x44u8; 32];

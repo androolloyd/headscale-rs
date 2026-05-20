@@ -30,7 +30,7 @@ impl Database {
     pub async fn new(url: &str) -> Result<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
-            .idle_timeout(Duration::from_secs(300))
+            .idle_timeout(Duration::from_mins(5))
             .connect(url)
             .await?;
 

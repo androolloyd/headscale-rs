@@ -18,6 +18,21 @@ tracing.workspace = true
 # Database
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "migrate"] }
 
+# Pre-auth key persistence — bcrypt-hashes the bearer token so the
+# canonical store never holds plaintext (parity with the Go
+# upstream's `hscontrol/types/preauth_key.go::Key` column). Pinned to
+# the major series the rest of the workspace already pulls in via
+# transitive deps (see `cargo tree`).
+bcrypt = "0.16"
+# Unix-seconds helper that the preauth row uses for created_at /
+# expires_at / used_at — re-used from the workspace's general
+# time-stamp pattern (sessions table is i64 unix epoch too).
+hex = "0.4"
+# Random token bytes for the `octrapreauth-<hex>` plaintext we hash
+# into the row's `key_hash` column. Same `rand_core` the admin
+# in-memory store already uses.
+rand_core = { workspace = true }
+
 # Internal crates
 headscale-core.workspace = true
 headscale-identity.workspace = true

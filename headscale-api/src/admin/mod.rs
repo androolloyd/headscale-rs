@@ -59,6 +59,7 @@
 pub mod auth;
 pub mod machines;
 pub mod preauth;
+pub mod preauth_persistent;
 pub mod users;
 mod views;
 
@@ -82,6 +83,7 @@ pub use machines::{MachineAdmin, MachineAdminError, MachineAdminRecord, WireMach
 pub use preauth::{
     InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,
 };
+pub use preauth_persistent::PersistentPreauthAdmin;
 pub use users::{UserRecord, UserRegistry, UserRegistryError};
 
 use views::Section;

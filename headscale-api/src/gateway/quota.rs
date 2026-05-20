@@ -126,7 +126,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Inference,
                 limit: 1_000_000,
-                reset_period: Some(Duration::from_hours(24)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 
@@ -136,7 +136,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Compute,
                 limit: 3600,
-                reset_period: Some(Duration::from_hours(24)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 
@@ -156,7 +156,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Bandwidth,
                 limit: 100 * 1024 * 1024 * 1024,
-                reset_period: Some(Duration::from_hours(24)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 

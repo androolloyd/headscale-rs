@@ -3,6 +3,8 @@
 //! These live next to `/key` in the wire router because upstream serves
 //! them from the same public control listener, before API bearer auth.
 
+use std::collections::BTreeMap;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -10,6 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+
+use super::{DerpMap, WireState};
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
@@ -107,7 +111,29 @@ pub async fn handle_blank() -> Response {
         .into_response()
 }
 
-use super::WireState;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugDerpInfo {
+    pub configured: bool,
+    pub total_regions: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub regions: BTreeMap<u16, DebugDerpRegion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugDerpRegion {
+    pub region_id: u16,
+    pub region_name: String,
+    pub nodes: Vec<DebugDerpNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugDerpNode {
+    pub name: String,
+    pub hostname: String,
+    pub derp_port: u16,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub stun_port: i32,
+}
 
 pub async fn handle_debug_routes(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let snapshot = state.machines.snapshot();
@@ -127,6 +153,28 @@ pub async fn handle_debug_routes(State(state): State<WireState>, headers: Header
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain")],
             state.machines.debug_routes_string_for_snapshot(&snapshot),
+        )
+            .into_response()
+    }
+}
+
+pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    if wants_json(&headers) {
+        let info = debug_derp_info(&state.derp_map);
+        match serde_json::to_string_pretty(&info) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            debug_derp_string(&state.derp_map),
         )
             .into_response()
     }
@@ -227,6 +275,83 @@ fn wants_json(headers: &HeaderMap) -> bool {
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|accept| accept.contains("application/json"))
+}
+
+fn debug_derp_configured(derp_map: &DerpMap) -> bool {
+    !derp_map.regions.is_empty() || derp_map.omit_default_regions
+}
+
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
+fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
+    let configured = debug_derp_configured(derp_map);
+    let mut info = DebugDerpInfo {
+        configured,
+        total_regions: if configured {
+            derp_map.regions.len()
+        } else {
+            0
+        },
+        regions: BTreeMap::new(),
+    };
+
+    if !configured {
+        return info;
+    }
+
+    for (region_id, region) in &derp_map.regions {
+        let nodes = region
+            .nodes
+            .iter()
+            .map(|node| DebugDerpNode {
+                name: node.name.clone(),
+                hostname: node.host_name.clone(),
+                derp_port: node.derp_port,
+                stun_port: node.stun_port,
+            })
+            .collect();
+        info.regions.insert(
+            *region_id,
+            DebugDerpRegion {
+                region_id: *region_id,
+                region_name: region.region_name.clone(),
+                nodes,
+            },
+        );
+    }
+
+    info
+}
+
+fn debug_derp_string(derp_map: &DerpMap) -> String {
+    if !debug_derp_configured(derp_map) {
+        return "DERP Map: not configured\n".to_string();
+    }
+
+    let mut out = String::from("=== DERP Map Configuration ===\n\n");
+    out.push_str(&format!("Total Regions: {}\n\n", derp_map.regions.len()));
+
+    let mut regions = derp_map.regions.iter().collect::<Vec<_>>();
+    regions.sort_by_key(|(region_id, _)| **region_id);
+    for (region_id, region) in regions {
+        out.push_str(&format!("Region {region_id}: {}\n", region.region_name));
+        out.push_str(&format!("  - Nodes: {}\n", region.nodes.len()));
+
+        for node in &region.nodes {
+            out.push_str(&format!(
+                "    - {} ({}:{})\n",
+                node.name, node.host_name, node.derp_port
+            ));
+            if node.stun_port != 0 {
+                out.push_str(&format!("      STUN: {}\n", node.stun_port));
+            }
+        }
+        out.push('\n');
+    }
+
+    out
 }
 
 fn control_url(configured: Option<&str>, headers: &HeaderMap, uri: &Uri) -> String {
@@ -390,7 +515,7 @@ fn apple_mobileconfig(url: &str, payload_type: &str, platform: &str) -> String {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRecord, MachineRegistry, WireState,
+        DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MachineRegistry, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -398,6 +523,7 @@ mod tests {
     };
     use axum::body::to_bytes;
     use chrono::Utc;
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -444,6 +570,32 @@ mod tests {
             .map(|route| (*route).to_string())
             .collect();
         rec
+    }
+
+    fn derp_fixture() -> DerpMap {
+        DerpMap {
+            omit_default_regions: true,
+            regions: HashMap::from([(
+                1,
+                DerpRegion {
+                    region_id: 1,
+                    region_code: "test".to_string(),
+                    region_name: "Test region".to_string(),
+                    avoid: false,
+                    nodes: vec![DerpRegionNode {
+                        name: "derp-1".to_string(),
+                        region_id: 1,
+                        host_name: "derp1.example.com".to_string(),
+                        ipv4: "198.51.100.10".to_string(),
+                        ipv6: String::new(),
+                        derp_port: 443,
+                        stun_port: 3478,
+                        stun_only: false,
+                        insecure_for_tests: false,
+                    }],
+                },
+            )]),
+        }
     }
 
     #[tokio::test]
@@ -683,6 +835,96 @@ mod tests {
             parsed["primary_routes"].get("0.0.0.0/0").is_none(),
             "exit routes are excluded from primary route debug state"
         );
+    }
+
+    #[tokio::test]
+    async fn debug_derp_text_matches_headscale_go_unconfigured_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/derp")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"DERP Map: not configured\n");
+    }
+
+    #[tokio::test]
+    async fn debug_derp_text_matches_headscale_go_configured_shape() {
+        let (mut state, _dir) = fixture_state();
+        state.derp_map = Arc::new(derp_fixture());
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/derp")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(
+            body,
+            "=== DERP Map Configuration ===\n\nTotal Regions: 1\n\nRegion 1: Test region\n  - Nodes: 1\n    - derp-1 (derp1.example.com:443)\n      STUN: 3478\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_derp_json_matches_headscale_go_shape() {
+        let (mut state, _dir) = fixture_state();
+        state.derp_map = Arc::new(derp_fixture());
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/derp")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["configured"], true);
+        assert_eq!(parsed["total_regions"], 1);
+        assert_eq!(parsed["regions"]["1"]["region_id"], 1);
+        assert_eq!(parsed["regions"]["1"]["region_name"], "Test region");
+        assert_eq!(parsed["regions"]["1"]["nodes"][0]["name"], "derp-1");
+        assert_eq!(
+            parsed["regions"]["1"]["nodes"][0]["hostname"],
+            "derp1.example.com"
+        );
+        assert_eq!(parsed["regions"]["1"]["nodes"][0]["derp_port"], 443);
+        assert_eq!(parsed["regions"]["1"]["nodes"][0]["stun_port"], 3478);
     }
 
     #[tokio::test]

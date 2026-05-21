@@ -973,6 +973,7 @@ pub fn router(state: WireState) -> Router {
             get(basic_handlers::handle_swagger_api_v1),
         )
         .route("/debug/routes", get(basic_handlers::handle_debug_routes))
+        .route("/debug/derp", get(basic_handlers::handle_debug_derp))
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

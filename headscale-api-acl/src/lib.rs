@@ -540,13 +540,14 @@ impl AclDoc {
     /// suitable for a static `tailcfg.FilterRule.SrcIPs` / `DstIPs`
     /// entry. Group references expand to their members; `host:` /
     /// `ipset:` resolve to their CIDR contents; the flattenable
-    /// autogroups (`internet`, `member`) collapse to `*`; the
+    /// autogroups (`internet`, `member`) collapse to the IPv4+IPv6
+    /// zero-prefix pair used by headscale-go FilterRules; the
     /// non-flattenable autogroups (`self`, `nonroot`, `tagged`,
     /// `tag:*`) return an empty list — the FilterRule layer drops
     /// the rule rather than silently leaking it as `*`.
     pub fn expand_principal(&self, token: &str) -> Vec<String> {
         if token == "*" {
-            return vec!["*".to_string()];
+            return wildcard_filter_cidrs();
         }
         if let Some(g) = token.strip_prefix("group:") {
             if let Some(members) = self.groups.get(g) {
@@ -568,7 +569,7 @@ impl AclDoc {
         }
         if let Some(ag) = token.strip_prefix("autogroup:") {
             if ag == "internet" || ag == "member" {
-                return vec!["*".to_string()];
+                return wildcard_filter_cidrs();
             }
             return Vec::new();
         }
@@ -627,6 +628,10 @@ impl AclDoc {
         }
         identity_matches(entry, principal)
     }
+}
+
+pub fn wildcard_filter_cidrs() -> Vec<String> {
+    vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
 }
 
 fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
@@ -1607,7 +1612,7 @@ mod tests {
     #[test]
     fn expand_principal_wildcard_returns_wildcard() {
         let d = AclDoc::empty();
-        assert_eq!(d.expand_principal("*"), vec!["*"]);
+        assert_eq!(d.expand_principal("*"), wildcard_filter_cidrs());
     }
 
     #[test]

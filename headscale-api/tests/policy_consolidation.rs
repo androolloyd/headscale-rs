@@ -72,7 +72,8 @@ fn raw_round_trip_preserves_url_with_double_slashes() {
 #[test]
 fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let store = PolicyStore::new();
-    let raw = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+    let raw =
+        r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc.clone(), raw.to_string());
     let store_rules = store.filter_rules();
@@ -80,11 +81,14 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let direct = acl_to_filter_rules(&doc);
     assert_eq!(store_rules.len(), direct.len());
     assert_eq!(store_rules.len(), 1);
-    assert_eq!(store_rules[0].src_ips, vec!["*"]);
-    assert_eq!(store_rules[0].dst_ports.len(), 1);
-    assert_eq!(store_rules[0].dst_ports[0].ip, "*");
+    assert_eq!(store_rules[0].src_ips, vec!["0.0.0.0/0", "::/0"]);
+    assert_eq!(store_rules[0].dst_ports.len(), 2);
+    assert_eq!(store_rules[0].dst_ports[0].ip, "0.0.0.0/0");
+    assert_eq!(store_rules[0].dst_ports[1].ip, "::/0");
     assert_eq!(store_rules[0].dst_ports[0].ports.first, 0);
     assert_eq!(store_rules[0].dst_ports[0].ports.last, 65535);
+    assert_eq!(store_rules[0].dst_ports[1].ports.first, 0);
+    assert_eq!(store_rules[0].dst_ports[1].ports.last, 65535);
     assert!(store_rules[0].ip_proto.is_empty());
 }
 

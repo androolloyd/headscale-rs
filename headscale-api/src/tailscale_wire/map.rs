@@ -99,9 +99,9 @@ pub const MAP_LONGPOLL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 30s leaves headroom for slow links.
 pub const MAP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// MagicDNS domain emitted on every map response. Static for the
-/// interop test.
-const TAILNET_DOMAIN: &str = "octra.test";
+fn tailnet_domain(dns: &DnsStore) -> String {
+    dns.spec().base_domain.clone()
+}
 
 /// Wall 7 (closed in the same commit batch as Wall 6 for the interop
 /// path): the canonical "everyone can reach everyone on every port"
@@ -110,16 +110,25 @@ const TAILNET_DOMAIN: &str = "octra.test";
 /// even though the netmap holds the target node. Production
 /// deployments derive this list from the ACL surface; the interop
 /// test runs with an open default so the ping assertion lands.
+///
+/// Headscale-go parity: the bypass uses the same IPv4+IPv6 zero-prefix
+/// pair the ACL translator emits for `*` principals, and one
+/// NetPortRange per address family.
 pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
-    vec![FilterRule {
-        src_ips: vec!["*".into()],
-        dst_ports: vec![NetPortRange {
-            ip: "*".into(),
+    let cidrs = headscale_api_acl::wildcard_filter_cidrs();
+    let dst_ports = cidrs
+        .iter()
+        .map(|ip| NetPortRange {
+            ip: ip.clone(),
             ports: PortRange {
                 first: 0,
                 last: 65535,
             },
-        }],
+        })
+        .collect();
+    vec![FilterRule {
+        src_ips: cidrs,
+        dst_ports,
         ip_proto: Vec::new(),
     }]
 }
@@ -222,7 +231,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // fields a fresh map would have, sans peers) tells stock
     // `tailscale` to fall back to its login flow.
     if own.is_expired_at(chrono::Utc::now()) {
-        return logout_map_response(&own, &node_key_hex);
+        return logout_map_response(&own, &node_key_hex, state.dns.as_ref());
     }
 
     // Wall 7: persist client-provided DiscoKey + Endpoints from
@@ -284,7 +293,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     }
 
     // Build the response.
-    let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
+    let tailnet_domain = tailnet_domain(&state.dns);
+    let own_node = record_to_map_node(&own, &tailnet_domain);
     // #238: `snapshot()` returns `Arc<HashMap<…>>` — one Arc clone
     // total. Iterating borrows the map; we never clone individual
     // records. `record_to_map_node` takes `&MachineRecord` so the
@@ -293,7 +303,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     let mut peers: Vec<MapNode> = snapshot
         .iter()
         .filter(|(k, _)| k.as_str() != node_key_hex.as_str())
-        .map(|(_, rec)| record_to_map_node(rec, TAILNET_DOMAIN))
+        .map(|(_, rec)| record_to_map_node(rec, &tailnet_domain))
         .collect();
     // Stable order so tests are deterministic.
     peers.sort_by_key(|n| n.id);
@@ -309,7 +319,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // populates a one-region fixture pointing at the `derp-1`
         // sidecar (see `derp_config::load_derp_map`).
         derp_map: (*state.derp_map).clone(),
-        domain: TAILNET_DOMAIN.into(),
+        domain: tailnet_domain,
         // Packet filter from the live `PolicyStore`. Falls back to
         // `allow_all_packet_filter` when no policy has been pushed —
         // preserves the Wall 7 default for the interop test, while
@@ -355,8 +365,23 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
 
         // The stream's carried state is enough to re-build MapResponse
         // on each registry / policy / DNS wake.
+        //
+        // # audit-2 C-1: lost-wake fix (commit follow-up)
+        //
+        // We subscribe to the registry's generation-counter watch
+        // channel **before** taking the first chunk. The receiver
+        // remembers its last-seen generation across `.await` boundaries
+        // — any `upsert` / `update_with` that fires while this unfold
+        // is *between* iterations bumps the sender, and the next
+        // `changed().await` on the receiver returns immediately. This
+        // closes the `notify_waiters` lost-wake gap the prior
+        // implementation had (the `Notified` was re-registered AFTER
+        // the chunk was returned, so wakes fired in the gap were
+        // dropped). The companion `tokio::sync::Notify` stays on the
+        // registry for any caller that wants raw fan-out wake, but the
+        // long-poll path now consumes the watch channel exclusively.
         let machines = state.machines.clone();
-        let notify = state.machines.notify.clone();
+        let gen_rx = state.machines.subscribe_gen();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let derp_map_for_stream = state.derp_map.clone();
@@ -365,20 +390,28 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             (
                 Some(first),
                 machines,
-                notify,
+                gen_rx,
                 policy,
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
             ),
-            move |(first_opt, machines, notify, policy, self_node_key, machines_derp_map, dns)| async move {
+            move |(
+                first_opt,
+                machines,
+                mut gen_rx,
+                policy,
+                self_node_key,
+                machines_derp_map,
+                dns,
+            )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
                         Ok::<_, std::io::Error>(initial),
                         (
                             None,
                             machines,
-                            notify,
+                            gen_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
@@ -388,23 +421,34 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 }
                 // Wait for either a registry change, a policy change,
                 // a DNS extra-records edit, or a keepalive tick,
-                // whichever fires first. We park each `Notified`
-                // future inside a small scope so the Arcs aren't
-                // borrowed when we re-wrap the state for the next
-                // iteration.
+                // whichever fires first.
+                //
+                // `gen_rx.changed()` is missed-update tolerant: if the
+                // sender bumped the value between the previous chunk
+                // emission and this select, the `changed()` future
+                // returns immediately rather than parking. That's the
+                // load-bearing property that closes the audit-2 C-1
+                // race — see the registry's `wake_waiters` doc.
                 let chunk = {
-                    let notify_for_wait = notify.clone();
-                    let notified = notify_for_wait.notified();
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
                     let dns_for_wait = dns.clone();
                     let dns_changed = dns_for_wait.wait_for_change();
-                    tokio::pin!(notified);
                     tokio::pin!(policy_changed);
                     tokio::pin!(dns_changed);
                     tokio::select! {
-                    () = &mut notified => {
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                    biased;
+                    res = gen_rx.changed() => {
+                        // `Err` only happens if every sender has been
+                        // dropped — would mean the entire registry's
+                        // gone, in which case we degrade to a
+                        // keepalive frame and let the next iteration
+                        // (or stream end) handle teardown.
+                        if res.is_err() {
+                            build_keepalive_chunk()
+                        } else {
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                        }
                     }
                     () = &mut policy_changed => {
                         // Policy edited via admin PUT — every parked
@@ -428,7 +472,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                     (
                         None,
                         machines,
-                        notify,
+                        gen_rx,
                         policy,
                         self_node_key,
                         machines_derp_map,
@@ -469,12 +513,13 @@ fn rebuild_map_chunk(
     let Some(own) = machines.get(self_node_key) else {
         return build_keepalive_chunk();
     };
-    let own_node = record_to_map_node(&own, TAILNET_DOMAIN);
+    let tailnet_domain = tailnet_domain(dns);
+    let own_node = record_to_map_node(&own, &tailnet_domain);
     let snapshot = machines.snapshot();
     let mut peers: Vec<MapNode> = snapshot
         .iter()
         .filter(|(k, _)| k.as_str() != self_node_key)
-        .map(|(_, rec)| record_to_map_node(rec, TAILNET_DOMAIN))
+        .map(|(_, rec)| record_to_map_node(rec, &tailnet_domain))
         .collect();
     peers.sort_by_key(|n| n.id);
     let dns_config = build_dns_for_snapshot(dns, &snapshot);
@@ -484,7 +529,7 @@ fn rebuild_map_chunk(
         peers,
         dns_config,
         derp_map: (**derp_map).clone(),
-        domain: TAILNET_DOMAIN.into(),
+        domain: tailnet_domain,
         packet_filter: packet_filter_for(policy),
         keep_alive: false,
         node_key_expired: false,
@@ -496,14 +541,19 @@ fn rebuild_map_chunk(
 /// stock daemon reads `NodeKeyExpired: true` and falls back to its
 /// register/login flow. We strip peers + packet_filter to keep the
 /// payload minimal — the client only needs the expired bit.
-fn logout_map_response(rec: &crate::tailscale_wire::MachineRecord, node_key_hex: &str) -> Response {
+fn logout_map_response(
+    rec: &crate::tailscale_wire::MachineRecord,
+    node_key_hex: &str,
+    dns: &DnsStore,
+) -> Response {
+    let tailnet_domain = tailnet_domain(dns);
     let mr = MapResponse {
         key_expiry_extension: 0,
-        node: super::register::record_to_map_node(rec, TAILNET_DOMAIN),
+        node: super::register::record_to_map_node(rec, &tailnet_domain),
         peers: Vec::new(),
         dns_config: DnsConfig::default(),
         derp_map: crate::tailscale_wire::wire::DerpMap::default(),
-        domain: TAILNET_DOMAIN.into(),
+        domain: tailnet_domain,
         packet_filter: Vec::new(),
         keep_alive: false,
         node_key_expired: true,
@@ -636,13 +686,46 @@ mod tests {
         assert_eq!(mr.node.addresses[0], "100.64.0.10/32");
         assert_eq!(mr.peers.len(), 1);
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
-        assert_eq!(mr.peers[0].name, "peer-b.octra.test");
-        assert_eq!(mr.domain, "octra.test");
+        assert_eq!(mr.peers[0].name, "peer-b");
+        assert_eq!(mr.domain, "");
         // Full MapResponse — must NOT be flagged as a keepalive.
         // Wall 5 regression: when `KeepAlive=true` the upstream client
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_response_uses_dns_base_domain_for_node_names() {
+        let (state, _dir) = fixture();
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            base_domain: "headscale.test".into(),
+            ..crate::dns::DnsConfigSpec::default()
+        });
+        let a = "2a".repeat(32);
+        let b = "2b".repeat(32);
+        insert_peer(&state, &a, "peer-a", 20);
+        insert_peer(&state, &b, "peer-b", 21);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.node.name, "peer-a.headscale.test");
+        assert_eq!(mr.peers[0].name, "peer-b.headscale.test");
+        assert_eq!(mr.domain, "headscale.test");
     }
 
     #[tokio::test]
@@ -838,12 +921,18 @@ mod tests {
         let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(first_mr.peers.len(), 0);
 
-        // Schedule the registry change for AFTER the unfold has parked
-        // on `notify.notified()`. `notify_waiters` only wakes already-
-        // parked waiters (it does NOT enqueue a pending notification),
-        // so the spawn-with-delay ordering is required — without it
-        // the wake fires before the listener is registered and the
-        // subsequent `frame()` reads a keepalive instead.
+        // Schedule the registry change. **audit-2 C-1 fix landed**:
+        // since the stream now consumes a `watch::Receiver<u64>` (see
+        // the wake-channel doc on `MachineRegistry`), the receiver's
+        // last-seen generation lags the sender across `.await`
+        // boundaries — a bump fired BEFORE the receiver is parked on
+        // `changed()` is still captured by the next call. We keep the
+        // 50ms spawn-delay here for readability (it preserves the
+        // "first chunk → wait → second chunk" pacing that makes the
+        // test easy to read), but the previous "registered listener
+        // is mandatory before the wake" hazard is gone — see the
+        // companion `stream_true_wake_during_chunk_build_is_not_lost`
+        // test below for the load-bearing proof.
         let state_for_spawn = state.clone();
         let b_clone = b.clone();
         tokio::spawn(async move {
@@ -862,6 +951,78 @@ mod tests {
             mr.peers.len(),
             1,
             "second chunk should include the newly-registered peer"
+        );
+        assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
+    }
+
+    /// audit-2 C-1: a registry change fired **before** the unfold
+    /// re-parks on `changed()` MUST still wake the next chunk.
+    ///
+    /// The prior `Notify::notified()` implementation lost wakes
+    /// emitted in the window between "previous chunk yielded" and
+    /// "next iteration registers the listener". The watch-channel
+    /// receiver is missed-update tolerant: the sender's value is
+    /// stored in the channel; if the receiver hasn't observed the
+    /// latest yet, `changed()` returns immediately. This test fires
+    /// the registry change with NO `sleep` first, exercising exactly
+    /// the gap the prior implementation lost.
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_wake_during_chunk_build_is_not_lost() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Consume the initial chunk.
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = frame.into_data().unwrap();
+
+        // CRITICAL: bump the registry IMMEDIATELY — no sleep, no yield.
+        // Under the old `Notify`-only implementation, the unfold has
+        // returned the first chunk into the framed body and is now
+        // re-entering its async block; the `Notified` listener for
+        // the second iteration has not yet been registered. The
+        // `notify_waiters()` call below would have been dropped on
+        // the floor. Under the watch-channel implementation, the
+        // sender's new value is stored; the next `changed().await`
+        // returns immediately.
+        insert_peer(&state, &b, "peer-b", 11);
+
+        // Now read the next chunk — must be the refreshed MapResponse
+        // (peers.len == 1), NOT a keepalive.
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            mr.peers.len(),
+            1,
+            "wake fired during chunk-build window must surface on the next chunk; \
+             got keepalive instead, indicating the lost-wake race regressed"
         );
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
     }
@@ -1058,7 +1219,7 @@ mod tests {
             node: MapNode {
                 id: 42,
                 stable_id: "n42".into(),
-                name: "peer-a.octra.test".into(),
+                name: "peer-a.headscale.test".into(),
                 user: 7,
                 key: format!("nodekey:{}", "aa".repeat(32)),
                 machine: None,
@@ -1072,7 +1233,7 @@ mod tests {
             peers: vec![],
             dns_config: DnsConfig::default(),
             derp_map: DerpMap::default(),
-            domain: TAILNET_DOMAIN.into(),
+            domain: "headscale.test".into(),
             keep_alive: true,
             packet_filter: allow_all_packet_filter(),
             node_key_expired: false,

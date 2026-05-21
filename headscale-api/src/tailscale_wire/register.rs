@@ -240,14 +240,24 @@ async fn register_inner(
 /// Helper exposed for tests + `/map`: turn a `MachineRecord` into the
 /// `MapNode` shape we ship in `MapResponse.Peers`.
 pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
+    fn qualify(label: String, domain: &str) -> String {
+        if domain.is_empty() {
+            label
+        } else {
+            format!("{label}.{domain}")
+        }
+    }
+
     let name = if rec.hostname.is_empty() {
-        format!(
-            "node-{}.{}",
-            &rec.node_key_hex[..8.min(rec.node_key_hex.len())],
-            domain
+        qualify(
+            format!(
+                "node-{}",
+                &rec.node_key_hex[..8.min(rec.node_key_hex.len())]
+            ),
+            domain,
         )
     } else {
-        format!("{}.{}", rec.hostname, domain)
+        qualify(rec.hostname.clone(), domain)
     };
     let id = stable_id_from_key(&rec.node_key_hex);
     let stable_id = format!("n{id}");
@@ -325,6 +335,23 @@ mod tests {
             "Auth": { "AuthKey": authkey },
             "Hostinfo": { "Hostname": "peer-a", "OS": "linux", "OSVersion": "6.6" },
         })
+    }
+
+    #[test]
+    fn record_to_map_node_omits_suffix_when_domain_is_empty() {
+        let record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "alice".into(),
+            "peer-a".into(),
+            std::net::Ipv4Addr::new(100, 64, 0, 8),
+            false,
+        );
+
+        let node = record_to_map_node(&record, "");
+
+        assert_eq!(node.name, "peer-a");
     }
 
     #[tokio::test]

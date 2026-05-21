@@ -41,8 +41,8 @@
 //! Two MachineRecords can advertise the same hostname (the client
 //! controls it; nothing enforces uniqueness on register). When we
 //! emit MagicDNS A records, the second collision gets a `-<n{id}>`
-//! suffix appended before the base domain (e.g. `peer-1.octra.test`
-//! → `peer-1-n42.octra.test`). The first-seen hostname keeps the
+//! suffix appended before the base domain (e.g. `peer-1.headscale.test`
+//! -> `peer-1-n42.headscale.test`). The first-seen hostname keeps the
 //! collision-free name; ordering is stable because we iterate the
 //! registry by sorted node-id. This is deterministic and matches what
 //! `juanfont/headscale` does in its `normalizeToFQDNRules` path.
@@ -73,23 +73,22 @@ pub const EXTRA_RECORDS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// table in `node.toml` (or any other serde-driven config surface);
 /// the wire layer consumes a [`DnsStore`] derived from this spec.
 ///
-/// Field semantics deliberately track the gap-analysis P1 deliverable
-/// list rather than upstream Go field-for-field — operators are the
-/// audience here, not the stock daemon.
+/// Defaults follow headscale-go v0.28: MagicDNS defaults on, but the
+/// base domain defaults empty and must be supplied by the operator
+/// before MagicDNS can be used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DnsConfigSpec {
-    /// Enable MagicDNS. Defaults to `true`: when an operator drops in
-    /// a `[dns]` table at all, the most common intent is "yes, give me
-    /// MagicDNS." Set to `false` to emit a `DNSConfig` with `Proxied
-    /// = false` (stock clients then skip the MagicDNS resolver).
+    /// Enable MagicDNS. Matches headscale-go's default of `true`; call
+    /// [`Self::validate`] or [`DnsStore::try_from_spec`] before runtime
+    /// use so an empty `base_domain` is rejected.
     #[serde(default = "default_true")]
     pub magic_dns: bool,
     /// MagicDNS root domain. Hostnames are emitted as
     /// `<hostname>.<base_domain>` → tailnet IP. Operators typically
     /// pick a sub-domain of an org-owned name (e.g.
-    /// `tailnet.example.org`). Defaults to `"octravpn.example.org"` —
-    /// matches the upstream example config.
+    /// `tailnet.example.org`). Defaults to empty, matching
+    /// headscale-go config defaults.
     #[serde(default = "default_base_domain")]
     pub base_domain: String,
     /// Default resolver(s) — DNS-over-UDP `IP[:port]` literals or
@@ -133,14 +132,14 @@ const fn default_true() -> bool {
 }
 
 fn default_base_domain() -> String {
-    "octravpn.example.org".to_string()
+    String::new()
 }
 
 impl Default for DnsConfigSpec {
-    /// Operator-friendly defaults: MagicDNS on, base domain
-    /// `octravpn.example.org`, no resolvers / records / search
-    /// domains. Mirrors what `#[serde(default)]` produces when an
-    /// empty `[dns]` block lands in `node.toml`.
+    /// Headscale-go-compatible defaults: MagicDNS on, empty base
+    /// domain, no resolvers / records / search domains. An operator
+    /// config must set `base_domain` or disable MagicDNS before
+    /// passing validation.
     fn default() -> Self {
         Self {
             magic_dns: default_true(),
@@ -153,6 +152,33 @@ impl Default for DnsConfigSpec {
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsConfigError {
+    MissingBaseDomainForMagicDns,
+}
+
+impl std::fmt::Display for DnsConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingBaseDomainForMagicDns => {
+                f.write_str("dns.base_domain must be set when using MagicDNS")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DnsConfigError {}
+
+impl DnsConfigSpec {
+    pub fn validate(&self) -> Result<(), DnsConfigError> {
+        if self.magic_dns && self.base_domain.trim().is_empty() {
+            return Err(DnsConfigError::MissingBaseDomainForMagicDns);
+        }
+
+        Ok(())
     }
 }
 
@@ -227,6 +253,13 @@ impl DnsStore {
                 notify: Notify::new(),
             }),
         }
+    }
+
+    /// Construct from a parsed [`DnsConfigSpec`] after applying
+    /// headscale-go-compatible DNS validation.
+    pub fn try_from_spec(spec: DnsConfigSpec) -> Result<Self, DnsConfigError> {
+        spec.validate()?;
+        Ok(Self::from_spec(spec))
     }
 
     /// Snapshot the current spec. Cheap (Arc clone).
@@ -311,9 +344,9 @@ impl std::fmt::Debug for DnsStore {
 /// | `Resolvers`                 | `spec.nameservers` mapped to `DnsResolver` |
 /// | `Routes`                    | `spec.restricted_nameservers` (split DNS)|
 /// | `FallbackResolvers`         | `spec.fallback_nameservers`               |
-/// | `Domains`                   | `[base_domain] ++ spec.search_domains`   |
-/// | `Proxied`                   | `spec.magic_dns`                          |
-/// | `ExtraRecords`              | `extra` ++ MagicDNS A records (machines) |
+/// | `Domains`                   | `[base_domain] ++ spec.search_domains` when base is set |
+/// | `Proxied`                   | `spec.magic_dns && base_domain is set`    |
+/// | `ExtraRecords`              | `extra` ++ MagicDNS A records when base is set |
 /// | `ExitNodeFilteredSet`       | `spec.exit_node_filtered_set`             |
 /// | `AuthoritativeSuffixes`     | `spec.authoritative_suffixes` OR derived |
 ///
@@ -325,6 +358,8 @@ pub fn build_dns_config(
     machines: &[MachineDnsRecord],
     extra: &[DnsRecord],
 ) -> DnsConfig {
+    let base_domain_set = !spec.base_domain.trim().is_empty();
+    let magic_dns_enabled = spec.magic_dns && base_domain_set;
     let resolvers = spec
         .nameservers
         .iter()
@@ -352,7 +387,7 @@ pub fn build_dns_config(
     // `DnsStore::new()` empty-default) drops the leading entry so the
     // wire output is `{}` byte-for-byte.
     let mut domains = Vec::with_capacity(1 + spec.search_domains.len());
-    if !spec.base_domain.is_empty() {
+    if base_domain_set {
         domains.push(spec.base_domain.clone());
     }
     for d in &spec.search_domains {
@@ -361,7 +396,11 @@ pub fn build_dns_config(
         }
     }
 
-    let magic_records = magic_dns_records(&spec.base_domain, machines);
+    let magic_records = if magic_dns_enabled {
+        magic_dns_records(&spec.base_domain, machines)
+    } else {
+        Vec::new()
+    };
     let mut combined: Vec<DnsRecord> = Vec::with_capacity(extra.len() + magic_records.len());
     combined.extend_from_slice(extra);
     combined.extend(magic_records);
@@ -376,13 +415,22 @@ pub fn build_dns_config(
         routes,
         fallback_resolvers,
         domains,
-        proxied: spec.magic_dns,
+        proxied: magic_dns_enabled,
         nameservers: Vec::new(),
         cert_domains: Vec::new(),
         extra_records: combined,
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
         authoritative_suffixes: authoritative,
     }
+}
+
+pub fn try_build_dns_config(
+    spec: &DnsConfigSpec,
+    machines: &[MachineDnsRecord],
+    extra: &[DnsRecord],
+) -> Result<DnsConfig, DnsConfigError> {
+    spec.validate()?;
+    Ok(build_dns_config(spec, machines, extra))
 }
 
 fn string_to_resolver(s: &str) -> DnsResolver {
@@ -398,7 +446,9 @@ fn string_to_resolver(s: &str) -> DnsResolver {
 /// override this via `[dns].authoritative_suffixes` in node.toml.
 fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + spec.restricted_nameservers.len());
-    out.push(spec.base_domain.clone());
+    if !spec.base_domain.trim().is_empty() {
+        out.push(spec.base_domain.clone());
+    }
     // Sorted for determinism — HashMap iteration order is otherwise
     // non-deterministic and our tests would flake. BTreeSet is the
     // zero-value-friendly form of the BTreeMap<K, ()> pattern.
@@ -422,6 +472,10 @@ fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
 /// the rest get a `-n{id}` suffix. Sorting by `node_id` gives a
 /// stable, reproducible ordering across rebuilds.
 pub fn magic_dns_records(base_domain: &str, machines: &[MachineDnsRecord]) -> Vec<DnsRecord> {
+    if base_domain.trim().is_empty() {
+        return Vec::new();
+    }
+
     // Walk in node-id order so collision suffixes are deterministic.
     let mut sorted: Vec<&MachineDnsRecord> = machines.iter().collect();
     sorted.sort_by_key(|m| m.node_id);
@@ -615,16 +669,28 @@ mod tests {
         }
     }
 
-    fn spec_default() -> DnsConfigSpec {
-        DnsConfigSpec::default()
+    fn magic_spec() -> DnsConfigSpec {
+        DnsConfigSpec {
+            base_domain: "headscale.test".into(),
+            ..DnsConfigSpec::default()
+        }
     }
 
     #[test]
-    fn default_spec_has_magic_dns_on_and_base_domain_set() {
-        let s = spec_default();
+    fn default_spec_matches_headscale_go_dns_defaults() {
+        let s = DnsConfigSpec::default();
         assert!(s.magic_dns);
-        assert_eq!(s.base_domain, "octravpn.example.org");
+        assert_eq!(s.base_domain, "");
         assert!(s.nameservers.is_empty());
+    }
+
+    #[test]
+    fn default_spec_requires_base_domain_before_runtime_use() {
+        assert_eq!(
+            DnsConfigSpec::default().validate(),
+            Err(DnsConfigError::MissingBaseDomainForMagicDns)
+        );
+        assert!(DnsStore::try_from_spec(DnsConfigSpec::default()).is_err());
     }
 
     #[test]
@@ -636,33 +702,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_magic_dns_spec_is_safe_if_validation_is_bypassed() {
+        let cfg = DnsStore::from_spec(DnsConfigSpec::default()).build(&[machine("peer", 1, 1)]);
+        assert!(!cfg.proxied);
+        assert!(cfg.domains.is_empty());
+        assert!(cfg.extra_records.is_empty());
+    }
+
+    #[test]
     fn store_from_spec_emits_proxied_and_base_domain_search() {
-        let store = DnsStore::from_spec(spec_default());
+        let store = DnsStore::try_from_spec(magic_spec()).expect("valid dns spec");
         let cfg = store.build(&[]);
         assert!(cfg.proxied);
-        assert_eq!(cfg.domains, vec!["octravpn.example.org".to_string()]);
+        assert_eq!(cfg.domains, vec!["headscale.test".to_string()]);
         // Default authoritative-suffix list contains the base domain.
         assert!(
             cfg.authoritative_suffixes
-                .contains(&"octravpn.example.org".to_string())
+                .contains(&"headscale.test".to_string())
         );
     }
 
     #[test]
     fn magic_dns_records_emit_per_machine_a_records() {
         let machines = [machine("peer-1", 11, 1), machine("peer-2", 22, 2)];
-        let store = DnsStore::from_spec(spec_default());
+        let store = DnsStore::from_spec(magic_spec());
         let cfg = store.build(&machines);
         assert_eq!(cfg.extra_records.len(), 2);
         assert!(
             cfg.extra_records
                 .iter()
-                .any(|r| r.name == "peer-1.octravpn.example.org" && r.value == "100.64.0.11")
+                .any(|r| r.name == "peer-1.headscale.test" && r.value == "100.64.0.11")
         );
         assert!(
             cfg.extra_records
                 .iter()
-                .any(|r| r.name == "peer-2.octravpn.example.org" && r.value == "100.64.0.22")
+                .any(|r| r.name == "peer-2.headscale.test" && r.value == "100.64.0.22")
         );
     }
 
@@ -672,10 +746,10 @@ mod tests {
             machine("dup", 11, 42), // higher id ⇒ collision-suffixed
             machine("dup", 22, 7),  // lower id ⇒ keeps canonical name
         ];
-        let cfg = DnsStore::from_spec(spec_default()).build(&machines);
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
         let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
-        assert!(names.contains(&"dup.octravpn.example.org".to_string()));
-        assert!(names.contains(&"dup-n42.octravpn.example.org".to_string()));
+        assert!(names.contains(&"dup.headscale.test".to_string()));
+        assert!(names.contains(&"dup-n42.headscale.test".to_string()));
     }
 
     #[test]
@@ -685,11 +759,11 @@ mod tests {
             machine("dup", 22, 200),
             machine("dup", 33, 50),
         ];
-        let cfg = DnsStore::from_spec(spec_default()).build(&machines);
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
         let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
-        assert!(names.contains(&"dup.octravpn.example.org".to_string()));
-        assert!(names.contains(&"dup-n100.octravpn.example.org".to_string()));
-        assert!(names.contains(&"dup-n200.octravpn.example.org".to_string()));
+        assert!(names.contains(&"dup.headscale.test".to_string()));
+        assert!(names.contains(&"dup-n100.headscale.test".to_string()));
+        assert!(names.contains(&"dup-n200.headscale.test".to_string()));
     }
 
     #[test]
@@ -708,9 +782,9 @@ mod tests {
             ipv4: Ipv4Addr::new(100, 64, 0, 9),
             node_id: 99,
         }];
-        let cfg = DnsStore::from_spec(spec_default()).build(&machines);
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
         assert_eq!(cfg.extra_records.len(), 1);
-        assert_eq!(cfg.extra_records[0].name, "n99.octravpn.example.org");
+        assert_eq!(cfg.extra_records[0].name, "n99.headscale.test");
     }
 
     #[test]
@@ -722,7 +796,7 @@ mod tests {
         );
         let spec = DnsConfigSpec {
             restricted_nameservers: restricted,
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         let route = cfg.routes.get("corp.internal").expect("route present");
@@ -738,12 +812,12 @@ mod tests {
         restricted.insert("ops.internal".to_string(), vec!["10.0.0.2".to_string()]);
         let spec = DnsConfigSpec {
             restricted_nameservers: restricted,
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         // base_domain + 2 suffixes, sorted (deterministic).
         assert_eq!(cfg.authoritative_suffixes.len(), 3);
-        assert_eq!(cfg.authoritative_suffixes[0], "octravpn.example.org");
+        assert_eq!(cfg.authoritative_suffixes[0], "headscale.test");
         assert!(
             cfg.authoritative_suffixes
                 .contains(&"corp.internal".to_string())
@@ -758,7 +832,7 @@ mod tests {
     fn authoritative_suffixes_override_replaces_default() {
         let spec = DnsConfigSpec {
             authoritative_suffixes: Some(vec!["only.this".to_string()]),
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.authoritative_suffixes, vec!["only.this".to_string()]);
@@ -807,7 +881,7 @@ mod tests {
 
     #[test]
     fn extra_records_land_in_dnsconfig() {
-        let store = DnsStore::from_spec(spec_default());
+        let store = DnsStore::from_spec(magic_spec());
         store.set_extra_records(vec![DnsRecord {
             name: "static.example.org".into(),
             record_type: "A".into(),
@@ -825,7 +899,7 @@ mod tests {
     fn nameservers_become_resolvers_in_wire_shape() {
         let spec = DnsConfigSpec {
             nameservers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.resolvers.len(), 2);
@@ -839,7 +913,7 @@ mod tests {
     fn fallback_resolvers_populated() {
         let spec = DnsConfigSpec {
             fallback_nameservers: vec!["9.9.9.9".to_string()],
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.fallback_resolvers.len(), 1);
@@ -850,7 +924,7 @@ mod tests {
     fn exit_node_filtered_set_propagates() {
         let spec = DnsConfigSpec {
             exit_node_filtered_set: vec!["bank.example".to_string()],
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.exit_node_filtered_set, vec!["bank.example".to_string()]);
@@ -860,7 +934,7 @@ mod tests {
     fn magic_dns_disabled_emits_no_proxied_no_authoritative_default() {
         let spec = DnsConfigSpec {
             magic_dns: false,
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert!(!cfg.proxied);
@@ -869,7 +943,7 @@ mod tests {
         // signal ("don't ask upstream for these names").
         assert!(
             cfg.authoritative_suffixes
-                .contains(&"octravpn.example.org".to_string())
+                .contains(&"headscale.test".to_string())
         );
     }
 
@@ -877,19 +951,19 @@ mod tests {
     fn search_domains_appended_after_base_domain() {
         let spec = DnsConfigSpec {
             search_domains: vec!["aux.example.org".to_string()],
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.domains.len(), 2);
-        assert_eq!(cfg.domains[0], "octravpn.example.org");
+        assert_eq!(cfg.domains[0], "headscale.test");
         assert_eq!(cfg.domains[1], "aux.example.org");
     }
 
     #[test]
     fn search_domain_equal_to_base_is_not_duplicated() {
         let spec = DnsConfigSpec {
-            search_domains: vec!["octravpn.example.org".to_string()],
-            ..spec_default()
+            search_domains: vec!["headscale.test".to_string()],
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert_eq!(cfg.domains.len(), 1);
@@ -899,7 +973,7 @@ mod tests {
     fn dns_config_serialises_to_pascalcase_json() {
         let spec = DnsConfigSpec {
             nameservers: vec!["1.1.1.1".to_string()],
-            ..spec_default()
+            ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         let json = serde_json::to_string(&cfg).unwrap();
@@ -936,7 +1010,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_wait_for_change_wakes_on_set_extra_records() {
-        let store = DnsStore::from_spec(spec_default());
+        let store = DnsStore::from_spec(magic_spec());
         let store2 = store.clone();
         let join = tokio::spawn(async move {
             store2.wait_for_change().await;
@@ -956,7 +1030,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_wait_for_change_wakes_on_set_spec() {
-        let store = DnsStore::from_spec(spec_default());
+        let store = DnsStore::from_spec(magic_spec());
         let store2 = store.clone();
         let join = tokio::spawn(async move {
             store2.wait_for_change().await;
@@ -964,7 +1038,7 @@ mod tests {
         tokio::task::yield_now().await;
         store.set_spec(DnsConfigSpec {
             base_domain: "another.example.org".into(),
-            ..spec_default()
+            ..magic_spec()
         });
         tokio::time::timeout(Duration::from_secs(2), join)
             .await

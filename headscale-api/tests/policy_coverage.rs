@@ -213,7 +213,7 @@ fn unknown_rule_field_is_schema_error() {
 #[test]
 fn expand_principal_wildcard_returns_wildcard() {
     let d = PolicyDoc::empty();
-    assert_eq!(d.expand_principal("*"), vec!["*"]);
+    assert_eq!(d.expand_principal("*"), vec!["0.0.0.0/0", "::/0"]);
 }
 
 #[test]

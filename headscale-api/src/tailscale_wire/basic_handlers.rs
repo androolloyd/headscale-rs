@@ -3,7 +3,7 @@
 //! These live next to `/key` in the wire router because upstream serves
 //! them from the same public control listener, before API bearer auth.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::{
     Json,
@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::policy::SshPolicyNode;
+use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
     DerpMap, MachineRecord, WireState,
@@ -193,6 +193,31 @@ pub struct DebugBatcherNodeInfo {
     pub active_connections: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNodeStoreNode {
+    pub id: u64,
+    pub node_key: String,
+    pub machine_key: String,
+    pub user: String,
+    pub hostname: String,
+    pub ipv4: String,
+    pub online: bool,
+    pub expired: bool,
+    pub ephemeral: bool,
+    pub created_at: String,
+    pub last_seen: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<String>,
+    pub forced_tags: Vec<String>,
+    pub available_routes: Vec<String>,
+    pub approved_routes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugStringInfo {
+    pub content: String,
+}
+
 pub async fn handle_debug_overview(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let info = debug_overview_info(&state);
     if wants_json(&headers) {
@@ -317,6 +342,31 @@ pub async fn handle_debug_ssh(State(state): State<WireState>) -> Response {
     }
 }
 
+pub async fn handle_debug_nodestore(
+    State(state): State<WireState>,
+    headers: HeaderMap,
+) -> Response {
+    if wants_json(&headers) {
+        let nodes = debug_nodestore_json(&state);
+        match serde_json::to_string_pretty(&nodes) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            debug_nodestore_string(&state),
+        )
+            .into_response()
+    }
+}
+
 pub async fn handle_debug_mapresponses() -> Response {
     // headscale-go returns this exact body when
     // HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH is unset. headscale-rs does
@@ -342,6 +392,31 @@ pub async fn handle_debug_batcher(State(state): State<WireState>, headers: Heade
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain")],
             debug_batcher_string(&info),
+        )
+            .into_response()
+    }
+}
+
+pub async fn handle_debug_policy_manager(
+    State(state): State<WireState>,
+    headers: HeaderMap,
+) -> Response {
+    let content = debug_policy_manager_string(&state);
+    if wants_json(&headers) {
+        match serde_json::to_string_pretty(&DebugStringInfo { content }) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            content,
         )
             .into_response()
     }
@@ -450,6 +525,279 @@ fn debug_derp_configured(derp_map: &DerpMap) -> bool {
 
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+
+fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNode> {
+    let snapshot = state.machines.snapshot();
+    let now = chrono::Utc::now();
+    snapshot
+        .iter()
+        .map(|(node_key, rec)| {
+            let id = stable_id_from_key(node_key);
+            (
+                id.to_string(),
+                DebugNodeStoreNode {
+                    id,
+                    node_key: node_key.clone(),
+                    machine_key: rec.machine_key_hex.clone(),
+                    user: rec.user.clone(),
+                    hostname: rec.hostname.clone(),
+                    ipv4: rec.ipv4.to_string(),
+                    online: !rec.is_expired_at(now),
+                    expired: rec.is_expired_at(now),
+                    ephemeral: rec.ephemeral,
+                    created_at: rec.created_at.to_rfc3339(),
+                    last_seen: rec.last_seen.to_rfc3339(),
+                    expiry: rec.expiry.map(|expiry| expiry.to_rfc3339()),
+                    forced_tags: rec.forced_tags.clone(),
+                    available_routes: rec.available_routes.clone(),
+                    approved_routes: rec.approved_routes.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn debug_nodestore_string(state: &WireState) -> String {
+    let snapshot = state.machines.snapshot();
+    let mut out = String::from("=== NodeStore Debug Information ===\n\n");
+
+    let mut nodes_by_user: BTreeMap<String, Vec<&MachineRecord>> = BTreeMap::new();
+    for rec in snapshot.values() {
+        let user = if rec.user.is_empty() {
+            "unknown".to_string()
+        } else {
+            rec.user.clone()
+        };
+        nodes_by_user.entry(user).or_default().push(rec);
+    }
+
+    out.push_str(&format!("Total Nodes: {}\n", snapshot.len()));
+    out.push_str(&format!("Users with Nodes: {}\n", nodes_by_user.len()));
+    out.push('\n');
+
+    out.push_str("Nodes by Internal User ID:\n");
+    for (user, nodes) in &nodes_by_user {
+        let tagged_count = nodes
+            .iter()
+            .filter(|node| !node.forced_tags.is_empty())
+            .count();
+        if tagged_count > 0 {
+            out.push_str(&format!(
+                "  - User {user} ({user}): {} nodes ({tagged_count} tagged)\n",
+                nodes.len()
+            ));
+        } else {
+            out.push_str(&format!(
+                "  - User {user} ({user}): {} nodes\n",
+                nodes.len()
+            ));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("Peer Relationships:\n");
+    let peer_map = debug_peer_map_for_snapshot(&state.policy, &snapshot);
+    let mut total_peers = 0usize;
+    for (node_key, rec) in sorted_snapshot_nodes(&snapshot) {
+        let node_id = stable_id_from_key(node_key);
+        let peer_count = peer_map
+            .get(&node_id)
+            .map_or(snapshot.len().saturating_sub(1), BTreeSet::len);
+        total_peers += peer_count;
+        out.push_str(&format!(
+            "  - Node {node_id} ({}): {peer_count} peers\n",
+            rec.hostname
+        ));
+    }
+    if !snapshot.is_empty() {
+        let avg_peers = total_peers as f64 / snapshot.len() as f64;
+        out.push_str(&format!("  - Average peers per node: {avg_peers:.1}\n"));
+    }
+    out.push('\n');
+
+    out.push_str(&format!("NodeKey Index: {} entries\n", snapshot.len()));
+    out.push('\n');
+
+    out
+}
+
+fn debug_policy_manager_string(state: &WireState) -> String {
+    let version = state.policy.updated_at().unwrap_or(0);
+    let mut out = format!("PolicyManager (v{version}):\n\n");
+
+    out.push_str("\n\n");
+
+    if let Some(doc) = state.policy.doc() {
+        if let Ok(policy) = serde_json::to_string_pretty(&doc) {
+            out.push_str("Policy:\n");
+            out.push_str(&policy);
+            out.push_str("\n\n");
+        }
+
+        out.push_str(&format!(
+            "AutoApprover ({}):\n",
+            doc.auto_approvers.routes.len() + usize::from(!doc.auto_approvers.exit_node.is_empty())
+        ));
+        for (prefix, approvers) in &doc.auto_approvers.routes {
+            out.push_str(&format!("\t{prefix}:\n"));
+            for approver in approvers {
+                out.push_str(&format!("\t\t{approver}\n"));
+            }
+        }
+        if !doc.auto_approvers.exit_node.is_empty() {
+            out.push_str("\texitNode:\n");
+            for approver in &doc.auto_approvers.exit_node {
+                out.push_str(&format!("\t\t{approver}\n"));
+            }
+        }
+
+        out.push_str("\n\n");
+
+        out.push_str(&format!("TagOwner ({}):\n", doc.tag_owners.len()));
+        for (tag, owners) in &doc.tag_owners {
+            out.push_str(&format!("\t{tag}:\n"));
+            for owner in owners {
+                out.push_str(&format!("\t\t{owner}\n"));
+            }
+        }
+
+        out.push_str("\n\n");
+
+        let filter = state.policy.filter_rules();
+        if let Ok(filter_json) = serde_json::to_string_pretty(&filter) {
+            out.push_str("Compiled filter:\n");
+            out.push_str(&filter_json);
+            out.push_str("\n\n");
+        }
+    } else {
+        out.push_str("AutoApprover (0):\n");
+        out.push_str("\n\n");
+        out.push_str("TagOwner (0):\n");
+        out.push_str("\n\n");
+    }
+
+    out.push_str("\n\n");
+    out.push_str("Matchers:\n");
+    out.push_str("an internal structure used to filter nodes and routes\n");
+    for line in debug_matcher_lines(&state.policy) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+
+    out.push_str("\n\n");
+    out.push_str("Nodes:\n");
+    for (node_key, rec) in sorted_snapshot_nodes(&state.machines.snapshot()) {
+        out.push_str(&format!(
+            "id:{} hostname:{} user:{} addr:{}\n",
+            stable_id_from_key(node_key),
+            rec.hostname,
+            rec.user,
+            rec.ipv4
+        ));
+    }
+
+    out
+}
+
+fn debug_matcher_lines(policy: &crate::policy::PolicyStore) -> Vec<String> {
+    let Some(doc) = policy.doc() else {
+        return Vec::new();
+    };
+
+    let mut lines = Vec::new();
+    for rule in doc.rules {
+        if !matches!(rule.action, PolicyAction::Accept) {
+            continue;
+        }
+        lines.push("Match:".to_string());
+        lines.push("  Sources:".to_string());
+        for src in rule.src {
+            lines.push(format!("    {src}"));
+        }
+        lines.push("  Destinations:".to_string());
+        for dst in rule.dst {
+            lines.push(format!("    {dst}"));
+        }
+    }
+    lines
+}
+
+fn debug_peer_map_for_snapshot(
+    policy: &crate::policy::PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+) -> BTreeMap<u64, BTreeSet<u64>> {
+    let primary_routes = stateful_primary_routes_for_debug(snapshot);
+    let nodes = snapshot
+        .iter()
+        .map(|(node_key, rec)| PeerMapNode {
+            id: stable_id_from_key(node_key),
+            addr: rec.ipv4.to_string(),
+            user: (!rec.user.is_empty()).then(|| rec.user.clone()),
+            tags: rec.forced_tags.clone(),
+            routes: primary_routes.get(node_key).cloned().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(map) = policy.build_peer_map(&nodes) {
+        return map
+            .into_iter()
+            .map(|(node_id, peers)| (node_id, peers.into_iter().collect()))
+            .collect();
+    }
+
+    let all_ids = snapshot
+        .keys()
+        .map(|node_key| stable_id_from_key(node_key))
+        .collect::<BTreeSet<_>>();
+    snapshot
+        .keys()
+        .map(|node_key| {
+            let node_id = stable_id_from_key(node_key);
+            let peers = all_ids
+                .iter()
+                .copied()
+                .filter(|peer_id| *peer_id != node_id)
+                .collect();
+            (node_id, peers)
+        })
+        .collect()
+}
+
+fn stateful_primary_routes_for_debug(
+    snapshot: &HashMap<String, MachineRecord>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut routes_by_prefix: BTreeMap<String, Vec<(&String, u64)>> = BTreeMap::new();
+    for (node_key, rec) in snapshot {
+        for route in rec
+            .available_routes
+            .iter()
+            .filter(|route| rec.approved_routes.contains(route))
+            .filter(|route| *route != "0.0.0.0/0" && *route != "::/0")
+        {
+            routes_by_prefix
+                .entry(route.clone())
+                .or_default()
+                .push((node_key, stable_id_from_key(node_key)));
+        }
+    }
+
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (prefix, mut nodes) in routes_by_prefix {
+        nodes.sort_by_key(|(_, node_id)| *node_id);
+        if let Some((node_key, _)) = nodes.first() {
+            out.entry((*node_key).clone()).or_default().push(prefix);
+        }
+    }
+    out
+}
+
+fn sorted_snapshot_nodes(
+    snapshot: &HashMap<String, MachineRecord>,
+) -> Vec<(&String, &MachineRecord)> {
+    let mut nodes = snapshot.iter().collect::<Vec<_>>();
+    nodes.sort_by_key(|(node_key, _)| stable_id_from_key(node_key));
+    nodes
 }
 
 fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
@@ -1384,6 +1732,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_nodestore_text_matches_headscale_go_empty_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/nodestore")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            &body[..],
+            b"=== NodeStore Debug Information ===\n\nTotal Nodes: 0\nUsers with Nodes: 0\n\nNodes by Internal User ID:\n\nPeer Relationships:\n\nNodeKey Index: 0 entries\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_nodestore_json_reports_runtime_nodes() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-nodestore-node";
+        let mut rec = record(node_key, 41, &["10.41.0.0/24"], &["10.41.0.0/24"]);
+        rec.user = "charlie".to_string();
+        rec.hostname = "charlie-node".to_string();
+        rec.forced_tags = vec!["tag:debug".to_string()];
+        state.machines.upsert(node_key.to_string(), rec);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/nodestore")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let node_id = stable_id_from_key(node_key).to_string();
+        let node = parsed.get(&node_id).unwrap();
+        assert_eq!(node["id"], stable_id_from_key(node_key));
+        assert_eq!(node["node_key"], node_key);
+        assert_eq!(node["user"], "charlie");
+        assert_eq!(node["hostname"], "charlie-node");
+        assert_eq!(node["ipv4"], "100.64.0.41");
+        assert_eq!(node["online"], true);
+        assert_eq!(node["forced_tags"], serde_json::json!(["tag:debug"]));
+        assert_eq!(node["approved_routes"], serde_json::json!(["10.41.0.0/24"]));
+    }
+
+    #[tokio::test]
     async fn debug_filter_returns_runtime_allow_all_when_policy_unloaded() {
         let (state, _dir) = fixture_state();
         let resp = router(state)
@@ -1645,6 +2062,87 @@ mod tests {
         assert_eq!(parsed["total_nodes"], 1);
         assert_eq!(node["connected"], false);
         assert_eq!(node["active_connections"], 0);
+    }
+
+    #[tokio::test]
+    async fn debug_policy_manager_text_matches_headscale_go_empty_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/policy-manager")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            &body[..],
+            b"PolicyManager (v0):\n\n\n\nAutoApprover (0):\n\n\nTagOwner (0):\n\n\n\n\nMatchers:\nan internal structure used to filter nodes and routes\n\n\nNodes:\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_policy_manager_json_wraps_loaded_policy_state() {
+        let (state, _dir) = fixture_state();
+        let raw_policy = r#"{
+          "version": 1,
+          "tagOwners": {
+            "tag:server": ["group:admins"]
+          },
+          "groups": {
+            "group:admins": ["alice"]
+          },
+          "autoApprovers": {
+            "routes": {
+              "10.0.0.0/24": ["group:admins"]
+            }
+          },
+          "rules": [
+            {"action": "accept", "src": ["group:admins"], "dst": ["tag:server"], "ports": ["tcp/22"]}
+          ]
+        }"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set_at(doc, raw_policy.to_string(), 42);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/policy-manager")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let content = parsed["content"].as_str().unwrap();
+        assert!(content.starts_with("PolicyManager (v42):"));
+        assert!(content.contains("Policy:\n"));
+        assert!(content.contains("AutoApprover (1):"));
+        assert!(content.contains("\t10.0.0.0/24:\n"));
+        assert!(content.contains("TagOwner (1):"));
+        assert!(content.contains("\ttag:server:\n"));
+        assert!(content.contains("Compiled filter:\n"));
+        assert!(content.contains("Matchers:\n"));
     }
 
     #[tokio::test]

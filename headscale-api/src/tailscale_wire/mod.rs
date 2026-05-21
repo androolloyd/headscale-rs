@@ -1076,10 +1076,18 @@ pub fn router(state: WireState) -> Router {
         .route("/debug/policy", get(basic_handlers::handle_debug_policy))
         .route("/debug/ssh", get(basic_handlers::handle_debug_ssh))
         .route(
+            "/debug/nodestore",
+            get(basic_handlers::handle_debug_nodestore),
+        )
+        .route(
             "/debug/mapresponses",
             get(basic_handlers::handle_debug_mapresponses),
         )
         .route("/debug/batcher", get(basic_handlers::handle_debug_batcher))
+        .route(
+            "/debug/policy-manager",
+            get(basic_handlers::handle_debug_policy_manager),
+        )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

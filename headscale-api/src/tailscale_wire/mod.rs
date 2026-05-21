@@ -1062,6 +1062,7 @@ pub fn router(state: WireState) -> Router {
             "/swagger/v1/openapiv2.json",
             get(basic_handlers::handle_swagger_api_v1),
         )
+        .route("/metrics", get(basic_handlers::handle_metrics))
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),

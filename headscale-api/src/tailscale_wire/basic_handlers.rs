@@ -22,6 +22,7 @@ use super::{
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
 const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH not set";
+const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 
@@ -97,6 +98,15 @@ pub async fn handle_favicon() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "image/png")],
         FAVICON_PNG,
+    )
+        .into_response()
+}
+
+pub async fn handle_metrics(State(state): State<WireState>) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)],
+        metrics_text(&state),
     )
         .into_response()
 }
@@ -996,6 +1006,117 @@ fn duration_nanos(duration: std::time::Duration) -> i64 {
 
 fn default_batcher_workers() -> usize {
     std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() * 3 / 4).max(1))
+}
+
+fn metrics_text(state: &WireState) -> String {
+    let snapshot = state.machines.snapshot();
+    let now = chrono::Utc::now();
+    let mut nodes_online = 0usize;
+    let mut nodes_expired = 0usize;
+    let mut nodes_ephemeral = 0usize;
+    let mut users = BTreeSet::new();
+
+    for rec in snapshot.values() {
+        if rec.is_expired_at(now) {
+            nodes_expired += 1;
+        } else {
+            nodes_online += 1;
+        }
+        if rec.ephemeral {
+            nodes_ephemeral += 1;
+        }
+        if !rec.user.is_empty() {
+            users.insert(rec.user.clone());
+        }
+    }
+
+    let derp = debug_derp_info(&state.derp_map);
+    let routes = state.machines.debug_routes_for_snapshot(&snapshot);
+    let active_connections = state.machines.active_connections();
+    let map_stream_connections = active_connections.values().sum::<usize>();
+    let map_stream_connected_nodes = active_connections
+        .values()
+        .filter(|connections| **connections > 0)
+        .count();
+
+    let mut out = String::new();
+    append_gauge(
+        &mut out,
+        "headscale_nodes_registered",
+        "Current number of registered nodes in the wire registry.",
+        snapshot.len(),
+    );
+    append_gauge(
+        &mut out,
+        "headscale_nodes_online",
+        "Current number of non-expired nodes in the wire registry.",
+        nodes_online,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_nodes_expired",
+        "Current number of expired nodes in the wire registry.",
+        nodes_expired,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_nodes_ephemeral",
+        "Current number of ephemeral nodes in the wire registry.",
+        nodes_ephemeral,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_users",
+        "Current number of users with at least one node in the wire registry.",
+        users.len(),
+    );
+    append_gauge(
+        &mut out,
+        "headscale_derp_regions",
+        "Current number of configured DERP regions.",
+        derp.total_regions,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_policy_loaded",
+        "Whether an ACL policy is currently loaded.",
+        usize::from(state.policy.is_loaded()),
+    );
+    append_gauge(
+        &mut out,
+        "headscale_map_stream_connections",
+        "Current number of active streaming map connections.",
+        map_stream_connections,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_map_stream_connected_nodes",
+        "Current number of nodes with at least one active streaming map connection.",
+        map_stream_connected_nodes,
+    );
+    append_gauge(
+        &mut out,
+        "headscale_routes_primary",
+        "Current number of primary subnet routes.",
+        routes.primary_routes.len(),
+    );
+
+    out
+}
+
+fn append_gauge(out: &mut String, name: &str, help: &str, value: usize) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" gauge\n");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(&value.to_string());
+    out.push('\n');
 }
 
 fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNode> {
@@ -1918,6 +2039,96 @@ mod tests {
         let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(body.len(), FAVICON_PNG.len());
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some(PROMETHEUS_TEXT_CONTENT_TYPE)
+        );
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("# HELP headscale_nodes_registered "));
+        assert!(body.contains("# TYPE headscale_nodes_registered gauge"));
+        assert!(body.contains("headscale_nodes_registered 0\n"));
+        assert!(body.contains("headscale_nodes_online 0\n"));
+        assert!(body.contains("headscale_policy_loaded 0\n"));
+        assert!(body.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_runtime_wire_state() {
+        let (mut state, _dir) = fixture_state();
+        state.derp_map = Arc::new(derp_fixture());
+
+        let mut alice = record(
+            "metrics-alice",
+            41,
+            &["10.41.0.0/24", "0.0.0.0/0"],
+            &["10.41.0.0/24", "0.0.0.0/0"],
+        );
+        alice.user = "alice".to_string();
+        state.machines.upsert(alice.node_key_hex.clone(), alice);
+
+        let mut bob = record("metrics-bob", 42, &[], &[]);
+        bob.user = "bob".to_string();
+        bob.ephemeral = true;
+        bob.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        state.machines.upsert(bob.node_key_hex.clone(), bob);
+
+        let raw_policy = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let _guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key("metrics-alice"),
+        );
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        for sample in [
+            "headscale_nodes_registered 2\n",
+            "headscale_nodes_online 1\n",
+            "headscale_nodes_expired 1\n",
+            "headscale_nodes_ephemeral 1\n",
+            "headscale_users 2\n",
+            "headscale_derp_regions 1\n",
+            "headscale_policy_loaded 1\n",
+            "headscale_map_stream_connections 1\n",
+            "headscale_map_stream_connected_nodes 1\n",
+            "headscale_routes_primary 1\n",
+        ] {
+            assert!(body.contains(sample), "missing sample {sample:?}\n{body}");
+        }
     }
 
     #[tokio::test]

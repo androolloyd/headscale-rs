@@ -110,16 +110,29 @@ const TAILNET_DOMAIN: &str = "octra.test";
 /// even though the netmap holds the target node. Production
 /// deployments derive this list from the ACL surface; the interop
 /// test runs with an open default so the ping assertion lands.
+///
+/// Headscale-go parity: the bypass uses the same IPv4+IPv6 zero-prefix
+/// pair the ACL translator emits for `*` principals
+/// (`headscale_api_acl::wildcard_filter_cidrs`), and one NetPortRange
+/// per address family. Tailscale clients accept both `*` and the
+/// cidr-pair, but the cidr-pair matches what upstream Go emits —
+/// keeping both code paths in lockstep avoids a class of "works on
+/// our policy path, breaks on the bypass" diff bugs.
 pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
-    vec![FilterRule {
-        src_ips: vec!["*".into()],
-        dst_ports: vec![NetPortRange {
-            ip: "*".into(),
+    let cidrs = headscale_api_acl::wildcard_filter_cidrs();
+    let dst_ports = cidrs
+        .iter()
+        .map(|ip| NetPortRange {
+            ip: ip.clone(),
             ports: PortRange {
                 first: 0,
                 last: 65535,
             },
-        }],
+        })
+        .collect();
+    vec![FilterRule {
+        src_ips: cidrs,
+        dst_ports,
         ip_proto: Vec::new(),
     }]
 }

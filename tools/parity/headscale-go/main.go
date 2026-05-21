@@ -16,12 +16,14 @@ import (
 )
 
 type scenario struct {
-	Name        string          `json:"name"`
-	Policy      json.RawMessage `json:"policy"`
-	Users       []scenarioUser  `json:"users,omitempty"`
-	Nodes       []scenarioNode  `json:"nodes,omitempty"`
-	RouteChecks []routeCheck    `json:"route_checks,omitempty"`
-	Wire        *wireScenario   `json:"wire,omitempty"`
+	Name             string            `json:"name"`
+	Policy           json.RawMessage   `json:"policy"`
+	Users            []scenarioUser    `json:"users,omitempty"`
+	Nodes            []scenarioNode    `json:"nodes,omitempty"`
+	FilterNodeChecks []filterNodeCheck `json:"filter_node_checks,omitempty"`
+	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
+	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
+	Wire             *wireScenario     `json:"wire,omitempty"`
 }
 
 type scenarioUser struct {
@@ -35,6 +37,7 @@ type scenarioNode struct {
 	UserID   uint     `json:"user_id"`
 	Hostname string   `json:"hostname"`
 	IPv4     string   `json:"ipv4"`
+	IPv6     string   `json:"ipv6,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 }
 
@@ -42,8 +45,20 @@ type scenarioOutput struct {
 	Engine         string             `json:"engine"`
 	Name           string             `json:"name"`
 	Filter         []filterRuleOut    `json:"filter"`
+	FilterForNodes []filterForNodeOut `json:"filter_for_nodes,omitempty"`
 	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
+	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
 	Wire           *wireOutput        `json:"wire,omitempty"`
+}
+
+type filterNodeCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
+}
+
+type filterForNodeOut struct {
+	Name  string          `json:"name"`
+	Rules []filterRuleOut `json:"rules"`
 }
 
 type routeCheck struct {
@@ -59,11 +74,23 @@ type routeApprovalOut struct {
 	Changed        bool     `json:"changed"`
 }
 
+type tagCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
+	Tag    string `json:"tag"`
+}
+
+type tagCheckOut struct {
+	Name    string `json:"name"`
+	Allowed bool   `json:"allowed"`
+}
+
 type wireScenario struct {
 	DNSConfig        json.RawMessage `json:"dns_config,omitempty"`
 	DERPMap          json.RawMessage `json:"derp_map,omitempty"`
 	RegisterRequest  json.RawMessage `json:"register_request,omitempty"`
 	RegisterResponse json.RawMessage `json:"register_response,omitempty"`
+	MapRequest       json.RawMessage `json:"map_request,omitempty"`
 	MapResponse      json.RawMessage `json:"map_response,omitempty"`
 }
 
@@ -72,6 +99,7 @@ type wireOutput struct {
 	DERPMap          json.RawMessage          `json:"derp_map,omitempty"`
 	RegisterRequest  *registerRequestSummary  `json:"register_request,omitempty"`
 	RegisterResponse *registerResponseSummary `json:"register_response,omitempty"`
+	MapRequest       *mapRequestSummary       `json:"map_request,omitempty"`
 	MapResponse      *mapResponseSummary      `json:"map_response,omitempty"`
 }
 
@@ -93,6 +121,17 @@ type registerResponseSummary struct {
 	Error             string       `json:"error,omitempty"`
 }
 
+type mapRequestSummary struct {
+	Version   int              `json:"version,omitempty"`
+	Stream    bool             `json:"stream,omitempty"`
+	Compress  string           `json:"compress,omitempty"`
+	OmitPeers bool             `json:"omit_peers,omitempty"`
+	NodeKey   string           `json:"node_key,omitempty"`
+	DiscoKey  string           `json:"disco_key,omitempty"`
+	Endpoints []string         `json:"endpoints,omitempty"`
+	Hostinfo  *hostInfoSummary `json:"hostinfo,omitempty"`
+}
+
 type userSummary struct {
 	ID          uint64 `json:"id"`
 	DisplayName string `json:"display_name,omitempty"`
@@ -106,13 +145,14 @@ type loginSummary struct {
 }
 
 type mapResponseSummary struct {
-	KeepAlive    bool            `json:"keep_alive"`
-	Domain       string          `json:"domain,omitempty"`
-	Node         *mapNodeSummary `json:"node,omitempty"`
-	PeerCount    int             `json:"peer_count"`
-	PacketFilter []filterRuleOut `json:"packet_filter,omitempty"`
-	DNSConfig    json.RawMessage `json:"dns_config,omitempty"`
-	DERPMap      json.RawMessage `json:"derp_map,omitempty"`
+	KeepAlive    bool             `json:"keep_alive"`
+	Domain       string           `json:"domain,omitempty"`
+	Node         *mapNodeSummary  `json:"node,omitempty"`
+	PeerCount    int              `json:"peer_count"`
+	Peers        []mapNodeSummary `json:"peers,omitempty"`
+	PacketFilter []filterRuleOut  `json:"packet_filter,omitempty"`
+	DNSConfig    json.RawMessage  `json:"dns_config,omitempty"`
+	DERPMap      json.RawMessage  `json:"derp_map,omitempty"`
 }
 
 type mapNodeSummary struct {
@@ -201,7 +241,15 @@ func runScenario(path string) (scenarioOutput, error) {
 		return scenarioOutput{}, fmt.Errorf("headscale-go parsing policy for %s: %w", sc.Name, err)
 	}
 	rules, _ := pm.Filter()
+	filterForNodes, err := runFilterNodeChecks(sc.FilterNodeChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	routeApprovals, err := runRouteChecks(sc.RouteChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
+	tagChecks, err := runTagChecks(sc.TagChecks, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
 	}
@@ -213,7 +261,9 @@ func runScenario(path string) (scenarioOutput, error) {
 		Engine:         "headscale-go",
 		Name:           sc.Name,
 		Filter:         normalizeFilterRules(rules),
+		FilterForNodes: filterForNodes,
 		RouteApprovals: routeApprovals,
+		TagChecks:      tagChecks,
 		Wire:           wire,
 	}, nil
 }
@@ -246,6 +296,14 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 			}
 			ipPtr = &ip
 		}
+		var ip6Ptr *netip.Addr
+		if n.IPv6 != "" {
+			ip, err := netip.ParseAddr(n.IPv6)
+			if err != nil {
+				return nil, fmt.Errorf("parse node %d IPv6: %w", n.ID, err)
+			}
+			ip6Ptr = &ip
+		}
 		userID := n.UserID
 		node := &types.Node{
 			ID:        types.NodeID(n.ID),
@@ -254,6 +312,7 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 			UserID:    &userID,
 			User:      users[n.UserID],
 			IPv4:      ipPtr,
+			IPv6:      ip6Ptr,
 			Tags:      n.Tags,
 		}
 		nodes = append(nodes, node)
@@ -264,6 +323,8 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 	out := make([]filterRuleOut, 0, len(rules))
 	for _, rule := range rules {
+		src := append([]string(nil), rule.SrcIPs...)
+		sort.Strings(src)
 		dst := make([]netPortRangeOut, 0, len(rule.DstPorts))
 		for _, p := range rule.DstPorts {
 			dst = append(dst, netPortRangeOut{
@@ -274,13 +335,46 @@ func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 				},
 			})
 		}
+		sort.Slice(dst, func(i, j int) bool {
+			if dst[i].IP != dst[j].IP {
+				return dst[i].IP < dst[j].IP
+			}
+			if dst[i].Ports.First != dst[j].Ports.First {
+				return dst[i].Ports.First < dst[j].Ports.First
+			}
+			return dst[i].Ports.Last < dst[j].Ports.Last
+		})
+		ipProto := append([]int(nil), rule.IPProto...)
+		sort.Ints(ipProto)
 		out = append(out, filterRuleOut{
-			SrcIPs:   append([]string(nil), rule.SrcIPs...),
+			SrcIPs:   src,
 			DstPorts: dst,
-			IPProto:  append([]int(nil), rule.IPProto...),
+			IPProto:  ipProto,
 		})
 	}
 	return out
+}
+
+func runFilterNodeChecks(checks []filterNodeCheck, pm policy.PolicyManager, nodes types.Nodes) ([]filterForNodeOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	out := make([]filterForNodeOut, 0, len(checks))
+	for _, check := range checks {
+		node := findNode(nodes, check.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("filter node check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		rules, err := pm.FilterForNode(node.View())
+		if err != nil {
+			return nil, fmt.Errorf("filter node check %q: %w", check.Name, err)
+		}
+		out = append(out, filterForNodeOut{
+			Name:  check.Name,
+			Rules: normalizeFilterRules(rules),
+		})
+	}
+	return out, nil
 }
 
 func runRouteChecks(checks []routeCheck, pm policy.PolicyManager, nodes types.Nodes) ([]routeApprovalOut, error) {
@@ -306,6 +400,24 @@ func runRouteChecks(checks []routeCheck, pm policy.PolicyManager, nodes types.No
 			Name:           check.Name,
 			ApprovedRoutes: prefixStrings(approved),
 			Changed:        changed,
+		})
+	}
+	return out, nil
+}
+
+func runTagChecks(checks []tagCheck, pm policy.PolicyManager, nodes types.Nodes) ([]tagCheckOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	out := make([]tagCheckOut, 0, len(checks))
+	for _, check := range checks {
+		node := findNode(nodes, check.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("tag check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		out = append(out, tagCheckOut{
+			Name:    check.Name,
+			Allowed: pm.NodeCanHaveTag(node.View(), check.Tag),
 		})
 	}
 	return out, nil
@@ -382,6 +494,13 @@ func normalizeWire(in *wireScenario) (*wireOutput, error) {
 		}
 		out.RegisterResponse = summarizeRegisterResponse(&v)
 	}
+	if len(in.MapRequest) > 0 {
+		var v tailcfg.MapRequest
+		if err := json.Unmarshal(in.MapRequest, &v); err != nil {
+			return nil, fmt.Errorf("wire map_request: %w", err)
+		}
+		out.MapRequest = summarizeMapRequest(&v)
+	}
 	if len(in.MapResponse) > 0 {
 		var v tailcfg.MapResponse
 		if err := json.Unmarshal(in.MapResponse, &v); err != nil {
@@ -442,6 +561,22 @@ func summarizeRegisterResponse(resp *tailcfg.RegisterResponse) *registerResponse
 	}
 }
 
+func summarizeMapRequest(req *tailcfg.MapRequest) *mapRequestSummary {
+	out := &mapRequestSummary{
+		Version:   int(req.Version),
+		Stream:    req.Stream,
+		Compress:  req.Compress,
+		OmitPeers: req.OmitPeers,
+		NodeKey:   req.NodeKey.String(),
+		DiscoKey:  req.DiscoKey.String(),
+		Endpoints: addrPortStrings(req.Endpoints),
+	}
+	if req.Hostinfo != nil {
+		out.Hostinfo = summarizeHostInfo(req.Hostinfo.View())
+	}
+	return out
+}
+
 func summarizeMapResponse(resp *tailcfg.MapResponse) (*mapResponseSummary, error) {
 	out := &mapResponseSummary{
 		KeepAlive:    resp.KeepAlive,
@@ -451,6 +586,15 @@ func summarizeMapResponse(resp *tailcfg.MapResponse) (*mapResponseSummary, error
 	}
 	if resp.Node != nil {
 		out.Node = summarizeMapNode(resp.Node)
+	}
+	if len(resp.Peers) > 0 {
+		out.Peers = make([]mapNodeSummary, 0, len(resp.Peers))
+		for _, peer := range resp.Peers {
+			out.Peers = append(out.Peers, *summarizeMapNode(peer))
+		}
+		sort.Slice(out.Peers, func(i, j int) bool {
+			return out.Peers[i].ID < out.Peers[j].ID
+		})
 	}
 	if resp.DNSConfig != nil {
 		raw, err := marshalRaw(resp.DNSConfig)

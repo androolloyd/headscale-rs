@@ -1,6 +1,6 @@
 # Headscale-go differential harness
 
-This harness compares observable policy-to-`tailcfg.FilterRule` output between:
+This harness compares observable policy and wire output between:
 
 - `headscale-rs`, via `tools/parity/headscale-rs`
 - `headscale-go` v0.28.0, via `tools/parity/headscale-go`
@@ -21,6 +21,9 @@ Scenarios may also include:
 
 - `route_checks`: node route auto-approval checks compared against
   `headscale-go`'s `ApproveRoutesWithPolicy`.
+- `filter_node_checks`: per-node `FilterForNode` checks, including
+  `autogroup:self` reduction.
+- `tag_checks`: `NodeCanHaveTag` checks for `tagOwners` behavior.
 - `wire`: typed `tailcfg` JSON fragments for DNS, DERP, register, and map
   response summaries. The Go side round-trips these through
   `tailscale.com/tailcfg`; the Rust side round-trips through
@@ -28,3 +31,5 @@ Scenarios may also include:
 
 Add scenarios here when closing parity gaps. Keep the default scenario set green;
 put known divergences in separate local files until the implementation catches up.
+The pinned headscale-go v0.28 policy surface does not expose `ipsets`; do not add
+`ipset:` scenarios to this harness until the Go side supports them.

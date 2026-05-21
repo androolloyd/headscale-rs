@@ -47,6 +47,7 @@ fn register_response_uses_auth_url_and_id_acronyms() {
         node_key_expired: false,
         auth_url: String::new(),
         machine_authorized: true,
+        error: String::new(),
     };
 
     let value = serde_json::to_value(response).unwrap();

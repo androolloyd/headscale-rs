@@ -41,7 +41,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 
@@ -316,6 +316,11 @@ pub struct MachineRegistry {
     /// map rebuilds do not accidentally steal primaries by recomputing
     /// from a blank table.
     primary_routes: RwLock<PrimaryRouteState>,
+    /// Batcher connection state by stable node ID. The count is the
+    /// current active `Stream:true` map-response connection count, and
+    /// zero-count entries are retained after disconnect to match
+    /// headscale-go's `/debug/batcher` rapid-reconnect state.
+    active_connections: RwLock<BTreeMap<u64, usize>>,
 }
 
 impl Default for MachineRegistry {
@@ -326,6 +331,7 @@ impl Default for MachineRegistry {
             notify: Arc::new(Notify::new()),
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
+            active_connections: RwLock::new(BTreeMap::new()),
         }
     }
 }
@@ -442,6 +448,32 @@ impl MachineRegistry {
         }));
     }
 
+    /// Start tracking one active streaming map-response connection for
+    /// `node_id`. The returned guard decrements the count when the
+    /// response body is dropped.
+    pub(crate) fn track_stream_connection(
+        machines: Arc<Self>,
+        node_id: u64,
+    ) -> StreamConnectionGuard {
+        {
+            let mut active = machines.active_connections.write();
+            *active.entry(node_id).or_insert(0) += 1;
+        }
+        StreamConnectionGuard { machines, node_id }
+    }
+
+    fn release_stream_connection(&self, node_id: u64) {
+        let mut active = self.active_connections.write();
+        if let Some(count) = active.get_mut(&node_id) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    /// Snapshot batcher connection state by stable node ID.
+    pub fn active_connections(&self) -> BTreeMap<u64, usize> {
+        self.active_connections.read().clone()
+    }
+
     /// Look up a single machine by its hex-encoded node key.
     ///
     /// Still returns an owned `MachineRecord` — call sites read the
@@ -548,7 +580,13 @@ impl MachineRegistry {
     /// Remove a machine from the registry entirely. Mirrors
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
-        self.update_with(|map| map.remove(node_key_hex).is_some())
+        let removed = self.update_with(|map| map.remove(node_key_hex).is_some());
+        if removed {
+            self.active_connections
+                .write()
+                .remove(&stable_id_from_key(node_key_hex));
+        }
+        removed
     }
 
     /// Stamp `last_seen = now()` on the given node. Called from the
@@ -617,7 +655,7 @@ impl MachineRegistry {
         let cutoff_chrono =
             chrono::Duration::from_std(grace).unwrap_or(chrono::Duration::seconds(0));
         let deadline = now - cutoff_chrono;
-        self.update_with(|map| {
+        let removed = self.update_with(|map| {
             let to_drop: Vec<String> = map
                 .iter()
                 .filter(|(_, rec)| rec.ephemeral && rec.last_seen < deadline)
@@ -627,7 +665,25 @@ impl MachineRegistry {
                 map.remove(k);
             }
             to_drop
-        })
+        });
+        if !removed.is_empty() {
+            let mut active = self.active_connections.write();
+            for node_key_hex in &removed {
+                active.remove(&stable_id_from_key(node_key_hex));
+            }
+        }
+        removed
+    }
+}
+
+pub(crate) struct StreamConnectionGuard {
+    machines: Arc<MachineRegistry>,
+    node_id: u64,
+}
+
+impl Drop for StreamConnectionGuard {
+    fn drop(&mut self) {
+        self.machines.release_stream_connection(self.node_id);
     }
 }
 
@@ -808,6 +864,22 @@ mod registry_tests {
         assert!(!reg.delete("nk-a"));
     }
 
+    #[test]
+    fn batcher_connection_state_keeps_disconnect_until_node_delete() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+
+        let guard = MachineRegistry::track_stream_connection(reg.clone(), node_id);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+
+        drop(guard);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+
+        assert!(reg.delete("nk-a"));
+        assert!(!reg.active_connections().contains_key(&node_id));
+    }
+
     /// `touch_last_seen` advances the timestamp.
     #[test]
     fn touch_last_seen_advances() {
@@ -864,6 +936,24 @@ mod registry_tests {
         assert!(reg.get("nk-a").is_none());
         assert!(reg.get("nk-b").is_some(), "fresh ephemeral survives");
         assert!(reg.get("nk-c").is_some(), "non-ephemeral never touched");
+    }
+
+    #[test]
+    fn gc_ephemeral_cleans_batcher_connection_state() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(10);
+        rec.ephemeral = true;
+        rec.last_seen = Utc::now() - chrono::Duration::seconds(120);
+        reg.upsert("nk-a".to_string(), rec);
+        let node_id = stable_id_from_key("nk-a");
+
+        let guard = MachineRegistry::track_stream_connection(reg.clone(), node_id);
+        drop(guard);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        assert_eq!(removed, vec!["nk-a".to_string()]);
+        assert!(!reg.active_connections().contains_key(&node_id));
     }
 
     /// `gc_ephemeral` returns an empty list when nothing matches.
@@ -972,6 +1062,10 @@ pub fn router(state: WireState) -> Router {
             "/swagger/v1/openapiv2.json",
             get(basic_handlers::handle_swagger_api_v1),
         )
+        .route(
+            "/debug/overview",
+            get(basic_handlers::handle_debug_overview),
+        )
         .route("/debug/routes", get(basic_handlers::handle_debug_routes))
         .route("/debug/derp", get(basic_handlers::handle_debug_derp))
         .route(
@@ -985,6 +1079,7 @@ pub fn router(state: WireState) -> Router {
             "/debug/mapresponses",
             get(basic_handlers::handle_debug_mapresponses),
         )
+        .route("/debug/batcher", get(basic_handlers::handle_debug_batcher))
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

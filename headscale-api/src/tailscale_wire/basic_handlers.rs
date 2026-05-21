@@ -150,6 +150,71 @@ pub struct DebugRegistrationCacheInfo {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugOverviewInfo {
+    pub nodes: DebugOverviewNodes,
+    pub users: BTreeMap<String, usize>,
+    pub total_users: usize,
+    pub policy: DebugOverviewPolicy,
+    pub derp: DebugOverviewDerp,
+    pub primary_routes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugOverviewNodes {
+    pub total: usize,
+    pub online: usize,
+    pub expired: usize,
+    pub ephemeral: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugOverviewPolicy {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugOverviewDerp {
+    pub configured: bool,
+    pub regions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugBatcherInfo {
+    pub connected_nodes: BTreeMap<String, DebugBatcherNodeInfo>,
+    pub total_nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugBatcherNodeInfo {
+    pub connected: bool,
+    pub active_connections: usize,
+}
+
+pub async fn handle_debug_overview(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    let info = debug_overview_info(&state);
+    if wants_json(&headers) {
+        match serde_json::to_string_pretty(&info) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            debug_overview_string(&info),
+        )
+            .into_response()
+    }
+}
+
 pub async fn handle_debug_routes(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let snapshot = state.machines.snapshot();
     if wants_json(&headers) {
@@ -260,6 +325,28 @@ pub async fn handle_debug_mapresponses() -> Response {
     (StatusCode::OK, MAPRESPONSES_DEBUG_DISABLED_BODY).into_response()
 }
 
+pub async fn handle_debug_batcher(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    let info = debug_batcher_info(&state);
+    if wants_json(&headers) {
+        match serde_json::to_string_pretty(&info) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            debug_batcher_string(&info),
+        )
+            .into_response()
+    }
+}
+
 pub async fn handle_windows(
     State(state): State<WireState>,
     headers: HeaderMap,
@@ -363,6 +450,141 @@ fn debug_derp_configured(derp_map: &DerpMap) -> bool {
 
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+
+fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
+    let snapshot = state.machines.snapshot();
+    let now = chrono::Utc::now();
+    let mut nodes = DebugOverviewNodes {
+        total: snapshot.len(),
+        ..DebugOverviewNodes::default()
+    };
+    let mut users = BTreeMap::new();
+
+    for rec in snapshot.values() {
+        let expired = rec.is_expired_at(now);
+        if expired {
+            nodes.expired += 1;
+        } else {
+            // The in-memory wire registry does not yet track
+            // headscale-go's separate online/offline bit. A record
+            // that is present and not expired is the closest current
+            // equivalent.
+            nodes.online += 1;
+        }
+        if rec.ephemeral {
+            nodes.ephemeral += 1;
+        }
+        if !rec.user.is_empty() {
+            *users.entry(rec.user.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let routes = state.machines.debug_routes_for_snapshot(&snapshot);
+    let derp = debug_derp_info(&state.derp_map);
+    DebugOverviewInfo {
+        nodes,
+        total_users: users.len(),
+        users,
+        policy: DebugOverviewPolicy {
+            mode: "memory".to_string(),
+            path: None,
+        },
+        derp: DebugOverviewDerp {
+            configured: derp.configured,
+            regions: derp.total_regions,
+        },
+        primary_routes: routes.primary_routes.len(),
+    }
+}
+
+fn debug_overview_string(info: &DebugOverviewInfo) -> String {
+    let mut out = String::from("=== Headscale State Overview ===\n\n");
+
+    out.push_str(&format!("Nodes: {} total\n", info.nodes.total));
+    out.push_str(&format!("  - Online: {}\n", info.nodes.online));
+    out.push_str(&format!("  - Expired: {}\n", info.nodes.expired));
+    out.push_str(&format!("  - Ephemeral: {}\n", info.nodes.ephemeral));
+    out.push('\n');
+
+    out.push_str(&format!("Users: {} total\n", info.total_users));
+    for (user, node_count) in &info.users {
+        out.push_str(&format!("  - {user}: {node_count} nodes\n"));
+    }
+    out.push('\n');
+
+    out.push_str("Policy:\n");
+    out.push_str(&format!("  - Mode: {}\n", info.policy.mode));
+    if let Some(path) = &info.policy.path {
+        out.push_str(&format!("  - Path: {path}\n"));
+    }
+    out.push('\n');
+
+    if info.derp.configured {
+        out.push_str(&format!("DERP: {} regions configured\n", info.derp.regions));
+    } else {
+        out.push_str("DERP: not configured\n");
+    }
+    out.push('\n');
+
+    out.push_str(&format!("Primary Routes: {} active\n", info.primary_routes));
+    out.push('\n');
+
+    out.push_str("Registration Cache: active\n");
+    out.push('\n');
+
+    out
+}
+
+fn debug_batcher_info(state: &WireState) -> DebugBatcherInfo {
+    let connected_nodes = state
+        .machines
+        .active_connections()
+        .into_iter()
+        .map(|(node_id, active_connections)| {
+            (
+                node_id.to_string(),
+                DebugBatcherNodeInfo {
+                    connected: active_connections > 0,
+                    active_connections,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    DebugBatcherInfo {
+        total_nodes: connected_nodes.len(),
+        connected_nodes,
+    }
+}
+
+fn debug_batcher_string(info: &DebugBatcherInfo) -> String {
+    let mut out = String::from("=== Batcher Connected Nodes ===\n\n");
+    let mut connected_count = 0;
+
+    for (node_id, node) in &info.connected_nodes {
+        let status = if node.connected {
+            connected_count += 1;
+            "connected"
+        } else {
+            "disconnected"
+        };
+        if node.active_connections > 0 {
+            out.push_str(&format!(
+                "Node {node_id}:\t{status} ({} connections)\n",
+                node.active_connections
+            ));
+        } else {
+            out.push_str(&format!("Node {node_id}:\t{status}\n"));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nSummary: {connected_count} connected, {} total\n",
+        info.total_nodes
+    ));
+
+    out
 }
 
 fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
@@ -880,6 +1102,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_overview_text_matches_headscale_go_empty_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/overview")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            &body[..],
+            b"=== Headscale State Overview ===\n\nNodes: 0 total\n  - Online: 0\n  - Expired: 0\n  - Ephemeral: 0\n\nUsers: 0 total\n\nPolicy:\n  - Mode: memory\n\nDERP: not configured\n\nPrimary Routes: 0 active\n\nRegistration Cache: active\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_overview_json_reports_runtime_state() {
+        let (mut state, _dir) = fixture_state();
+        state.derp_map = Arc::new(derp_fixture());
+
+        let mut alice = record("overview-alice", 21, &["10.0.0.0/24"], &["10.0.0.0/24"]);
+        alice.hostname = "alice-node".to_string();
+        alice.user = "alice".to_string();
+        state.machines.upsert(alice.node_key_hex.clone(), alice);
+
+        let mut bob = record("overview-bob", 22, &[], &[]);
+        bob.hostname = "bob-node".to_string();
+        bob.user = "bob".to_string();
+        bob.ephemeral = true;
+        bob.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        state.machines.upsert(bob.node_key_hex.clone(), bob);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/overview")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["nodes"]["total"], 2);
+        assert_eq!(parsed["nodes"]["online"], 1);
+        assert_eq!(parsed["nodes"]["expired"], 1);
+        assert_eq!(parsed["nodes"]["ephemeral"], 1);
+        assert_eq!(parsed["users"]["alice"], 1);
+        assert_eq!(parsed["users"]["bob"], 1);
+        assert_eq!(parsed["total_users"], 2);
+        assert_eq!(parsed["policy"]["mode"], "memory");
+        assert!(parsed["policy"].get("path").is_none());
+        assert_eq!(parsed["derp"]["configured"], true);
+        assert_eq!(parsed["derp"]["regions"], 1);
+        assert_eq!(parsed["primary_routes"], 1);
+    }
+
+    #[tokio::test]
     async fn debug_routes_text_matches_headscale_go_empty_shape() {
         let (state, _dir) = fixture_state();
         let resp = router(state)
@@ -1242,6 +1543,108 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], MAPRESPONSES_DEBUG_DISABLED_BODY.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn debug_batcher_text_matches_headscale_go_empty_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/batcher")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            &body[..],
+            b"=== Batcher Connected Nodes ===\n\n\nSummary: 0 connected, 0 total\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_batcher_json_tracks_active_stream_connection() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-batcher-node";
+        state
+            .machines
+            .upsert(node_key.to_string(), record(node_key, 31, &[], &[]));
+
+        let app = router(state.clone());
+        let stream_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "Stream": true,
+                            "Version": 39
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/batcher")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let node_id = stable_id_from_key(node_key).to_string();
+        assert_eq!(parsed["total_nodes"], 1);
+        let node = parsed["connected_nodes"].get(&node_id).unwrap();
+        assert_eq!(node["connected"], true);
+        assert_eq!(node["active_connections"], 1);
+
+        drop(stream_resp);
+
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/batcher")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let node = parsed["connected_nodes"].get(&node_id).unwrap();
+        assert_eq!(parsed["total_nodes"], 1);
+        assert_eq!(node["connected"], false);
+        assert_eq!(node["active_connections"], 0);
     }
 
     #[tokio::test]

@@ -595,6 +595,10 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         let self_node_key = node_key_hex.clone();
         let derp_map_for_stream = state.derp_map.clone();
         let dns_for_stream = state.dns.clone();
+        let connection_guard = super::MachineRegistry::track_stream_connection(
+            machines.clone(),
+            stable_id_from_key(&node_key_hex),
+        );
         let stream = futures_util::stream::unfold(
             (
                 Some(first),
@@ -604,6 +608,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
+                connection_guard,
             ),
             move |(
                 first_opt,
@@ -613,6 +618,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 machines_derp_map,
                 dns,
+                connection_guard,
             )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
@@ -625,6 +631,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             self_node_key,
                             machines_derp_map,
                             dns,
+                            connection_guard,
                         ),
                     ));
                 }
@@ -686,6 +693,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         self_node_key,
                         machines_derp_map,
                         dns,
+                        connection_guard,
                     ),
                 ))
             },

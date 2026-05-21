@@ -611,11 +611,11 @@ pub struct DerpMap {
     /// `OCTRAVPN_DERP_MAP_PATH` → [`derp_config::load_derp_map`].
     #[serde(default)]
     pub regions: HashMap<u16, DerpRegion>,
-    /// Discovered upstream as `OmitDefaultRegions` — when true, the
+    /// Discovered upstream as `omitDefaultRegions` — when true, the
     /// client must NOT augment our DERPMap with the public Tailscale
     /// region list. We always emit `true` for the interop test so the
     /// client only ever talks to our sidecar.
-    #[serde(default, rename = "OmitDefaultRegions")]
+    #[serde(default, rename = "omitDefaultRegions", alias = "OmitDefaultRegions")]
     pub omit_default_regions: bool,
 }
 
@@ -631,7 +631,7 @@ pub struct DerpRegion {
     pub region_name: String,
     /// Whether the region should be skipped for new sessions. Defaults
     /// to false (region is healthy).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub avoid: bool,
     pub nodes: Vec<DerpRegionNode>,
 }

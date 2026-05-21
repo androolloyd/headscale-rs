@@ -570,6 +570,9 @@ impl AclDoc {
         let Some(advertised) = parse_cidr(prefix) else {
             return false;
         };
+        if is_default_route(&advertised) {
+            return false;
+        }
         for (key, principals) in &self.auto_approvers.routes {
             let Some(approver_net) = parse_cidr(key) else {
                 continue;
@@ -597,16 +600,17 @@ impl AclDoc {
     /// suitable for a static `tailcfg.FilterRule.SrcIPs` / `DstIPs`
     /// entry. Group references expand to their members; `host:` /
     /// `ipset:` resolve to their CIDR contents; the flattenable
-    /// autogroups (`internet`, `member`) collapse to `*`; the
+    /// autogroups (`internet`, `member`) collapse to the IPv4 and
+    /// IPv6 default routes; the
     /// non-flattenable autogroups (`self`, `nonroot`, `tagged`,
     /// `tag:*`) return an empty list — the FilterRule layer drops
     /// the rule rather than silently leaking it as `*`.
     pub fn expand_principal(&self, token: &str) -> Vec<String> {
         if token == "*" {
-            return vec!["*".to_string()];
+            return wildcard_filter_cidrs();
         }
         if let Some(g) = token.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(g) {
+            if let Some(members) = self.groups.get(g).or_else(|| self.groups.get(token)) {
                 return members.clone();
             }
             return Vec::new();
@@ -625,7 +629,7 @@ impl AclDoc {
         }
         if let Some(ag) = token.strip_prefix("autogroup:") {
             if ag == "internet" || ag == "member" {
-                return vec!["*".to_string()];
+                return wildcard_filter_cidrs();
             }
             return Vec::new();
         }
@@ -659,13 +663,13 @@ impl AclDoc {
             return true;
         }
         if let Some(group) = entry.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(group) {
+            if let Some(members) = self.groups.get(group).or_else(|| self.groups.get(entry)) {
                 return members.iter().any(|m| identity_matches(m, principal));
             }
             return false;
         }
         if let Some(tag) = entry.strip_prefix("tag:") {
-            return principal.tags.iter().any(|t| t == tag);
+            return principal.tags.iter().any(|t| tag_matches(t, tag));
         }
         if let Some(ag) = entry.strip_prefix("autogroup:") {
             return autogroup_matches(ag, principal, peer);
@@ -692,6 +696,10 @@ impl AclDoc {
     }
 }
 
+fn wildcard_filter_cidrs() -> Vec<String> {
+    vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+}
+
 fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
     if let Some(addr) = principal.addr
         && entry == addr
@@ -699,11 +707,20 @@ fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
         return true;
     }
     if let Some(user) = principal.user
-        && entry == user
+        && user_matches(entry, user)
     {
         return true;
     }
     false
+}
+
+fn user_matches(entry: &str, user: &str) -> bool {
+    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
+}
+
+fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
+    node_tag == policy_tag_without_prefix
+        || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
 }
 
 fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeView<'_>>) -> bool {
@@ -717,7 +734,7 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         return !principal.tags.is_empty();
     }
     if let Some(tag) = kind.strip_prefix("tag:") {
-        return principal.tags.iter().any(|t| t == tag);
+        return principal.tags.iter().any(|t| tag_matches(t, tag));
     }
     if kind == "self" {
         let Some(peer) = peer else {
@@ -732,6 +749,13 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         return false;
     }
     false
+}
+
+fn is_default_route(net: &IpNet) -> bool {
+    match net {
+        IpNet::V4(v4) => v4.prefix_len() == 0,
+        IpNet::V6(v6) => v6.prefix_len() == 0,
+    }
 }
 
 /// Parse a CIDR or bare-address string into an `IpNet`. A bare
@@ -1572,6 +1596,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_approve_route_accepts_prefixed_node_tags() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.auto_approvers
+            .routes
+            .insert("10.0.0.0/8".into(), vec!["tag:router".into()]);
+        let tags = vec!["tag:router".into()];
+        let router = NodeView::new("100.64.0.1").with_tags(&tags);
+        assert!(doc.auto_approves_route(&router, "10.0.0.0/8"));
+    }
+
+    #[test]
+    fn auto_approve_route_rejects_default_route_without_exit_node() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups.insert("admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("0.0.0.0/0".into(), vec!["group:admins".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("::/0".into(), vec!["group:admins".into()]);
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(!doc.auto_approves_route(&alice, "0.0.0.0/0"));
+        assert!(!doc.auto_approves_route(&alice, "::/0"));
+    }
+
+    #[test]
     fn auto_approve_route_matches_subprefix() {
         let mut doc = AclDoc {
             version: 1,
@@ -1628,6 +1684,33 @@ mod tests {
         let carol = NodeView::new("100.64.0.2").with_user("carol");
         assert!(doc.auto_approves_route(&alice, "172.16.0.0/16"));
         assert!(!doc.auto_approves_route(&carol, "172.16.0.0/16"));
+    }
+
+    #[test]
+    fn auto_approve_route_matches_legacy_user_suffix() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups.insert("admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("172.16.0.0/12".into(), vec!["group:admins".into()]);
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(doc.auto_approves_route(&alice, "172.16.0.0/16"));
+    }
+
+    #[test]
+    fn auto_approve_exit_node_matches_prefixed_group_key() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups
+            .insert("group:admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers.exit_node = vec!["group:admins".into()];
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(doc.auto_approves_exit_node(&alice));
     }
 
     #[test]
@@ -1927,9 +2010,9 @@ mod tests {
     // --- expand_principal ------------------------------------------
 
     #[test]
-    fn expand_principal_wildcard_returns_wildcard() {
+    fn expand_principal_wildcard_returns_default_cidrs() {
         let d = AclDoc::empty();
-        assert_eq!(d.expand_principal("*"), vec!["*"]);
+        assert_eq!(d.expand_principal("*"), vec!["0.0.0.0/0", "::/0"]);
     }
 
     #[test]
@@ -1943,6 +2026,16 @@ mod tests {
         let mut d = AclDoc::empty();
         d.groups
             .insert("admins".to_string(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn expand_principal_prefixed_group_key_returns_members() {
+        let mut d = AclDoc::empty();
+        d.groups.insert(
+            "group:admins".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
         assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
     }
 

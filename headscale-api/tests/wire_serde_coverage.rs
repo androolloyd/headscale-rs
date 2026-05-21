@@ -430,7 +430,7 @@ fn derp_map_omit_default_regions_round_trip() {
     let m: DerpMap = serde_json::from_str(j).unwrap();
     assert!(m.omit_default_regions);
     let v = serde_json::to_value(&m).unwrap();
-    assert_eq!(v["OmitDefaultRegions"], true);
+    assert_eq!(v["omitDefaultRegions"], true);
 }
 
 // ---------------------------------------------------------------------------

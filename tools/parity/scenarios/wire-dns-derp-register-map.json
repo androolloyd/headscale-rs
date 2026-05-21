@@ -1,0 +1,105 @@
+{
+  "name": "wire-dns-derp-register-map",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "dns_config": {
+      "Resolvers": [
+        { "Addr": "1.1.1.1" },
+        { "Addr": "https://dns.example/dns-query", "UseWithExitNode": true }
+      ],
+      "Routes": {
+        "corp.example": [{ "Addr": "10.0.0.53" }]
+      },
+      "FallbackResolvers": [
+        { "Addr": "9.9.9.9" }
+      ],
+      "Domains": ["tail.example", "corp.example"],
+      "Proxied": true,
+      "ExtraRecords": [
+        { "Name": "db.tail.example", "Type": "A", "Value": "100.64.0.10" }
+      ],
+      "ExitNodeFilteredSet": ["corp.example"]
+    },
+    "derp_map": {
+      "Regions": {
+        "900": {
+          "RegionID": 900,
+          "RegionCode": "test",
+          "RegionName": "Test DERP",
+          "Nodes": [
+            {
+              "Name": "900a",
+              "RegionID": 900,
+              "HostName": "derp.example",
+              "IPv4": "203.0.113.10",
+              "DERPPort": 443,
+              "STUNPort": 3478,
+              "InsecureForTests": true
+            }
+          ]
+        }
+      },
+      "omitDefaultRegions": true
+    },
+    "register_request": {
+      "NodeKey": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+      "Auth": { "AuthKey": "octrapreauth-test" },
+      "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+      "Followup": "auth"
+    },
+    "register_response": {
+      "User": {
+        "ID": 42,
+        "LoginName": "alice",
+        "DisplayName": "Alice"
+      },
+      "Login": {
+        "ID": 42,
+        "Provider": "octravpn-preauth",
+        "LoginName": "alice",
+        "DisplayName": "Alice"
+      },
+      "NodeKeyExpired": false,
+      "AuthURL": "",
+      "MachineAuthorized": true
+    },
+    "map_response": {
+      "KeyExpiryExtension": 0,
+      "Node": {
+        "ID": 7,
+        "StableID": "n7",
+        "Name": "peer.tail.example",
+        "User": 42,
+        "Key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+        "Addresses": ["100.64.0.7/32"],
+        "AllowedIPs": ["100.64.0.7/32"],
+        "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+        "MachineAuthorized": true,
+        "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+        "Endpoints": ["198.51.100.7:41641"]
+      },
+      "Peers": [],
+      "DNSConfig": {
+        "Domains": ["tail.example"],
+        "Proxied": true
+      },
+      "DERPMap": {
+        "Regions": {},
+        "omitDefaultRegions": true
+      },
+      "Domain": "tail.example",
+      "KeepAlive": true,
+      "PacketFilter": [
+        {
+          "SrcIPs": ["*"],
+          "DstPorts": [
+            { "IP": "*", "Ports": { "First": 0, "Last": 65535 } }
+          ]
+        }
+      ]
+    }
+  }
+}

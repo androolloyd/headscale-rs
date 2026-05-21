@@ -277,9 +277,10 @@ mod tests {
         );
         let rs = acl_to_filter_rules(&d);
         assert_eq!(rs.len(), 1);
-        assert_eq!(rs[0].src_ips, vec!["*"]);
-        assert_eq!(rs[0].dst_ports.len(), 1);
-        assert_eq!(rs[0].dst_ports[0].ip, "*");
+        assert_eq!(rs[0].src_ips, vec!["0.0.0.0/0", "::/0"]);
+        assert_eq!(rs[0].dst_ports.len(), 2);
+        assert_eq!(rs[0].dst_ports[0].ip, "0.0.0.0/0");
+        assert_eq!(rs[0].dst_ports[1].ip, "::/0");
         assert_eq!(rs[0].dst_ports[0].ports.first, 0);
         assert_eq!(rs[0].dst_ports[0].ports.last, 65535);
         assert!(rs[0].ip_proto.is_empty());

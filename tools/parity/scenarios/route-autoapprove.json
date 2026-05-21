@@ -1,0 +1,53 @@
+{
+  "name": "route-autoapprove",
+  "policy": {
+    "groups": {
+      "group:admins": ["alice@"]
+    },
+    "tagOwners": {
+      "tag:router": ["alice@"]
+    },
+    "acls": [
+      { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "10.0.0.0/8": ["group:admins"],
+        "172.16.0.0/12": ["tag:router"]
+      },
+      "exitNode": ["group:admins"]
+    }
+  },
+  "users": [
+    { "id": 1, "name": "alice" },
+    { "id": 2, "name": "bob" }
+  ],
+  "nodes": [
+    { "id": 1, "user_id": 1, "hostname": "alice-laptop", "ipv4": "100.64.0.1" },
+    { "id": 2, "user_id": 2, "hostname": "router", "ipv4": "100.64.0.2", "tags": ["tag:router"] },
+    { "id": 3, "user_id": 2, "hostname": "bob-laptop", "ipv4": "100.64.0.3" }
+  ],
+  "route_checks": [
+    {
+      "name": "group-member-adds-subprefix-and-keeps-manual",
+      "node_id": 1,
+      "current_approved": ["203.0.113.0/24"],
+      "announced_routes": ["10.42.0.0/16"]
+    },
+    {
+      "name": "tagged-router-adds-tag-route",
+      "node_id": 2,
+      "announced_routes": ["172.16.4.0/24"]
+    },
+    {
+      "name": "plain-user-cannot-add-admin-route",
+      "node_id": 3,
+      "announced_routes": ["10.42.0.0/16"]
+    },
+    {
+      "name": "exit-node-approves-v4-and-v6-defaults",
+      "node_id": 1,
+      "announced_routes": ["0.0.0.0/0", "::/0"]
+    }
+  ]
+}

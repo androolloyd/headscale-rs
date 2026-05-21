@@ -215,7 +215,7 @@ fn expand_principal_handles_autogroup_internet() {
     let raw = load("upstream_acl_a01.hujson");
     let doc = parse_hujson_policy(&raw).unwrap();
     let exp = doc.expand_principal("autogroup:internet");
-    assert_eq!(exp, vec!["*"]);
+    assert_eq!(exp, vec!["0.0.0.0/0", "::/0"]);
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn expand_principal_handles_autogroup_member() {
     let raw = load("upstream_acl_a01.hujson");
     let doc = parse_hujson_policy(&raw).unwrap();
     let exp = doc.expand_principal("autogroup:member");
-    assert_eq!(exp, vec!["*"]);
+    assert_eq!(exp, vec!["0.0.0.0/0", "::/0"]);
 }
 
 #[test]

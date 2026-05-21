@@ -81,9 +81,10 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let direct = acl_to_filter_rules(&doc);
     assert_eq!(store_rules.len(), direct.len());
     assert_eq!(store_rules.len(), 1);
-    assert_eq!(store_rules[0].src_ips, vec!["*"]);
-    assert_eq!(store_rules[0].dst_ports.len(), 1);
-    assert_eq!(store_rules[0].dst_ports[0].ip, "*");
+    assert_eq!(store_rules[0].src_ips, vec!["0.0.0.0/0", "::/0"]);
+    assert_eq!(store_rules[0].dst_ports.len(), 2);
+    assert_eq!(store_rules[0].dst_ports[0].ip, "0.0.0.0/0");
+    assert_eq!(store_rules[0].dst_ports[1].ip, "::/0");
     assert_eq!(store_rules[0].dst_ports[0].ports.first, 0);
     assert_eq!(store_rules[0].dst_ports[0].ports.last, 65535);
     assert!(store_rules[0].ip_proto.is_empty());

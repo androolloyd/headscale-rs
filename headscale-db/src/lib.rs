@@ -13,6 +13,7 @@ pub mod headscale_nodes;
 pub mod models;
 pub mod nodes;
 pub mod payments;
+pub mod policies;
 pub mod preauth_keys;
 pub mod resources;
 pub mod sessions;

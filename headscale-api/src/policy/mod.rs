@@ -92,12 +92,19 @@ impl PolicyStore {
     /// Recomputes the cached `FilterRule` list and notifies every
     /// parked `/map` long-poller.
     pub fn set(&self, doc: PolicyDoc, raw: String) {
+        self.set_at(doc, raw, now_unix());
+    }
+
+    /// Same as [`Self::set`], but preserves the caller supplied
+    /// update timestamp. DB-backed policy mode uses this to keep the
+    /// in-memory cache and latest `policies.updated_at` row aligned.
+    pub fn set_at(&self, doc: PolicyDoc, raw: String, updated_at: i64) {
         let filters = acl_to_filter_rules(&doc);
         {
             let mut g = self.inner.state.write();
             g.doc = Some(doc);
             g.raw = Some(raw);
-            g.updated_at = Some(now_unix());
+            g.updated_at = Some(updated_at);
             g.filters = filters;
         }
         self.inner.notify.notify_waiters();

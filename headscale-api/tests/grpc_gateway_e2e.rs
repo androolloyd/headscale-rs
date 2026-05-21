@@ -29,6 +29,11 @@ impl DatabaseHealthCheck for FailingDatabaseHealth {
 }
 
 async fn fixture() -> (Router, String) {
+    let (app, token, _db) = fixture_with_db().await;
+    (app, token)
+}
+
+async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
     let db = headscale_db::Database::in_memory()
         .await
         .expect("open in-memory db");
@@ -51,8 +56,9 @@ async fn fixture() -> (Router, String) {
         PolicyStore::new(),
         machines,
     )
-    .with_database_pool(db.pool().clone());
-    (grpc_gateway::router(service), created.api_key)
+    .with_database_pool(db.pool().clone())
+    .with_policy_pool(db.pool().clone());
+    (grpc_gateway::router(service), created.api_key, db)
 }
 
 async fn fixture_with_failing_health() -> (Router, String) {
@@ -662,4 +668,36 @@ async fn grpc_gateway_policy_round_trips_protojson_body() {
     let body = body_json(resp).await;
     assert_eq!(body["policy"], policy);
     assert!(body["updatedAt"].as_str().unwrap().ends_with('Z'));
+}
+
+#[tokio::test]
+async fn grpc_gateway_policy_persists_in_database_mode() {
+    let (app, token, db) = fixture_with_db().await;
+    let first = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:22"]}]}"#;
+    let second = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:443"]}]}"#;
+
+    for policy in [first, second] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::PUT,
+                "/api/v1/policy",
+                Some(&token),
+                Body::from(serde_json::json!({ "policy": policy }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM policies")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    let latest = headscale_db::policies::get_latest(db.pool())
+        .await
+        .unwrap()
+        .expect("latest policy");
+    assert_eq!(latest.data, second);
 }

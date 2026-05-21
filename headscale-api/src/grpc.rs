@@ -191,6 +191,7 @@ pub mod upstream {
         policy: PolicyStore,
         machines: Arc<dyn MachineAdmin>,
         database_health: Option<Arc<dyn DatabaseHealthCheck>>,
+        policy_persistence: Option<Arc<dyn PolicyPersistence>>,
         pending_nodes: Arc<RwLock<BTreeMap<String, MachineAdminRecord>>>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
@@ -201,6 +202,18 @@ pub mod upstream {
         async fn ping(&self) -> Result<(), String>;
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PersistedPolicy {
+        pub policy: String,
+        pub updated_at: i64,
+    }
+
+    #[async_trait]
+    pub trait PolicyPersistence: Send + Sync {
+        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String>;
+        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String>;
+    }
+
     #[cfg(feature = "admin")]
     #[async_trait]
     impl DatabaseHealthCheck for sqlx::SqlitePool {
@@ -209,6 +222,32 @@ pub mod upstream {
                 .execute(self)
                 .await
                 .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    #[cfg(feature = "admin")]
+    #[async_trait]
+    impl PolicyPersistence for sqlx::SqlitePool {
+        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
+            headscale_db::policies::get_latest(self)
+                .await
+                .map(|row| {
+                    row.map(|policy| PersistedPolicy {
+                        policy: policy.data,
+                        updated_at: policy.updated_at,
+                    })
+                })
+                .map_err(|e| e.to_string())
+        }
+
+        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
+            headscale_db::policies::set(self, policy)
+                .await
+                .map(|policy| PersistedPolicy {
+                    policy: policy.data,
+                    updated_at: policy.updated_at,
+                })
                 .map_err(|e| e.to_string())
         }
     }
@@ -238,6 +277,7 @@ pub mod upstream {
                 policy,
                 machines,
                 database_health: None,
+                policy_persistence: None,
                 pending_nodes: Arc::new(RwLock::new(BTreeMap::new())),
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
@@ -255,6 +295,37 @@ pub mod upstream {
         #[cfg(feature = "admin")]
         pub fn with_database_pool(self, pool: sqlx::SqlitePool) -> Self {
             self.with_database_health(Arc::new(pool))
+        }
+
+        pub fn with_policy_persistence(
+            mut self,
+            policy_persistence: Arc<dyn PolicyPersistence>,
+        ) -> Self {
+            self.policy_persistence = Some(policy_persistence);
+            self
+        }
+
+        #[cfg(feature = "admin")]
+        pub fn with_policy_pool(self, pool: sqlx::SqlitePool) -> Self {
+            self.with_policy_persistence(Arc::new(pool))
+        }
+
+        pub async fn load_policy_from_persistence(&self) -> Result<bool, Status> {
+            let Some(policy_persistence) = &self.policy_persistence else {
+                return Ok(false);
+            };
+            let Some(policy) = policy_persistence
+                .get_latest_policy()
+                .await
+                .map_err(|e| Status::unknown(format!("loading policy from database: {e}")))?
+            else {
+                return Ok(false);
+            };
+            let doc = parse_hujson_policy(&policy.policy).map_err(|e| {
+                Status::invalid_argument(format!("loading policy from database: {e}"))
+            })?;
+            self.policy.set_at(doc, policy.policy, policy.updated_at);
+            Ok(true)
         }
 
         pub fn require_api_key_auth(mut self) -> Self {
@@ -803,6 +874,22 @@ pub mod upstream {
             request: Request<GetPolicyRequest>,
         ) -> Result<Response<GetPolicyResponse>, Status> {
             self.authorize(&request).await?;
+            if let Some(policy_persistence) = &self.policy_persistence {
+                let policy = policy_persistence
+                    .get_latest_policy()
+                    .await
+                    .map_err(|e| Status::unknown(format!("loading policy from database: {e}")))?;
+                return Ok(Response::new(match policy {
+                    Some(policy) => GetPolicyResponse {
+                        policy: policy.policy,
+                        updated_at: Some(unix_to_timestamp(policy.updated_at)),
+                    },
+                    None => GetPolicyResponse {
+                        policy: String::new(),
+                        updated_at: None,
+                    },
+                }));
+            }
             Ok(Response::new(GetPolicyResponse {
                 policy: self.policy.raw().unwrap_or_default(),
                 updated_at: self.policy.updated_at().map(unix_to_timestamp),
@@ -817,7 +904,21 @@ pub mod upstream {
             let policy = request.into_inner().policy;
             let doc = parse_hujson_policy(&policy)
                 .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
-            self.policy.set(doc, policy.clone());
+            let (policy, updated_at) = if let Some(policy_persistence) = &self.policy_persistence {
+                let persisted = policy_persistence
+                    .set_policy(&policy)
+                    .await
+                    .map_err(|e| Status::unknown(format!("persisting policy to database: {e}")))?;
+                self.policy
+                    .set_at(doc, persisted.policy.clone(), persisted.updated_at);
+                (persisted.policy, persisted.updated_at)
+            } else {
+                self.policy.set(doc, policy.clone());
+                (
+                    policy,
+                    self.policy.updated_at().unwrap_or_else(current_unix_i64),
+                )
+            };
             crate::admin::machines::apply_policy_auto_approvals(
                 &self.policy,
                 self.machines.as_ref(),
@@ -826,7 +927,7 @@ pub mod upstream {
             .map_err(machine_error_to_status)?;
             Ok(Response::new(SetPolicyResponse {
                 policy,
-                updated_at: self.policy.updated_at().map(unix_to_timestamp),
+                updated_at: Some(unix_to_timestamp(updated_at)),
             }))
         }
 
@@ -1250,6 +1351,7 @@ mod upstream_tests {
             Arc::new(WireMachineAdmin::new(machines.clone())),
         )
         .with_database_pool(db.pool().clone());
+        let service = service.with_policy_pool(db.pool().clone());
         (service, machines)
     }
 
@@ -1271,6 +1373,7 @@ mod upstream_tests {
             Arc::new(WireMachineAdmin::new(machines)),
         )
         .with_database_pool(db.pool().clone());
+        let service = service.with_policy_pool(db.pool().clone());
         (service, api_keys)
     }
 
@@ -1293,6 +1396,27 @@ mod upstream_tests {
             machines,
         )
         .with_database_pool(db.pool().clone());
+        let service = service.with_policy_pool(db.pool().clone());
+        (service, db)
+    }
+
+    async fn admin_service_with_policy_db() -> (HeadscaleAdminService, headscale_db::Database) {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new()))),
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone());
         (service, db)
     }
 
@@ -2218,6 +2342,73 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_persists_and_loads_database_policy() {
+        let (service, db) = admin_service_with_policy_db().await;
+        let raw1 = r#"{
+          // first policy row
+          "acls": [{"action": "accept", "src": ["*"], "dst": ["*:22"]}]
+        }"#;
+        let raw2 = r#"{
+          // newest policy row
+          "acls": [{"action": "accept", "src": ["*"], "dst": ["*:443"]}]
+        }"#;
+
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: raw1.into(),
+            }))
+            .await
+            .unwrap();
+        let set = service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: raw2.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(set.policy, raw2);
+        assert!(set.updated_at.is_some());
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM policies")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        let latest = headscale_db::policies::get_latest(db.pool())
+            .await
+            .unwrap()
+            .expect("latest policy");
+        assert_eq!(latest.data, raw2);
+
+        let fresh_policy = PolicyStore::new();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let fresh = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            fresh_policy.clone(),
+            Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new()))),
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone());
+
+        let got = fresh
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, raw2);
+        assert_eq!(got.updated_at.map(|ts| ts.seconds), Some(latest.updated_at));
+        assert!(!fresh_policy.is_loaded());
+
+        assert!(fresh.load_policy_from_persistence().await.unwrap());
+        assert_eq!(fresh_policy.raw().unwrap(), raw2);
+        assert_eq!(fresh_policy.updated_at(), Some(latest.updated_at));
     }
 
     #[tokio::test]

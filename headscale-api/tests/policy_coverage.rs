@@ -399,6 +399,16 @@ fn store_set_preserves_raw_comments_verbatim() {
     assert_eq!(s.raw().unwrap(), raw, "raw bytes round-trip with comments");
 }
 
+#[test]
+fn store_set_at_preserves_supplied_update_timestamp() {
+    let s = PolicyStore::new();
+    let raw = r#"{"version":1,"rules":[]}"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    s.set_at(doc, raw.to_string(), 42);
+    assert_eq!(s.raw().unwrap(), raw);
+    assert_eq!(s.updated_at(), Some(42));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_set_wakes_parked_long_pollers() {
     let s = Arc::new(PolicyStore::new());

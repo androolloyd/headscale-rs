@@ -13,7 +13,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{DerpMap, WireState};
+use crate::policy::SshPolicyNode;
+
+use super::{
+    DerpMap, MachineRecord, WireState,
+    wire::{SshPolicy, stable_id_from_key},
+};
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
@@ -214,6 +219,19 @@ pub async fn handle_debug_filter(State(state): State<WireState>) -> Response {
     }
 }
 
+pub async fn handle_debug_ssh(State(state): State<WireState>) -> Response {
+    let policies = debug_ssh_policies(&state);
+    match serde_json::to_string_pretty(&policies) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
 pub async fn handle_windows(
     State(state): State<WireState>,
     headers: HeaderMap,
@@ -395,6 +413,44 @@ fn debug_registration_cache_info() -> DebugRegistrationCacheInfo {
         cleanup: "20m0s".to_string(),
         status: "active".to_string(),
     }
+}
+
+fn debug_ssh_policies(state: &WireState) -> BTreeMap<String, Option<SshPolicy>> {
+    let snapshot = state.machines.snapshot();
+    let nodes = ssh_policy_nodes_from_snapshot(&snapshot);
+
+    snapshot
+        .iter()
+        .map(|(node_key, rec)| {
+            let id = stable_id_from_key(node_key);
+            let policy = state.policy.ssh_policy_for(&nodes, id);
+            (
+                format!(
+                    "id:{id} hostname:{} givenname:{}",
+                    rec.hostname, rec.hostname
+                ),
+                policy,
+            )
+        })
+        .collect()
+}
+
+fn ssh_policy_nodes_from_snapshot(
+    snapshot: &std::collections::HashMap<String, MachineRecord>,
+) -> Vec<SshPolicyNode> {
+    snapshot
+        .iter()
+        .map(|(node_key, rec)| SshPolicyNode {
+            id: stable_id_from_key(node_key),
+            user: if rec.user.is_empty() {
+                None
+            } else {
+                Some(rec.user.clone())
+            },
+            addrs: vec![rec.ipv4.to_string()],
+            tags: rec.forced_tags.clone(),
+        })
+        .collect()
 }
 
 fn control_url(configured: Option<&str>, headers: &HeaderMap, uri: &Uri) -> String {
@@ -1071,6 +1127,107 @@ mod tests {
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["First"], 22);
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["Last"], 22);
         assert_eq!(parsed[0]["IPProto"], serde_json::json!([6]));
+    }
+
+    #[tokio::test]
+    async fn debug_ssh_returns_empty_json_object_without_nodes() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/ssh")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn debug_ssh_returns_policies_per_node() {
+        let (state, _dir) = fixture_state();
+        let server = "debug-ssh-server";
+        let admin = "debug-ssh-admin";
+
+        let mut server_rec = record(server, 11, &[], &[]);
+        server_rec.hostname = "server".to_string();
+        server_rec.user = "alice".to_string();
+        server_rec.forced_tags = vec!["tag:server".to_string()];
+        state.machines.upsert(server.to_string(), server_rec);
+
+        let mut admin_rec = record(admin, 12, &[], &[]);
+        admin_rec.hostname = "admin".to_string();
+        admin_rec.user = "bob".to_string();
+        state.machines.upsert(admin.to_string(), admin_rec);
+
+        let raw_policy = r#"{
+            "groups": {"group:admins": ["bob@"]},
+            "tagOwners": {"tag:server": ["alice@"]},
+            "acls": [],
+            "ssh": [{
+                "action": "check",
+                "checkPeriod": "24h",
+                "src": ["group:admins"],
+                "dst": ["tag:server"],
+                "users": ["autogroup:nonroot", "root"]
+            }]
+        }"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/ssh")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let server_key = format!(
+            "id:{} hostname:server givenname:server",
+            stable_id_from_key(server)
+        );
+        let admin_key = format!(
+            "id:{} hostname:admin givenname:admin",
+            stable_id_from_key(admin)
+        );
+
+        let server_policy = parsed.get(&server_key).unwrap();
+        let admin_policy = parsed.get(&admin_key).unwrap();
+
+        assert_eq!(server_policy["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            server_policy["rules"][0]["principals"][0]["nodeIP"],
+            "100.64.0.12"
+        );
+        assert_eq!(server_policy["rules"][0]["sshUsers"]["*"], "=");
+        assert_eq!(
+            server_policy["rules"][0]["action"]["sessionDuration"],
+            24_i64 * 60 * 60 * 1_000_000_000
+        );
+        assert!(admin_policy["rules"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

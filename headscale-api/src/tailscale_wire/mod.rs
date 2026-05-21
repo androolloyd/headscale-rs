@@ -979,6 +979,7 @@ pub fn router(state: WireState) -> Router {
             get(basic_handlers::handle_debug_registration_cache),
         )
         .route("/debug/filter", get(basic_handlers::handle_debug_filter))
+        .route("/debug/ssh", get(basic_handlers::handle_debug_ssh))
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

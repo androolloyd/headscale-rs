@@ -1066,6 +1066,7 @@ pub fn router(state: WireState) -> Router {
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),
         )
+        .route("/debug/config", get(basic_handlers::handle_debug_config))
         .route("/debug/routes", get(basic_handlers::handle_debug_routes))
         .route("/debug/derp", get(basic_handlers::handle_debug_derp))
         .route(

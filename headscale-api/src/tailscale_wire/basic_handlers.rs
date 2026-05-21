@@ -218,6 +218,302 @@ pub struct DebugStringInfo {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugConfigInfo {
+    #[serde(rename = "ServerURL")]
+    pub server_url: String,
+    #[serde(rename = "Addr")]
+    pub addr: String,
+    #[serde(rename = "MetricsAddr")]
+    pub metrics_addr: String,
+    #[serde(rename = "GRPCAddr")]
+    pub grpc_addr: String,
+    #[serde(rename = "GRPCAllowInsecure")]
+    pub grpc_allow_insecure: bool,
+    #[serde(rename = "EphemeralNodeInactivityTimeout")]
+    pub ephemeral_node_inactivity_timeout: i64,
+    #[serde(rename = "PrefixV4")]
+    pub prefix_v4: Option<String>,
+    #[serde(rename = "PrefixV6")]
+    pub prefix_v6: Option<String>,
+    #[serde(rename = "IPAllocation")]
+    pub ip_allocation: String,
+    #[serde(rename = "NoisePrivateKeyPath")]
+    pub noise_private_key_path: String,
+    #[serde(rename = "BaseDomain")]
+    pub base_domain: String,
+    #[serde(rename = "Log")]
+    pub log: DebugLogConfig,
+    #[serde(rename = "DisableUpdateCheck")]
+    pub disable_update_check: bool,
+    #[serde(rename = "Database")]
+    pub database: DebugDatabaseConfig,
+    #[serde(rename = "DERP")]
+    pub derp: DebugDerpConfig,
+    #[serde(rename = "TLS")]
+    pub tls: DebugTlsConfig,
+    #[serde(rename = "ACMEURL")]
+    pub acme_url: String,
+    #[serde(rename = "ACMEEmail")]
+    pub acme_email: String,
+    #[serde(rename = "DNSConfig")]
+    pub dns_config: DebugDnsConfig,
+    #[serde(rename = "TailcfgDNSConfig")]
+    pub tailcfg_dns_config: serde_json::Value,
+    #[serde(rename = "UnixSocket")]
+    pub unix_socket: String,
+    #[serde(rename = "UnixSocketPermission")]
+    pub unix_socket_permission: u32,
+    #[serde(rename = "OIDC")]
+    pub oidc: DebugOidcConfig,
+    #[serde(rename = "LogTail")]
+    pub log_tail: DebugEnabledConfig,
+    #[serde(rename = "RandomizeClientPort")]
+    pub randomize_client_port: bool,
+    #[serde(rename = "Taildrop")]
+    pub taildrop: DebugEnabledConfig,
+    #[serde(rename = "CLI")]
+    pub cli: DebugCliConfig,
+    #[serde(rename = "Policy")]
+    pub policy: DebugPolicyConfig,
+    #[serde(rename = "Tuning")]
+    pub tuning: DebugTuningConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugLogConfig {
+    #[serde(rename = "Format")]
+    pub format: String,
+    #[serde(rename = "Level")]
+    pub level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugDatabaseConfig {
+    #[serde(rename = "Type")]
+    pub database_type: String,
+    #[serde(rename = "Debug")]
+    pub debug: bool,
+    #[serde(rename = "Gorm")]
+    pub gorm: DebugGormConfig,
+    #[serde(rename = "Sqlite")]
+    pub sqlite: DebugSqliteConfig,
+    #[serde(rename = "Postgres")]
+    pub postgres: DebugPostgresConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugGormConfig {
+    #[serde(rename = "Debug")]
+    pub debug: bool,
+    #[serde(rename = "SlowThreshold")]
+    pub slow_threshold: i64,
+    #[serde(rename = "SkipErrRecordNotFound")]
+    pub skip_err_record_not_found: bool,
+    #[serde(rename = "ParameterizedQueries")]
+    pub parameterized_queries: bool,
+    #[serde(rename = "PrepareStmt")]
+    pub prepare_stmt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugSqliteConfig {
+    #[serde(rename = "Path")]
+    pub path: String,
+    #[serde(rename = "WriteAheadLog")]
+    pub write_ahead_log: bool,
+    #[serde(rename = "WALAutoCheckPoint")]
+    pub wal_auto_check_point: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugPostgresConfig {
+    #[serde(rename = "Host")]
+    pub host: String,
+    #[serde(rename = "Port")]
+    pub port: i32,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "User")]
+    pub user: String,
+    #[serde(rename = "Pass")]
+    pub pass: String,
+    #[serde(rename = "Ssl")]
+    pub ssl: String,
+    #[serde(rename = "MaxOpenConnections")]
+    pub max_open_connections: i32,
+    #[serde(rename = "MaxIdleConnections")]
+    pub max_idle_connections: i32,
+    #[serde(rename = "ConnMaxIdleTimeSecs")]
+    pub conn_max_idle_time_secs: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugDerpConfig {
+    #[serde(rename = "ServerEnabled")]
+    pub server_enabled: bool,
+    #[serde(rename = "AutomaticallyAddEmbeddedDerpRegion")]
+    pub automatically_add_embedded_derp_region: bool,
+    #[serde(rename = "ServerRegionID")]
+    pub server_region_id: i32,
+    #[serde(rename = "ServerRegionCode")]
+    pub server_region_code: String,
+    #[serde(rename = "ServerRegionName")]
+    pub server_region_name: String,
+    #[serde(rename = "ServerPrivateKeyPath")]
+    pub server_private_key_path: String,
+    #[serde(rename = "ServerVerifyClients")]
+    pub server_verify_clients: bool,
+    #[serde(rename = "STUNAddr")]
+    pub stun_addr: String,
+    #[serde(rename = "URLs")]
+    pub urls: Vec<String>,
+    #[serde(rename = "Paths")]
+    pub paths: Vec<String>,
+    #[serde(rename = "DERPMap")]
+    pub derp_map: serde_json::Value,
+    #[serde(rename = "AutoUpdate")]
+    pub auto_update: bool,
+    #[serde(rename = "UpdateFrequency")]
+    pub update_frequency: i64,
+    #[serde(rename = "IPv4")]
+    pub ipv4: String,
+    #[serde(rename = "IPv6")]
+    pub ipv6: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugTlsConfig {
+    #[serde(rename = "CertPath")]
+    pub cert_path: String,
+    #[serde(rename = "KeyPath")]
+    pub key_path: String,
+    #[serde(rename = "LetsEncrypt")]
+    pub lets_encrypt: DebugLetsEncryptConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugLetsEncryptConfig {
+    #[serde(rename = "Listen")]
+    pub listen: String,
+    #[serde(rename = "Hostname")]
+    pub hostname: String,
+    #[serde(rename = "CacheDir")]
+    pub cache_dir: String,
+    #[serde(rename = "ChallengeType")]
+    pub challenge_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugDnsConfig {
+    #[serde(rename = "MagicDNS")]
+    pub magic_dns: bool,
+    #[serde(rename = "BaseDomain")]
+    pub base_domain: String,
+    #[serde(rename = "OverrideLocalDNS")]
+    pub override_local_dns: bool,
+    #[serde(rename = "Nameservers")]
+    pub nameservers: DebugNameservers,
+    #[serde(rename = "SearchDomains")]
+    pub search_domains: Vec<String>,
+    #[serde(rename = "ExtraRecords")]
+    pub extra_records: Vec<serde_json::Value>,
+    #[serde(rename = "ExtraRecordsPath")]
+    pub extra_records_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNameservers {
+    #[serde(rename = "Global")]
+    pub global: Vec<String>,
+    #[serde(rename = "Split")]
+    pub split: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugOidcConfig {
+    #[serde(rename = "OnlyStartIfOIDCIsAvailable")]
+    pub only_start_if_oidc_is_available: bool,
+    #[serde(rename = "Issuer")]
+    pub issuer: String,
+    #[serde(rename = "ClientID")]
+    pub client_id: String,
+    #[serde(rename = "ClientSecret")]
+    pub client_secret: String,
+    #[serde(rename = "Scope")]
+    pub scope: Vec<String>,
+    #[serde(rename = "ExtraParams")]
+    pub extra_params: BTreeMap<String, String>,
+    #[serde(rename = "AllowedDomains")]
+    pub allowed_domains: Vec<String>,
+    #[serde(rename = "AllowedUsers")]
+    pub allowed_users: Vec<String>,
+    #[serde(rename = "AllowedGroups")]
+    pub allowed_groups: Vec<String>,
+    #[serde(rename = "EmailVerifiedRequired")]
+    pub email_verified_required: bool,
+    #[serde(rename = "Expiry")]
+    pub expiry: i64,
+    #[serde(rename = "UseExpiryFromToken")]
+    pub use_expiry_from_token: bool,
+    #[serde(rename = "PKCE")]
+    pub pkce: DebugPkceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugPkceConfig {
+    #[serde(rename = "Enabled")]
+    pub enabled: bool,
+    #[serde(rename = "Method")]
+    pub method: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugEnabledConfig {
+    #[serde(rename = "Enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugCliConfig {
+    #[serde(rename = "Address")]
+    pub address: String,
+    #[serde(rename = "APIKey")]
+    pub api_key: String,
+    #[serde(rename = "Timeout")]
+    pub timeout: i64,
+    #[serde(rename = "Insecure")]
+    pub insecure: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugPolicyConfig {
+    #[serde(rename = "Path")]
+    pub path: String,
+    #[serde(rename = "Mode")]
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugTuningConfig {
+    #[serde(rename = "NotifierSendTimeout")]
+    pub notifier_send_timeout: i64,
+    #[serde(rename = "BatchChangeDelay")]
+    pub batch_change_delay: i64,
+    #[serde(rename = "NodeMapSessionBufferedChanSize")]
+    pub node_map_session_buffered_chan_size: i32,
+    #[serde(rename = "BatcherWorkers")]
+    pub batcher_workers: usize,
+    #[serde(rename = "RegisterCacheCleanup")]
+    pub register_cache_cleanup: i64,
+    #[serde(rename = "RegisterCacheExpiration")]
+    pub register_cache_expiration: i64,
+    #[serde(rename = "NodeStoreBatchSize")]
+    pub node_store_batch_size: i32,
+    #[serde(rename = "NodeStoreBatchTimeout")]
+    pub node_store_batch_timeout: i64,
+}
+
 pub async fn handle_debug_overview(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let info = debug_overview_info(&state);
     if wants_json(&headers) {
@@ -237,6 +533,18 @@ pub async fn handle_debug_overview(State(state): State<WireState>, headers: Head
             debug_overview_string(&info),
         )
             .into_response()
+    }
+}
+
+pub async fn handle_debug_config(State(state): State<WireState>) -> Response {
+    match serde_json::to_string_pretty(&debug_config_info(&state)) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
 }
 
@@ -525,6 +833,169 @@ fn debug_derp_configured(derp_map: &DerpMap) -> bool {
 
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+
+fn debug_config_info(state: &WireState) -> DebugConfigInfo {
+    let dns_spec = state.dns.spec();
+    let tailcfg_dns_config =
+        serde_json::to_value(state.dns.build(&[])).unwrap_or(serde_json::Value::Null);
+    let derp_map = serde_json::to_value(state.derp_map.as_ref()).unwrap_or(serde_json::Value::Null);
+
+    DebugConfigInfo {
+        server_url: state.public_control_url.clone().unwrap_or_default(),
+        addr: String::new(),
+        metrics_addr: String::new(),
+        grpc_addr: ":50443".to_string(),
+        grpc_allow_insecure: false,
+        ephemeral_node_inactivity_timeout: duration_nanos(std::time::Duration::from_secs(120)),
+        prefix_v4: None,
+        prefix_v6: None,
+        ip_allocation: "sequential".to_string(),
+        noise_private_key_path: String::new(),
+        base_domain: dns_spec.base_domain.clone(),
+        log: DebugLogConfig {
+            format: "text".to_string(),
+            level: "info".to_string(),
+        },
+        disable_update_check: false,
+        database: DebugDatabaseConfig {
+            database_type: String::new(),
+            debug: false,
+            gorm: DebugGormConfig {
+                debug: false,
+                slow_threshold: 0,
+                skip_err_record_not_found: false,
+                parameterized_queries: false,
+                prepare_stmt: false,
+            },
+            sqlite: DebugSqliteConfig {
+                path: String::new(),
+                write_ahead_log: true,
+                wal_auto_check_point: 1000,
+            },
+            postgres: DebugPostgresConfig {
+                host: String::new(),
+                port: 0,
+                name: String::new(),
+                user: String::new(),
+                pass: String::new(),
+                ssl: "false".to_string(),
+                max_open_connections: 10,
+                max_idle_connections: 10,
+                conn_max_idle_time_secs: 3600,
+            },
+        },
+        derp: DebugDerpConfig {
+            server_enabled: false,
+            automatically_add_embedded_derp_region: true,
+            server_region_id: 0,
+            server_region_code: String::new(),
+            server_region_name: String::new(),
+            server_private_key_path: String::new(),
+            server_verify_clients: true,
+            stun_addr: String::new(),
+            urls: Vec::new(),
+            paths: Vec::new(),
+            derp_map,
+            auto_update: false,
+            update_frequency: duration_nanos(std::time::Duration::from_secs(3 * 60 * 60)),
+            ipv4: String::new(),
+            ipv6: String::new(),
+        },
+        tls: DebugTlsConfig {
+            cert_path: String::new(),
+            key_path: String::new(),
+            lets_encrypt: DebugLetsEncryptConfig {
+                listen: String::new(),
+                hostname: String::new(),
+                cache_dir: "/var/www/.cache".to_string(),
+                challenge_type: "HTTP-01".to_string(),
+            },
+        },
+        acme_url: String::new(),
+        acme_email: String::new(),
+        dns_config: DebugDnsConfig {
+            magic_dns: dns_spec.magic_dns,
+            base_domain: dns_spec.base_domain.clone(),
+            // headscale-go's default is true. This field affects
+            // whether global resolvers land in Resolvers vs
+            // FallbackResolvers; headscale-rs exposes
+            // `fallback_nameservers` separately, so preserve the Go
+            // config default for the debug shape.
+            override_local_dns: true,
+            nameservers: DebugNameservers {
+                global: dns_spec.nameservers.clone(),
+                split: dns_spec
+                    .restricted_nameservers
+                    .iter()
+                    .map(|(suffix, resolvers)| (suffix.clone(), resolvers.clone()))
+                    .collect(),
+            },
+            search_domains: dns_spec.search_domains.clone(),
+            extra_records: Vec::new(),
+            extra_records_path: dns_spec
+                .extra_records
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        },
+        tailcfg_dns_config,
+        unix_socket: "/var/run/headscale/headscale.sock".to_string(),
+        unix_socket_permission: 0o770,
+        oidc: DebugOidcConfig {
+            only_start_if_oidc_is_available: true,
+            issuer: String::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            scope: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
+            extra_params: BTreeMap::new(),
+            allowed_domains: Vec::new(),
+            allowed_users: Vec::new(),
+            allowed_groups: Vec::new(),
+            email_verified_required: true,
+            expiry: duration_nanos(std::time::Duration::from_secs(180 * 24 * 60 * 60)),
+            use_expiry_from_token: false,
+            pkce: DebugPkceConfig {
+                enabled: false,
+                method: "S256".to_string(),
+            },
+        },
+        log_tail: DebugEnabledConfig { enabled: false },
+        randomize_client_port: false,
+        taildrop: DebugEnabledConfig { enabled: true },
+        cli: DebugCliConfig {
+            address: String::new(),
+            api_key: String::new(),
+            timeout: duration_nanos(std::time::Duration::from_secs(5)),
+            insecure: false,
+        },
+        policy: DebugPolicyConfig {
+            path: String::new(),
+            mode: "file".to_string(),
+        },
+        tuning: DebugTuningConfig {
+            notifier_send_timeout: duration_nanos(std::time::Duration::from_millis(800)),
+            batch_change_delay: duration_nanos(std::time::Duration::from_millis(800)),
+            node_map_session_buffered_chan_size: 30,
+            batcher_workers: default_batcher_workers(),
+            register_cache_cleanup: 0,
+            register_cache_expiration: 0,
+            node_store_batch_size: 100,
+            node_store_batch_timeout: duration_nanos(std::time::Duration::from_millis(500)),
+        },
+    }
+}
+
+fn duration_nanos(duration: std::time::Duration) -> i64 {
+    i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
+}
+
+fn default_batcher_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() * 3 / 4).max(1))
 }
 
 fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNode> {
@@ -1526,6 +1997,124 @@ mod tests {
         assert_eq!(parsed["derp"]["configured"], true);
         assert_eq!(parsed["derp"]["regions"], 1);
         assert_eq!(parsed["primary_routes"], 1);
+    }
+
+    #[tokio::test]
+    async fn debug_config_returns_headscale_go_top_level_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/config")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        for key in [
+            "ServerURL",
+            "Addr",
+            "MetricsAddr",
+            "GRPCAddr",
+            "GRPCAllowInsecure",
+            "EphemeralNodeInactivityTimeout",
+            "PrefixV4",
+            "PrefixV6",
+            "IPAllocation",
+            "NoisePrivateKeyPath",
+            "BaseDomain",
+            "Log",
+            "Database",
+            "DERP",
+            "TLS",
+            "DNSConfig",
+            "TailcfgDNSConfig",
+            "UnixSocket",
+            "UnixSocketPermission",
+            "OIDC",
+            "LogTail",
+            "Taildrop",
+            "CLI",
+            "Policy",
+            "Tuning",
+        ] {
+            assert!(parsed.get(key).is_some(), "missing config field {key}");
+        }
+        assert_eq!(parsed["GRPCAddr"], ":50443");
+        assert_eq!(parsed["GRPCAllowInsecure"], false);
+        assert_eq!(parsed["EphemeralNodeInactivityTimeout"], 120_000_000_000i64);
+        assert!(parsed["PrefixV4"].is_null());
+        assert!(parsed["PrefixV6"].is_null());
+        assert_eq!(parsed["IPAllocation"], "sequential");
+        assert_eq!(parsed["DNSConfig"]["MagicDNS"], false);
+        assert_eq!(parsed["DNSConfig"]["OverrideLocalDNS"], true);
+        assert_eq!(parsed["Policy"]["Mode"], "file");
+        assert_eq!(parsed["Tuning"]["NodeStoreBatchSize"], 100);
+        assert_eq!(parsed["UnixSocketPermission"], 0o770);
+    }
+
+    #[tokio::test]
+    async fn debug_config_reflects_runtime_server_url_dns_and_derp() {
+        let (mut state, _dir) = fixture_state();
+        state.public_control_url = Some("https://headscale.example".to_string());
+        state.derp_map = Arc::new(derp_fixture());
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            magic_dns: true,
+            base_domain: "tailnet.example".to_string(),
+            nameservers: vec!["1.1.1.1".to_string()],
+            restricted_nameservers: HashMap::from([(
+                "corp.example".to_string(),
+                vec!["10.0.0.53".to_string()],
+            )]),
+            search_domains: vec!["corp.example".to_string()],
+            ..crate::dns::DnsConfigSpec::default()
+        });
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/config")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["ServerURL"], "https://headscale.example");
+        assert_eq!(parsed["BaseDomain"], "tailnet.example");
+        assert_eq!(parsed["DNSConfig"]["MagicDNS"], true);
+        assert_eq!(parsed["DNSConfig"]["BaseDomain"], "tailnet.example");
+        assert_eq!(
+            parsed["DNSConfig"]["Nameservers"]["Global"],
+            serde_json::json!(["1.1.1.1"])
+        );
+        assert_eq!(
+            parsed["DNSConfig"]["Nameservers"]["Split"]["corp.example"],
+            serde_json::json!(["10.0.0.53"])
+        );
+        assert_eq!(
+            parsed["TailcfgDNSConfig"]["Domains"],
+            serde_json::json!(["tailnet.example", "corp.example"])
+        );
+        assert_eq!(
+            parsed["DERP"]["DERPMap"]["Regions"]["1"]["RegionName"],
+            "Test region"
+        );
     }
 
     #[tokio::test]

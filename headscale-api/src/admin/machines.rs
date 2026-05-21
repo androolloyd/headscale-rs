@@ -55,7 +55,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::tailscale_wire::MachineRegistry;
+use crate::policy::PolicyStore;
+use crate::tailscale_wire::{MachineRegistry, routes::auto_approved_routes_for_node};
 
 use super::auth::now_unix;
 use super::users::UserAdmin;
@@ -169,6 +170,40 @@ pub trait MachineAdmin: Send + Sync {
     /// Mark a machine deleted. Same sidecar story as `expire`. The
     /// record disappears from `list()` once flagged.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
+}
+
+/// Re-run policy auto-approvers for every visible machine.
+///
+/// Existing approved routes are preserved; newly advertised routes are
+/// approved only when the loaded policy allows the node to advertise
+/// them. This mirrors headscale-go policy reload behaviour.
+pub(crate) async fn apply_policy_auto_approvals(
+    policy: &PolicyStore,
+    machines: &dyn MachineAdmin,
+) -> Result<usize, MachineAdminError> {
+    let mut changed = 0usize;
+    for node in machines.list().await {
+        let user = (!node.user.is_empty()).then_some(node.user.as_str());
+        let approved = auto_approved_routes_for_node(
+            policy,
+            &node.ipv4,
+            user,
+            &node.tags,
+            &node.approved_routes,
+            &node.routes,
+        )
+        .map_err(|e| {
+            MachineAdminError::BadRequest(format!(
+                "auto approving routes for node {}: {e}",
+                node.id
+            ))
+        })?;
+        if approved != node.approved_routes {
+            machines.set_approved_routes(&node.id, approved).await?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 /// Default impl: adapts [`MachineRegistry`] for the admin panel.

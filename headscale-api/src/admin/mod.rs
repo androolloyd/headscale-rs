@@ -1250,11 +1250,23 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
         Ok(doc) => {
             let n_rules = doc.rules.len();
             s.policy.set(doc, raw);
+            let auto_approved_nodes =
+                match machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await {
+                    Ok(count) => count,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                };
             (
                 StatusCode::OK,
                 Json(json!({
                     "applied": true,
                     "rules": n_rules,
+                    "autoApprovedNodes": auto_approved_nodes,
                 })),
             )
                 .into_response()

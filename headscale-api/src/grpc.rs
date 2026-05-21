@@ -786,6 +786,12 @@ pub mod upstream {
             let doc = parse_hujson_policy(&policy)
                 .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
             self.policy.set(doc, policy.clone());
+            crate::admin::machines::apply_policy_auto_approvals(
+                &self.policy,
+                self.machines.as_ref(),
+            )
+            .await
+            .map_err(machine_error_to_status)?;
             Ok(Response::new(SetPolicyResponse {
                 policy,
                 updated_at: self.policy.updated_at().map(unix_to_timestamp),
@@ -2162,6 +2168,37 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_auto_approves_existing_node_routes() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "8d".repeat(32);
+        let mut rec = MachineRecord::new_at(
+            Utc::now(),
+            node_key.clone(),
+            "8e".repeat(32),
+            "alice".into(),
+            "router".into(),
+            Ipv4Addr::new(100, 64, 0, 8),
+            false,
+        );
+        rec.available_routes = vec!["10.88.1.0/24".into(), "10.99.1.0/24".into()];
+        machines.upsert(node_key.clone(), rec);
+
+        let raw = r#"{
+          "auto_approvers": {
+            "routes": {"10.88.0.0/16": ["alice@"]}
+          }
+        }"#;
+        service
+            .set_policy(Request::new(SetPolicyRequest { policy: raw.into() }))
+            .await
+            .unwrap();
+
+        let rec = machines.get(&node_key).expect("node remains registered");
+        assert_eq!(rec.available_routes, vec!["10.88.1.0/24", "10.99.1.0/24"]);
+        assert_eq!(rec.approved_routes, vec!["10.88.1.0/24"]);
     }
 
     #[tokio::test]

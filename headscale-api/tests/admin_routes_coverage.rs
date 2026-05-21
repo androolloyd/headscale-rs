@@ -431,6 +431,50 @@ async fn api_policy_put_then_get_round_trips_raw() {
 }
 
 #[tokio::test]
+async fn api_policy_put_auto_approves_existing_node_routes() {
+    let policy = PolicyStore::new();
+    let reg = Arc::new(MachineRegistry::new());
+    let node_key = "7a".repeat(32);
+    let mut rec = MachineRecord::new_at(
+        chrono::Utc::now(),
+        node_key.clone(),
+        "7b".repeat(32),
+        "alice".into(),
+        "router".into(),
+        std::net::Ipv4Addr::new(100, 64, 0, 7),
+        false,
+    );
+    rec.available_routes = vec!["10.77.1.0/24".into(), "10.99.1.0/24".into()];
+    reg.upsert(node_key.clone(), rec);
+    let state = AdminState::builder()
+        .bearer_token(BEARER)
+        .users(UserRegistry::new())
+        .machines(Arc::new(WireMachineAdmin::new(reg.clone())))
+        .preauth(Arc::new(InMemoryPreauthAdmin::new()))
+        .policy(policy)
+        .build();
+    let app = router(state);
+    let raw = r#"{
+        "version": 1,
+        "auto_approvers": {
+            "routes": {"10.77.0.0/16": ["alice@"]}
+        }
+    }"#;
+
+    let resp = app
+        .oneshot(req_put_text("/api/v1/policy", raw, Some(BEARER)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let b = body(resp).await;
+    assert!(b.contains(r#""autoApprovedNodes":1"#));
+
+    let rec = reg.get(&node_key).expect("node still registered");
+    assert_eq!(rec.available_routes, vec!["10.77.1.0/24", "10.99.1.0/24"]);
+    assert_eq!(rec.approved_routes, vec!["10.77.1.0/24"]);
+}
+
+#[tokio::test]
 async fn api_policy_put_invalid_hujson_returns_400_and_preserves_existing() {
     let app = router(fixture_state());
     // First: load a known-good policy.

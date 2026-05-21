@@ -21,6 +21,7 @@ use super::{
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
+const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH not set";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 
@@ -219,6 +220,25 @@ pub async fn handle_debug_filter(State(state): State<WireState>) -> Response {
     }
 }
 
+pub async fn handle_debug_policy(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    let Some(policy) = state.policy.raw() else {
+        return http_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+    };
+
+    let content_type = if wants_json(&headers) {
+        "application/json"
+    } else {
+        "text/plain"
+    };
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        policy,
+    )
+        .into_response()
+}
+
 pub async fn handle_debug_ssh(State(state): State<WireState>) -> Response {
     let policies = debug_ssh_policies(&state);
     match serde_json::to_string_pretty(&policies) {
@@ -230,6 +250,14 @@ pub async fn handle_debug_ssh(State(state): State<WireState>) -> Response {
             .into_response(),
         Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
+}
+
+pub async fn handle_debug_mapresponses() -> Response {
+    // headscale-go returns this exact body when
+    // HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH is unset. headscale-rs does
+    // not yet implement map-response dump files, so expose the same
+    // disabled state instead of leaving the endpoint missing.
+    (StatusCode::OK, MAPRESPONSES_DEBUG_DISABLED_BODY).into_response()
 }
 
 pub async fn handle_windows(
@@ -1127,6 +1155,93 @@ mod tests {
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["First"], 22);
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["Last"], 22);
         assert_eq!(parsed[0]["IPProto"], serde_json::json!([6]));
+    }
+
+    #[tokio::test]
+    async fn debug_policy_returns_loaded_raw_policy_as_text_by_default() {
+        let (state, _dir) = fixture_state();
+        let raw_policy = r#"{
+          // keep comments and whitespace byte-for-byte
+          "version": 1,
+          "rules": [
+            {"action": "accept", "src": ["*"], "dst": ["*"], "ports": ["*/*"]},
+          ],
+        }"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/policy")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], raw_policy.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn debug_policy_honours_application_json_accept_header() {
+        let (state, _dir) = fixture_state();
+        let raw_policy = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/policy")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], raw_policy.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn debug_mapresponses_matches_headscale_go_disabled_state() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/mapresponses")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], MAPRESPONSES_DEBUG_DISABLED_BODY.as_bytes());
     }
 
     #[tokio::test]

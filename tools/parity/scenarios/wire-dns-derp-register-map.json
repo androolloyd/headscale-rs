@@ -45,7 +45,7 @@
     },
     "register_request": {
       "NodeKey": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
-      "Auth": { "AuthKey": "octrapreauth-test" },
+      "Auth": { "AuthKey": "hskey-auth-test" },
       "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
       "Followup": "auth"
     },

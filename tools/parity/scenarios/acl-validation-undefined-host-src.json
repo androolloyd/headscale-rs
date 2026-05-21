@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-undefined-host-src",
+  "expect_policy_error": "Host \"missinghost\" is not defined",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["missinghost"],
+        "dst": ["autogroup:internet:*"]
+      }
+    ]
+  }
+}

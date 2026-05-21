@@ -2,139 +2,122 @@ syntax = "proto3";
 
 package headscale.v1;
 
-import "common.proto";
+import "google/protobuf/timestamp.proto";
+import "preauthkey.proto";
+import "user.proto";
 
-// Node management service
-service NodeService {
-  // Register a new node in the mesh
-  rpc Register(RegisterRequest) returns (RegisterResponse);
-
-  // Update node information
-  rpc UpdateNode(UpdateNodeRequest) returns (Node);
-
-  // Get node by ID
-  rpc GetNode(GetNodeRequest) returns (Node);
-
-  // List all nodes in the mesh
-  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
-
-  // Delete a node
-  rpc DeleteNode(DeleteNodeRequest) returns (Status);
-
-  // Heartbeat to maintain online status
-  rpc Heartbeat(HeartbeatRequest) returns (Status);
-
-  // Get peers for a node
-  rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+enum RegisterMethod {
+  REGISTER_METHOD_UNSPECIFIED = 0;
+  REGISTER_METHOD_AUTH_KEY = 1;
+  REGISTER_METHOD_CLI = 2;
+  REGISTER_METHOD_OIDC = 3;
 }
 
-// Node capabilities
-message NodeCapabilities {
-  bool relay = 1;
-  bool inference = 2;
-  bool storage = 3;
-  bool compute = 4;
-  bool seed = 5;
-}
-
-// Node in the mesh
 message Node {
-  string id = 1;  // DID
-  string name = 2;
-  string wg_pubkey = 3;
-  repeated string addresses = 4;  // IP addresses
-  repeated string endpoints = 5;
-  uint64 last_seen = 6;
-  NodeCapabilities capabilities = 7;
-  bool online = 8;
+  reserved 9;
+  uint64 id = 1;
+  string machine_key = 2;
+  string node_key = 3;
+  string disco_key = 4;
+  repeated string ip_addresses = 5;
+  string name = 6;
+  User user = 7;
+  google.protobuf.Timestamp last_seen = 8;
+  google.protobuf.Timestamp expiry = 10;
+  PreAuthKey pre_auth_key = 11;
+  google.protobuf.Timestamp created_at = 12;
+  RegisterMethod register_method = 13;
+  reserved 14 to 20;
+  string given_name = 21;
+  bool online = 22;
+  repeated string approved_routes = 23;
+  repeated string available_routes = 24;
+  repeated string subnet_routes = 25;
+  repeated string tags = 26;
 }
 
-// Node registration request
-message RegisterRequest {
-  string id = 1;  // DID
-  string name = 2;
-  string wg_pubkey = 3;
-  repeated string endpoints = 4;
-  NodeCapabilities capabilities = 5;
+message RegisterNodeRequest {
+  string user = 1;
+  string key = 2;
 }
 
-// Node registration response
-message RegisterResponse {
-  repeated string addresses = 1;
-  repeated PeerInfo peers = 2;
-  optional DerpMap derp_map = 3;
+message RegisterNodeResponse {
+  Node node = 1;
 }
 
-// Peer information
-message PeerInfo {
-  string id = 1;
-  string wg_pubkey = 2;
-  repeated string addresses = 3;
-  repeated string endpoints = 4;
-  repeated string allowed_ips = 5;
-}
-
-// DERP server map
-message DerpMap {
-  repeated DerpRegion regions = 1;
-}
-
-message DerpRegion {
-  uint32 id = 1;
-  string name = 2;
-  repeated DerpNode nodes = 3;
-}
-
-message DerpNode {
-  string name = 1;
-  string url = 2;
-  uint32 stun_port = 3;
-}
-
-// Update node request
-message UpdateNodeRequest {
-  string id = 1;
-  optional string name = 2;
-  optional string wg_pubkey = 3;
-  repeated string endpoints = 4;
-  optional NodeCapabilities capabilities = 5;
-}
-
-// Get node request
 message GetNodeRequest {
-  string id = 1;
+  uint64 node_id = 1;
 }
 
-// List nodes request
+message GetNodeResponse {
+  Node node = 1;
+}
+
+message SetTagsRequest {
+  uint64 node_id = 1;
+  repeated string tags = 2;
+}
+
+message SetTagsResponse {
+  Node node = 1;
+}
+
+message SetApprovedRoutesRequest {
+  uint64 node_id = 1;
+  repeated string routes = 2;
+}
+
+message SetApprovedRoutesResponse {
+  Node node = 1;
+}
+
+message DeleteNodeRequest {
+  uint64 node_id = 1;
+}
+
+message DeleteNodeResponse {}
+
+message ExpireNodeRequest {
+  uint64 node_id = 1;
+  google.protobuf.Timestamp expiry = 2;
+}
+
+message ExpireNodeResponse {
+  Node node = 1;
+}
+
+message RenameNodeRequest {
+  uint64 node_id = 1;
+  string new_name = 2;
+}
+
+message RenameNodeResponse {
+  Node node = 1;
+}
+
 message ListNodesRequest {
-  optional bool online_only = 1;
-  optional uint32 limit = 2;
-  optional uint32 offset = 3;
+  string user = 1;
 }
 
-// List nodes response
 message ListNodesResponse {
   repeated Node nodes = 1;
-  uint32 total = 2;
 }
 
-// Delete node request
-message DeleteNodeRequest {
-  string id = 1;
+message DebugCreateNodeRequest {
+  string user = 1;
+  string key = 2;
+  string name = 3;
+  repeated string routes = 4;
 }
 
-// Heartbeat request
-message HeartbeatRequest {
-  string id = 1;
-  repeated string endpoints = 2;
+message DebugCreateNodeResponse {
+  Node node = 1;
 }
 
-// Get peers request
-message GetPeersRequest {
-  string id = 1;
+message BackfillNodeIPsRequest {
+  bool confirmed = 1;
 }
 
-// Get peers response
-message GetPeersResponse {
-  repeated PeerInfo peers = 1;
+message BackfillNodeIPsResponse {
+  repeated string changes = 1;
 }

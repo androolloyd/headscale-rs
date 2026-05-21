@@ -1,0 +1,14 @@
+{
+  "name": "ssh-validation-wildcard-dst",
+  "expect_policy_error": "wildcard (*) is not supported as SSH destination",
+  "policy": {
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["alice@"],
+        "dst": ["*"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

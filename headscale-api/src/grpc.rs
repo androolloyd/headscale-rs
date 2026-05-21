@@ -18,63 +18,14 @@ use tonic::Status as TonicStatus;
 /// Service trait implementations
 pub mod services {
     use super::{
-        CloseChannelRequest, CreateChannelRequest, DeleteNodeRequest, DepositRequest,
-        GetBalanceRequest, GetBalanceResponse, GetChannelsRequest, GetChannelsResponse,
-        GetHistoryRequest, GetHistoryResponse, GetNodeRequest, GetPeersRequest, GetPeersResponse,
-        GetPricingRequest, GetPricingResponse, GetUsageRequest, GetUsageResponse,
-        HealthCheckRequest, HealthCheckResponse, HeartbeatRequest, ListNodesRequest,
-        ListNodesResponse, MetricsRequest, MetricsResponse, Node, PaymentChannel,
-        QueryResourcesRequest, QueryResourcesResponse, RecordUsageRequest, RegisterRequest,
-        RegisterResourceRequest, RegisterResponse, Request, Response, SetCreditLimitRequest,
-        Status, TonicStatus, Transaction, TransferRequest, UpdateChannelRequest, UpdateNodeRequest,
-        async_trait,
+        CloseChannelRequest, CreateChannelRequest, DepositRequest, GetBalanceRequest,
+        GetBalanceResponse, GetChannelsRequest, GetChannelsResponse, GetHistoryRequest,
+        GetHistoryResponse, GetPricingRequest, GetPricingResponse, GetUsageRequest,
+        GetUsageResponse, HealthCheckRequest, HealthCheckResponse, MetricsRequest, MetricsResponse,
+        PaymentChannel, QueryResourcesRequest, QueryResourcesResponse, RecordUsageRequest,
+        RegisterResourceRequest, Request, Response, SetCreditLimitRequest, Status, TonicStatus,
+        Transaction, TransferRequest, UpdateChannelRequest, async_trait,
     };
-
-    /// Node service implementation trait
-    #[async_trait]
-    pub trait NodeServiceImpl: Send + Sync + 'static {
-        /// Register a new node
-        async fn register(
-            &self,
-            request: Request<RegisterRequest>,
-        ) -> Result<Response<RegisterResponse>, TonicStatus>;
-
-        /// Update node information
-        async fn update_node(
-            &self,
-            request: Request<UpdateNodeRequest>,
-        ) -> Result<Response<Node>, TonicStatus>;
-
-        /// Get node by ID
-        async fn get_node(
-            &self,
-            request: Request<GetNodeRequest>,
-        ) -> Result<Response<Node>, TonicStatus>;
-
-        /// List all nodes
-        async fn list_nodes(
-            &self,
-            request: Request<ListNodesRequest>,
-        ) -> Result<Response<ListNodesResponse>, TonicStatus>;
-
-        /// Delete a node
-        async fn delete_node(
-            &self,
-            request: Request<DeleteNodeRequest>,
-        ) -> Result<Response<Status>, TonicStatus>;
-
-        /// Node heartbeat
-        async fn heartbeat(
-            &self,
-            request: Request<HeartbeatRequest>,
-        ) -> Result<Response<Status>, TonicStatus>;
-
-        /// Get peers for a node
-        async fn get_peers(
-            &self,
-            request: Request<GetPeersRequest>,
-        ) -> Result<Response<GetPeersResponse>, TonicStatus>;
-    }
 
     /// Resource service implementation trait
     #[async_trait]
@@ -182,6 +133,2047 @@ pub mod services {
             &self,
             request: Request<MetricsRequest>,
         ) -> Result<Response<MetricsResponse>, TonicStatus>;
+    }
+}
+
+/// Upstream `headscale.v1.HeadscaleService` implementation slices.
+///
+/// The full headscale-go service contains users, nodes, pre-auth keys,
+/// routes, policies, API keys, and debug/version operations. This
+/// adapter wires implemented admin-backed RPC slices first and leaves
+/// the remaining methods out of the generated descriptor until those
+/// backing behaviours exist in Rust.
+#[cfg(feature = "admin")]
+pub mod upstream {
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use parking_lot::{Mutex, RwLock};
+    use rand_core::RngCore;
+    use tonic::{Request, Response, Status, metadata::MetadataMap};
+
+    use crate::admin::{
+        ApiKeyAdmin, ApiKeyAdminError, ApiKeyAdminKey, ApiKeyMintRequest, MachineAdmin,
+        MachineAdminError, MachineAdminRecord, PreauthAdmin, PreauthAdminError, PreauthAdminKey,
+        PreauthMintRequest, UserAdmin, UserRecord, UserRegistry, UserRegistryError,
+    };
+    use crate::generated::headscale_service_server::{HeadscaleService, HeadscaleServiceServer};
+    use crate::generated::{
+        ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CreateApiKeyRequest,
+        CreateApiKeyResponse, CreatePreAuthKeyRequest, CreatePreAuthKeyResponse, CreateUserRequest,
+        CreateUserResponse, DebugCreateNodeRequest, DebugCreateNodeResponse, DeleteApiKeyRequest,
+        DeleteApiKeyResponse, DeleteNodeRequest, DeleteNodeResponse, DeletePreAuthKeyRequest,
+        DeletePreAuthKeyResponse, DeleteUserRequest, DeleteUserResponse, ExpireApiKeyRequest,
+        ExpireApiKeyResponse, ExpireNodeRequest, ExpireNodeResponse, ExpirePreAuthKeyRequest,
+        ExpirePreAuthKeyResponse, GetNodeRequest, GetNodeResponse, GetPolicyRequest,
+        GetPolicyResponse, HealthRequest, HealthResponse, ListApiKeysRequest, ListApiKeysResponse,
+        ListNodesRequest, ListNodesResponse, ListPreAuthKeysRequest, ListPreAuthKeysResponse,
+        ListUsersRequest, ListUsersResponse, Node, PreAuthKey, RegisterMethod, RegisterNodeRequest,
+        RegisterNodeResponse, RenameNodeRequest, RenameNodeResponse, RenameUserRequest,
+        RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
+        SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
+    };
+    use crate::policy::{PolicyStore, parse_hujson_policy};
+    use crate::tailscale_wire::routes::{
+        PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
+    };
+    use crate::tailscale_wire::wire::stable_id_from_key;
+
+    const AUTH_PREFIX: &str = "Bearer ";
+
+    #[derive(Clone)]
+    pub struct HeadscaleAdminService {
+        users: Arc<dyn UserAdmin>,
+        api_keys: Arc<dyn ApiKeyAdmin>,
+        preauth: Arc<dyn PreauthAdmin>,
+        policy: PolicyStore,
+        machines: Arc<dyn MachineAdmin>,
+        pending_nodes: Arc<RwLock<BTreeMap<String, MachineAdminRecord>>>,
+        primary_routes: Arc<Mutex<PrimaryRouteState>>,
+        require_api_key_auth: bool,
+    }
+
+    impl HeadscaleAdminService {
+        pub fn new(
+            users: UserRegistry,
+            api_keys: Arc<dyn ApiKeyAdmin>,
+            preauth: Arc<dyn PreauthAdmin>,
+            policy: PolicyStore,
+            machines: Arc<dyn MachineAdmin>,
+        ) -> Self {
+            Self::with_user_admin(Arc::new(users), api_keys, preauth, policy, machines)
+        }
+
+        pub fn with_user_admin(
+            users: Arc<dyn UserAdmin>,
+            api_keys: Arc<dyn ApiKeyAdmin>,
+            preauth: Arc<dyn PreauthAdmin>,
+            policy: PolicyStore,
+            machines: Arc<dyn MachineAdmin>,
+        ) -> Self {
+            Self {
+                users,
+                api_keys,
+                preauth,
+                policy,
+                machines,
+                pending_nodes: Arc::new(RwLock::new(BTreeMap::new())),
+                primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
+                require_api_key_auth: false,
+            }
+        }
+
+        pub fn require_api_key_auth(mut self) -> Self {
+            self.require_api_key_auth = true;
+            self
+        }
+
+        pub fn into_service_server(self) -> HeadscaleServiceServer<Self> {
+            HeadscaleServiceServer::new(self)
+        }
+
+        pub fn into_authenticated_service_server(self) -> HeadscaleServiceServer<Self> {
+            self.require_api_key_auth().into_service_server()
+        }
+
+        async fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
+            if !self.require_api_key_auth {
+                return Ok(());
+            }
+            let token = bearer_token(request.metadata())?.to_string();
+            if self.api_keys.validate(&token).await {
+                Ok(())
+            } else {
+                Err(Status::unauthenticated("invalid token"))
+            }
+        }
+
+        async fn machine_by_id(&self, node_id: u64) -> Result<MachineAdminRecord, Status> {
+            self.machines
+                .list()
+                .await
+                .into_iter()
+                .find(|node| machine_numeric_id(node) == node_id)
+                .ok_or_else(|| Status::not_found("node not found"))
+        }
+
+        async fn debug_machine_record(
+            &self,
+            user: &str,
+            name: &str,
+            routes: Vec<String>,
+        ) -> MachineAdminRecord {
+            let node_key = self.unique_node_key().await;
+            let now = chrono::Utc::now().timestamp().max(0) as u64;
+            MachineAdminRecord {
+                node_id: 0,
+                ipv4: cgnat_ip_from_key(&node_key).to_string(),
+                id: node_key,
+                name: name.to_string(),
+                user: user.to_string(),
+                online: false,
+                last_seen: now,
+                created_at: now,
+                expiry: None,
+                machine_key_hex: random_key_hex(),
+                os: "TestOS".into(),
+                version: "unknown".into(),
+                tags: Vec::new(),
+                routes,
+                approved_routes: Vec::new(),
+                register_method: RegisterMethod::Unspecified as i32,
+                expired: false,
+            }
+        }
+
+        async fn unique_node_key(&self) -> String {
+            loop {
+                let node_key = random_key_hex();
+                if self.machines.get(&node_key).await.is_none()
+                    && !self
+                        .pending_nodes
+                        .read()
+                        .values()
+                        .any(|record| record.id == node_key)
+                {
+                    return node_key;
+                }
+            }
+        }
+    }
+
+    fn bearer_token(metadata: &MetadataMap) -> Result<&str, Status> {
+        let value = metadata
+            .get("authorization")
+            .ok_or_else(|| Status::unauthenticated("Authorization token is not supplied"))?;
+        let header = value
+            .to_str()
+            .map_err(|_| Status::unauthenticated("invalid authorization metadata"))?;
+        header.strip_prefix(AUTH_PREFIX).ok_or_else(|| {
+            Status::unauthenticated(r#"missing "Bearer " prefix in "Authorization" header"#)
+        })
+    }
+
+    #[async_trait]
+    impl HeadscaleService for HeadscaleAdminService {
+        async fn create_user(
+            &self,
+            request: Request<CreateUserRequest>,
+        ) -> Result<Response<CreateUserResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let user = self
+                .users
+                .create_detailed(
+                    &body.name,
+                    &body.display_name,
+                    &body.email,
+                    &body.picture_url,
+                )
+                .await
+                .map_err(user_error_to_status)?;
+            Ok(Response::new(CreateUserResponse {
+                user: Some(user_record_to_proto(&user)),
+            }))
+        }
+
+        async fn rename_user(
+            &self,
+            request: Request<RenameUserRequest>,
+        ) -> Result<Response<RenameUserResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let user = self
+                .users
+                .rename_by_id(body.old_id, &body.new_name)
+                .await
+                .map_err(user_error_to_status)?;
+            Ok(Response::new(RenameUserResponse {
+                user: Some(user_record_to_proto(&user)),
+            }))
+        }
+
+        async fn delete_user(
+            &self,
+            request: Request<DeleteUserRequest>,
+        ) -> Result<Response<DeleteUserResponse>, Status> {
+            self.authorize(&request).await?;
+            self.users
+                .delete_by_id(request.into_inner().id)
+                .await
+                .map_err(user_error_to_status)?;
+            Ok(Response::new(DeleteUserResponse {}))
+        }
+
+        async fn list_users(
+            &self,
+            request: Request<ListUsersRequest>,
+        ) -> Result<Response<ListUsersResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let mut users = match (body.name.is_empty(), body.email.is_empty(), body.id) {
+                (false, _, _) => self
+                    .users
+                    .get(&body.name)
+                    .await
+                    .map_err(user_error_to_status)?
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                (true, false, _) => self
+                    .users
+                    .all()
+                    .await
+                    .map_err(user_error_to_status)?
+                    .into_iter()
+                    .filter(|u| u.email == body.email)
+                    .collect(),
+                (true, true, id) if id != 0 => self
+                    .users
+                    .get_by_id(id)
+                    .await
+                    .map_err(user_error_to_status)?
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                _ => self.users.all().await.map_err(user_error_to_status)?,
+            };
+            users.sort_by_key(|u| u.id);
+            Ok(Response::new(ListUsersResponse {
+                users: users.iter().map(user_record_to_proto).collect(),
+            }))
+        }
+
+        async fn create_pre_auth_key(
+            &self,
+            request: Request<CreatePreAuthKeyRequest>,
+        ) -> Result<Response<CreatePreAuthKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            for tag in &body.acl_tags {
+                validate_tag(tag)?;
+            }
+            let user = if body.user == 0 {
+                String::new()
+            } else {
+                self.users
+                    .get_by_id(body.user)
+                    .await
+                    .map_err(user_error_to_status)?
+                    .ok_or_else(|| Status::not_found("user not found"))?
+                    .name
+            };
+            let ttl_secs = body
+                .expiration
+                .as_ref()
+                .map(timestamp_to_ttl_secs)
+                .transpose()?
+                .unwrap_or(0);
+            let created = self
+                .preauth
+                .mint(PreauthMintRequest {
+                    user,
+                    ttl_secs,
+                    reusable: body.reusable,
+                    ephemeral: body.ephemeral,
+                    tags: body.acl_tags,
+                })
+                .await
+                .map_err(preauth_error_to_status)?;
+            Ok(Response::new(CreatePreAuthKeyResponse {
+                pre_auth_key: Some(preauth_key_to_proto(&created, &self.users).await?),
+            }))
+        }
+
+        async fn expire_pre_auth_key(
+            &self,
+            request: Request<ExpirePreAuthKeyRequest>,
+        ) -> Result<Response<ExpirePreAuthKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let id = request.into_inner().id;
+            self.preauth
+                .expire_by_id(id)
+                .await
+                .map_err(preauth_error_to_status)?;
+            Ok(Response::new(ExpirePreAuthKeyResponse {}))
+        }
+
+        async fn delete_pre_auth_key(
+            &self,
+            request: Request<DeletePreAuthKeyRequest>,
+        ) -> Result<Response<DeletePreAuthKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let id = request.into_inner().id;
+            self.preauth
+                .delete_by_id(id)
+                .await
+                .map_err(preauth_error_to_status)?;
+            Ok(Response::new(DeletePreAuthKeyResponse {}))
+        }
+
+        async fn list_pre_auth_keys(
+            &self,
+            request: Request<ListPreAuthKeysRequest>,
+        ) -> Result<Response<ListPreAuthKeysResponse>, Status> {
+            self.authorize(&request).await?;
+            let keys = self.preauth.list().await;
+            let mut pre_auth_keys = Vec::with_capacity(keys.len());
+            for key in &keys {
+                pre_auth_keys.push(preauth_key_to_proto(key, &self.users).await?);
+            }
+            pre_auth_keys.sort_by_key(|key| key.id);
+            Ok(Response::new(ListPreAuthKeysResponse { pre_auth_keys }))
+        }
+
+        async fn debug_create_node(
+            &self,
+            request: Request<DebugCreateNodeRequest>,
+        ) -> Result<Response<DebugCreateNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            validate_registration_id(&body.key)?;
+            let user = self
+                .users
+                .get(&body.user)
+                .await
+                .map_err(user_error_to_status)?
+                .ok_or_else(|| Status::not_found("user not found"))?;
+            let routes = normalize_routes(body.routes)
+                .map_err(|e| Status::invalid_argument(format!("parsing route: {e}")))?;
+            let record = self
+                .debug_machine_record(&user.name, &body.name, routes)
+                .await;
+            self.pending_nodes.write().insert(body.key, record.clone());
+            Ok(Response::new(DebugCreateNodeResponse {
+                node: Some(machine_to_node(&record, &self.users).await?),
+            }))
+        }
+
+        async fn get_node(
+            &self,
+            request: Request<GetNodeRequest>,
+        ) -> Result<Response<GetNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let node = self.machine_by_id(request.into_inner().node_id).await?;
+            Ok(Response::new(GetNodeResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            }))
+        }
+
+        async fn set_tags(
+            &self,
+            request: Request<SetTagsRequest>,
+        ) -> Result<Response<SetTagsResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            if body.tags.is_empty() {
+                return Err(Status::invalid_argument(
+                    "cannot remove all tags from a node - tagged nodes must have at least one tag",
+                ));
+            }
+            for tag in &body.tags {
+                validate_tag(tag)?;
+            }
+            let node = self.machine_by_id(body.node_id).await?;
+            self.machines
+                .set_tags(&node.id, body.tags)
+                .await
+                .map_err(machine_error_to_status)?;
+            let node = self
+                .machines
+                .get(&node.id)
+                .await
+                .ok_or_else(|| Status::not_found("node not found"))?;
+            Ok(Response::new(SetTagsResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            }))
+        }
+
+        async fn set_approved_routes(
+            &self,
+            request: Request<SetApprovedRoutesRequest>,
+        ) -> Result<Response<SetApprovedRoutesResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let node = self.machine_by_id(body.node_id).await?;
+            let routes = normalize_routes(body.routes)
+                .map_err(|e| Status::invalid_argument(format!("parsing route: {e}")))?;
+            self.machines
+                .set_approved_routes(&node.id, routes)
+                .await
+                .map_err(machine_error_to_status)?;
+            let node = self
+                .machines
+                .get(&node.id)
+                .await
+                .ok_or_else(|| Status::not_found("node not found"))?;
+            let machines = self.machines.list().await;
+            let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
+            let primary_routes = route_sets.primary_routes_for(&node.id);
+            Ok(Response::new(SetApprovedRoutesResponse {
+                node: Some(machine_to_node_with_routes(&node, &self.users, &primary_routes).await?),
+            }))
+        }
+
+        async fn register_node(
+            &self,
+            request: Request<RegisterNodeRequest>,
+        ) -> Result<Response<RegisterNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            validate_registration_id(&body.key)?;
+            let user = self
+                .users
+                .get(&body.user)
+                .await
+                .map_err(user_error_to_status)?
+                .ok_or_else(|| Status::not_found("user not found"))?;
+            let mut record = self
+                .pending_nodes
+                .write()
+                .remove(&body.key)
+                .ok_or_else(|| Status::not_found("registration not found"))?;
+            record.user = user.name;
+            record.register_method = RegisterMethod::Cli as i32;
+
+            let node = self
+                .machines
+                .create(record)
+                .await
+                .map_err(machine_error_to_status)?;
+            Ok(Response::new(RegisterNodeResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            }))
+        }
+
+        async fn delete_node(
+            &self,
+            request: Request<DeleteNodeRequest>,
+        ) -> Result<Response<DeleteNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let node = self.machine_by_id(request.into_inner().node_id).await?;
+            self.machines
+                .delete(&node.id)
+                .await
+                .map_err(machine_error_to_status)?;
+            Ok(Response::new(DeleteNodeResponse {}))
+        }
+
+        async fn expire_node(
+            &self,
+            request: Request<ExpireNodeRequest>,
+        ) -> Result<Response<ExpireNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let node = self.machine_by_id(body.node_id).await?;
+            let expiry = body
+                .expiry
+                .as_ref()
+                .map(timestamp_to_datetime)
+                .transpose()?
+                .unwrap_or_else(chrono::Utc::now);
+            self.machines
+                .expire_at(&node.id, Some(expiry))
+                .await
+                .map_err(machine_error_to_status)?;
+            let node = self
+                .machines
+                .get(&node.id)
+                .await
+                .ok_or_else(|| Status::not_found("node not found"))?;
+            Ok(Response::new(ExpireNodeResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            }))
+        }
+
+        async fn rename_node(
+            &self,
+            request: Request<RenameNodeRequest>,
+        ) -> Result<Response<RenameNodeResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let node = self.machine_by_id(body.node_id).await?;
+            self.machines
+                .rename(&node.id, &body.new_name)
+                .await
+                .map_err(machine_error_to_status)?;
+            let node = self
+                .machines
+                .get(&node.id)
+                .await
+                .ok_or_else(|| Status::not_found("node not found"))?;
+            Ok(Response::new(RenameNodeResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            }))
+        }
+
+        async fn list_nodes(
+            &self,
+            request: Request<ListNodesRequest>,
+        ) -> Result<Response<ListNodesResponse>, Status> {
+            self.authorize(&request).await?;
+            let filter_user = request.into_inner().user;
+            let machines = self.machines.list().await;
+            let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
+            let mut nodes = Vec::with_capacity(machines.len());
+            for node in machines {
+                if !filter_user.is_empty() && node.user != filter_user {
+                    continue;
+                }
+                let subnet_routes = route_sets.subnet_routes_for(&node.id);
+                nodes.push(machine_to_node_with_routes(&node, &self.users, &subnet_routes).await?);
+            }
+            nodes.sort_by_key(|node| node.id);
+            Ok(Response::new(ListNodesResponse { nodes }))
+        }
+
+        async fn backfill_node_i_ps(
+            &self,
+            request: Request<BackfillNodeIPsRequest>,
+        ) -> Result<Response<BackfillNodeIPsResponse>, Status> {
+            self.authorize(&request).await?;
+            if !request.into_inner().confirmed {
+                return Err(Status::unknown("not confirmed, aborting"));
+            }
+            Ok(Response::new(BackfillNodeIPsResponse {
+                changes: Vec::new(),
+            }))
+        }
+
+        async fn create_api_key(
+            &self,
+            request: Request<CreateApiKeyRequest>,
+        ) -> Result<Response<CreateApiKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let expiration = body
+                .expiration
+                .as_ref()
+                .map(timestamp_to_unix)
+                .transpose()?;
+            let created = self
+                .api_keys
+                .mint(ApiKeyMintRequest { expiration })
+                .await
+                .map_err(admin_error_to_status)?;
+            Ok(Response::new(CreateApiKeyResponse {
+                api_key: created.api_key,
+            }))
+        }
+
+        async fn expire_api_key(
+            &self,
+            request: Request<ExpireApiKeyRequest>,
+        ) -> Result<Response<ExpireApiKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let selector = ApiKeySelector::from_parts(body.prefix, body.id)?;
+            match selector {
+                ApiKeySelector::Id(id) => self.api_keys.expire_by_id(id).await,
+                ApiKeySelector::Prefix(prefix) => self.api_keys.expire_by_prefix(&prefix).await,
+            }
+            .map_err(admin_error_to_status)?;
+            Ok(Response::new(ExpireApiKeyResponse {}))
+        }
+
+        async fn list_api_keys(
+            &self,
+            request: Request<ListApiKeysRequest>,
+        ) -> Result<Response<ListApiKeysResponse>, Status> {
+            self.authorize(&request).await?;
+            let api_keys = self
+                .api_keys
+                .list()
+                .await
+                .iter()
+                .map(admin_key_to_proto)
+                .collect();
+            Ok(Response::new(ListApiKeysResponse { api_keys }))
+        }
+
+        async fn delete_api_key(
+            &self,
+            request: Request<DeleteApiKeyRequest>,
+        ) -> Result<Response<DeleteApiKeyResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let selector = ApiKeySelector::from_parts(body.prefix, body.id)?;
+            match selector {
+                ApiKeySelector::Id(id) => self.api_keys.delete_by_id(id).await,
+                ApiKeySelector::Prefix(prefix) => self.api_keys.delete_by_prefix(&prefix).await,
+            }
+            .map_err(admin_error_to_status)?;
+            Ok(Response::new(DeleteApiKeyResponse {}))
+        }
+
+        async fn get_policy(
+            &self,
+            request: Request<GetPolicyRequest>,
+        ) -> Result<Response<GetPolicyResponse>, Status> {
+            self.authorize(&request).await?;
+            Ok(Response::new(GetPolicyResponse {
+                policy: self.policy.raw().unwrap_or_default(),
+                updated_at: self.policy.updated_at().map(unix_to_timestamp),
+            }))
+        }
+
+        async fn set_policy(
+            &self,
+            request: Request<SetPolicyRequest>,
+        ) -> Result<Response<SetPolicyResponse>, Status> {
+            self.authorize(&request).await?;
+            let policy = request.into_inner().policy;
+            let doc = parse_hujson_policy(&policy)
+                .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
+            self.policy.set(doc, policy.clone());
+            Ok(Response::new(SetPolicyResponse {
+                policy,
+                updated_at: self.policy.updated_at().map(unix_to_timestamp),
+            }))
+        }
+
+        async fn health(
+            &self,
+            request: Request<HealthRequest>,
+        ) -> Result<Response<HealthResponse>, Status> {
+            self.authorize(&request).await?;
+            Ok(Response::new(HealthResponse {
+                database_connectivity: true,
+            }))
+        }
+    }
+
+    enum ApiKeySelector {
+        Id(u64),
+        Prefix(String),
+    }
+
+    impl ApiKeySelector {
+        fn from_parts(prefix: String, id: u64) -> Result<Self, Status> {
+            match (prefix.trim().is_empty(), id) {
+                (true, 0) => Err(Status::invalid_argument(
+                    "either prefix or id must be provided",
+                )),
+                (false, 0) => Ok(Self::Prefix(prefix)),
+                (true, id) => Ok(Self::Id(id)),
+                (false, _) => Err(Status::invalid_argument(
+                    "only one of prefix or id can be provided",
+                )),
+            }
+        }
+    }
+
+    fn admin_key_to_proto(key: &ApiKeyAdminKey) -> ApiKey {
+        ApiKey {
+            id: key.id,
+            prefix: key.prefix.clone(),
+            expiration: key.expiration.map(unix_to_timestamp),
+            created_at: Some(unix_to_timestamp(key.created_at)),
+            last_seen: key.last_seen.map(unix_to_timestamp),
+        }
+    }
+
+    fn unix_to_timestamp(seconds: i64) -> prost_types::Timestamp {
+        prost_types::Timestamp { seconds, nanos: 0 }
+    }
+
+    fn timestamp_to_ttl_secs(ts: &prost_types::Timestamp) -> Result<u64, Status> {
+        let expiration = timestamp_to_unix(ts)?;
+        let now = current_unix_i64();
+        if expiration <= now {
+            return Ok(60);
+        }
+        Ok((expiration - now) as u64)
+    }
+
+    fn timestamp_to_unix(ts: &prost_types::Timestamp) -> Result<i64, Status> {
+        if !(0..1_000_000_000).contains(&ts.nanos) {
+            return Err(Status::invalid_argument("timestamp nanos out of range"));
+        }
+        Ok(ts.seconds)
+    }
+
+    fn current_unix_i64() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    fn admin_error_to_status(e: ApiKeyAdminError) -> Status {
+        match e {
+            ApiKeyAdminError::NotFound => Status::not_found("api key not found"),
+            ApiKeyAdminError::Store(msg) => Status::internal(msg),
+        }
+    }
+
+    async fn preauth_key_to_proto(
+        key: &PreauthAdminKey,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<PreAuthKey, Status> {
+        Ok(PreAuthKey {
+            user: preauth_user_to_proto(key, users).await?,
+            id: key.id,
+            key: key.key.clone(),
+            reusable: key.reusable,
+            ephemeral: key.ephemeral,
+            used: key.redemptions > 0,
+            expiration: Some(unix_to_timestamp(saturating_u64_to_i64(key.expires_at))),
+            created_at: Some(unix_to_timestamp(saturating_u64_to_i64(key.created_at))),
+            acl_tags: key.tags.clone(),
+        })
+    }
+
+    async fn preauth_user_to_proto(
+        key: &PreauthAdminKey,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<Option<ProtoUser>, Status> {
+        if key.user.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            users
+                .get(&key.user)
+                .await
+                .map_err(user_error_to_status)?
+                .map_or_else(
+                    || ProtoUser {
+                        id: 0,
+                        name: key.user.clone(),
+                        created_at: None,
+                        display_name: String::new(),
+                        email: String::new(),
+                        provider_id: String::new(),
+                        provider: String::new(),
+                        profile_pic_url: String::new(),
+                    },
+                    |user| user_record_to_proto(&user),
+                ),
+        ))
+    }
+
+    fn preauth_error_to_status(e: PreauthAdminError) -> Status {
+        match e {
+            PreauthAdminError::Unknown(_) => Status::not_found("preauth key not found"),
+            PreauthAdminError::Invalid(msg) => Status::invalid_argument(msg),
+        }
+    }
+
+    async fn machine_to_node(
+        machine: &MachineAdminRecord,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<Node, Status> {
+        machine_to_node_with_routes(machine, users, &[]).await
+    }
+
+    async fn machine_to_node_with_routes(
+        machine: &MachineAdminRecord,
+        users: &Arc<dyn UserAdmin>,
+        subnet_routes: &[String],
+    ) -> Result<Node, Status> {
+        let user = machine_user_to_proto(machine, users).await?;
+        Ok(Node {
+            id: machine_numeric_id(machine),
+            machine_key: prefix_key("mkey:", &machine.machine_key_hex),
+            node_key: prefix_key("nodekey:", &machine.id),
+            disco_key: String::new(),
+            ip_addresses: vec![machine.ipv4.clone()],
+            name: machine.name.clone(),
+            user,
+            last_seen: nonzero_u64_timestamp(machine.last_seen),
+            expiry: machine
+                .expiry
+                .map(saturating_u64_to_i64)
+                .map(unix_to_timestamp),
+            pre_auth_key: None,
+            created_at: nonzero_u64_timestamp(machine.created_at),
+            register_method: machine.register_method,
+            given_name: machine.name.clone(),
+            online: machine.online,
+            approved_routes: machine.approved_routes.clone(),
+            available_routes: machine.routes.clone(),
+            subnet_routes: subnet_routes.to_vec(),
+            tags: machine.tags.clone(),
+        })
+    }
+
+    fn machine_numeric_id(machine: &MachineAdminRecord) -> u64 {
+        if machine.node_id == 0 {
+            stable_id_from_key(&machine.id)
+        } else {
+            machine.node_id
+        }
+    }
+
+    struct MachineRouteSets {
+        primary_routes: BTreeMap<String, Vec<String>>,
+        exit_routes: BTreeMap<String, Vec<String>>,
+    }
+
+    impl MachineRouteSets {
+        fn primary_routes_for(&self, id: &str) -> Vec<String> {
+            self.primary_routes.get(id).cloned().unwrap_or_default()
+        }
+
+        fn subnet_routes_for(&self, id: &str) -> Vec<String> {
+            let mut routes = self.primary_routes_for(id);
+            routes.extend(self.exit_routes.get(id).cloned().unwrap_or_default());
+            routes.sort();
+            routes.dedup();
+            routes
+        }
+    }
+
+    fn route_sets_for_machines(
+        primary_state: &Arc<Mutex<PrimaryRouteState>>,
+        machines: &[MachineAdminRecord],
+    ) -> MachineRouteSets {
+        let mut state = primary_state.lock();
+        let _ = state.sync_routes(machines.iter().map(|machine| {
+            (
+                machine_numeric_id(machine),
+                active_approved_routes(&machine.routes, &machine.approved_routes),
+            )
+        }));
+
+        let mut primary_routes = BTreeMap::new();
+        let mut exit_routes = BTreeMap::new();
+        for machine in machines {
+            let node_id = machine_numeric_id(machine);
+            let primary = state.primary_routes(node_id);
+            if !primary.is_empty() {
+                primary_routes.insert(machine.id.clone(), primary);
+            }
+
+            let exit = active_exit_routes(&machine.routes, &machine.approved_routes);
+            if !exit.is_empty() {
+                exit_routes.insert(machine.id.clone(), exit);
+            }
+        }
+
+        MachineRouteSets {
+            primary_routes,
+            exit_routes,
+        }
+    }
+
+    fn validate_registration_id(id: &str) -> Result<(), Status> {
+        const REGISTRATION_ID_LENGTH: usize = 24;
+        if id.len() != REGISTRATION_ID_LENGTH {
+            return Err(Status::invalid_argument(format!(
+                "registration ID must be {REGISTRATION_ID_LENGTH} characters long"
+            )));
+        }
+        Ok(())
+    }
+
+    fn random_key_hex() -> String {
+        let mut raw = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut raw);
+        hex::encode(raw)
+    }
+
+    fn cgnat_ip_from_key(key: &str) -> Ipv4Addr {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in key.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let host = ((h as u32) % ((1u32 << 22) - 3)) + 2;
+        const CGNAT_BASE: u32 = 0x6440_0000;
+        Ipv4Addr::from((CGNAT_BASE | host).to_be_bytes())
+    }
+
+    fn prefix_key(prefix: &str, value: &str) -> String {
+        if value.is_empty() || value.starts_with(prefix) {
+            value.to_string()
+        } else {
+            format!("{prefix}{value}")
+        }
+    }
+
+    fn nonzero_u64_timestamp(seconds: u64) -> Option<prost_types::Timestamp> {
+        if seconds == 0 {
+            None
+        } else {
+            Some(unix_to_timestamp(saturating_u64_to_i64(seconds)))
+        }
+    }
+
+    async fn machine_user_to_proto(
+        machine: &MachineAdminRecord,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<Option<ProtoUser>, Status> {
+        if machine.user.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            users
+                .get(&machine.user)
+                .await
+                .map_err(user_error_to_status)?
+                .map_or_else(
+                    || ProtoUser {
+                        id: stable_id_from_key(&machine.user),
+                        name: machine.user.clone(),
+                        created_at: None,
+                        display_name: String::new(),
+                        email: String::new(),
+                        provider_id: String::new(),
+                        provider: String::new(),
+                        profile_pic_url: String::new(),
+                    },
+                    |user| user_record_to_proto(&user),
+                ),
+        ))
+    }
+
+    fn timestamp_to_datetime(
+        ts: &prost_types::Timestamp,
+    ) -> Result<chrono::DateTime<chrono::Utc>, Status> {
+        if !(0..1_000_000_000).contains(&ts.nanos) {
+            return Err(Status::invalid_argument("timestamp nanos out of range"));
+        }
+        chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+            .ok_or_else(|| Status::invalid_argument("timestamp out of range"))
+    }
+
+    fn machine_error_to_status(e: MachineAdminError) -> Status {
+        match e {
+            MachineAdminError::NotFound(_) => Status::not_found("node not found"),
+            MachineAdminError::BadRequest(msg) => Status::invalid_argument(msg),
+        }
+    }
+
+    fn validate_tag(tag: &str) -> Result<(), Status> {
+        if !tag.starts_with("tag:") {
+            return Err(Status::invalid_argument(
+                "tag must start with the string 'tag:'",
+            ));
+        }
+        if tag.to_lowercase() != tag {
+            return Err(Status::invalid_argument("tag should be lowercase"));
+        }
+        if tag.split_whitespace().count() > 1 {
+            return Err(Status::invalid_argument("tag should not contains space"));
+        }
+        Ok(())
+    }
+
+    fn user_record_to_proto(user: &UserRecord) -> ProtoUser {
+        ProtoUser {
+            id: user.id,
+            name: user.name.clone(),
+            created_at: Some(unix_to_timestamp(saturating_u64_to_i64(user.created_at))),
+            display_name: user.display_name.clone(),
+            email: user.email.clone(),
+            provider_id: user.provider_id.clone(),
+            provider: user.provider.clone(),
+            profile_pic_url: user.profile_pic_url.clone(),
+        }
+    }
+
+    fn saturating_u64_to_i64(v: u64) -> i64 {
+        i64::try_from(v).unwrap_or(i64::MAX)
+    }
+
+    fn user_error_to_status(e: UserRegistryError) -> Status {
+        match e {
+            UserRegistryError::InvalidName(msg) => Status::invalid_argument(msg),
+            UserRegistryError::Exists(msg) => Status::already_exists(msg),
+            UserRegistryError::Missing(msg) => Status::not_found(msg),
+            UserRegistryError::CannotChangeOidcUser => {
+                Status::invalid_argument("cannot edit OIDC user")
+            }
+            UserRegistryError::Store(msg) => Status::internal(msg),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "admin"))]
+mod upstream_tests {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use tonic::Request;
+
+    use super::upstream::HeadscaleAdminService;
+    use crate::admin::{
+        ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentMachineAdmin,
+        PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
+    };
+    use crate::generated::headscale_service_server::HeadscaleService;
+    use crate::generated::{
+        BackfillNodeIPsRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
+        DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest, DeletePreAuthKeyRequest,
+        DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest, ExpirePreAuthKeyRequest,
+        GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListNodesRequest,
+        ListPreAuthKeysRequest, ListUsersRequest, RegisterMethod, RegisterNodeRequest,
+        RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
+        SetTagsRequest,
+    };
+    use crate::policy::PolicyStore;
+    use crate::tailscale_wire::MachineRegistry;
+    use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
+
+    async fn admin_service() -> HeadscaleAdminService {
+        admin_service_with_machines().await.0
+    }
+
+    async fn admin_service_with_machines() -> (HeadscaleAdminService, Arc<MachineRegistry>) {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let machines = Arc::new(MachineRegistry::new());
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines.clone())),
+        );
+        (service, machines)
+    }
+
+    async fn admin_service_with_api_keys() -> (HeadscaleAdminService, Arc<PersistentApiKeyAdmin>) {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
+        let machines = Arc::new(MachineRegistry::new());
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            api_keys.clone(),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        (service, api_keys)
+    }
+
+    async fn admin_service_with_persistent_machines()
+    -> (HeadscaleAdminService, headscale_db::Database) {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            machines,
+        );
+        (service, db)
+    }
+
+    fn fixture_machine(id: &str, user: &str, name: &str) -> MachineRecord {
+        MachineRecord::new_at(
+            Utc::now(),
+            id.to_string(),
+            "bb".repeat(32),
+            user.to_string(),
+            name.to_string(),
+            Ipv4Addr::new(100, 64, 0, 7),
+            false,
+        )
+    }
+
+    fn fixture_machine_with_routes(
+        id: &str,
+        user: &str,
+        name: &str,
+        routes: Vec<String>,
+    ) -> MachineRecord {
+        let mut machine = fixture_machine(id, user, name);
+        machine.available_routes = routes;
+        machine
+    }
+
+    #[tokio::test]
+    async fn upstream_user_grpc_create_list_rename_delete() {
+        let service = admin_service().await;
+
+        let created = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: "Alice Smith".into(),
+                email: "alice@example.com".into(),
+                picture_url: "https://example.com/alice.png".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user");
+        assert_eq!(created.id, 1);
+        assert_eq!(created.name, "alice");
+        assert_eq!(created.display_name, "Alice Smith");
+        assert_eq!(created.email, "alice@example.com");
+        assert_eq!(created.profile_pic_url, "https://example.com/alice.png");
+        assert!(created.created_at.is_some());
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: 0,
+                name: "alice".into(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.users.len(), 1);
+        assert_eq!(listed.users[0].id, created.id);
+
+        let renamed = service
+            .rename_user(Request::new(RenameUserRequest {
+                old_id: created.id,
+                new_name: "bob".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("renamed user");
+        assert_eq!(renamed.id, created.id);
+        assert_eq!(renamed.name, "bob");
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: created.id,
+                name: String::new(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.users.len(), 1);
+        assert_eq!(listed.users[0].name, "bob");
+
+        service
+            .delete_user(Request::new(DeleteUserRequest { id: created.id }))
+            .await
+            .unwrap();
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: 0,
+                name: String::new(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_user_grpc_reports_invalid_duplicate_and_missing() {
+        let service = admin_service().await;
+
+        let err = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "Alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+        let err = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::AlreadyExists);
+
+        let err = service
+            .delete_user(Request::new(DeleteUserRequest { id: 99 }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_grpc_api_key_auth_mode_enforces_bearer_token() {
+        let (service, api_keys) = admin_service_with_api_keys().await;
+        let service = service.require_api_key_auth();
+        let _mounted = service.clone().into_service_server();
+        let _auth_mounted = service.clone().into_authenticated_service_server();
+
+        let err = service
+            .health(Request::new(HealthRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert_eq!(err.message(), "Authorization token is not supplied");
+
+        let mut malformed = Request::new(HealthRequest {});
+        malformed
+            .metadata_mut()
+            .insert("authorization", "Token abc".parse().unwrap());
+        let err = service.health(malformed).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert_eq!(
+            err.message(),
+            r#"missing "Bearer " prefix in "Authorization" header"#
+        );
+
+        let mut invalid = Request::new(HealthRequest {});
+        invalid
+            .metadata_mut()
+            .insert("authorization", "Bearer invalid".parse().unwrap());
+        let err = service.health(invalid).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert_eq!(err.message(), "invalid token");
+
+        let created = api_keys
+            .mint(ApiKeyMintRequest { expiration: None })
+            .await
+            .expect("mint api key");
+        let mut valid = Request::new(HealthRequest {});
+        valid.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", created.api_key).parse().unwrap(),
+        );
+        let health = service.health(valid).await.unwrap().into_inner();
+        assert!(health.database_connectivity);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_debug_create_then_register() {
+        let (service, _machines) = admin_service_with_machines().await;
+        const REGISTRATION_ID: &str = "abcdefghijklmnopqrstuvwx";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let debug_node = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "debug-router".into(),
+                routes: vec!["10.0.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("debug node");
+        assert_eq!(debug_node.name, "debug-router");
+        assert!(debug_node.node_key.starts_with("nodekey:"));
+        assert!(debug_node.machine_key.starts_with("mkey:"));
+        assert_eq!(debug_node.available_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(
+            debug_node.register_method,
+            RegisterMethod::Unspecified as i32
+        );
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.nodes.is_empty(), "debug node stays pending");
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.node_key, debug_node.node_key);
+        assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
+        assert_eq!(registered.available_routes, vec!["10.0.0.0/24"]);
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.nodes.len(), 1);
+        assert_eq!(listed.nodes[0].node_key, debug_node.node_key);
+
+        let err = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_persistent_machines_use_numeric_go_ids() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        const REGISTRATION_ID: &str = "abcdefghijklmnopqrstuvwx";
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let pending = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "debug-router".into(),
+                routes: vec!["10.0.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("pending node");
+        assert_ne!(pending.id, 1, "pending wire-only node uses fallback id");
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.id, 1);
+        assert_eq!(registered.node_key, pending.node_key);
+        assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
+        assert_eq!(registered.available_routes, vec!["10.0.0.0/24"]);
+
+        let got = service
+            .get_node(Request::new(GetNodeRequest { node_id: 1 }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node");
+        assert_eq!(got.id, 1);
+        assert_eq!(got.user.as_ref().unwrap().id, 1);
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.nodes.len(), 1);
+        assert_eq!(listed.nodes[0].id, 1);
+
+        let renamed = service
+            .rename_node(Request::new(RenameNodeRequest {
+                node_id: 1,
+                new_name: "debug-renamed".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("renamed node");
+        assert_eq!(renamed.name, "debug-renamed");
+
+        let given_name: String = sqlx::query_scalar("SELECT given_name FROM nodes WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(given_name, "debug-renamed");
+
+        service
+            .delete_node(Request::new(DeleteNodeRequest { node_id: 1 }))
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_list_get_rename_tags_expire_delete() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "aa".repeat(32);
+        machines.upsert(
+            node_key.clone(),
+            fixture_machine_with_routes(&node_key, "alice", "alpha", vec!["10.0.0.0/24".into()]),
+        );
+        let node_id = stable_id_from_key(&node_key);
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.nodes.len(), 1);
+        assert_eq!(listed.nodes[0].id, node_id);
+        assert_eq!(listed.nodes[0].node_key, format!("nodekey:{node_key}"));
+        assert_eq!(
+            listed.nodes[0].machine_key,
+            format!("mkey:{}", "bb".repeat(32))
+        );
+        assert_eq!(listed.nodes[0].ip_addresses, vec!["100.64.0.7".to_string()]);
+        assert_eq!(listed.nodes[0].available_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(listed.nodes[0].user.as_ref().unwrap().name, "alice");
+
+        let got = service
+            .get_node(Request::new(GetNodeRequest { node_id }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node");
+        assert_eq!(got.name, "alpha");
+
+        let tagged = service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("tagged node");
+        assert_eq!(tagged.tags, vec!["tag:server".to_string()]);
+
+        let routed = service
+            .set_approved_routes(Request::new(SetApprovedRoutesRequest {
+                node_id,
+                routes: vec!["10.0.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("routed node");
+        assert_eq!(routed.approved_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(routed.subnet_routes, vec!["10.0.0.0/24"]);
+
+        let preapproved = service
+            .set_approved_routes(Request::new(SetApprovedRoutesRequest {
+                node_id,
+                routes: vec!["10.1.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("preapproved node");
+        assert_eq!(preapproved.approved_routes, vec!["10.1.0.0/24"]);
+        assert!(preapproved.subnet_routes.is_empty());
+
+        let renamed = service
+            .rename_node(Request::new(RenameNodeRequest {
+                node_id,
+                new_name: "beta".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("renamed node");
+        assert_eq!(renamed.name, "beta");
+
+        let expired = service
+            .expire_node(Request::new(ExpireNodeRequest {
+                node_id,
+                expiry: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_800,
+                    nanos: 0,
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("expired node");
+        assert_eq!(expired.expiry.as_ref().unwrap().seconds, 4_102_444_800);
+
+        service
+            .delete_node(Request::new(DeleteNodeRequest { node_id }))
+            .await
+            .unwrap();
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_reports_missing_and_bad_tags() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "cc".repeat(32);
+        machines.upsert(
+            node_key.clone(),
+            fixture_machine(&node_key, "alice", "alpha"),
+        );
+        let node_id = stable_id_from_key(&node_key);
+
+        let err = service
+            .get_node(Request::new(GetNodeRequest { node_id: 42 }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        let err = service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id,
+                tags: vec!["Tag:Server".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .set_approved_routes(Request::new(SetApprovedRoutesRequest {
+                node_id,
+                routes: vec!["not-a-prefix".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id,
+                tags: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: "short".into(),
+                name: "debug".into(),
+                routes: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: "abcdefghijklmnopqrstuvwx".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_routes_pick_single_primary() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_a = "11".repeat(32);
+        let node_b = "22".repeat(32);
+        let route = "10.0.0.0/24".to_string();
+
+        let mut machine_a =
+            fixture_machine_with_routes(&node_a, "alice", "alpha", vec![route.clone()]);
+        machine_a.approved_routes = vec![route.clone()];
+        machines.upsert(node_a.clone(), machine_a);
+
+        let mut machine_b = fixture_machine_with_routes(&node_b, "alice", "beta", vec![route]);
+        machine_b.approved_routes = vec!["10.0.0.0/24".into()];
+        machines.upsert(node_b.clone(), machine_b);
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let primary_count = listed
+            .nodes
+            .iter()
+            .filter(|node| node.subnet_routes == vec!["10.0.0.0/24"])
+            .count();
+        assert_eq!(primary_count, 1);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_routes_keep_primary_sticky_after_old_owner_returns() {
+        let (service, machines) = admin_service_with_machines().await;
+        let route = "10.44.0.0/24".to_string();
+        let nodes = [
+            ("61".repeat(32), "alpha", 61),
+            ("62".repeat(32), "beta", 62),
+            ("63".repeat(32), "gamma", 63),
+        ];
+
+        for (node_key, name, octet) in &nodes {
+            let mut machine =
+                fixture_machine_with_routes(node_key, "alice", name, vec![route.clone()]);
+            machine.ipv4 = Ipv4Addr::new(100, 64, 0, *octet);
+            machine.approved_routes = vec![route.clone()];
+            machines.upsert(node_key.clone(), machine);
+        }
+
+        let first = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let first_owner_id = first
+            .nodes
+            .iter()
+            .find(|node| node.subnet_routes == vec![route.clone()])
+            .expect("initial primary")
+            .id;
+        let first_owner_key = nodes
+            .iter()
+            .find(|(node_key, _, _)| stable_id_from_key(node_key) == first_owner_id)
+            .expect("primary key")
+            .0
+            .clone();
+        let old_primary = machines.get(&first_owner_key).expect("old primary");
+        assert!(machines.delete(&first_owner_key));
+
+        let second = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let second_owner_id = second
+            .nodes
+            .iter()
+            .find(|node| node.subnet_routes == vec![route.clone()])
+            .expect("replacement primary")
+            .id;
+        assert_ne!(second_owner_id, first_owner_id);
+
+        machines.upsert(first_owner_key, old_primary);
+        let third = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let third_owner_id = third
+            .nodes
+            .iter()
+            .find(|node| node.subnet_routes == vec![route.clone()])
+            .expect("sticky primary")
+            .id;
+        assert_eq!(third_owner_id, second_owner_id);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_exit_routes_are_serving_not_primary_routes() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "64".repeat(32);
+        let mut machine = fixture_machine_with_routes(
+            &node_key,
+            "alice",
+            "exit",
+            vec!["0.0.0.0/0".into(), "::/0".into()],
+        );
+        machine.approved_routes = Vec::new();
+        machines.upsert(node_key.clone(), machine);
+        let node_id = stable_id_from_key(&node_key);
+
+        let updated = service
+            .set_approved_routes(Request::new(SetApprovedRoutesRequest {
+                node_id,
+                routes: vec!["0.0.0.0/0".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("updated node");
+        assert_eq!(updated.approved_routes, vec!["0.0.0.0/0", "::/0"]);
+        assert!(updated.subnet_routes.is_empty());
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let listed_node = listed
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .expect("listed node");
+        assert_eq!(listed_node.subnet_routes, vec!["0.0.0.0/0", "::/0"]);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_backfill_requires_confirmation() {
+        let service = admin_service().await;
+
+        let err = service
+            .backfill_node_i_ps(Request::new(BackfillNodeIPsRequest { confirmed: false }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+
+        let ok = service
+            .backfill_node_i_ps(Request::new(BackfillNodeIPsRequest { confirmed: true }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ok.changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_api_key_grpc_create_list_expire_delete() {
+        let service = admin_service().await;
+
+        let created = service
+            .create_api_key(Request::new(CreateApiKeyRequest {
+                expiration: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_800,
+                    nanos: 0,
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.api_key.starts_with("hskey-api-"));
+
+        let listed = service
+            .list_api_keys(Request::new(ListApiKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.api_keys.len(), 1);
+        let key = &listed.api_keys[0];
+        assert!(key.id > 0);
+        assert!(key.prefix.starts_with("hskey-api-"));
+        assert!(key.prefix.ends_with("-***"));
+        assert_eq!(key.expiration.as_ref().unwrap().seconds, 4_102_444_800);
+        assert!(key.created_at.is_some());
+
+        service
+            .expire_api_key(Request::new(ExpireApiKeyRequest {
+                prefix: String::new(),
+                id: key.id,
+            }))
+            .await
+            .unwrap();
+
+        service
+            .delete_api_key(Request::new(DeleteApiKeyRequest {
+                prefix: String::new(),
+                id: key.id,
+            }))
+            .await
+            .unwrap();
+
+        let listed = service
+            .list_api_keys(Request::new(ListApiKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.api_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_api_key_grpc_requires_exactly_one_selector() {
+        let service = admin_service().await;
+
+        let err = service
+            .expire_api_key(Request::new(ExpireApiKeyRequest {
+                prefix: String::new(),
+                id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .delete_api_key(Request::new(DeleteApiKeyRequest {
+                prefix: "hskey-api-abcdefghijkl-***".into(),
+                id: 1,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_preauth_grpc_create_list_expire_delete() {
+        let service = admin_service().await;
+
+        let user = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user");
+
+        let created = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: user.id,
+                reusable: true,
+                ephemeral: true,
+                expiration: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_800,
+                    nanos: 0,
+                }),
+                acl_tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("created preauth key");
+        assert!(created.id > 0);
+        assert!(created.key.starts_with("hskey-auth-"));
+        assert!(created.reusable);
+        assert!(created.ephemeral);
+        assert_eq!(created.acl_tags, vec!["tag:server".to_string()]);
+        assert_eq!(created.user.as_ref().unwrap().id, user.id);
+
+        let listed = service
+            .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.pre_auth_keys.len(), 1);
+        assert_eq!(listed.pre_auth_keys[0].id, created.id);
+
+        service
+            .expire_pre_auth_key(Request::new(ExpirePreAuthKeyRequest { id: created.id }))
+            .await
+            .unwrap();
+
+        service
+            .delete_pre_auth_key(Request::new(DeletePreAuthKeyRequest { id: created.id }))
+            .await
+            .unwrap();
+
+        let listed = service
+            .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.pre_auth_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_preauth_grpc_validates_user_id_and_tags() {
+        let service = admin_service().await;
+
+        let err = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: 42,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        let err = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: 0,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: vec!["Tag:Server".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let created = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: 0,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: vec!["tag:infra".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("created tags-only key");
+        assert!(created.user.is_none());
+        assert_eq!(created.acl_tags, vec!["tag:infra".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_set_get_and_validate() {
+        let service = admin_service().await;
+        let raw = r#"{
+          "acls": [
+            {"action": "accept", "src": ["*"], "dst": ["*:*"]},
+          ],
+        }"#;
+
+        let set = service
+            .set_policy(Request::new(SetPolicyRequest { policy: raw.into() }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(set.policy, raw);
+        assert!(set.updated_at.is_some());
+
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, raw);
+        assert!(got.updated_at.is_some());
+
+        let err = service
+            .set_policy(Request::new(SetPolicyRequest { policy: "{".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_health_grpc_reports_database_connectivity() {
+        let service = admin_service().await;
+
+        let health = service
+            .health(Request::new(HealthRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(health.database_connectivity);
     }
 }
 

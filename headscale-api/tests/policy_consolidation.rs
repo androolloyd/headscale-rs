@@ -186,6 +186,10 @@ fn auto_approve_route_matches_subprefix_via_tag() {
             "routes": {"10.0.0.0/8": ["tag:router"]},
             "exit_node": ["tag:exit"]
         },
+        "tag_owners": {
+            "tag:router": ["alice@"],
+            "tag:exit": ["alice@"]
+        },
         "rules": []
     }"#;
     let doc = parse_hujson_policy(raw).unwrap();

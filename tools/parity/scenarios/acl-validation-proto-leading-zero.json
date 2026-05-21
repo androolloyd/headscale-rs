@@ -1,0 +1,14 @@
+{
+  "name": "acl-validation-proto-leading-zero",
+  "expect_policy_error": "leading 0 not permitted",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "0",
+        "src": ["*"],
+        "dst": ["*:*"]
+      }
+    ]
+  }
+}

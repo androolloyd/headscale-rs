@@ -122,7 +122,7 @@ impl QuotaManager {
     // `duration_constructors` API which trips E0658 on Rust 1.88
     // (the downstream octra workspace's CI floor). Keep the
     // arithmetic form until 1.95+ is the floor.
-    #[allow(clippy::duration_suboptimal_units)]
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     fn default_quotas() -> HashMap<GatewayResourceType, Quota> {
         let mut defaults = HashMap::new();
 

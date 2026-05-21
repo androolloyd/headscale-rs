@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-self-src",
+  "expect_policy_error": "\"autogroup:self\" used in source",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["autogroup:self"],
+        "dst": ["10.0.0.1:*"]
+      }
+    ]
+  }
+}

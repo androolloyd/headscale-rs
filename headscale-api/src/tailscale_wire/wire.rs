@@ -11,12 +11,11 @@
 //!
 //! ## Decision log
 //!
-//! - **We only model the fields stock `tailscale up` actually requires
-//!   to reach "registered" and emit a single MapResponse.** Anything
-//!   beyond that (ACLs, SSH attributes, DERPRegion, DNSConfig
-//!   extensions, key-rotation fields) is **omitted on purpose** — the
-//!   blocker doc rules them out for the interop test, and including
-//!   them risks drift against the upstream `tailcfg` package.
+//! - **We model the fields stock `tailscale up` requires plus the
+//!   parity-critical policy surfaces now covered by the headscale-go
+//!   differential harness.** Incremental peer deltas, key-rotation
+//!   fields, and most debug-only fields are still intentionally omitted
+//!   until a parity scenario or real-client test needs them.
 //! - **Field names match `tailscale/tailcfg/tailcfg.go` verbatim.**
 //!   We use `#[serde(rename = "…")]` only when Rust naming conventions
 //!   would otherwise diverge (e.g. `NodeKey` instead of `node_key`).
@@ -32,10 +31,11 @@
 //!   (`PeersChanged{,Patch}`, `PeerSeenChange`) is intentionally not
 //!   modelled — the interop test only needs the first full snapshot.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One registered machine's state, kept in the in-memory
 /// `MachineRegistry` after a successful `register`.
@@ -116,6 +116,15 @@ pub struct MachineRecord {
     /// upstream's `Node.ForcedTags` semantics. The admin
     /// `POST /api/v1/machines/{id}/tags` route writes here.
     pub forced_tags: Vec<String>,
+    /// Routes advertised by the node in `HostInfo.RoutableIPs`.
+    pub available_routes: Vec<String>,
+    /// Routes currently approved by an operator/policy. These are
+    /// emitted as `MapNode.AllowedIPs` in addition to the node's own
+    /// `/32` address.
+    pub approved_routes: Vec<String>,
+    /// Upstream `headscale.v1.RegisterMethod` numeric value. Auth-key
+    /// registration is the normal wire path default.
+    pub register_method: i32,
 }
 
 impl MachineRecord {
@@ -154,6 +163,9 @@ impl MachineRecord {
             ephemeral,
             created_at: now,
             forced_tags: Vec::new(),
+            available_routes: Vec::new(),
+            approved_routes: Vec::new(),
+            register_method: 1,
         }
     }
 }
@@ -202,7 +214,7 @@ pub struct RegisterRequest {
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct RegisterAuth {
-    /// Preauth bearer token (e.g. `octrapreauth-<hex>`). On the
+    /// Preauth bearer token (e.g. `hskey-auth-<prefix>-<secret>`). On the
     /// upstream wire this is `AuthKey`.
     #[serde(default)]
     pub auth_key: String,
@@ -221,6 +233,9 @@ pub struct HostInfo {
     /// wire byte-identical.
     #[serde(default, rename = "OSVersion")]
     pub os_version: String,
+    /// Subnet routes advertised by the client.
+    #[serde(default, rename = "RoutableIPs")]
+    pub routable_ips: Vec<String>,
 }
 
 /// Response to a successful `register`.
@@ -305,6 +320,9 @@ pub struct MapRequest {
     /// Currently ignored.
     #[serde(default)]
     pub compress: String,
+    /// Whether the server should include keepalive frames in a stream.
+    #[serde(default)]
+    pub keep_alive: bool,
     /// HostInfo the client wants to update on this map call.
     #[serde(default)]
     pub hostinfo: Option<HostInfo>,
@@ -317,6 +335,12 @@ pub struct MapRequest {
     /// URL instead).
     #[serde(default)]
     pub node_key: String,
+    /// Opaque stream resume handle supplied by newer clients.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_session_handle: String,
+    /// Last stream sequence processed for `MapSessionHandle` resume.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub map_session_seq: i64,
     /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
     /// Stock `tailscale` v1.78+ includes this on every MapRequest;
     /// the server must persist + fan it back out on every peer's
@@ -327,6 +351,15 @@ pub struct MapRequest {
     /// Upstream JSON tag is `DiscoKey` (`tailcfg.MapRequest.DiscoKey`).
     #[serde(default, rename = "DiscoKey", skip_serializing_if = "Option::is_none")]
     pub disco_key: Option<String>,
+    /// Public hardware-attestation identity key, if the client has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_attestation_key: Option<String>,
+    /// Go encodes this `[]byte` signature as a base64 JSON string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hardware_attestation_key_signature: String,
+    /// Timestamp prepended to the attested node-key signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_attestation_key_signature_timestamp: Option<DateTime<Utc>>,
     /// Wall 7: NAT-traversal endpoint candidates the client wants peers
     /// to try (`"ip:port"` strings). Upstream `tailcfg.MapRequest`
     /// historically carried `Endpoints []string`; v1.78+ added a typed
@@ -334,42 +367,104 @@ pub struct MapRequest {
     /// `[]string`. Optional ⇒ empty list when absent.
     #[serde(default, rename = "Endpoints")]
     pub endpoints: Option<Vec<String>>,
+    /// Parallel endpoint source-type list (`tailcfg.EndpointType`).
+    #[serde(
+        default,
+        rename = "EndpointTypes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub endpoint_types: Vec<i32>,
+    /// Legacy read-only map fetch bit. Deprecated upstream but still
+    /// accepted for parity with older clients.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Latest local tailnet key authority head hash.
+    #[serde(default, rename = "TKAHead", skip_serializing_if = "String::is_empty")]
+    pub tka_head: String,
+    /// Debug/development feature flags sent by the client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_flags: Vec<String>,
 }
 
 /// Response to `/machine/{node_key}/map`.
 ///
-/// We return only the fields needed for a fresh peer to learn its
-/// own assigned addresses and the (one) other peer in the test
-/// tailnet. `DERPMap`, `ACLs`, `DNSConfig`, key-rotation fields,
-/// SSH attributes, `Domain`, etc. are all elided.
-#[derive(Debug, Serialize, Deserialize)]
+/// `tailcfg.MapResponse` is both the initial netmap snapshot and the
+/// long-poll delta envelope. Runtime paths still mostly emit full
+/// snapshots, but the wire model accepts and can serialise the current
+/// delta/debug fields so fixtures and compatibility tests can cover the
+/// same surface as headscale-go.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapResponse {
+    /// Opaque stream-resume handle for stateful long-poll sessions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_session_handle: String,
+    /// Sequence number within `MapSessionHandle`.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub seq: i64,
+    /// Empty stream message that keeps the long-poll connection alive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_alive: bool,
+    /// Control-plane request for the client to prove liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_request: Option<PingRequest>,
+    /// URL the client should open for an interactive follow-up action.
+    #[serde(
+        default,
+        rename = "PopBrowserURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub pop_browser_url: String,
     /// `key_expiry_extension` in upstream; unused here, kept for shape.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub key_expiry_extension: u64,
     /// Own node record.
-    pub node: MapNode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<MapNode>,
     /// Other peers in the tailnet. Empty list is valid (e.g. a
     /// peer-A joining before peer-B does); the long-poll waits for a
     /// second registration to flesh this out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<MapNode>,
+    /// Full node records that changed in an incremental map response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers_changed: Vec<MapNode>,
+    /// Node IDs removed from the peer list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers_removed: Vec<u64>,
+    /// Lightweight peer mutation patches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers_changed_patch: Vec<PeerChange>,
+    /// Peer last-seen/online edge notifications.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_seen_change: BTreeMap<u64, bool>,
+    /// Peer online-state updates.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub online_change: BTreeMap<u64, bool>,
+    /// User profile rows referenced by `Node.User` and `Peers[*].User`.
+    /// Upstream sends these in initial maps and in later deltas when a
+    /// profile changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_profiles: Vec<UserProfile>,
     /// Synthetic empty DNS config — present so the client doesn't
     /// reject the response for missing fields. Upstream JSON tag is
     /// `DNSConfig` (all-caps DNS), not `DnsConfig`.
-    #[serde(rename = "DNSConfig")]
-    pub dns_config: DnsConfig,
+    #[serde(default, rename = "DNSConfig", skip_serializing_if = "Option::is_none")]
+    pub dns_config: Option<DnsConfig>,
     /// Synthetic empty DERPMap — peers will fall back to direct
     /// connections on the docker bridge. Upstream JSON tag is
     /// `DERPMap`, not `DerpMap`.
-    #[serde(rename = "DERPMap")]
-    pub derp_map: DerpMap,
+    #[serde(default, rename = "DERPMap", skip_serializing_if = "Option::is_none")]
+    pub derp_map: Option<DerpMap>,
     /// Domain string the client treats as the tailnet's MagicDNS root.
-    /// We hard-code `octra.test` for the interop run.
+    /// Runtime map responses derive this from the configured DNS base
+    /// domain.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub domain: String,
-    /// Whether the client should keep polling. `true` matches stock
-    /// expectations.
-    pub keep_alive: bool,
+    /// Whether the tailnet asks clients to include service discovery
+    /// data in HostInfo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_services: Option<bool>,
     /// P1 lifecycle: mirrors `tailcfg.MapResponse.NodeKeyExpired`. When
     /// `true` the stock daemon treats the response as a forced
     /// logout — it tears down its session and falls back to a fresh
@@ -396,6 +491,209 @@ pub struct MapResponse {
     /// and `DstPorts`. The IPProto field is omitted ⇒ all protocols.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packet_filter: Vec<FilterRule>,
+    /// Incremental packet-filter updates keyed by server-assigned name.
+    /// A null value deletes that named filter; `"*": null` clears all.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub packet_filters: BTreeMap<String, Option<Vec<FilterRule>>>,
+    /// Control-plane health strings. `Some(vec![])` explicitly clears
+    /// previous health warnings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<Vec<String>>,
+    /// Structured GUI/display health patches.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub display_messages: BTreeMap<String, Option<DisplayMessage>>,
+    /// `tailcfg.MapResponse.SSHPolicy`. When present, updates the
+    /// client's incoming Tailscale SSH policy for this node.
+    #[serde(default, rename = "SSHPolicy", skip_serializing_if = "Option::is_none")]
+    pub ssh_policy: Option<SshPolicy>,
+    /// Control server wall-clock time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_time: Option<DateTime<Utc>>,
+    /// Tailnet key-authority state.
+    #[serde(default, rename = "TKAInfo", skip_serializing_if = "Option::is_none")]
+    pub tka_info: Option<TkaInfo>,
+    /// Per-tailnet data-plane audit log ID.
+    #[serde(
+        default,
+        rename = "DomainDataPlaneAuditLogID",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub domain_data_plane_audit_log_id: String,
+    /// Declarative/imperative debug settings still carried by tailcfg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugConfig>,
+    /// Instructions for reconnecting to the control server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_dial_plan: Option<ControlDialPlan>,
+    /// Latest-client-version notification payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<ClientVersion>,
+    /// Deprecated tailnet default auto-update bit.
+    #[serde(
+        default,
+        rename = "DefaultAutoUpdate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deprecated_default_auto_update: Option<bool>,
+}
+
+/// `tailcfg.PingRequest`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PingRequest {
+    #[serde(rename = "URL")]
+    pub url: String,
+    #[serde(
+        default,
+        rename = "URLIsNoise",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub url_is_noise: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub types: String,
+    #[serde(default, rename = "IP", skip_serializing_if = "String::is_empty")]
+    pub ip: String,
+    /// Go encodes `[]byte` as a base64 JSON string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub payload: String,
+}
+
+/// `tailcfg.PeerChange`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct PeerChange {
+    #[serde(rename = "NodeID")]
+    pub node_id: u64,
+    #[serde(default, rename = "DERPRegion", skip_serializing_if = "is_zero_i32")]
+    pub derp_region: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cap: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cap_map: BTreeMap<String, Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Go encodes `[]byte` as a base64 JSON string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_signature: String,
+    #[serde(default, rename = "DiscoKey", skip_serializing_if = "Option::is_none")]
+    pub disco_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_expiry: Option<DateTime<Utc>>,
+}
+
+/// `tailcfg.DisplayMessage`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DisplayMessage {
+    pub title: String,
+    pub text: String,
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub impacts_connectivity: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_action: Option<DisplayMessageAction>,
+}
+
+/// `tailcfg.DisplayMessageAction`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DisplayMessageAction {
+    #[serde(rename = "URL")]
+    pub url: String,
+    pub label: String,
+}
+
+/// `tailcfg.TKAInfo`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct TkaInfo {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+/// `tailcfg.Debug`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DebugConfig {
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub sleep_seconds: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_log_tail: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+}
+
+/// `tailcfg.ControlDialPlan`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ControlDialPlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ControlIpCandidate>,
+}
+
+/// `tailcfg.ControlIPCandidate`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ControlIpCandidate {
+    #[serde(default, rename = "IP", skip_serializing_if = "String::is_empty")]
+    pub ip: String,
+    #[serde(default, rename = "ACEHost", skip_serializing_if = "String::is_empty")]
+    pub ace_host: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub dial_start_delay_sec: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub dial_timeout_sec: f64,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
+}
+
+/// `tailcfg.ClientVersion`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ClientVersion {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running_latest: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub latest_version: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent_security_update: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notify: bool,
+    #[serde(
+        default,
+        rename = "NotifyURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub notify_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notify_text: String,
+}
+
+/// `tailcfg.UserProfile` display metadata for a user referenced by a
+/// map node.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserProfile {
+    #[serde(rename = "ID")]
+    pub id: u64,
+    pub login_name: String,
+    pub display_name: String,
+    #[serde(
+        default,
+        rename = "ProfilePicURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub profile_pic_url: String,
 }
 
 /// `tailcfg.FilterRule`. The default zero-value here is unreachable —
@@ -434,6 +732,66 @@ pub struct PortRange {
     pub last: u16,
 }
 
+/// `tailcfg.SSHPolicy`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+pub struct SshPolicy {
+    #[serde(default)]
+    pub rules: Vec<SshRule>,
+}
+
+/// `tailcfg.SSHRule`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshRule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principals: Vec<SshPrincipal>,
+    #[serde(
+        default,
+        rename = "sshUsers",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub ssh_users: BTreeMap<String, String>,
+    #[serde(default)]
+    pub action: SshAction,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept_env: Vec<String>,
+}
+
+/// `tailcfg.SSHPrincipal`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshPrincipal {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    #[serde(default, rename = "nodeIP", skip_serializing_if = "String::is_empty")]
+    pub node_ip: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_login: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub any: bool,
+}
+
+/// `tailcfg.SSHAction`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshAction {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reject: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept: bool,
+    /// Go `time.Duration`, encoded by tailcfg as integer nanoseconds.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub session_duration: i64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_agent_forwarding: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_local_port_forwarding: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_remote_port_forwarding: bool,
+}
+
 /// A single node record inside a `MapResponse`.
 ///
 /// Field set + JSON names track `tailscale/tailcfg/tailcfg.go::Node`.
@@ -455,7 +813,7 @@ pub struct PortRange {
 /// expecting a `UserID`. With our pre-fix MapNode omitting `User`,
 /// the decode succeeded but the downstream state-machine couldn't
 /// build a usable netmap for the node it had just been told it was.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapNode {
     /// Stable per-tailnet node ID. We use the FNV hash of the node
@@ -476,8 +834,15 @@ pub struct MapNode {
     /// the preauth user label (see `register::register_inner`).
     #[serde(rename = "User")]
     pub user: u64,
+    /// User who shared this node, if different from `User`.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sharer: u64,
     /// `nodekey:` prefixed hex.
     pub key: String,
+    /// Tailnet key-authority signature over `Key`. Go encodes the
+    /// underlying bytes as a base64 JSON string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_signature: String,
     /// `mkey:` prefixed hex. Upstream `Node.Machine` is tagged
     /// `omitzero`; `tailscale` v1.78+ rejects a literal `"mkey:"`
     /// (zero-length hex) with `PollNetMap: response: key hex has the
@@ -493,8 +858,30 @@ pub struct MapNode {
     /// (all-caps IPs).
     #[serde(rename = "AllowedIPs")]
     pub allowed_ips: Vec<String>,
+    /// Routes for which this node is currently the selected primary
+    /// subnet router.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_routes: Vec<String>,
     /// Hostname the node advertised.
     pub hostinfo: HostInfo,
+    /// Node creation timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<DateTime<Utc>>,
+    /// Node key expiry timestamp, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_expiry: Option<DateTime<Utc>>,
+    /// Client capability version.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cap: u32,
+    /// ACL tags applied to this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Last time this node was seen online.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Online state; `None` means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
     /// Mirrors upstream `tailcfg.Node.MachineAuthorized` (line 433 of
     /// `tailcfg/tailcfg.go`). The control client's
     /// `netmap.NetworkMap.GetMachineStatus()` reads this off
@@ -504,6 +891,19 @@ pub struct MapNode {
     /// not sufficient — the netmap must carry the same bit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub machine_authorized: bool,
+    /// Deprecated upstream capability list. Kept for clients and
+    /// parity fixtures that still consume the legacy field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Modern node capability map (`tailcfg.Node.CapMap`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cap_map: BTreeMap<String, Vec<Value>>,
+    /// Whether the node key is expired from the control plane's view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expired: bool,
+    /// Modern DERP home region.
+    #[serde(default, rename = "HomeDERP", skip_serializing_if = "is_zero_i32")]
+    pub home_derp: i32,
     /// Wall 7: `tailcfg.Node.DiscoKey` (`discokey:<hex>` X25519 public).
     /// Without this `wgcfg.NewFromIPs` rejects the node and
     /// `wgengine.Reconfig` runs at `0/0 peers` — `tailscale ping`
@@ -521,6 +921,53 @@ pub struct MapNode {
     /// an empty JSON array.
     #[serde(rename = "Endpoints", default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
+    /// Deprecated DERP-in-IP:port string (`127.3.3.40:<region>`).
+    #[serde(default, rename = "DERP", skip_serializing_if = "String::is_empty")]
+    pub legacy_derp_string: String,
+    /// Unsigned peerapi-only node bit.
+    #[serde(
+        default,
+        rename = "UnsignedPeerAPIOnly",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub unsigned_peer_api_only: bool,
+    /// Display names computed by the client/control path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub computed_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub computed_name_with_host: String,
+    /// Per-node data-plane audit log ID.
+    #[serde(
+        default,
+        rename = "DataPlaneAuditLogID",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub data_plane_audit_log_id: String,
+    /// Peer-specific masquerade addresses.
+    #[serde(
+        default,
+        rename = "SelfNodeV4MasqAddrForThisPeer",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub self_node_v4_masq_addr_for_this_peer: Option<String>,
+    #[serde(
+        default,
+        rename = "SelfNodeV6MasqAddrForThisPeer",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub self_node_v6_masq_addr_for_this_peer: Option<String>,
+    /// Non-Tailscale WireGuard peer and jailed-node flags.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_wire_guard_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_jailed: bool,
+    /// DNS resolvers attached to a WireGuard-only exit node.
+    #[serde(
+        default,
+        rename = "ExitNodeDNSResolvers",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub exit_node_dns_resolvers: Vec<DnsResolver>,
 }
 
 /// `tailcfg.DNSConfig`. Mirrors the upstream Go struct field-for-field
@@ -695,8 +1142,20 @@ pub struct DerpRegionNode {
 fn is_zero_u16(v: &u16) -> bool {
     *v == 0
 }
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Strip a Tailscale key prefix (`mkey:`, `nodekey:`, `discokey:`)
@@ -748,12 +1207,13 @@ mod tests {
         let r = RegisterRequest {
             node_key: "nodekey:deadbeef".into(),
             auth: Some(RegisterAuth {
-                auth_key: "octrapreauth-abc".into(),
+                auth_key: "hskey-auth-abc".into(),
             }),
             hostinfo: Some(HostInfo {
                 hostname: "peer-a".into(),
                 os: "linux".into(),
                 os_version: "6.6".into(),
+                routable_ips: Vec::new(),
             }),
             followup: None,
             ephemeral: false,

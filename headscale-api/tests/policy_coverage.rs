@@ -366,6 +366,31 @@ fn store_set_caches_filter_rules() {
 }
 
 #[test]
+fn store_second_set_recomputes_cached_filter_rules() {
+    let s = PolicyStore::new();
+    let raw_22 = r#"{
+        "version": 1,
+        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}]
+    }"#;
+    let raw_443 = r#"{
+        "version": 1,
+        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/443"]}]
+    }"#;
+
+    s.set(parse_hujson_policy(raw_22).unwrap(), raw_22.to_string());
+    assert_eq!(s.filter_rules()[0].dst_ports[0].ports.first, 22);
+
+    let doc_443 = parse_hujson_policy(raw_443).unwrap();
+    s.set(doc_443.clone(), raw_443.to_string());
+
+    let rules = s.filter_rules();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].dst_ports[0].ports.first, 443);
+    assert_eq!(s.doc().unwrap(), doc_443);
+    assert_eq!(s.raw().unwrap(), raw_443);
+}
+
+#[test]
 fn store_set_preserves_raw_comments_verbatim() {
     let s = PolicyStore::new();
     let raw = "{\n  // comments must survive\n  \"version\":1,\n  \"rules\":[]\n}";

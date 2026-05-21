@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net/netip"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -23,6 +25,8 @@ type scenario struct {
 	FilterNodeChecks []filterNodeCheck `json:"filter_node_checks,omitempty"`
 	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
 	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
+	SSHChecks        []sshCheck        `json:"ssh_checks,omitempty"`
+	ExpectPolicyErr  string            `json:"expect_policy_error,omitempty"`
 	Wire             *wireScenario     `json:"wire,omitempty"`
 }
 
@@ -45,9 +49,11 @@ type scenarioOutput struct {
 	Engine         string             `json:"engine"`
 	Name           string             `json:"name"`
 	Filter         []filterRuleOut    `json:"filter"`
+	PolicyError    string             `json:"policy_error,omitempty"`
 	FilterForNodes []filterForNodeOut `json:"filter_for_nodes,omitempty"`
 	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
 	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
+	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
 	Wire           *wireOutput        `json:"wire,omitempty"`
 }
 
@@ -83,6 +89,31 @@ type tagCheck struct {
 type tagCheckOut struct {
 	Name    string `json:"name"`
 	Allowed bool   `json:"allowed"`
+}
+
+type sshCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
+}
+
+type sshPolicyOut struct {
+	Name  string       `json:"name"`
+	Rules []sshRuleOut `json:"rules"`
+}
+
+type sshRuleOut struct {
+	Principals []string          `json:"principals"`
+	SSHUsers   map[string]string `json:"ssh_users"`
+	Action     sshActionOut      `json:"action"`
+}
+
+type sshActionOut struct {
+	Accept                    bool  `json:"accept"`
+	Reject                    bool  `json:"reject"`
+	SessionDurationNanos      int64 `json:"session_duration_nanos"`
+	AllowAgentForwarding      bool  `json:"allow_agent_forwarding"`
+	AllowLocalPortForwarding  bool  `json:"allow_local_port_forwarding"`
+	AllowRemotePortForwarding bool  `json:"allow_remote_port_forwarding"`
 }
 
 type wireScenario struct {
@@ -122,14 +153,24 @@ type registerResponseSummary struct {
 }
 
 type mapRequestSummary struct {
-	Version   int              `json:"version,omitempty"`
-	Stream    bool             `json:"stream,omitempty"`
-	Compress  string           `json:"compress,omitempty"`
-	OmitPeers bool             `json:"omit_peers,omitempty"`
-	NodeKey   string           `json:"node_key,omitempty"`
-	DiscoKey  string           `json:"disco_key,omitempty"`
-	Endpoints []string         `json:"endpoints,omitempty"`
-	Hostinfo  *hostInfoSummary `json:"hostinfo,omitempty"`
+	Version                                  int              `json:"version,omitempty"`
+	Stream                                   bool             `json:"stream,omitempty"`
+	KeepAlive                                bool             `json:"keep_alive,omitempty"`
+	Compress                                 string           `json:"compress,omitempty"`
+	OmitPeers                                bool             `json:"omit_peers,omitempty"`
+	NodeKey                                  string           `json:"node_key,omitempty"`
+	MapSessionHandle                         string           `json:"map_session_handle,omitempty"`
+	MapSessionSeq                            int64            `json:"map_session_seq,omitempty"`
+	DiscoKey                                 string           `json:"disco_key,omitempty"`
+	HardwareAttestationKey                   string           `json:"hardware_attestation_key,omitempty"`
+	HardwareAttestationKeySignature          string           `json:"hardware_attestation_key_signature,omitempty"`
+	HardwareAttestationKeySignatureTimestamp bool             `json:"hardware_attestation_key_signature_timestamp,omitempty"`
+	Endpoints                                []string         `json:"endpoints,omitempty"`
+	EndpointTypes                            []int            `json:"endpoint_types,omitempty"`
+	ReadOnly                                 bool             `json:"read_only,omitempty"`
+	TKAHead                                  string           `json:"tka_head,omitempty"`
+	DebugFlags                               []string         `json:"debug_flags,omitempty"`
+	Hostinfo                                 *hostInfoSummary `json:"hostinfo,omitempty"`
 }
 
 type userSummary struct {
@@ -145,29 +186,77 @@ type loginSummary struct {
 }
 
 type mapResponseSummary struct {
-	KeepAlive    bool             `json:"keep_alive"`
-	Domain       string           `json:"domain,omitempty"`
-	Node         *mapNodeSummary  `json:"node,omitempty"`
-	PeerCount    int              `json:"peer_count"`
-	Peers        []mapNodeSummary `json:"peers,omitempty"`
-	PacketFilter []filterRuleOut  `json:"packet_filter,omitempty"`
-	DNSConfig    json.RawMessage  `json:"dns_config,omitempty"`
-	DERPMap      json.RawMessage  `json:"derp_map,omitempty"`
+	MapSessionHandle          string               `json:"map_session_handle,omitempty"`
+	Seq                       int64                `json:"seq,omitempty"`
+	KeepAlive                 bool                 `json:"keep_alive"`
+	PingRequest               json.RawMessage      `json:"ping_request,omitempty"`
+	PopBrowserURL             string               `json:"pop_browser_url,omitempty"`
+	Domain                    string               `json:"domain,omitempty"`
+	CollectServices           *bool                `json:"collect_services,omitempty"`
+	Node                      *mapNodeSummary      `json:"node,omitempty"`
+	PeerCount                 int                  `json:"peer_count"`
+	Peers                     []mapNodeSummary     `json:"peers,omitempty"`
+	PeersChanged              []mapNodeSummary     `json:"peers_changed,omitempty"`
+	PeersRemoved              []uint64             `json:"peers_removed,omitempty"`
+	PeersChangedPatch         json.RawMessage      `json:"peers_changed_patch,omitempty"`
+	PeerSeenChange            json.RawMessage      `json:"peer_seen_change,omitempty"`
+	OnlineChange              json.RawMessage      `json:"online_change,omitempty"`
+	UserProfiles              []userProfileSummary `json:"user_profiles,omitempty"`
+	PacketFilter              []filterRuleOut      `json:"packet_filter,omitempty"`
+	PacketFilters             json.RawMessage      `json:"packet_filters,omitempty"`
+	Health                    *[]string            `json:"health,omitempty"`
+	DisplayMessages           json.RawMessage      `json:"display_messages,omitempty"`
+	DNSConfig                 json.RawMessage      `json:"dns_config,omitempty"`
+	DERPMap                   json.RawMessage      `json:"derp_map,omitempty"`
+	SSHPolicy                 []sshRuleOut         `json:"ssh_policy,omitempty"`
+	ControlTime               json.RawMessage      `json:"control_time,omitempty"`
+	TKAInfo                   json.RawMessage      `json:"tka_info,omitempty"`
+	DomainDataPlaneAuditLogID string               `json:"domain_data_plane_audit_log_id,omitempty"`
+	Debug                     json.RawMessage      `json:"debug,omitempty"`
+	ControlDialPlan           json.RawMessage      `json:"control_dial_plan,omitempty"`
+	ClientVersion             json.RawMessage      `json:"client_version,omitempty"`
+	DefaultAutoUpdate         *bool                `json:"default_auto_update,omitempty"`
 }
 
 type mapNodeSummary struct {
-	ID                uint64           `json:"id"`
-	StableID          string           `json:"stable_id,omitempty"`
-	Name              string           `json:"name,omitempty"`
-	User              uint64           `json:"user"`
-	Key               string           `json:"key,omitempty"`
-	Machine           string           `json:"machine,omitempty"`
-	DiscoKey          string           `json:"disco_key,omitempty"`
-	Addresses         []string         `json:"addresses,omitempty"`
-	AllowedIPs        []string         `json:"allowed_ips,omitempty"`
-	Endpoints         []string         `json:"endpoints,omitempty"`
-	Hostinfo          *hostInfoSummary `json:"hostinfo,omitempty"`
-	MachineAuthorized bool             `json:"machine_authorized,omitempty"`
+	ID                            uint64           `json:"id"`
+	StableID                      string           `json:"stable_id,omitempty"`
+	Name                          string           `json:"name,omitempty"`
+	User                          uint64           `json:"user"`
+	Sharer                        uint64           `json:"sharer,omitempty"`
+	Key                           string           `json:"key,omitempty"`
+	KeySignature                  string           `json:"key_signature,omitempty"`
+	Machine                       string           `json:"machine,omitempty"`
+	DiscoKey                      string           `json:"disco_key,omitempty"`
+	Addresses                     []string         `json:"addresses,omitempty"`
+	AllowedIPs                    []string         `json:"allowed_ips,omitempty"`
+	PrimaryRoutes                 []string         `json:"primary_routes,omitempty"`
+	Endpoints                     []string         `json:"endpoints,omitempty"`
+	LegacyDERPString              string           `json:"legacy_derp_string,omitempty"`
+	Hostinfo                      *hostInfoSummary `json:"hostinfo,omitempty"`
+	Tags                          []string         `json:"tags,omitempty"`
+	Online                        *bool            `json:"online,omitempty"`
+	MachineAuthorized             bool             `json:"machine_authorized,omitempty"`
+	Capabilities                  []string         `json:"capabilities,omitempty"`
+	CapMap                        json.RawMessage  `json:"cap_map,omitempty"`
+	Expired                       bool             `json:"expired,omitempty"`
+	HomeDERP                      int              `json:"home_derp,omitempty"`
+	UnsignedPeerAPIOnly           bool             `json:"unsigned_peer_api_only,omitempty"`
+	ComputedName                  string           `json:"computed_name,omitempty"`
+	ComputedNameWithHost          string           `json:"computed_name_with_host,omitempty"`
+	DataPlaneAuditLogID           string           `json:"data_plane_audit_log_id,omitempty"`
+	SelfNodeV4MasqAddrForThisPeer string           `json:"self_node_v4_masq_addr_for_this_peer,omitempty"`
+	SelfNodeV6MasqAddrForThisPeer string           `json:"self_node_v6_masq_addr_for_this_peer,omitempty"`
+	IsWireGuardOnly               bool             `json:"is_wire_guard_only,omitempty"`
+	IsJailed                      bool             `json:"is_jailed,omitempty"`
+	ExitNodeDNSResolvers          json.RawMessage  `json:"exit_node_dns_resolvers,omitempty"`
+}
+
+type userProfileSummary struct {
+	ID            uint64 `json:"id"`
+	LoginName     string `json:"login_name,omitempty"`
+	DisplayName   string `json:"display_name,omitempty"`
+	ProfilePicURL string `json:"profile_pic_url,omitempty"`
 }
 
 type hostInfoSummary struct {
@@ -238,7 +327,21 @@ func runScenario(path string) (scenarioOutput, error) {
 	}
 	pm, err := policy.NewPolicyManager(sc.Policy, users, nodes.ViewSlice())
 	if err != nil {
+		if sc.ExpectPolicyErr != "" {
+			if !strings.Contains(err.Error(), sc.ExpectPolicyErr) {
+				return scenarioOutput{}, fmt.Errorf("headscale-go policy error for %s = %q, want substring %q", sc.Name, err.Error(), sc.ExpectPolicyErr)
+			}
+			return scenarioOutput{
+				Engine:      "headscale-go",
+				Name:        sc.Name,
+				Filter:      []filterRuleOut{},
+				PolicyError: sc.ExpectPolicyErr,
+			}, nil
+		}
 		return scenarioOutput{}, fmt.Errorf("headscale-go parsing policy for %s: %w", sc.Name, err)
+	}
+	if sc.ExpectPolicyErr != "" {
+		return scenarioOutput{}, fmt.Errorf("headscale-go policy for %s parsed successfully, want error containing %q", sc.Name, sc.ExpectPolicyErr)
 	}
 	rules, _ := pm.Filter()
 	filterForNodes, err := runFilterNodeChecks(sc.FilterNodeChecks, pm, nodes)
@@ -253,6 +356,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
+	sshPolicies, err := runSSHChecks(sc.SSHChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	wire, err := normalizeWire(sc.Wire)
 	if err != nil {
 		return scenarioOutput{}, err
@@ -264,6 +371,7 @@ func runScenario(path string) (scenarioOutput, error) {
 		FilterForNodes: filterForNodes,
 		RouteApprovals: routeApprovals,
 		TagChecks:      tagChecks,
+		SSHPolicies:    sshPolicies,
 		Wire:           wire,
 	}, nil
 }
@@ -423,6 +531,67 @@ func runTagChecks(checks []tagCheck, pm policy.PolicyManager, nodes types.Nodes)
 	return out, nil
 }
 
+func runSSHChecks(checks []sshCheck, pm policy.PolicyManager, nodes types.Nodes) ([]sshPolicyOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	out := make([]sshPolicyOut, 0, len(checks))
+	for _, check := range checks {
+		node := findNode(nodes, check.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("ssh check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		sshPolicy, err := pm.SSHPolicy(node.View())
+		if err != nil {
+			return nil, fmt.Errorf("ssh check %q: %w", check.Name, err)
+		}
+		out = append(out, sshPolicyOut{
+			Name:  check.Name,
+			Rules: normalizeSSHPolicy(sshPolicy),
+		})
+	}
+	return out, nil
+}
+
+func normalizeSSHPolicy(policy *tailcfg.SSHPolicy) []sshRuleOut {
+	if policy == nil {
+		return []sshRuleOut{}
+	}
+	out := make([]sshRuleOut, 0, len(policy.Rules))
+	for _, rule := range policy.Rules {
+		if rule == nil {
+			continue
+		}
+		principals := make([]string, 0, len(rule.Principals))
+		for _, principal := range rule.Principals {
+			if principal == nil || principal.NodeIP == "" {
+				continue
+			}
+			principals = append(principals, principal.NodeIP)
+		}
+		sort.Strings(principals)
+
+		action := sshActionOut{}
+		if rule.Action != nil {
+			action = sshActionOut{
+				Accept:                    rule.Action.Accept,
+				Reject:                    rule.Action.Reject,
+				SessionDurationNanos:      int64(rule.Action.SessionDuration),
+				AllowAgentForwarding:      rule.Action.AllowAgentForwarding,
+				AllowLocalPortForwarding:  rule.Action.AllowLocalPortForwarding,
+				AllowRemotePortForwarding: rule.Action.AllowRemotePortForwarding,
+			}
+		}
+
+		out = append(out, sshRuleOut{
+			Principals: principals,
+			SSHUsers:   rule.SSHUsers,
+			Action:     action,
+		})
+	}
+	return out
+}
+
 func findNode(nodes types.Nodes, id uint64) *types.Node {
 	for _, node := range nodes {
 		if uint64(node.ID) == id {
@@ -562,15 +731,36 @@ func summarizeRegisterResponse(resp *tailcfg.RegisterResponse) *registerResponse
 }
 
 func summarizeMapRequest(req *tailcfg.MapRequest) *mapRequestSummary {
-	out := &mapRequestSummary{
-		Version:   int(req.Version),
-		Stream:    req.Stream,
-		Compress:  req.Compress,
-		OmitPeers: req.OmitPeers,
-		NodeKey:   req.NodeKey.String(),
-		DiscoKey:  req.DiscoKey.String(),
-		Endpoints: addrPortStrings(req.Endpoints),
+	endpointTypes := make([]int, 0, len(req.EndpointTypes))
+	for _, endpointType := range req.EndpointTypes {
+		endpointTypes = append(endpointTypes, int(endpointType))
 	}
+	out := &mapRequestSummary{
+		Version:                                  int(req.Version),
+		Stream:                                   req.Stream,
+		KeepAlive:                                req.KeepAlive,
+		Compress:                                 req.Compress,
+		OmitPeers:                                req.OmitPeers,
+		MapSessionHandle:                         req.MapSessionHandle,
+		MapSessionSeq:                            req.MapSessionSeq,
+		HardwareAttestationKeySignature:          base64.StdEncoding.EncodeToString(req.HardwareAttestationKeySignature),
+		HardwareAttestationKeySignatureTimestamp: !req.HardwareAttestationKeySignatureTimestamp.IsZero(),
+		Endpoints:                                addrPortStrings(req.Endpoints),
+		EndpointTypes:                            endpointTypes,
+		ReadOnly:                                 req.ReadOnly,
+		TKAHead:                                  req.TKAHead,
+		DebugFlags:                               append([]string(nil), req.DebugFlags...),
+	}
+	if !req.NodeKey.IsZero() {
+		out.NodeKey = req.NodeKey.String()
+	}
+	if !req.DiscoKey.IsZero() {
+		out.DiscoKey = req.DiscoKey.String()
+	}
+	if !req.HardwareAttestationKey.IsZero() {
+		out.HardwareAttestationKey = req.HardwareAttestationKey.String()
+	}
+	sort.Strings(out.DebugFlags)
 	if req.Hostinfo != nil {
 		out.Hostinfo = summarizeHostInfo(req.Hostinfo.View())
 	}
@@ -579,10 +769,25 @@ func summarizeMapRequest(req *tailcfg.MapRequest) *mapRequestSummary {
 
 func summarizeMapResponse(resp *tailcfg.MapResponse) (*mapResponseSummary, error) {
 	out := &mapResponseSummary{
-		KeepAlive:    resp.KeepAlive,
-		Domain:       resp.Domain,
-		PeerCount:    len(resp.Peers),
-		PacketFilter: normalizeFilterRules(resp.PacketFilter),
+		MapSessionHandle:          resp.MapSessionHandle,
+		Seq:                       resp.Seq,
+		KeepAlive:                 resp.KeepAlive,
+		PopBrowserURL:             resp.PopBrowserURL,
+		Domain:                    resp.Domain,
+		CollectServices:           optBoolPtr(resp.CollectServices),
+		PeerCount:                 len(resp.Peers),
+		PacketFilter:              normalizeFilterRules(resp.PacketFilter),
+		Health:                    stringSlicePtr(resp.Health),
+		SSHPolicy:                 normalizeSSHPolicy(resp.SSHPolicy),
+		DomainDataPlaneAuditLogID: resp.DomainDataPlaneAuditLogID,
+		DefaultAutoUpdate:         optBoolPtr(resp.DeprecatedDefaultAutoUpdate),
+	}
+	var err error
+	if resp.PingRequest != nil {
+		out.PingRequest, err = marshalRaw(resp.PingRequest)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response ping_request marshal: %w", err)
+		}
 	}
 	if resp.Node != nil {
 		out.Node = summarizeMapNode(resp.Node)
@@ -595,6 +800,68 @@ func summarizeMapResponse(resp *tailcfg.MapResponse) (*mapResponseSummary, error
 		sort.Slice(out.Peers, func(i, j int) bool {
 			return out.Peers[i].ID < out.Peers[j].ID
 		})
+	}
+	if len(resp.PeersChanged) > 0 {
+		out.PeersChanged = make([]mapNodeSummary, 0, len(resp.PeersChanged))
+		for _, peer := range resp.PeersChanged {
+			out.PeersChanged = append(out.PeersChanged, *summarizeMapNode(peer))
+		}
+		sort.Slice(out.PeersChanged, func(i, j int) bool {
+			return out.PeersChanged[i].ID < out.PeersChanged[j].ID
+		})
+	}
+	if len(resp.PeersRemoved) > 0 {
+		out.PeersRemoved = make([]uint64, 0, len(resp.PeersRemoved))
+		for _, id := range resp.PeersRemoved {
+			out.PeersRemoved = append(out.PeersRemoved, uint64(id))
+		}
+		sort.Slice(out.PeersRemoved, func(i, j int) bool {
+			return out.PeersRemoved[i] < out.PeersRemoved[j]
+		})
+	}
+	if len(resp.PeersChangedPatch) > 0 {
+		out.PeersChangedPatch, err = marshalRaw(resp.PeersChangedPatch)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response peers_changed_patch marshal: %w", err)
+		}
+	}
+	if len(resp.PeerSeenChange) > 0 {
+		out.PeerSeenChange, err = marshalRaw(resp.PeerSeenChange)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response peer_seen_change marshal: %w", err)
+		}
+	}
+	if len(resp.OnlineChange) > 0 {
+		out.OnlineChange, err = marshalRaw(resp.OnlineChange)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response online_change marshal: %w", err)
+		}
+	}
+	if len(resp.UserProfiles) > 0 {
+		out.UserProfiles = make([]userProfileSummary, 0, len(resp.UserProfiles))
+		for _, profile := range resp.UserProfiles {
+			out.UserProfiles = append(out.UserProfiles, userProfileSummary{
+				ID:            uint64(profile.ID),
+				LoginName:     profile.LoginName,
+				DisplayName:   profile.DisplayName,
+				ProfilePicURL: profile.ProfilePicURL,
+			})
+		}
+		sort.Slice(out.UserProfiles, func(i, j int) bool {
+			return out.UserProfiles[i].ID < out.UserProfiles[j].ID
+		})
+	}
+	if len(resp.PacketFilters) > 0 {
+		out.PacketFilters, err = marshalRaw(resp.PacketFilters)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response packet_filters marshal: %w", err)
+		}
+	}
+	if len(resp.DisplayMessages) > 0 {
+		out.DisplayMessages, err = marshalRaw(resp.DisplayMessages)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response display_messages marshal: %w", err)
+		}
 	}
 	if resp.DNSConfig != nil {
 		raw, err := marshalRaw(resp.DNSConfig)
@@ -610,24 +877,117 @@ func summarizeMapResponse(resp *tailcfg.MapResponse) (*mapResponseSummary, error
 		}
 		out.DERPMap = raw
 	}
+	if resp.ControlTime != nil {
+		out.ControlTime, err = marshalRaw(resp.ControlTime)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response control_time marshal: %w", err)
+		}
+	}
+	if resp.TKAInfo != nil {
+		out.TKAInfo, err = marshalRaw(resp.TKAInfo)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response tka_info marshal: %w", err)
+		}
+	}
+	if resp.Debug != nil {
+		out.Debug, err = marshalRaw(resp.Debug)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response debug marshal: %w", err)
+		}
+	}
+	if resp.ControlDialPlan != nil {
+		out.ControlDialPlan, err = marshalRaw(resp.ControlDialPlan)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response control_dial_plan marshal: %w", err)
+		}
+	}
+	if resp.ClientVersion != nil {
+		out.ClientVersion, err = marshalRaw(resp.ClientVersion)
+		if err != nil {
+			return nil, fmt.Errorf("wire map_response client_version marshal: %w", err)
+		}
+	}
 	return out, nil
 }
 
 func summarizeMapNode(node *tailcfg.Node) *mapNodeSummary {
-	return &mapNodeSummary{
-		ID:                uint64(node.ID),
-		StableID:          string(node.StableID),
-		Name:              node.Name,
-		User:              uint64(node.User),
-		Key:               node.Key.String(),
-		Machine:           node.Machine.String(),
-		DiscoKey:          node.DiscoKey.String(),
-		Addresses:         prefixStrings(node.Addresses),
-		AllowedIPs:        prefixStrings(node.AllowedIPs),
-		Endpoints:         addrPortStrings(node.Endpoints),
-		Hostinfo:          summarizeHostInfo(node.Hostinfo),
-		MachineAuthorized: node.MachineAuthorized,
+	var online *bool
+	if node.Online != nil {
+		v := *node.Online
+		online = &v
 	}
+	var capMap json.RawMessage
+	if len(node.CapMap) > 0 {
+		capMap, _ = marshalRaw(node.CapMap)
+	}
+	var exitNodeDNSResolvers json.RawMessage
+	if len(node.ExitNodeDNSResolvers) > 0 {
+		exitNodeDNSResolvers, _ = marshalRaw(node.ExitNodeDNSResolvers)
+	}
+	var selfNodeV4MasqAddrForThisPeer string
+	if node.SelfNodeV4MasqAddrForThisPeer != nil {
+		selfNodeV4MasqAddrForThisPeer = node.SelfNodeV4MasqAddrForThisPeer.String()
+	}
+	var selfNodeV6MasqAddrForThisPeer string
+	if node.SelfNodeV6MasqAddrForThisPeer != nil {
+		selfNodeV6MasqAddrForThisPeer = node.SelfNodeV6MasqAddrForThisPeer.String()
+	}
+	capabilities := make([]string, 0, len(node.Capabilities))
+	for _, capability := range node.Capabilities {
+		capabilities = append(capabilities, string(capability))
+	}
+	sort.Strings(capabilities)
+	tags := append([]string(nil), node.Tags...)
+	sort.Strings(tags)
+	return &mapNodeSummary{
+		ID:                            uint64(node.ID),
+		StableID:                      string(node.StableID),
+		Name:                          node.Name,
+		User:                          uint64(node.User),
+		Sharer:                        uint64(node.Sharer),
+		Key:                           node.Key.String(),
+		KeySignature:                  base64.StdEncoding.EncodeToString(node.KeySignature),
+		Machine:                       node.Machine.String(),
+		DiscoKey:                      node.DiscoKey.String(),
+		Addresses:                     prefixStrings(node.Addresses),
+		AllowedIPs:                    prefixStrings(node.AllowedIPs),
+		PrimaryRoutes:                 prefixStrings(node.PrimaryRoutes),
+		Endpoints:                     addrPortStrings(node.Endpoints),
+		LegacyDERPString:              node.LegacyDERPString,
+		Hostinfo:                      summarizeHostInfo(node.Hostinfo),
+		Tags:                          tags,
+		Online:                        online,
+		MachineAuthorized:             node.MachineAuthorized,
+		Capabilities:                  capabilities,
+		CapMap:                        capMap,
+		Expired:                       node.Expired,
+		HomeDERP:                      node.HomeDERP,
+		UnsignedPeerAPIOnly:           node.UnsignedPeerAPIOnly,
+		ComputedName:                  node.ComputedName,
+		ComputedNameWithHost:          node.ComputedNameWithHost,
+		DataPlaneAuditLogID:           node.DataPlaneAuditLogID,
+		SelfNodeV4MasqAddrForThisPeer: selfNodeV4MasqAddrForThisPeer,
+		SelfNodeV6MasqAddrForThisPeer: selfNodeV6MasqAddrForThisPeer,
+		IsWireGuardOnly:               node.IsWireGuardOnly,
+		IsJailed:                      node.IsJailed,
+		ExitNodeDNSResolvers:          exitNodeDNSResolvers,
+	}
+}
+
+func optBoolPtr(v interface{ Get() (bool, bool) }) *bool {
+	if b, ok := v.Get(); ok {
+		out := b
+		return &out
+	}
+	return nil
+}
+
+func stringSlicePtr(in []string) *[]string {
+	if in == nil {
+		return nil
+	}
+	out := append([]string(nil), in...)
+	return &out
 }
 
 func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {

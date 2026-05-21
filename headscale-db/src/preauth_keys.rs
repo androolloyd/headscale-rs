@@ -1,11 +1,11 @@
 //! Pre-auth key persistence — sqlx-backed store mirroring
-//! `juanfont/headscale@main:hscontrol/db/preauth_keys.go`.
+//! `juanfont/headscale@v0.28.0:hscontrol/db/preauth_keys.go`.
 //!
 //! ## Surface
 //!
 //! * [`create`] — mint a new token, return the plaintext + the row.
-//! * [`get_by_token`] — bcrypt-verify a candidate plaintext against
-//!   every live row and return the match (or `NotFound`).
+//! * [`get_by_token`] — parse the modern key prefix or legacy
+//!   plaintext, bcrypt-verify the secret, and return the row.
 //! * [`expire`] — set `expiration` to now, leaving the row in place.
 //! * [`destroy`] — delete the row outright.
 //! * [`list_by_user`] — admin listing per user (newest first).
@@ -15,10 +15,10 @@
 //!
 //! ## Token shape
 //!
-//! Wire format is `octrapreauth-<64-hex>` — unchanged from the
-//! pre-persistence in-process minter so existing operator UX is
-//! preserved (see brief: "Do NOT change the wire-format of the
-//! `octrapreauth-<hex>` token").
+//! Wire format is `hskey-auth-<12 urlsafe chars>-<64 urlsafe chars>`,
+//! matching headscale-go v0.28.0. Octra-specific callers should adapt
+//! at the Octra boundary instead of changing this upstream-compatible
+//! store.
 //!
 //! ## Bcrypt cost
 //!
@@ -32,28 +32,70 @@ use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-/// Brand prefix on the plaintext bearer token. Hard-coded so the
-/// admin panel + CLI render identical truncated forms.
-pub const TOKEN_PREFIX: &str = "octrapreauth-";
+/// Brand prefix on the plaintext bearer token.
+pub const TOKEN_PREFIX: &str = "hskey-auth-";
+pub const TOKEN_PREFIX_LEN: usize = 12;
+pub const TOKEN_SECRET_LEN: usize = 64;
 
 /// Production bcrypt cost. 12 is the industry-standard floor as of
-/// 2024 (NIST SP 800-63B), and matches the Go upstream's
-/// `bcrypt.DefaultCost` (which is 10) bumped one notch for the
-/// extra-throughput-per-key the headscale-rs control plane sees.
-pub const BCRYPT_COST_DEFAULT: u32 = 12;
+/// 2024 (NIST SP 800-63B), but this store intentionally matches
+/// headscale-go's `bcrypt.DefaultCost`.
+pub const BCRYPT_COST_DEFAULT: u32 = 10;
 
 /// Cheap bcrypt cost for unit tests — the crate's minimum (4). Keeps
 /// the 20+ test suite under a couple of seconds total. `bcrypt::hash`
 /// rejects costs below 4 with `BcryptError::CostNotAllowed`.
 pub const BCRYPT_COST_TEST: u32 = 4;
 
+const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const PREAUTH_KEY_COLUMNS: &str = r"
+        id,
+        key,
+        prefix,
+        COALESCE(CAST(hash AS TEXT), '') AS key_hash,
+        COALESCE(CAST(user_id AS TEXT), '') AS user_id,
+        reusable,
+        ephemeral,
+        COALESCE(tags, '[]') AS tags,
+        CASE
+            WHEN expiration IS NULL THEN NULL
+            WHEN typeof(expiration) = 'integer' THEN expiration
+            ELSE unixepoch(expiration)
+        END AS expiration,
+        CASE
+            WHEN created_at IS NULL THEN 0
+            WHEN typeof(created_at) = 'integer' THEN created_at
+            ELSE unixepoch(created_at)
+        END AS created_at,
+        CASE
+            WHEN used THEN COALESCE(
+                CASE
+                    WHEN expiration IS NULL THEN NULL
+                    WHEN typeof(expiration) = 'integer' THEN expiration
+                    ELSE unixepoch(expiration)
+                END,
+                CASE
+                    WHEN created_at IS NULL THEN 0
+                    WHEN typeof(created_at) = 'integer' THEN created_at
+                    ELSE unixepoch(created_at)
+                END
+            )
+            ELSE NULL
+        END AS used_at
+";
+
+fn preauth_key_select(suffix: &str) -> String {
+    format!("SELECT {PREAUTH_KEY_COLUMNS} FROM pre_auth_keys {suffix}")
+}
+
 /// One pre-auth-key row in the DB. Mirrors the Go upstream's
-/// `hscontrol/types/preauth_key.go::PreAuthKey` field-for-field
-/// (renamed `Key` → `key_hash` to spell out the hashing — see the
-/// SQL migration comment for the trade).
+/// `hscontrol/types/preauth_key.go::PreAuthKey` fields while keeping
+/// Unix-second timestamps at the Rust boundary.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreauthKeyRow {
     pub id: i64,
+    pub key: Option<String>,
+    pub prefix: Option<String>,
     pub key_hash: String,
     pub user_id: String,
     pub reusable: bool,
@@ -69,6 +111,16 @@ pub struct PreauthKeyRow {
 }
 
 impl PreauthKeyRow {
+    pub fn display_key(&self) -> String {
+        if let Some(prefix) = self.prefix.as_deref().filter(|prefix| !prefix.is_empty()) {
+            format!("{TOKEN_PREFIX}{prefix}-***")
+        } else if let Some(key) = &self.key {
+            key.clone()
+        } else {
+            format!("{TOKEN_PREFIX}<sealed:{}>", self.id)
+        }
+    }
+
     /// Parse the JSON `tags` column.
     pub fn tag_list(&self) -> Vec<String> {
         serde_json::from_str(&self.tags).unwrap_or_default()
@@ -124,12 +176,30 @@ fn now_unix() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Generate a fresh `octrapreauth-<hex>` plaintext token. 32 random
-/// bytes ⇒ 64 hex chars ⇒ same length the in-process minter used.
-pub fn generate_plaintext() -> String {
-    let mut raw = [0u8; 32];
+fn generate_urlsafe(len: usize) -> String {
+    let mut raw = vec![0u8; len];
     rand_core::OsRng.fill_bytes(&mut raw);
-    format!("{TOKEN_PREFIX}{}", hex::encode(raw))
+    raw.into_iter()
+        .map(|b| URLSAFE[(b & 0b0011_1111) as usize] as char)
+        .collect()
+}
+
+fn is_valid_urlsafe(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Generate a fresh `hskey-auth-<12>-<64>` plaintext token.
+pub fn generate_plaintext() -> String {
+    let (plaintext, _, _) = generate_plaintext_parts();
+    plaintext
+}
+
+fn generate_plaintext_parts() -> (String, String, String) {
+    let prefix = generate_urlsafe(TOKEN_PREFIX_LEN);
+    let secret = generate_urlsafe(TOKEN_SECRET_LEN);
+    let key = format!("{TOKEN_PREFIX}{prefix}-{secret}");
+    (key, prefix, secret)
 }
 
 /// Mint with the production bcrypt cost.
@@ -151,28 +221,43 @@ pub async fn create_with_cost(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
-    if params.user_id.trim().is_empty() {
-        return Err(DbError::General("user_id must be non-empty".into()));
+    if params.user_id.trim().is_empty() && params.tags.is_empty() {
+        return Err(DbError::General(
+            "user_id must be non-empty unless tags are provided".into(),
+        ));
     }
-    let plaintext = generate_plaintext();
-    let hash = bcrypt::hash(&plaintext, cost)
-        .map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
+    let (plaintext, prefix, secret) = generate_plaintext_parts();
+    let hash =
+        bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
     let tags_json = serde_json::to_string(&params.tags)?;
     let created_at = now_unix();
 
     let id: i64 = sqlx::query_scalar(
         "
-        INSERT INTO preauth_keys
-            (key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        INSERT INTO pre_auth_keys
+            (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+        VALUES (
+            NULL,
+            ?,
+            ?,
+            NULLIF(?, ''),
+            ?,
+            ?,
+            false,
+            ?,
+            CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            datetime(?, 'unixepoch')
+        )
         RETURNING id
         ",
     )
-    .bind(&hash)
+    .bind(&prefix)
+    .bind(hash.as_bytes())
     .bind(&params.user_id)
     .bind(params.reusable)
     .bind(params.ephemeral)
     .bind(&tags_json)
+    .bind(params.expiration)
     .bind(params.expiration)
     .bind(created_at)
     .fetch_one(pool)
@@ -182,6 +267,8 @@ pub async fn create_with_cost(
         plaintext,
         row: PreauthKeyRow {
             id,
+            key: None,
+            prefix: Some(prefix),
             key_hash: hash,
             user_id: params.user_id,
             reusable: params.reusable,
@@ -196,54 +283,72 @@ pub async fn create_with_cost(
 
 /// Look up a row by id (used by tests + the admin "show" path).
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PreauthKeyRow> {
-    sqlx::query_as::<_, PreauthKeyRow>(
-        "
-        SELECT id, key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at
-        FROM preauth_keys
-        WHERE id = ?
-        ",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
-        e => DbError::from(e),
-    })
+    let query = preauth_key_select("WHERE id = ?");
+    sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+            e => DbError::from(e),
+        })
 }
 
-/// Find a row by candidate plaintext token. Verifies each live row's
-/// bcrypt hash against `candidate`. Returns `NotFound` if no row
-/// matches.
-///
-/// This is O(N) over live rows because bcrypt salts are per-row; the
-/// upstream Go code does the same thing
-/// (`hscontrol/db/preauth_keys.go::GetPreAuthKey`). N is bounded by
-/// the operator's outstanding-key count, which in practice is small.
-pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthKeyRow> {
-    // Cheap pre-filter: anything that doesn't carry the brand can't
-    // be one of ours.
-    if !candidate.starts_with(TOKEN_PREFIX) {
-        return Err(DbError::NotFound("preauth_key (bad prefix)".into()));
-    }
-    let rows = sqlx::query_as::<_, PreauthKeyRow>(
-        "
-        SELECT id, key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at
-        FROM preauth_keys
-        ",
-    )
-    .fetch_all(pool)
-    .await?;
+enum ParsedAuthKey<'a> {
+    Modern { prefix: &'a str, secret: &'a str },
+    Legacy { key: &'a str },
+}
 
-    for r in rows {
-        // `bcrypt::verify` returns Ok(true) on a match. We swallow
-        // hash-format errors as "this row doesn't match" — a malformed
-        // row shouldn't mask a good one further down the list.
-        if bcrypt::verify(candidate, &r.key_hash).unwrap_or(false) {
-            return Ok(r);
+fn parse_auth_key(candidate: &str) -> Result<ParsedAuthKey<'_>> {
+    if candidate.is_empty() {
+        return Err(DbError::General("auth-key failed to parse".into()));
+    }
+    if let Some(rest) = candidate.strip_prefix(TOKEN_PREFIX) {
+        let expected = TOKEN_PREFIX_LEN + 1 + TOKEN_SECRET_LEN;
+        if rest.len() != expected {
+            return Err(DbError::General("auth-key failed to parse".into()));
+        }
+        let prefix = &rest[..TOKEN_PREFIX_LEN];
+        if rest.as_bytes()[TOKEN_PREFIX_LEN] != b'-' {
+            return Err(DbError::General("auth-key failed to parse".into()));
+        }
+        let secret = &rest[TOKEN_PREFIX_LEN + 1..];
+        if !is_valid_urlsafe(prefix) || !is_valid_urlsafe(secret) {
+            return Err(DbError::General("auth-key failed to parse".into()));
+        }
+        return Ok(ParsedAuthKey::Modern { prefix, secret });
+    }
+    Ok(ParsedAuthKey::Legacy { key: candidate })
+}
+
+/// Find a row by candidate plaintext token. Modern rows are indexed by
+/// the public prefix; legacy rows are looked up by their plaintext
+/// `key` column. Returns `NotFound` if no row matches.
+pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthKeyRow> {
+    match parse_auth_key(candidate)? {
+        ParsedAuthKey::Modern { prefix, secret } => {
+            let query = preauth_key_select("WHERE prefix = ?");
+            let row = sqlx::query_as::<_, PreauthKeyRow>(&query)
+                .bind(prefix)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| DbError::NotFound("preauth_key".into()))?;
+
+            if bcrypt::verify(secret, &row.key_hash).unwrap_or(false) {
+                Ok(row)
+            } else {
+                Err(DbError::NotFound("preauth_key (hash mismatch)".into()))
+            }
+        }
+        ParsedAuthKey::Legacy { key } => {
+            let query = preauth_key_select("WHERE key = ?");
+            sqlx::query_as::<_, PreauthKeyRow>(&query)
+                .bind(key)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| DbError::NotFound("preauth_key".into()))
         }
     }
-    Err(DbError::NotFound("preauth_key (no hash match)".into()))
 }
 
 /// Expire a key by id — sets `expiration = now_unix()`. The row stays
@@ -251,7 +356,7 @@ pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthK
 pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
     let n = sqlx::query(
         "
-        UPDATE preauth_keys SET expiration = ? WHERE id = ?
+        UPDATE pre_auth_keys SET expiration = datetime(?, 'unixepoch') WHERE id = ?
         ",
     )
     .bind(now_unix())
@@ -267,7 +372,7 @@ pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
 
 /// Destroy a key by id outright.
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
-    let n = sqlx::query("DELETE FROM preauth_keys WHERE id = ?")
+    let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await?
@@ -280,17 +385,11 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
 
 /// List all keys belonging to `user_id`, newest first.
 pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<PreauthKeyRow>> {
-    let rows = sqlx::query_as::<_, PreauthKeyRow>(
-        "
-        SELECT id, key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at
-        FROM preauth_keys
-        WHERE user_id = ?
-        ORDER BY created_at DESC, id DESC
-        ",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+    let query = preauth_key_select("WHERE user_id = ? ORDER BY created_at DESC, id DESC");
+    let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -298,15 +397,10 @@ pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<Preaut
 /// "all keys" page (which Tailscale's `headscale preauthkey list`
 /// covers via `--user` filtering on the client).
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<PreauthKeyRow>> {
-    let rows = sqlx::query_as::<_, PreauthKeyRow>(
-        "
-        SELECT id, key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at
-        FROM preauth_keys
-        ORDER BY created_at DESC, id DESC
-        ",
-    )
-    .fetch_all(pool)
-    .await?;
+    let query = preauth_key_select("ORDER BY created_at DESC, id DESC");
+    let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -344,17 +438,12 @@ pub async fn try_use(
 
     // Re-read under the tx so we don't race with another concurrent
     // redemption of the same single-use key.
-    let fresh: PreauthKeyRow = sqlx::query_as::<_, PreauthKeyRow>(
-        "
-        SELECT id, key_hash, user_id, reusable, ephemeral, tags, expiration, created_at, used_at
-        FROM preauth_keys
-        WHERE id = ?
-        ",
-    )
-    .bind(row.id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| UseError::NotFound)?;
+    let query = preauth_key_select("WHERE id = ?");
+    let fresh: PreauthKeyRow = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(row.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| UseError::NotFound)?;
 
     let now = now_unix();
     if fresh.is_expired(now) {
@@ -367,18 +456,21 @@ pub async fn try_use(
     let updated = if fresh.reusable {
         fresh.clone()
     } else {
-        sqlx::query(
+        let affected = sqlx::query(
             "
-            UPDATE preauth_keys
-            SET used_at = ?
-            WHERE id = ? AND used_at IS NULL
+            UPDATE pre_auth_keys
+            SET used = true
+            WHERE id = ? AND used = false
             ",
         )
-        .bind(now)
         .bind(fresh.id)
         .execute(&mut *tx)
         .await
-        .map_err(|_| UseError::AlreadyUsed)?;
+        .map_err(|_| UseError::AlreadyUsed)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(UseError::AlreadyUsed);
+        }
         PreauthKeyRow {
             used_at: Some(now),
             ..fresh
@@ -425,6 +517,29 @@ mod tests {
         assert!(c.row.used_at.is_none());
         let again = get_by_id(db.pool(), c.row.id).await.unwrap();
         assert_eq!(again.key_hash, c.row.key_hash);
+
+        let (legacy_key, prefix, stored_hash, used, created_at): (
+            Option<String>,
+            Option<String>,
+            String,
+            bool,
+            i64,
+        ) = sqlx::query_as(
+            "
+            SELECT key, prefix, CAST(hash AS TEXT), used, unixepoch(created_at)
+            FROM pre_auth_keys
+            WHERE id = ?
+            ",
+        )
+        .bind(c.row.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert!(legacy_key.is_none());
+        assert_eq!(prefix, c.row.prefix);
+        assert_eq!(stored_hash, c.row.key_hash);
+        assert!(!used);
+        assert_eq!(created_at, c.row.created_at);
     }
 
     /// Go: TestCannotCreateForNonExistantUser (we don't yet enforce
@@ -464,12 +579,39 @@ mod tests {
         assert_eq!(row.id, c.row.id);
     }
 
+    #[tokio::test]
+    async fn get_by_token_accepts_headscale_go_legacy_plaintext_row() {
+        let db = fresh_db().await;
+        let key = "legacy-preauth-key";
+        let now = now_unix();
+        sqlx::query(
+            "
+            INSERT INTO pre_auth_keys
+                (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+            VALUES (?, NULL, NULL, ?, false, false, false, ?, NULL, datetime(?, 'unixepoch'))
+            ",
+        )
+        .bind(key)
+        .bind("alice")
+        .bind(r#"["tag:legacy"]"#)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let row = get_by_token(db.pool(), key).await.unwrap();
+        assert_eq!(row.key.as_deref(), Some(key));
+        assert_eq!(row.user_id, "alice");
+        assert_eq!(row.tag_list(), vec!["tag:legacy".to_string()]);
+        assert_eq!(row.created_at, now);
+    }
+
     /// Go: implicit in TestGetPreAuthKey — wrong token must miss.
     #[tokio::test]
     async fn get_by_token_rejects_wrong_token() {
         let db = fresh_db().await;
         let _c = create_for_test(db.pool(), alice()).await.unwrap();
-        let bogus = format!("{TOKEN_PREFIX}{}", "0".repeat(64));
+        let bogus = format!("{TOKEN_PREFIX}{}-{}", "A".repeat(12), "0".repeat(64));
         let e = get_by_token(db.pool(), &bogus).await.unwrap_err();
         assert!(matches!(e, DbError::NotFound(_)));
     }
@@ -664,7 +806,7 @@ mod tests {
     #[tokio::test]
     async fn try_use_unknown_token_not_found() {
         let db = fresh_db().await;
-        let bogus = format!("{TOKEN_PREFIX}{}", "0".repeat(64));
+        let bogus = format!("{TOKEN_PREFIX}{}-{}", "A".repeat(12), "0".repeat(64));
         let e = try_use(db.pool(), &bogus).await.unwrap_err();
         assert_eq!(e, UseError::NotFound);
     }

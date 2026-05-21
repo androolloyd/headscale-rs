@@ -28,6 +28,7 @@
 pub mod doc;
 pub mod filter;
 pub mod hujson;
+pub mod ssh;
 
 use std::sync::Arc;
 
@@ -39,8 +40,9 @@ pub use doc::{
 };
 pub use filter::acl_to_filter_rules;
 pub use hujson::{PolicyParseError, parse_hujson_policy};
+pub use ssh::{SshPolicyNode, compile_ssh_policy};
 
-use crate::tailscale_wire::wire::FilterRule;
+use crate::tailscale_wire::wire::{FilterRule, SshPolicy};
 
 /// Shared, swap-on-write policy store. Cheap to clone (`Arc`).
 ///
@@ -69,6 +71,7 @@ struct Inner {
 struct PolicyState {
     doc: Option<PolicyDoc>,
     raw: Option<String>,
+    updated_at: Option<i64>,
     /// Cached `Vec<FilterRule>` — recomputed inside [`PolicyStore::set`]
     /// so every `/map` rebuild is a single `read()` + clone.
     filters: Vec<FilterRule>,
@@ -91,6 +94,7 @@ impl PolicyStore {
             let mut g = self.inner.state.write();
             g.doc = Some(doc);
             g.raw = Some(raw);
+            g.updated_at = Some(now_unix());
             g.filters = filters;
         }
         self.inner.notify.notify_waiters();
@@ -116,6 +120,12 @@ impl PolicyStore {
         self.inner.state.read().raw.clone()
     }
 
+    /// Unix-seconds timestamp for the most recent successful policy
+    /// update, if a policy has been loaded.
+    pub fn updated_at(&self) -> Option<i64> {
+        self.inner.state.read().updated_at
+    }
+
     /// Snapshot the parsed doc. `None` until the first successful PUT.
     pub fn doc(&self) -> Option<PolicyDoc> {
         self.inner.state.read().doc.clone()
@@ -131,6 +141,22 @@ impl PolicyStore {
         match self.inner.state.read().doc.as_ref() {
             Some(doc) => doc.node_attrs_for(node),
             None => Vec::new(),
+        }
+    }
+
+    /// Compile the loaded policy's `ssh` block for `target_node_id`.
+    /// Returns `None` when no policy is loaded or the policy has no
+    /// SSH rules; returns an empty-policy object when SSH rules exist
+    /// but none match the target. Mirrors headscale-go's
+    /// `PolicyManager.SSHPolicy(node)` semantics.
+    pub fn ssh_policy_for(
+        &self,
+        nodes: &[SshPolicyNode],
+        target_node_id: u64,
+    ) -> Option<SshPolicy> {
+        match self.inner.state.read().doc.as_ref() {
+            Some(doc) => compile_ssh_policy(doc, nodes, target_node_id),
+            None => None,
         }
     }
 
@@ -168,6 +194,12 @@ impl PolicyStore {
     pub async fn wait_for_change(&self) {
         self.inner.notify.notified().await;
     }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Opaque waiter handle. Holds a strong ref to the underlying store so

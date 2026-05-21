@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-port-out-of-range",
+  "expect_policy_error": "port number out of range",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*:65536"]
+      }
+    ]
+  }
+}

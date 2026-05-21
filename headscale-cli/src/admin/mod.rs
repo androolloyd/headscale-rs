@@ -5,7 +5,7 @@
 //! This module wraps each of those endpoints in a clap subcommand so
 //! the same actions are available from the shell — matching upstream
 //! `juanfont/headscale`'s CLI surface for `users` / `nodes` /
-//! `preauthkeys` / `policy` / `tailnet`.
+//! `preauthkeys` / `apikeys` / `policy` / `tailnet`.
 //!
 //! ## Wire & auth
 //!
@@ -22,6 +22,7 @@
 //! | 5    | entity not found (404)                      |
 //! | 6    | other server-side failure (4xx / 5xx / decode) |
 
+pub mod apikeys;
 pub mod client;
 pub mod duration;
 pub mod nodes;
@@ -227,6 +228,39 @@ pub enum PreauthKeysCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ApiKeysCmd {
+    /// Mint a fresh API key. The full secret is only shown once.
+    Create {
+        /// Duration the key is valid (e.g. `30m`, `24h`, `90d`).
+        #[arg(short = 'e', long = "expiration", default_value = "90d")]
+        expiration: String,
+    },
+    /// List all known API keys.
+    #[command(alias = "ls", alias = "show")]
+    List,
+    /// Expire an API key by visible prefix or numeric ID.
+    #[command(alias = "revoke", alias = "exp", alias = "e")]
+    Expire {
+        /// API key display prefix, e.g. `hskey-api-abcdefghijkl-***`.
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// API key numeric ID.
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+    /// Delete an API key by visible prefix or numeric ID.
+    #[command(alias = "remove", alias = "del")]
+    Delete {
+        /// API key display prefix, e.g. `hskey-api-abcdefghijkl-***`.
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// API key numeric ID.
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum PolicyCmd {
     /// Fetch the policy currently loaded on the server.
     Get,
@@ -300,6 +334,16 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             preauthkeys::list(&client, user.as_deref(), conn.fmt()).await
         }
         PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+    }
+}
+
+pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), AdminError> {
+    let client = conn.build_client()?;
+    match cmd {
+        ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, conn.fmt()).await,
+        ApiKeysCmd::List => apikeys::list(&client, conn.fmt()).await,
+        ApiKeysCmd::Expire { prefix, id } => apikeys::expire(&client, prefix.as_deref(), *id).await,
+        ApiKeysCmd::Delete { prefix, id } => apikeys::delete(&client, prefix.as_deref(), *id).await,
     }
 }
 

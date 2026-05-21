@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-undefined-tag-dst",
+  "expect_policy_error": "Tag \"tag:notdefined\" is not defined",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["tag:notdefined:*"]
+      }
+    ]
+  }
+}

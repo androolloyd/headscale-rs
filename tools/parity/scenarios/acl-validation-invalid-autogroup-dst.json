@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-invalid-autogroup-dst",
+  "expect_policy_error": "AutoGroup is invalid",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["10.0.0.1"],
+        "dst": ["autogroup:invalid:*"]
+      }
+    ]
+  }
+}

@@ -194,7 +194,7 @@ async fn preauth_list_decodes() {
             when.method(GET).path("/api/v1/preauthkeys");
             then.status(200).json_body(json!([
                 {
-                    "key":"octrapreauth-aabbccdd00112233",
+                    "key":"hskey-auth-aabbccdd0011-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "user":"alice",
                     "created_at":1,
                     "expires_at":2,
@@ -227,7 +227,7 @@ async fn preauth_mint_posts_body() {
                     "tags":["tag:dev"]
                 }));
             then.status(201).json_body(json!({
-                "key":"octrapreauth-aabbccdd00112233",
+                "key":"hskey-auth-aabbccdd0011-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "user":"alice",
                 "created_at":10,
                 "expires_at": 86410_u64,
@@ -255,7 +255,7 @@ async fn preauth_mint_posts_body() {
 #[tokio::test]
 async fn preauth_expire_by_prefix() {
     let s = MockServer::start_async().await;
-    let prefix = "octrapreauth-aabbccdd";
+    let prefix = "hskey-auth-aabbccdd0011";
     let _m = s
         .mock_async(|when, then| {
             when.method(POST)
@@ -266,6 +266,92 @@ async fn preauth_expire_by_prefix() {
     let client = mk_client(&s);
     let path = format!("/preauthkeys/{prefix}/expire");
     client.post_no_content(&path).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// apikeys
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn apikey_list_decodes_response_object() {
+    let s = MockServer::start_async().await;
+    let _m = s
+        .mock_async(|when, then| {
+            when.method(GET).path("/api/v1/apikey");
+            then.status(200).json_body(json!({
+                "api_keys": [
+                    {
+                        "id": 7,
+                        "prefix": "hskey-api-abcdefghijkl-***",
+                        "expiration": 4_102_444_800_i64,
+                        "created_at": 10,
+                        "last_seen": null
+                    }
+                ]
+            }));
+        })
+        .await;
+    let client = mk_client(&s);
+    let v: serde_json::Value = client.get_json("/apikey").await.unwrap();
+    assert_eq!(v["api_keys"][0]["id"], 7);
+}
+
+#[tokio::test]
+async fn apikey_mint_posts_expiration() {
+    let s = MockServer::start_async().await;
+    let _m = s
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/v1/apikey")
+                .json_body(json!({"expiration": 4_102_444_800_i64}));
+            then.status(201)
+                .json_body(json!({"api_key": "hskey-api-abcdefghijkl-secret"}));
+        })
+        .await;
+    let client = mk_client(&s);
+    let body = headscale_api::admin::ApiKeyMintRequest {
+        expiration: Some(4_102_444_800),
+    };
+    let k: headscale_api::admin::ApiKeyCreated = client.post_json("/apikey", &body).await.unwrap();
+    assert!(k.api_key.starts_with("hskey-api-"));
+}
+
+#[tokio::test]
+async fn apikey_expire_by_id_posts_body() {
+    let s = MockServer::start_async().await;
+    let _m = s
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/v1/apikey/expire")
+                .json_body(json!({"id": 7}));
+            then.status(204);
+        })
+        .await;
+    let client = mk_client(&s);
+    let body = json!({"id": 7});
+    client
+        .post_json_no_content("/apikey/expire", &body)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn apikey_delete_by_prefix_uses_delete_body() {
+    let s = MockServer::start_async().await;
+    let _m = s
+        .mock_async(|when, then| {
+            when.method(DELETE)
+                .path("/api/v1/apikey")
+                .json_body(json!({"prefix": "hskey-api-abcdefghijkl-***"}));
+            then.status(204);
+        })
+        .await;
+    let client = mk_client(&s);
+    let body = json!({"prefix": "hskey-api-abcdefghijkl-***"});
+    client
+        .delete_json_no_content("/apikey", &body)
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,10 @@ Scenarios may also include:
 - `filter_node_checks`: per-node `FilterForNode` checks, including
   `autogroup:self` reduction.
 - `tag_checks`: `NodeCanHaveTag` checks for `tagOwners` behavior.
+- `ssh_checks`: per-node `SSHPolicy` checks, including SSH user maps,
+  `autogroup:self`, tagged destinations, host destinations, and `checkPeriod`.
+- `expect_policy_error`: a substring that both engines must reject during
+  policy load; used for negative parser/validator parity scenarios.
 - `wire`: typed `tailcfg` JSON fragments for DNS, DERP, register, and map
   response summaries. The Go side round-trips these through
   `tailscale.com/tailcfg`; the Rust side round-trips through

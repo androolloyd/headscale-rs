@@ -1,11 +1,18 @@
-use std::{collections::HashMap, env, fs, net::IpAddr, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    env, fs,
+    net::IpAddr,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, bail};
 use headscale_api::{
-    policy::{NodeView, PolicyAction, PolicyDoc, parse_hujson_policy},
+    policy::{
+        NodeView, PolicyAction, PolicyDoc, SshPolicyNode, compile_ssh_policy, parse_hujson_policy,
+    },
     tailscale_wire::wire::{
         DerpMap, DnsConfig, HostInfo, MapNode, MapRequest, MapResponse, RegisterRequest,
-        RegisterResponse,
+        RegisterResponse, SshPolicy as WireSshPolicy,
     },
 };
 use ipnet::IpNet;
@@ -26,6 +33,10 @@ struct Scenario {
     route_checks: Vec<RouteCheck>,
     #[serde(default)]
     tag_checks: Vec<TagCheck>,
+    #[serde(default)]
+    ssh_checks: Vec<SshCheck>,
+    #[serde(default)]
+    expect_policy_error: Option<String>,
     #[serde(default)]
     wire: Option<WireScenario>,
 }
@@ -73,6 +84,12 @@ struct TagCheck {
 }
 
 #[derive(Debug, Deserialize)]
+struct SshCheck {
+    name: String,
+    node_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct WireScenario {
     #[serde(default)]
     dns_config: Option<Value>,
@@ -93,12 +110,16 @@ struct ScenarioOutput {
     engine: &'static str,
     name: String,
     filter: Vec<FilterRuleOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     filter_for_nodes: Vec<FilterForNodeOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     route_approvals: Vec<RouteApprovalOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tag_checks: Vec<TagCheckOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ssh_policies: Vec<SshPolicyOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wire: Option<WireOutput>,
 }
@@ -120,6 +141,29 @@ struct RouteApprovalOut {
 struct TagCheckOut {
     name: String,
     allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SshPolicyOut {
+    name: String,
+    rules: Vec<SshRuleOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct SshRuleOut {
+    principals: Vec<String>,
+    ssh_users: BTreeMap<String, String>,
+    action: SshActionOut,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct SshActionOut {
+    accept: bool,
+    reject: bool,
+    session_duration_nanos: i64,
+    allow_agent_forwarding: bool,
+    allow_local_port_forwarding: bool,
+    allow_remote_port_forwarding: bool,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -170,6 +214,8 @@ struct MapRequestSummary {
     version: u32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    keep_alive: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     compress: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -177,9 +223,27 @@ struct MapRequestSummary {
     #[serde(skip_serializing_if = "String::is_empty")]
     node_key: String,
     #[serde(skip_serializing_if = "String::is_empty")]
+    map_session_handle: String,
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    map_session_seq: i64,
+    #[serde(skip_serializing_if = "String::is_empty")]
     disco_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    hardware_attestation_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    hardware_attestation_key_signature: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hardware_attestation_key_signature_timestamp: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     endpoints: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endpoint_types: Vec<i32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    read_only: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tka_head: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    debug_flags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hostinfo: Option<HostInfoSummary>,
 }
@@ -204,20 +268,64 @@ struct LoginSummary {
 
 #[derive(Debug, Serialize)]
 struct MapResponseSummary {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    map_session_handle: String,
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    seq: i64,
     keep_alive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ping_request: Option<Value>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pop_browser_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collect_services: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     node: Option<MapNodeSummary>,
     peer_count: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     peers: Vec<MapNodeSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    peers_changed: Vec<MapNodeSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    peers_removed: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peers_changed_patch: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_seen_change: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    online_change: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    user_profiles: Vec<UserProfileSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     packet_filter: Vec<FilterRuleOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packet_filters: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_messages: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dns_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     derp_map: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ssh_policy: Vec<SshRuleOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_time: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tka_info: Option<Value>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    domain_data_plane_audit_log_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_dial_plan: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_version: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_auto_update: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +338,10 @@ struct MapNodeSummary {
     user: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     key: String,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    sharer: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    key_signature: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     machine: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -239,11 +351,56 @@ struct MapNodeSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     allowed_ips: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    primary_routes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     endpoints: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    legacy_derp_string: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     hostinfo: Option<HostInfoSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    online: Option<bool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     machine_authorized: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cap_map: Option<Value>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    expired: bool,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    home_derp: i32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unsigned_peer_api_only: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    computed_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    computed_name_with_host: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    data_plane_audit_log_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    self_node_v4_masq_addr_for_this_peer: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    self_node_v6_masq_addr_for_this_peer: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_wire_guard_only: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_jailed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_node_dns_resolvers: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct UserProfileSummary {
+    id: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    login_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    display_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    profile_pic_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,16 +448,51 @@ fn main() -> Result<()> {
         let scenario: Scenario = serde_json::from_str(&raw)
             .with_context(|| format!("parsing scenario {}", path.display()))?;
         let policy = serde_json::to_string(&scenario.policy)?;
-        let doc = parse_hujson_policy(&policy)
-            .with_context(|| format!("headscale-rs parsing policy for {}", scenario.name))?;
+        let parsed = parse_hujson_policy(&policy);
+        if let Some(expect) = scenario.expect_policy_error.as_deref() {
+            match parsed {
+                Ok(_) => bail!(
+                    "headscale-rs policy for {} parsed successfully, want error containing {:?}",
+                    scenario.name,
+                    expect
+                ),
+                Err(err) => {
+                    let err = err.to_string();
+                    if !err.contains(expect) {
+                        bail!(
+                            "headscale-rs policy error for {} = {:?}, want substring {:?}",
+                            scenario.name,
+                            err,
+                            expect
+                        );
+                    }
+                    out.push(ScenarioOutput {
+                        engine: "headscale-rs",
+                        name: scenario.name.clone(),
+                        filter: Vec::new(),
+                        policy_error: Some(expect.to_string()),
+                        filter_for_nodes: Vec::new(),
+                        route_approvals: Vec::new(),
+                        tag_checks: Vec::new(),
+                        ssh_policies: Vec::new(),
+                        wire: None,
+                    });
+                    continue;
+                }
+            }
+        }
+        let doc =
+            parsed.with_context(|| format!("headscale-rs parsing policy for {}", scenario.name))?;
         let filter_nodes = build_filter_nodes(&scenario);
         out.push(ScenarioOutput {
             engine: "headscale-rs",
             name: scenario.name.clone(),
             filter: compile_filter_rules(&doc, &filter_nodes, None),
+            policy_error: None,
             filter_for_nodes: run_filter_node_checks(&scenario, &doc, &filter_nodes)?,
             route_approvals: run_route_checks(&scenario, &doc)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
+            ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
             wire: normalize_wire(scenario.wire)?,
         });
     }
@@ -398,6 +590,74 @@ fn run_tag_checks(
         });
     }
     Ok(out)
+}
+
+fn run_ssh_checks(
+    scenario: &Scenario,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+) -> Result<Vec<SshPolicyOut>> {
+    let mut out = Vec::with_capacity(scenario.ssh_checks.len());
+    let ssh_nodes: Vec<SshPolicyNode> = nodes
+        .iter()
+        .map(|node| SshPolicyNode {
+            id: node.id,
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+        })
+        .collect();
+    for check in &scenario.ssh_checks {
+        let node = nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "ssh check {} references unknown node {}",
+                    check.name, check.node_id
+                )
+            })?;
+        let policy = compile_ssh_policy(doc, &ssh_nodes, node.id);
+        out.push(SshPolicyOut {
+            name: check.name.clone(),
+            rules: normalize_ssh_policy(policy.as_ref()),
+        });
+    }
+    Ok(out)
+}
+
+fn normalize_ssh_policy(policy: Option<&WireSshPolicy>) -> Vec<SshRuleOut> {
+    let Some(policy) = policy else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for rule in &policy.rules {
+        let mut principals: Vec<String> = rule
+            .principals
+            .iter()
+            .filter_map(|principal| {
+                if principal.node_ip.is_empty() {
+                    None
+                } else {
+                    Some(principal.node_ip.clone())
+                }
+            })
+            .collect();
+        principals.sort();
+        out.push(SshRuleOut {
+            principals,
+            ssh_users: rule.ssh_users.clone(),
+            action: SshActionOut {
+                accept: rule.action.accept,
+                reject: rule.action.reject,
+                session_duration_nanos: rule.action.session_duration,
+                allow_agent_forwarding: rule.action.allow_agent_forwarding,
+                allow_local_port_forwarding: rule.action.allow_local_port_forwarding,
+                allow_remote_port_forwarding: rule.action.allow_remote_port_forwarding,
+            },
+        });
+    }
+    out
 }
 
 fn compile_filter_rules(
@@ -1136,14 +1396,28 @@ fn summarize_register_response(resp: RegisterResponse) -> RegisterResponseSummar
 fn summarize_map_request(req: MapRequest) -> MapRequestSummary {
     let mut endpoints = req.endpoints.unwrap_or_default();
     endpoints.sort();
+    let mut debug_flags = req.debug_flags;
+    debug_flags.sort();
     MapRequestSummary {
         version: req.version,
         stream: req.stream,
+        keep_alive: req.keep_alive,
         compress: req.compress,
         omit_peers: req.omit_peers,
         node_key: req.node_key,
+        map_session_handle: req.map_session_handle,
+        map_session_seq: req.map_session_seq,
         disco_key: req.disco_key.unwrap_or_default(),
+        hardware_attestation_key: req.hardware_attestation_key.unwrap_or_default(),
+        hardware_attestation_key_signature: req.hardware_attestation_key_signature,
+        hardware_attestation_key_signature_timestamp: req
+            .hardware_attestation_key_signature_timestamp
+            .is_some(),
         endpoints,
+        endpoint_types: req.endpoint_types,
+        read_only: req.read_only,
+        tka_head: req.tka_head,
+        debug_flags,
         hostinfo: req.hostinfo.map(summarize_hostinfo),
     }
 }
@@ -1155,19 +1429,86 @@ fn summarize_map_response(resp: MapResponse) -> Result<MapResponseSummary> {
         .map(summarize_map_node)
         .collect::<Vec<_>>();
     peers.sort_by_key(|peer| peer.id);
+    let mut peers_changed = resp
+        .peers_changed
+        .into_iter()
+        .map(summarize_map_node)
+        .collect::<Vec<_>>();
+    peers_changed.sort_by_key(|peer| peer.id);
+    let mut peers_removed = resp.peers_removed;
+    peers_removed.sort_unstable();
+    let packet_filters = if resp.packet_filters.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(resp.packet_filters)?)
+    };
+    let display_messages = if resp.display_messages.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(resp.display_messages)?)
+    };
+    let peer_seen_change = if resp.peer_seen_change.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(resp.peer_seen_change)?)
+    };
+    let online_change = if resp.online_change.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(resp.online_change)?)
+    };
+    let user_profiles = resp
+        .user_profiles
+        .into_iter()
+        .map(|profile| UserProfileSummary {
+            id: profile.id,
+            login_name: profile.login_name,
+            display_name: profile.display_name,
+            profile_pic_url: profile.profile_pic_url,
+        })
+        .collect();
     Ok(MapResponseSummary {
+        map_session_handle: resp.map_session_handle,
+        seq: resp.seq,
         keep_alive: resp.keep_alive,
+        ping_request: resp.ping_request.map(serde_json::to_value).transpose()?,
+        pop_browser_url: resp.pop_browser_url,
         domain: resp.domain,
-        node: Some(summarize_map_node(resp.node)),
+        collect_services: resp.collect_services,
+        node: resp.node.map(summarize_map_node),
         peer_count: peers.len(),
         peers,
+        peers_changed,
+        peers_removed,
+        peers_changed_patch: if resp.peers_changed_patch.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(resp.peers_changed_patch)?)
+        },
+        peer_seen_change,
+        online_change,
+        user_profiles,
         packet_filter: resp
             .packet_filter
             .into_iter()
             .map(filter_rule_out)
             .collect(),
-        dns_config: Some(serde_json::to_value(resp.dns_config)?),
-        derp_map: Some(serde_json::to_value(resp.derp_map)?),
+        packet_filters,
+        health: resp.health,
+        display_messages,
+        dns_config: resp.dns_config.map(serde_json::to_value).transpose()?,
+        derp_map: resp.derp_map.map(serde_json::to_value).transpose()?,
+        ssh_policy: normalize_ssh_policy(resp.ssh_policy.as_ref()),
+        control_time: resp.control_time.map(serde_json::to_value).transpose()?,
+        tka_info: resp.tka_info.map(serde_json::to_value).transpose()?,
+        domain_data_plane_audit_log_id: resp.domain_data_plane_audit_log_id,
+        debug: resp.debug.map(serde_json::to_value).transpose()?,
+        control_dial_plan: resp
+            .control_dial_plan
+            .map(serde_json::to_value)
+            .transpose()?,
+        client_version: resp.client_version.map(serde_json::to_value).transpose()?,
+        default_auto_update: resp.deprecated_default_auto_update,
     })
 }
 
@@ -1176,21 +1517,60 @@ fn summarize_map_node(node: MapNode) -> MapNodeSummary {
     addresses.sort();
     let mut allowed_ips = node.allowed_ips;
     allowed_ips.sort();
+    let mut primary_routes = node.primary_routes;
+    primary_routes.sort();
     let mut endpoints = node.endpoints;
     endpoints.sort();
+    let mut tags = node.tags;
+    tags.sort();
+    let mut capabilities = node.capabilities;
+    capabilities.sort();
+    let cap_map = if node.cap_map.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(node.cap_map).unwrap_or(Value::Null))
+    };
+    let exit_node_dns_resolvers = if node.exit_node_dns_resolvers.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(node.exit_node_dns_resolvers).unwrap_or(Value::Null))
+    };
     MapNodeSummary {
         id: node.id,
         stable_id: node.stable_id,
         name: node.name,
         user: node.user,
+        sharer: node.sharer,
         key: node.key,
+        key_signature: node.key_signature,
         machine: node.machine.unwrap_or_default(),
         disco_key: node.disco_key.unwrap_or_default(),
         addresses,
         allowed_ips,
+        primary_routes,
         endpoints,
+        legacy_derp_string: node.legacy_derp_string,
         hostinfo: Some(summarize_hostinfo(node.hostinfo)),
+        tags,
+        online: node.online,
         machine_authorized: node.machine_authorized,
+        capabilities,
+        cap_map,
+        expired: node.expired,
+        home_derp: node.home_derp,
+        unsigned_peer_api_only: node.unsigned_peer_api_only,
+        computed_name: node.computed_name,
+        computed_name_with_host: node.computed_name_with_host,
+        data_plane_audit_log_id: node.data_plane_audit_log_id,
+        self_node_v4_masq_addr_for_this_peer: node
+            .self_node_v4_masq_addr_for_this_peer
+            .unwrap_or_default(),
+        self_node_v6_masq_addr_for_this_peer: node
+            .self_node_v6_masq_addr_for_this_peer
+            .unwrap_or_default(),
+        is_wire_guard_only: node.is_wire_guard_only,
+        is_jailed: node.is_jailed,
+        exit_node_dns_resolvers,
     }
 }
 
@@ -1203,6 +1583,18 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
 }
 
 fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
+fn is_zero_i32(v: &i32) -> bool {
     *v == 0
 }
 

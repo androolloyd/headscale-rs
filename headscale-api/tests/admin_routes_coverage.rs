@@ -371,7 +371,7 @@ async fn api_preauth_expire_unknown_prefix_returns_404() {
     let resp = app()
         .oneshot(req_authed(
             Method::POST,
-            "/api/v1/preauthkeys/octrapreauth-never/expire",
+            "/api/v1/preauthkeys/hskey-auth-never/expire",
         ))
         .await
         .unwrap();
@@ -670,8 +670,8 @@ async fn api_preauthkey_mint_then_expire_round_trip() {
     let start = b.find(key_marker).unwrap() + key_marker.len();
     let end = b[start..].find('"').unwrap() + start;
     let key = &b[start..end];
-    assert!(key.starts_with("octrapreauth-"));
-    let prefix = &key[..18];
+    assert!(key.starts_with("hskey-auth-"));
+    let prefix = &key[..("hskey-auth-".len() + 12)];
 
     let r = app
         .oneshot(req_authed(

@@ -7,13 +7,16 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite, SqlitePool};
 use std::time::Duration;
 
+pub mod api_keys;
 pub mod error;
+pub mod headscale_nodes;
 pub mod models;
 pub mod nodes;
 pub mod payments;
 pub mod preauth_keys;
 pub mod resources;
 pub mod sessions;
+pub mod users;
 
 pub use error::{DbError, Result};
 
@@ -33,7 +36,7 @@ impl Database {
         // Rust toolchains older than 1.95 (the downstream octra
         // workspace path-deps this crate and CI there runs stable
         // 1.88). Keep `from_secs` until 1.95+ is the floor.
-        #[allow(clippy::duration_suboptimal_units)]
+        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
             .idle_timeout(Duration::from_secs(300))

@@ -45,20 +45,29 @@
 //! the registry directly.
 
 use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sqlx::SqlitePool;
 
 use crate::tailscale_wire::MachineRegistry;
 
 use super::auth::now_unix;
+use super::users::UserAdmin;
 
 /// Admin-side view of one registered machine.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineAdminRecord {
+    /// Upstream numeric node ID. Persistent stores populate this from
+    /// `nodes.id`; volatile wire-only adapters leave it at zero and
+    /// gRPC falls back to the deterministic legacy node-key hash.
+    #[serde(default)]
+    pub node_id: u64,
     /// `node_key_hex` from the wire registry. Used as the URL slug.
     pub id: String,
     /// Hostname the client advertised (may be empty).
@@ -73,6 +82,12 @@ pub struct MachineAdminRecord {
     /// Unix-seconds, best-effort. v0 stubs to `created_at` for any
     /// record we have a stamp for (none today); fills 0 otherwise.
     pub last_seen: u64,
+    /// Unix-seconds node creation timestamp.
+    #[serde(default)]
+    pub created_at: u64,
+    /// Unix-seconds node expiry timestamp. `None` means never expires.
+    #[serde(default)]
+    pub expiry: Option<u64>,
     /// Hex machine key (may be empty if the registrant only carried a
     /// NodeKey).
     pub machine_key_hex: String,
@@ -86,6 +101,12 @@ pub struct MachineAdminRecord {
     pub tags: Vec<String>,
     /// Routes the node advertises. Empty in v0.
     pub routes: Vec<String>,
+    /// Routes approved by operator/policy and emitted in `AllowedIPs`.
+    #[serde(default)]
+    pub approved_routes: Vec<String>,
+    /// Upstream `RegisterMethod` enum numeric value.
+    #[serde(default)]
+    pub register_method: i32,
     /// Whether an admin marked this machine "expired".
     pub expired: bool,
 }
@@ -109,6 +130,13 @@ pub enum MachineAdminError {
 pub trait MachineAdmin: Send + Sync {
     async fn list(&self) -> Vec<MachineAdminRecord>;
     async fn get(&self, id: &str) -> Option<MachineAdminRecord>;
+    /// Insert a synthetic/admin-created machine record. Used by
+    /// upstream debug/register gRPC paths and by future DB-backed node
+    /// creation. Implementations must reject duplicate node IDs.
+    async fn create(
+        &self,
+        record: MachineAdminRecord,
+    ) -> Result<MachineAdminRecord, MachineAdminError>;
     /// Mark a machine expired. `expiry = None` ⇒ expire immediately
     /// (`Utc::now()`); `Some(t)` ⇒ schedule expiry for `t`. Mirrors
     /// upstream `db.SetExpiry`.
@@ -132,6 +160,12 @@ pub trait MachineAdmin: Send + Sync {
     /// Replace the operator-forced tag list. Empty list clears the
     /// override. Mirrors `db.SetTags`.
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError>;
+    /// Replace approved routes. Empty list clears the approval.
+    async fn set_approved_routes(
+        &self,
+        id: &str,
+        routes: Vec<String>,
+    ) -> Result<(), MachineAdminError>;
     /// Mark a machine deleted. Same sidecar story as `expire`. The
     /// record disappears from `list()` once flagged.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
@@ -189,19 +223,290 @@ impl WireMachineAdmin {
             last_seen
         };
         MachineAdminRecord {
+            node_id: 0,
             id: id.to_string(),
             name: rec.hostname.clone(),
             user: rec.user.clone(),
             ipv4: rec.ipv4.to_string(),
             online: !is_expired,
             last_seen,
+            created_at: rec.created_at.timestamp().max(0) as u64,
+            expiry: rec.expiry.map(|t| t.timestamp().max(0) as u64),
             machine_key_hex: rec.machine_key_hex.clone(),
             os: "unknown".into(),
             version: "unknown".into(),
             tags: rec.forced_tags.clone(),
-            routes: Vec::new(),
+            routes: rec.available_routes.clone(),
+            approved_routes: rec.approved_routes.clone(),
+            register_method: rec.register_method,
             expired: is_expired,
         }
+    }
+}
+
+/// sqlx-backed node admin adapter over the canonical headscale-go
+/// `nodes` table.
+///
+/// The URL/admin slug remains the node key hex (`MachineAdminRecord::id`)
+/// so existing Octra admin routes stay stable. The upstream-visible
+/// numeric ID is carried separately in `MachineAdminRecord::node_id`
+/// and is what gRPC uses when present.
+#[derive(Clone)]
+pub struct PersistentMachineAdmin {
+    pool: SqlitePool,
+    users: Option<Arc<dyn UserAdmin>>,
+}
+
+impl PersistentMachineAdmin {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool, users: None }
+    }
+
+    pub fn with_user_admin(mut self, users: Arc<dyn UserAdmin>) -> Self {
+        self.users = Some(users);
+        self
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    async fn row_by_slug(
+        &self,
+        id: &str,
+    ) -> Result<headscale_db::headscale_nodes::HeadscaleNodeRow, MachineAdminError> {
+        let node_key = key_with_prefix("nodekey:", id);
+        match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
+            Ok(row) => Ok(row),
+            Err(headscale_db::DbError::NotFound(_)) => {
+                if let Ok(node_id) = id.parse::<i64>() {
+                    headscale_db::headscale_nodes::get_by_id(&self.pool, node_id)
+                        .await
+                        .map_err(|e| db_error_to_machine(e, id))
+                } else {
+                    Err(MachineAdminError::NotFound(id.to_string()))
+                }
+            }
+            Err(e) => Err(db_error_to_machine(e, id)),
+        }
+    }
+
+    async fn user_id_for_record(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<i64>, MachineAdminError> {
+        if record.user.trim().is_empty() {
+            return Ok(None);
+        }
+        let Some(users) = &self.users else {
+            return Ok(record.user.parse::<i64>().ok());
+        };
+        let user = users
+            .get(&record.user)
+            .await
+            .map_err(|e| MachineAdminError::BadRequest(e.to_string()))?
+            .ok_or_else(|| MachineAdminError::BadRequest("user not found".to_string()))?;
+        i64::try_from(user.id)
+            .map(Some)
+            .map_err(|_| MachineAdminError::BadRequest("user id out of range".to_string()))
+    }
+
+    async fn user_name_for_row(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> String {
+        let Some(user_id) = row.user_id else {
+            return String::new();
+        };
+        let Some(users) = &self.users else {
+            return user_id.to_string();
+        };
+        match u64::try_from(user_id).ok().map(|id| users.get_by_id(id)) {
+            Some(fut) => match fut.await {
+                Ok(Some(user)) => user.name,
+                Ok(None) | Err(_) => user_id.to_string(),
+            },
+            None => user_id.to_string(),
+        }
+    }
+
+    async fn row_to_record(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> MachineAdminRecord {
+        let host_info = row.host_info_value();
+        let routes = routes_from_host_info(&host_info);
+        let now = now_unix() as i64;
+        let expired = row.expiry.is_some_and(|expiry| expiry <= now);
+        let name = if row.given_name.is_empty() {
+            row.hostname.clone()
+        } else {
+            row.given_name.clone()
+        };
+        MachineAdminRecord {
+            node_id: u64::try_from(row.id).unwrap_or_default(),
+            id: key_without_prefix("nodekey:", &row.node_key),
+            name,
+            user: self.user_name_for_row(&row).await,
+            ipv4: row.ipv4.clone().unwrap_or_default(),
+            online: !expired,
+            last_seen: row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+            created_at: row.created_at.max(0) as u64,
+            expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
+            machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
+            os: host_info
+                .get("OS")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            version: host_info
+                .get("App")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            tags: row.tag_list(),
+            routes,
+            approved_routes: row.approved_route_list(),
+            register_method: register_method_from_db(&row.register_method),
+            expired,
+        }
+    }
+}
+
+#[async_trait]
+impl MachineAdmin for PersistentMachineAdmin {
+    async fn list(&self) -> Vec<MachineAdminRecord> {
+        match headscale_db::headscale_nodes::list(&self.pool).await {
+            Ok(rows) => {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    out.push(self.row_to_record(row).await);
+                }
+                out
+            }
+            Err(e) => {
+                tracing::warn!(?e, "persistent machine list failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn get(&self, id: &str) -> Option<MachineAdminRecord> {
+        match self.row_by_slug(id).await {
+            Ok(row) => Some(self.row_to_record(row).await),
+            Err(MachineAdminError::NotFound(_)) => None,
+            Err(e) => {
+                tracing::warn!(?e, id, "persistent machine get failed");
+                None
+            }
+        }
+    }
+
+    async fn create(
+        &self,
+        record: MachineAdminRecord,
+    ) -> Result<MachineAdminRecord, MachineAdminError> {
+        if record.id.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "node key must not be empty".into(),
+            ));
+        }
+        let node_key = key_with_prefix("nodekey:", record.id.trim());
+        match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
+            Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
+            Err(headscale_db::DbError::NotFound(_)) => {}
+            Err(e) => return Err(db_error_to_machine(e, &record.id)),
+        }
+        record
+            .ipv4
+            .parse::<Ipv4Addr>()
+            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        let user_id = self.user_id_for_record(&record).await?;
+        let row = headscale_db::headscale_nodes::create(
+            &self.pool,
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
+                node_key,
+                disco_key: String::new(),
+                endpoints: Vec::new(),
+                host_info: host_info_for_record(&record),
+                ipv4: Some(record.ipv4.clone()),
+                ipv6: None,
+                hostname: record.name.clone(),
+                given_name: record.name.clone(),
+                user_id,
+                register_method: register_method_to_db(record.register_method),
+                tags: record.tags.clone(),
+                auth_key_id: None,
+                expiry: record.expiry.map(|expiry| expiry as i64),
+                last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
+                approved_routes: record.approved_routes.clone(),
+            },
+        )
+        .await
+        .map_err(|e| db_error_to_machine(e, &record.id))?;
+        Ok(self.row_to_record(row).await)
+    }
+
+    async fn expire_at(
+        &self,
+        id: &str,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
+        headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::logout(&self.pool, row.id)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        if hostname.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "hostname must not be empty".into(),
+            ));
+        }
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::rename(&self.pool, row.id, hostname)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::set_tags(&self.pool, row.id, tags)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn set_approved_routes(
+        &self,
+        id: &str,
+        routes: Vec<String>,
+    ) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::set_approved_routes(&self.pool, row.id, routes)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::destroy(&self.pool, row.id)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))
     }
 }
 
@@ -232,6 +537,51 @@ impl MachineAdmin for WireMachineAdmin {
         let rec = self.registry.get(id)?;
         let is_exp = self.expired.read().contains(id);
         Some(Self::render(id, &rec, is_exp))
+    }
+
+    async fn create(
+        &self,
+        record: MachineAdminRecord,
+    ) -> Result<MachineAdminRecord, MachineAdminError> {
+        if record.id.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "node key must not be empty".into(),
+            ));
+        }
+        if self.registry.get(&record.id).is_some() {
+            return Err(MachineAdminError::BadRequest("node already exists".into()));
+        }
+        let ipv4 = record
+            .ipv4
+            .parse()
+            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        let created_at =
+            DateTime::from_timestamp(record.created_at as i64, 0).unwrap_or_else(Utc::now);
+        let expiry = record
+            .expiry
+            .and_then(|seconds| DateTime::from_timestamp(seconds as i64, 0));
+        let mut rec = crate::tailscale_wire::MachineRecord::new_at(
+            created_at,
+            record.id.clone(),
+            record.machine_key_hex.clone(),
+            record.user.clone(),
+            record.name.clone(),
+            ipv4,
+            false,
+        );
+        rec.expiry = expiry;
+        rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
+        rec.forced_tags = record.tags.clone();
+        rec.available_routes = record.routes.clone();
+        rec.approved_routes = record.approved_routes.clone();
+        rec.register_method = record.register_method;
+
+        self.registry.upsert(record.id.clone(), rec);
+        self.deleted.write().remove(&record.id);
+        self.expired.write().remove(&record.id);
+        self.get(&record.id)
+            .await
+            .ok_or(MachineAdminError::NotFound(record.id))
     }
 
     async fn expire_at(
@@ -289,6 +639,20 @@ impl MachineAdmin for WireMachineAdmin {
         Ok(())
     }
 
+    async fn set_approved_routes(
+        &self,
+        id: &str,
+        routes: Vec<String>,
+    ) -> Result<(), MachineAdminError> {
+        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        if !self.registry.set_approved_routes(id, routes) {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
         if self.registry.get(id).is_none() {
             return Err(MachineAdminError::NotFound(id.to_string()));
@@ -304,10 +668,74 @@ impl MachineAdmin for WireMachineAdmin {
     }
 }
 
+fn key_with_prefix(prefix: &str, value: &str) -> String {
+    if value.is_empty() || value.starts_with(prefix) {
+        value.to_string()
+    } else {
+        format!("{prefix}{value}")
+    }
+}
+
+fn key_without_prefix(prefix: &str, value: &str) -> String {
+    value.strip_prefix(prefix).unwrap_or(value).to_string()
+}
+
+fn register_method_to_db(method: i32) -> String {
+    match method {
+        1 => headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY.to_string(),
+        2 => headscale_db::headscale_nodes::REGISTER_METHOD_CLI.to_string(),
+        3 => headscale_db::headscale_nodes::REGISTER_METHOD_OIDC.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn register_method_from_db(method: &str) -> i32 {
+    match method {
+        headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY => 1,
+        headscale_db::headscale_nodes::REGISTER_METHOD_CLI => 2,
+        headscale_db::headscale_nodes::REGISTER_METHOD_OIDC => 3,
+        _ => 0,
+    }
+}
+
+fn routes_from_host_info(host_info: &Value) -> Vec<String> {
+    host_info
+        .get("RoutableIPs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn host_info_for_record(record: &MachineAdminRecord) -> Value {
+    json!({
+        "Hostname": record.name,
+        "RoutableIPs": record.routes,
+    })
+}
+
+fn db_error_to_machine(e: headscale_db::DbError, subject: &str) -> MachineAdminError {
+    match e {
+        headscale_db::DbError::NotFound(_) => MachineAdminError::NotFound(subject.to_string()),
+        headscale_db::DbError::General(msg)
+            if msg.contains("hostname")
+                || msg.contains("name is not unique")
+                || msg.contains("already exists") =>
+        {
+            MachineAdminError::BadRequest(msg)
+        }
+        other => MachineAdminError::BadRequest(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::users::PersistentUserAdmin;
     use super::*;
     use crate::tailscale_wire::{MachineRecord, MachineRegistry};
+    use headscale_db::Database;
     use std::net::Ipv4Addr;
 
     fn rt() -> tokio::runtime::Runtime {
@@ -445,6 +873,46 @@ mod tests {
         assert_eq!(view.tags, vec!["tag:prod", "tag:db"]);
     }
 
+    /// `create` inserts a synthetic node through the same admin
+    /// boundary gRPC debug/register uses.
+    #[test]
+    fn create_inserts_wire_record_and_rejects_duplicate() {
+        let (a, reg) = fixture();
+        let id = "cc".repeat(32);
+        let record = MachineAdminRecord {
+            node_id: 0,
+            id: id.clone(),
+            name: "debug-node".into(),
+            user: "alice".into(),
+            ipv4: "100.64.0.44".into(),
+            online: false,
+            last_seen: 1_700_000_000,
+            created_at: 1_700_000_000,
+            expiry: None,
+            machine_key_hex: "dd".repeat(32),
+            os: "TestOS".into(),
+            version: "unknown".into(),
+            tags: Vec::new(),
+            routes: vec!["10.0.0.0/24".into()],
+            approved_routes: Vec::new(),
+            register_method: 2,
+            expired: false,
+        };
+
+        let created = rt().block_on(a.create(record.clone())).unwrap();
+        assert_eq!(created.id, id);
+        assert_eq!(created.routes, vec!["10.0.0.0/24"]);
+        assert_eq!(created.register_method, 2);
+
+        let rec = reg.get(&record.id).expect("wire record inserted");
+        assert_eq!(rec.hostname, "debug-node");
+        assert_eq!(rec.available_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(rec.register_method, 2);
+
+        let err = rt().block_on(a.create(record)).unwrap_err();
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+    }
+
     /// `delete` removes the record from the wire registry too, not
     /// just the sidecar.
     #[test]
@@ -464,5 +932,141 @@ mod tests {
             .block_on(a.logout("zz".repeat(32).as_str()))
             .unwrap_err();
         assert!(matches!(e, MachineAdminError::NotFound(_)));
+    }
+
+    async fn persistent_fixture() -> (PersistentMachineAdmin, Database, Arc<PersistentUserAdmin>) {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let admin = PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone());
+        (admin, db, users)
+    }
+
+    fn persistent_record() -> MachineAdminRecord {
+        MachineAdminRecord {
+            node_id: 0,
+            id: "aa".repeat(32),
+            name: "alice-laptop".into(),
+            user: "alice".into(),
+            ipv4: "100.64.0.9".into(),
+            online: true,
+            last_seen: 1_700_000_000,
+            created_at: 1_700_000_000,
+            expiry: None,
+            machine_key_hex: "bb".repeat(32),
+            os: "linux".into(),
+            version: "unknown".into(),
+            tags: Vec::new(),
+            routes: vec!["10.0.0.0/24".into()],
+            approved_routes: Vec::new(),
+            register_method: 2,
+            expired: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_uses_go_nodes_table() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let created = admin.create(persistent_record()).await.unwrap();
+        assert_eq!(created.node_id, 1);
+        assert_eq!(created.id, "aa".repeat(32));
+        assert_eq!(created.user, "alice");
+        assert_eq!(created.routes, vec!["10.0.0.0/24"]);
+        assert_eq!(created.register_method, 2);
+
+        let raw = sqlx::query(
+            "
+            SELECT
+                id,
+                node_key,
+                machine_key,
+                given_name,
+                user_id,
+                typeof(user_id) AS user_id_type,
+                register_method,
+                host_info
+            FROM nodes
+            WHERE id = 1
+            ",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        use sqlx::Row;
+        assert_eq!(raw.get::<i64, _>("id"), 1);
+        assert_eq!(
+            raw.get::<String, _>("node_key"),
+            format!("nodekey:{}", "aa".repeat(32))
+        );
+        assert_eq!(
+            raw.get::<String, _>("machine_key"),
+            format!("mkey:{}", "bb".repeat(32))
+        );
+        assert_eq!(raw.get::<String, _>("given_name"), "alice-laptop");
+        assert_eq!(raw.get::<i64, _>("user_id"), 1);
+        assert_eq!(raw.get::<String, _>("user_id_type"), "integer");
+        assert_eq!(raw.get::<String, _>("register_method"), "cli");
+        assert!(raw.get::<String, _>("host_info").contains("RoutableIPs"));
+
+        let listed = admin.list().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].node_id, 1);
+        assert_eq!(
+            admin.get(&"aa".repeat(32)).await.unwrap().node_id,
+            created.node_id
+        );
+        assert_eq!(admin.get("1").await.unwrap().id, "aa".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_mutations_write_go_nodes_table() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let created = admin.create(persistent_record()).await.unwrap();
+        let node_key = created.id.clone();
+
+        admin.rename(&node_key, "alice-renamed").await.unwrap();
+        assert_eq!(admin.get(&node_key).await.unwrap().name, "alice-renamed");
+
+        admin
+            .set_tags(
+                &node_key,
+                vec!["tag:prod".into(), "tag:dev".into(), "tag:prod".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            admin.get(&node_key).await.unwrap().tags,
+            vec!["tag:dev", "tag:prod"]
+        );
+
+        admin
+            .set_approved_routes(&node_key, vec!["0.0.0.0/0".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            admin.get(&node_key).await.unwrap().approved_routes,
+            vec!["0.0.0.0/0", "::/0"]
+        );
+
+        let expiry = Utc::now() + chrono::Duration::seconds(60);
+        admin.expire_at(&node_key, Some(expiry)).await.unwrap();
+        assert_eq!(
+            admin.get(&node_key).await.unwrap().expiry,
+            Some(expiry.timestamp() as u64)
+        );
+
+        admin.logout(&node_key).await.unwrap();
+        let logged_out = admin.get(&node_key).await.unwrap();
+        assert!(logged_out.machine_key_hex.is_empty());
+        assert!(logged_out.expiry.is_some());
+
+        admin.delete(&node_key).await.unwrap();
+        assert!(admin.get(&node_key).await.is_none());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

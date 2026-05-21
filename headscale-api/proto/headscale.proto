@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package headscale.v1;
+
+import "apikey.proto";
+import "node.proto";
+import "policy.proto";
+import "preauthkey.proto";
+import "user.proto";
+
+service HeadscaleService {
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc RenameUser(RenameUserRequest) returns (RenameUserResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+
+  rpc CreatePreAuthKey(CreatePreAuthKeyRequest) returns (CreatePreAuthKeyResponse);
+  rpc ExpirePreAuthKey(ExpirePreAuthKeyRequest) returns (ExpirePreAuthKeyResponse);
+  rpc DeletePreAuthKey(DeletePreAuthKeyRequest) returns (DeletePreAuthKeyResponse);
+  rpc ListPreAuthKeys(ListPreAuthKeysRequest) returns (ListPreAuthKeysResponse);
+
+  rpc DebugCreateNode(DebugCreateNodeRequest) returns (DebugCreateNodeResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
+  rpc SetApprovedRoutes(SetApprovedRoutesRequest) returns (SetApprovedRoutesResponse);
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
+  rpc ExpireNode(ExpireNodeRequest) returns (ExpireNodeResponse);
+  rpc RenameNode(RenameNodeRequest) returns (RenameNodeResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc BackfillNodeIPs(BackfillNodeIPsRequest) returns (BackfillNodeIPsResponse);
+
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
+  rpc ExpireApiKey(ExpireApiKeyRequest) returns (ExpireApiKeyResponse);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
+  rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse);
+
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
+
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool database_connectivity = 1;
+}

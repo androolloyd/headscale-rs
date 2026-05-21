@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-port-zero",
+  "expect_policy_error": "first port must be >0",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*:0"]
+      }
+    ]
+  }
+}

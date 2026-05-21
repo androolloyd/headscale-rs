@@ -115,6 +115,25 @@ impl AdminClient {
         Ok(())
     }
 
+    /// `POST /api/v1<path>` carrying a JSON body and expecting
+    /// `204 No Content`.
+    pub async fn post_json_no_content<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), AdminError> {
+        let resp = self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| map_send_err(&e))?;
+        check_status(resp).await?;
+        Ok(())
+    }
+
     /// `PUT /api/v1<path>` carrying a raw string body (the policy
     /// endpoint accepts hujson; we never re-encode).
     pub async fn put_text(
@@ -152,6 +171,25 @@ impl AdminClient {
             .http
             .delete(self.url(path))
             .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| map_send_err(&e))?;
+        check_status(resp).await?;
+        Ok(())
+    }
+
+    /// `DELETE /api/v1<path>` carrying a JSON body and expecting
+    /// `204 No Content`.
+    pub async fn delete_json_no_content<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), AdminError> {
+        let resp = self
+            .http
+            .delete(self.url(path))
+            .bearer_auth(&self.token)
+            .json(body)
             .send()
             .await
             .map_err(|e| map_send_err(&e))?;

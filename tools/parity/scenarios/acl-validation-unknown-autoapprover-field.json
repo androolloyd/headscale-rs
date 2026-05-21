@@ -1,0 +1,10 @@
+{
+  "name": "acl-validation-unknown-autoapprover-field",
+  "expect_policy_error": "INVALID_AUTO_APPROVER_FIELD",
+  "policy": {
+    "autoApprovers": {
+      "exitNode": ["alice@"],
+      "INVALID_AUTO_APPROVER_FIELD": "should fail"
+    }
+  }
+}

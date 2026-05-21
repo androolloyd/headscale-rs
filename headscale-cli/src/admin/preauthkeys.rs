@@ -102,16 +102,16 @@ fn render_keys(keys: &[PreauthAdminKey]) {
     );
 }
 
-/// Show only the brand + first 8 hex chars of the secret — enough to
-/// disambiguate, not enough to reuse. Matches the truncation rule in
-/// `headscale_api::admin::preauth::key_prefix`.
+/// Show the upstream display prefix for modern pre-auth keys.
 fn short_prefix(key: &str) -> String {
-    let head_len = "octrapreauth-".len() + 8;
-    if key.len() > head_len {
-        format!("{}…", &key[..head_len])
-    } else {
-        key.to_string()
+    const TOKEN_PREFIX: &str = "hskey-auth-";
+    const TOKEN_PREFIX_LEN: usize = 12;
+    if let Some(rest) = key.strip_prefix(TOKEN_PREFIX)
+        && rest.len() >= TOKEN_PREFIX_LEN
+    {
+        return format!("{TOKEN_PREFIX}{}-***", &rest[..TOKEN_PREFIX_LEN]);
     }
+    key.to_string()
 }
 
 #[cfg(test)]
@@ -120,10 +120,9 @@ mod tests {
 
     #[test]
     fn short_prefix_truncates_long_keys() {
-        let s = format!("octrapreauth-{}", "a".repeat(64));
+        let s = format!("hskey-auth-{}-{}", "a".repeat(12), "b".repeat(64));
         let out = short_prefix(&s);
-        assert!(out.starts_with("octrapreauth-"));
-        assert!(out.ends_with('…'));
+        assert_eq!(out, "hskey-auth-aaaaaaaaaaaa-***");
     }
 
     #[test]

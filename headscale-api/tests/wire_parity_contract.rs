@@ -19,14 +19,14 @@ fn json_keys(value: &Value) -> Vec<String> {
 fn register_request_accepts_headscale_go_auth_key_shape() {
     let raw = json!({
         "NodeKey": "nodekey:012345",
-        "Auth": { "AuthKey": "octrapreauth-deadbeef" },
+        "Auth": { "AuthKey": "hskey-auth-deadbeef" },
         "Hostinfo": { "Hostname": "linux-a", "OS": "linux", "OSVersion": "6.8" },
         "Followup": "auth"
     });
 
     let req: RegisterRequest = serde_json::from_value(raw).unwrap();
     assert_eq!(req.node_key, "nodekey:012345");
-    assert_eq!(req.auth.unwrap().auth_key, "octrapreauth-deadbeef");
+    assert_eq!(req.auth.unwrap().auth_key, "hskey-auth-deadbeef");
     assert_eq!(req.hostinfo.unwrap().os, "linux");
 }
 
@@ -61,8 +61,7 @@ fn register_response_uses_auth_url_and_id_acronyms() {
 #[test]
 fn map_response_emits_required_stock_client_fields() {
     let response = MapResponse {
-        key_expiry_extension: 0,
-        node: MapNode {
+        node: Some(MapNode {
             id: 7,
             stable_id: "n7".into(),
             name: "linux-a.octra.test".into(),
@@ -71,36 +70,49 @@ fn map_response_emits_required_stock_client_fields() {
             machine: Some("mkey:bb".into()),
             addresses: vec!["100.64.0.7/32".into()],
             allowed_ips: vec!["100.64.0.7/32".into()],
+            primary_routes: Vec::new(),
             hostinfo: HostInfo {
                 hostname: "linux-a".into(),
                 os: "linux".into(),
                 os_version: "6.8".into(),
+                routable_ips: Vec::new(),
             },
+            created: None,
+            key_expiry: None,
+            cap: 0,
+            tags: Vec::new(),
+            last_seen: None,
+            online: None,
             machine_authorized: true,
+            capabilities: Vec::new(),
+            cap_map: std::collections::BTreeMap::new(),
+            expired: false,
+            home_derp: 0,
             disco_key: Some("discokey:cc".into()),
             endpoints: vec!["198.51.100.7:41641".into()],
-        },
+            ..MapNode::default()
+        }),
         peers: Vec::new(),
-        dns_config: DnsConfig::default(),
-        derp_map: DerpMap::default(),
+        user_profiles: Vec::new(),
+        dns_config: Some(DnsConfig::default()),
+        derp_map: Some(DerpMap::default()),
         domain: "octra.test".into(),
         keep_alive: true,
         node_key_expired: false,
         packet_filter: Vec::new(),
+        ssh_policy: None,
+        ..MapResponse::default()
     };
 
     let value = serde_json::to_value(response).unwrap();
     let keys = json_keys(&value);
-    for required in [
-        "DERPMap",
-        "DNSConfig",
-        "Domain",
-        "KeepAlive",
-        "Node",
-        "Peers",
-    ] {
+    for required in ["DERPMap", "DNSConfig", "Domain", "KeepAlive", "Node"] {
         assert!(keys.iter().any(|k| k == required), "missing {required}");
     }
+    assert!(
+        value.get("Peers").is_none(),
+        "empty Peers follows upstream omitempty"
+    );
     assert!(value.get("DerpMap").is_none());
     assert!(value.get("DnsConfig").is_none());
     assert_eq!(value["Node"]["ID"], 7);

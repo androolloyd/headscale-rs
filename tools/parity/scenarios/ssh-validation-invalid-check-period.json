@@ -1,0 +1,21 @@
+{
+  "name": "ssh-validation-invalid-check-period",
+  "expect_policy_error": "not a valid duration string",
+  "policy": {
+    "groups": {
+      "group:admins": ["alice@"]
+    },
+    "tagOwners": {
+      "tag:server": ["alice@"]
+    },
+    "ssh": [
+      {
+        "action": "check",
+        "checkPeriod": "invalid",
+        "src": ["group:admins"],
+        "dst": ["tag:server"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

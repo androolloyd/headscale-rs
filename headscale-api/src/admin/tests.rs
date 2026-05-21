@@ -247,7 +247,7 @@ async fn api_v1_preauthkey_mint_returns_full_key() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body = body_str(resp).await;
     assert!(body.contains(r#""user":"alice""#));
-    assert!(body.contains(r#""key":"octrapreauth-"#));
+    assert!(body.contains(r#""key":"hskey-auth-"#));
 }
 
 #[tokio::test]
@@ -353,9 +353,10 @@ async fn expired_session_redirects_to_login() {
     // the dashboard redirects.
     let state = AdminState {
         auth: AdminAuth::new_with_secret(admin_token(), [42u8; 32]),
-        users: UserRegistry::new(),
+        users: Arc::new(UserRegistry::new()),
         machines: Arc::new(NoopMachines),
         preauth: Arc::new(InMemoryPreauthAdmin::new()),
+        api_keys: Arc::new(NoopApiKeyAdmin),
         derp_regions: 0,
         policy: crate::policy::PolicyStore::new(),
     };

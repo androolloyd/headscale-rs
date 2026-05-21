@@ -132,7 +132,9 @@ impl<'de> Deserialize<'de> for AclRule {
         }
 
         for raw_dst in raw.dst {
-            if let Some((alias, port_spec)) = split_upstream_dst_ports(&raw_dst) {
+            if let Some((alias, port_spec)) =
+                split_upstream_dst_ports(&raw_dst).map_err(serde::de::Error::custom)?
+            {
                 validate_proto_port_compat(upstream_proto, port_spec)
                     .map_err(serde::de::Error::custom)?;
                 dst.push(alias.to_string());
@@ -176,8 +178,9 @@ pub struct AutoApprovers {
 }
 
 /// SSH grant. Minimal mirror of upstream `SSH` rule — `action`,
-/// `src`, `dst`, `users`. `deny_unknown_fields` mirrors the rest of
-/// the schema; unknown SSH keys are loud parse errors.
+/// `src`, `dst`, `users`, and optional `checkPeriod`.
+/// `deny_unknown_fields` mirrors the rest of the schema; unknown SSH
+/// keys are loud parse errors.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshRule {
@@ -186,6 +189,8 @@ pub struct SshRule {
     pub dst: Vec<String>,
     #[serde(default)]
     pub users: Vec<String>,
+    #[serde(default, rename = "check_period", alias = "checkPeriod")]
+    pub check_period: Option<String>,
 }
 
 /// Top-level ACL document.
@@ -221,8 +226,8 @@ pub struct AclDoc {
     /// `node_attrs` / `nodeAttrs`.
     #[serde(default, alias = "nodeAttrs")]
     pub node_attrs: Vec<NodeAttrGrant>,
-    /// `ssh` grants. Parsed and round-tripped — not yet compiled
-    /// into a wire SSHPolicy.
+    /// `ssh` grants. Parsed, validated, round-tripped, and compiled by
+    /// `headscale-api` into a wire SSHPolicy.
     #[serde(default)]
     pub ssh: Vec<SshRule>,
     /// Rule list. Upstream `juanfont/headscale` calls this field
@@ -317,7 +322,10 @@ impl AclDoc {
     /// Parse a TOML document. Unknown top-level fields and unknown
     /// rule fields are rejected.
     pub fn from_toml(input: &str) -> Result<Self, PolicyParseError> {
-        toml::from_str(input).map_err(|e| PolicyParseError::Schema(e.to_string()))
+        let doc: Self =
+            toml::from_str(input).map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+        validate_policy(&doc).map_err(PolicyParseError::Schema)?;
+        Ok(doc)
     }
 
     /// Parse a hujson document. See [`parse_hujson_policy`].
@@ -368,12 +376,15 @@ impl AclDoc {
                 src.sort();
                 dst.sort();
                 users.sort();
-                serde_json::json!({
-                    "action": s.action,
-                    "src": src,
-                    "dst": dst,
-                    "users": users,
-                })
+                let mut value = serde_json::Map::new();
+                value.insert("action".to_string(), serde_json::json!(s.action));
+                value.insert("src".to_string(), serde_json::json!(src));
+                value.insert("dst".to_string(), serde_json::json!(dst));
+                value.insert("users".to_string(), serde_json::json!(users));
+                if let Some(check_period) = &s.check_period {
+                    value.insert("check_period".to_string(), serde_json::json!(check_period));
+                }
+                serde_json::Value::Object(value)
             })
             .collect();
         serde_json::json!({
@@ -440,7 +451,336 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let stripped = strip_hujson(raw);
     let value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
-    serde_json::from_value::<AclDoc>(value).map_err(|e| PolicyParseError::Schema(e.to_string()))
+    let doc = serde_json::from_value::<AclDoc>(value)
+        .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+    validate_policy(&doc).map_err(PolicyParseError::Schema)?;
+    Ok(doc)
+}
+
+fn validate_policy(doc: &AclDoc) -> Result<(), String> {
+    let mut errs = Vec::new();
+
+    for rule in &doc.rules {
+        validate_acl_rule(doc, rule, &mut errs);
+    }
+    for ssh in &doc.ssh {
+        validate_ssh_rule(doc, ssh, &mut errs);
+    }
+    for owners in doc.tag_owners.values() {
+        for owner in owners {
+            validate_owner_ref(doc, owner, &mut errs);
+        }
+    }
+    for approvers in doc.auto_approvers.routes.values() {
+        for approver in approvers {
+            validate_approver_ref(doc, approver, &mut errs);
+        }
+    }
+    for approver in &doc.auto_approvers.exit_node {
+        validate_approver_ref(doc, approver, &mut errs);
+    }
+
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
+    }
+}
+
+fn validate_acl_rule(doc: &AclDoc, rule: &AclRule, errs: &mut Vec<String>) {
+    for src in &rule.src {
+        validate_acl_src_alias(src, errs);
+        validate_acl_ref(doc, src, errs);
+    }
+    for dst in &rule.dst {
+        validate_acl_dst_alias(dst, errs);
+        validate_acl_ref(doc, dst, errs);
+    }
+}
+
+fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "self" => errs.push(
+            r#""autogroup:self" used in source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for ACL sources, can be [autogroup:member autogroup:tagged]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_acl_dst_alias(alias: &str, errs: &mut Vec<String>) {
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" | "member" | "tagged" | "self" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for ACL destinations, can be [autogroup:internet autogroup:member autogroup:tagged autogroup:self]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
+    match rule.action.as_str() {
+        "accept" | "check" => {}
+        other => errs.push(format!(
+            "invalid SSH action {other:?}, must be one of: accept, check"
+        )),
+    }
+
+    if let Some(period) = rule.check_period.as_deref()
+        && parse_duration_nanos(period).is_none()
+    {
+        errs.push(format!("not a valid duration string: {period:?}"));
+    }
+
+    for user in &rule.users {
+        if user.starts_with("autogroup:") && user != "autogroup:nonroot" {
+            errs.push(format!(
+                "autogroup {user:?} is not supported for SSH user, can be [autogroup:nonroot]"
+            ));
+        }
+    }
+
+    for src in &rule.src {
+        validate_ssh_src_alias(src, errs);
+        validate_group_ref(doc, src, errs);
+        validate_tag_ref(doc, src, errs);
+    }
+    for dst in &rule.dst {
+        validate_ssh_dst_alias(dst, errs);
+        validate_tag_ref(doc, dst, errs);
+    }
+    validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
+}
+
+fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, alias, errs);
+    validate_tag_ref(doc, alias, errs);
+
+    if let Some(host) = alias.strip_prefix("host:") {
+        if !host_defined(doc, host) {
+            errs.push(format!(
+                "Host {host:?} is not defined in the Policy, please define or remove the reference to it"
+            ));
+        }
+        return;
+    }
+
+    if is_bare_host_alias(alias) && !host_defined(doc, alias) {
+        errs.push(format!(
+            "Host {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, owner, errs);
+    if owner.starts_with("tag:") {
+        validate_tag_ref(doc, owner, errs);
+    }
+}
+
+fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, approver, errs);
+    validate_tag_ref(doc, approver, errs);
+}
+
+fn validate_group_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    if alias.starts_with("group:") && !group_defined(doc, alias) {
+        errs.push(format!(
+            "Group {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn validate_tag_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    if alias.starts_with("tag:") && !tag_defined(doc, alias) {
+        errs.push(format!(
+            "Tag {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn group_defined(doc: &AclDoc, group: &str) -> bool {
+    doc.groups.contains_key(group)
+        || group
+            .strip_prefix("group:")
+            .is_some_and(|short| doc.groups.contains_key(short))
+}
+
+fn tag_defined(doc: &AclDoc, tag: &str) -> bool {
+    doc.tag_owners.contains_key(tag)
+        || doc.tags.contains_key(tag)
+        || tag
+            .strip_prefix("tag:")
+            .is_some_and(|short| doc.tag_owners.contains_key(short) || doc.tags.contains_key(short))
+}
+
+fn host_defined(doc: &AclDoc, host: &str) -> bool {
+    doc.hosts.contains_key(host)
+}
+
+fn is_bare_host_alias(alias: &str) -> bool {
+    alias != "*"
+        && !alias.contains('@')
+        && !alias.contains(':')
+        && !alias.starts_with("group:")
+        && !alias.starts_with("tag:")
+        && !alias.starts_with("autogroup:")
+        && !alias.starts_with("ipset:")
+        && parse_cidr(alias).is_none()
+}
+
+fn validate_ssh_src_alias(alias: &str, errs: &mut Vec<String>) {
+    if alias == "*" {
+        errs.push("alias v2.Asterix is not supported for SSH source".to_string());
+        return;
+    }
+
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in SSH source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" => {}
+        "nonroot" | "self" => errs.push(format!(
+            "autogroup {alias:?} is not supported for SSH sources, can be [autogroup:member autogroup:tagged]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_dst_alias(alias: &str, errs: &mut Vec<String>) {
+    if alias == "*" {
+        errs.push(
+            "wildcard (*) is not supported as SSH destination; use 'autogroup:member' for user-owned devices, 'autogroup:tagged' for tagged devices, or specific tags/users"
+                .to_string(),
+        );
+        return;
+    }
+
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in SSH destination, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" | "self" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for SSH sources, can be [autogroup:member autogroup:tagged autogroup:self]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut Vec<String>) {
+    let mut src_has_tagged_entities = false;
+    let mut src_has_groups = false;
+    let mut src_usernames: Vec<&str> = Vec::new();
+
+    for src in srcs {
+        if src.starts_with("tag:") || src == "autogroup:tagged" {
+            src_has_tagged_entities = true;
+        } else if src.starts_with("group:") || src == "autogroup:member" {
+            src_has_groups = true;
+        } else if src.contains('@') && !src_usernames.contains(&src.as_str()) {
+            src_usernames.push(src.as_str());
+        }
+    }
+
+    for dst in dsts {
+        if dst.contains('@') {
+            if src_has_tagged_entities {
+                errs.push(format!(
+                    "tags in SSH source cannot access user-owned devices ({dst}); use autogroup:tagged or specific tags as destinations instead"
+                ));
+            }
+            if src_has_groups || src_usernames.len() != 1 || src_usernames[0] != dst.as_str() {
+                errs.push(format!(
+                    "user destination requires source to contain only that same user {dst:?}; use autogroup:self instead for same-user SSH access"
+                ));
+            }
+        } else if dst == "autogroup:self" && src_has_tagged_entities {
+            errs.push(
+                "autogroup:self destination requires source to contain only users or groups, not tags or autogroup:tagged"
+                    .to_string(),
+            );
+        } else if dst == "autogroup:member" && src_has_tagged_entities {
+            errs.push(
+                "tags in SSH source cannot access autogroup:member (user-owned devices)"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+fn parse_duration_nanos(input: &str) -> Option<i64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "0" {
+        return Some(0);
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut pos = 0usize;
+    let mut total: i128 = 0;
+    while pos < bytes.len() {
+        if !bytes[pos].is_ascii_digit() {
+            return None;
+        }
+        let start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        let value: i128 = trimmed[start..pos].parse().ok()?;
+        let unit_start = pos;
+        while pos < bytes.len() && !bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        let unit = &trimmed[unit_start..pos];
+        let multiplier: i128 = match unit {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60 * 1_000_000_000,
+            "h" => 60 * 60 * 1_000_000_000,
+            "d" => 24 * 60 * 60 * 1_000_000_000,
+            "w" => 7 * 24 * 60 * 60 * 1_000_000_000,
+            "y" => 365 * 24 * 60 * 60 * 1_000_000_000,
+            _ => return None,
+        };
+        total = total.checked_add(value.checked_mul(multiplier)?)?;
+    }
+    i64::try_from(total).ok()
 }
 
 /// Strip `//` + `/* … */` comments and trailing commas. Preserves
@@ -809,12 +1149,15 @@ fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
     net.contains(&parsed)
 }
 
-fn split_upstream_dst_ports(dst: &str) -> Option<(&str, &str)> {
-    let (alias, port_spec) = dst.rsplit_once(':')?;
-    if alias.is_empty() || alias.ends_with(':') || !is_upstream_port_spec(port_spec) {
-        return None;
+fn split_upstream_dst_ports(dst: &str) -> Result<Option<(&str, &str)>, String> {
+    let Some((alias, port_spec)) = dst.rsplit_once(':') else {
+        return Ok(None);
+    };
+    if alias.is_empty() || alias.ends_with(':') || is_namespaced_alias_without_port(dst) {
+        return Ok(None);
     }
-    Some((alias, port_spec))
+    validate_upstream_port_spec(port_spec)?;
+    Ok(Some((alias, port_spec)))
 }
 
 fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
@@ -823,7 +1166,7 @@ fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
     }
     let mut out = Vec::new();
     for part in spec.split(',').map(str::trim) {
-        if !is_single_port_spec(part) {
+        if validate_upstream_port_spec(part).is_err() {
             continue;
         }
         if proto.is_empty() {
@@ -874,21 +1217,45 @@ fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_upstream_port_spec(spec: &str) -> bool {
-    spec.split(',').all(is_single_port_spec)
+fn is_namespaced_alias_without_port(dst: &str) -> bool {
+    ["tag:", "group:", "autogroup:", "host:", "ipset:"]
+        .iter()
+        .any(|prefix| dst.starts_with(prefix) && !dst[prefix.len()..].contains(':'))
 }
 
-fn is_single_port_spec(spec: &str) -> bool {
+fn validate_upstream_port_spec(spec: &str) -> Result<(), String> {
     if spec == "*" {
-        return true;
+        return Ok(());
     }
-    if let Some((lo, hi)) = spec.split_once('-') {
-        return !lo.is_empty()
-            && !hi.is_empty()
-            && lo.parse::<u16>().is_ok()
-            && hi.parse::<u16>().is_ok();
+    for part in spec.split(',').map(str::trim) {
+        if part.contains('-') {
+            let range_parts: Vec<&str> = part.split('-').filter(|part| !part.is_empty()).collect();
+            if range_parts.len() != 2 {
+                return Err("invalid port range format".to_string());
+            }
+            let first = parse_upstream_port(range_parts[0])?;
+            let last = parse_upstream_port(range_parts[1])?;
+            if first > last {
+                return Err("invalid port range: first port is greater than last port".to_string());
+            }
+        } else {
+            let port = parse_upstream_port(part)?;
+            if port < 1 {
+                return Err("first port must be >0, or use '*' for wildcard".to_string());
+            }
+        }
     }
-    spec.parse::<u16>().is_ok()
+    Ok(())
+}
+
+fn parse_upstream_port(port: &str) -> Result<u16, String> {
+    let parsed: i64 = port
+        .parse()
+        .map_err(|_| "invalid port number".to_string())?;
+    if !(0..=65_535).contains(&parsed) {
+        return Err("port number out of range".to_string());
+    }
+    Ok(parsed as u16)
 }
 
 fn port_matches(pattern: &str, port: PortRef<'_>) -> bool {
@@ -1073,6 +1440,10 @@ mod tests {
     #[test]
     fn hujson_accepts_headscale_go_dst_ports_for_tag_and_proto() {
         let raw = r#"{
+            "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:server": ["alice@"]
+            },
             "acls": [
                 {"action":"accept","proto":"tcp","src":["tag:client"],"dst":["tag:server:80,443"]}
             ]
@@ -1145,6 +1516,32 @@ mod tests {
         }"#;
         let err = parse_hujson_policy(raw).unwrap_err();
         assert!(format!("{err}").contains("does not support specific ports"));
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_invalid_dst_ports() {
+        for (dst, expected) in [
+            ("*:0", "first port must be >0"),
+            ("*:65536", "port number out of range"),
+            (
+                "*:22-10",
+                "invalid port range: first port is greater than last port",
+            ),
+            ("*:abc", "invalid port number"),
+        ] {
+            let raw = format!(
+                r#"{{
+                    "acls": [
+                        {{"action":"accept","src":["*"],"dst":["{dst}"]}}
+                    ]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).unwrap_err();
+            assert!(
+                format!("{err}").contains(expected),
+                "{dst} should contain {expected:?}, got {err}"
+            );
+        }
     }
 
     // --- Evaluate --------------------------------------------------
@@ -1790,11 +2187,16 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [auto_approvers]
             exit_node = ["tag:exit", "tag:router"]
             [auto_approvers.routes]
             "10.0.0.0/8" = ["tag:router"]
             "172.16.0.0/12" = ["group:admins"]
+            [tag_owners]
+            "tag:exit" = ["group:admins"]
+            "tag:router" = ["group:admins"]
         "#,
         )
         .unwrap();
@@ -1834,6 +2236,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [tag_owners]
             "tag:router" = ["group:admins"]
         "#,
@@ -1847,6 +2251,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [[ssh]]
             action = "accept"
             src = ["group:admins"]
@@ -1858,6 +2264,90 @@ mod tests {
         assert_eq!(doc.ssh.len(), 1);
         assert_eq!(doc.ssh[0].action, "accept");
         assert_eq!(doc.ssh[0].users, vec!["root"]);
+    }
+
+    #[test]
+    fn rejects_invalid_ssh_action_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "invalid",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid SSH action"));
+    }
+
+    #[test]
+    fn rejects_acl_autogroup_internet_source_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["autogroup:internet"],
+                "dst": ["10.0.0.1:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#""autogroup:internet" used in source"#));
+    }
+
+    #[test]
+    fn rejects_acl_autogroup_self_source_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["autogroup:self"],
+                "dst": ["10.0.0.1:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#""autogroup:self" used in source"#));
+    }
+
+    #[test]
+    fn rejects_ssh_wildcard_destination_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["*"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("wildcard (*) is not supported as SSH destination"));
+    }
+
+    #[test]
+    fn rejects_tagged_ssh_sources_to_user_destinations_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:client": ["alice@"]},
+              "ssh": [{
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["alice@"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("tags in SSH source cannot access user-owned devices"));
     }
 
     #[test]
@@ -1886,6 +2376,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [tagOwners]
+            "tag:exit" = ["alice@"]
             [autoApprovers]
             exitNode = ["tag:exit"]
             "#,

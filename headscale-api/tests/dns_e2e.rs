@@ -14,10 +14,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::dns::{
-    DnsConfigSpec, DnsStore, MachineDnsRecord, build_dns_config, parse_extra_records,
-    spawn_extra_records_watcher,
+    DnsConfigError, DnsConfigSpec, DnsStore, MachineDnsRecord, build_dns_config,
+    parse_extra_records, spawn_extra_records_watcher, try_build_dns_config,
 };
 use headscale_api::tailscale_wire::wire::{DnsRecord, MapResponse};
+
+fn magic_spec() -> DnsConfigSpec {
+    DnsConfigSpec {
+        base_domain: "headscale.test".into(),
+        ..Default::default()
+    }
+}
 
 /// Helper — write a JSON array of records to a path. Mirrors the
 /// shape `juanfont/headscale` accepts in its `[dns].extra_records`
@@ -41,7 +48,7 @@ fn write_records(path: &std::path::Path, records: &[(&str, &str, &str)]) {
 
 #[test]
 fn build_dns_config_emits_magic_a_records_per_machine() {
-    let spec = DnsConfigSpec::default();
+    let spec = magic_spec();
     let machines = [
         MachineDnsRecord {
             hostname: "peer-1".into(),
@@ -56,8 +63,19 @@ fn build_dns_config_emits_magic_a_records_per_machine() {
     ];
     let cfg = build_dns_config(&spec, &machines, &[]);
     let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
-    assert!(names.contains(&"peer-1.octravpn.example.org".to_string()));
-    assert!(names.contains(&"peer-2.octravpn.example.org".to_string()));
+    assert!(names.contains(&"peer-1.headscale.test".to_string()));
+    assert!(names.contains(&"peer-2.headscale.test".to_string()));
+}
+
+#[test]
+fn dns_default_matches_headscale_go_and_requires_base_domain_for_magic_dns() {
+    let spec = DnsConfigSpec::default();
+    assert!(spec.magic_dns);
+    assert!(spec.base_domain.is_empty());
+    assert!(matches!(
+        try_build_dns_config(&spec, &[], &[]),
+        Err(DnsConfigError::MissingBaseDomainForMagicDns)
+    ));
 }
 
 #[test]
@@ -69,7 +87,7 @@ fn split_dns_routes_round_trip_through_dns_config() {
     );
     let spec = DnsConfigSpec {
         restricted_nameservers: restricted,
-        ..Default::default()
+        ..magic_spec()
     };
     let cfg = build_dns_config(&spec, &[], &[]);
     let routes = cfg.routes.get("corp.internal").expect("present");
@@ -85,7 +103,7 @@ fn mapresponse_round_trip_carries_dnsconfig_fields() {
     // PascalCase field names land on the wire.
     let spec = DnsConfigSpec {
         nameservers: vec!["1.1.1.1".into()],
-        ..Default::default()
+        ..magic_spec()
     };
     let store = DnsStore::from_spec(spec);
     store.set_extra_records(vec![DnsRecord {
@@ -107,7 +125,7 @@ fn mapresponse_round_trip_carries_dnsconfig_fields() {
 
 #[tokio::test]
 async fn set_extra_records_wakes_waiters_within_1s() {
-    let store = DnsStore::from_spec(DnsConfigSpec::default());
+    let store = DnsStore::from_spec(magic_spec());
     let store2 = store.clone();
     let join = tokio::spawn(async move {
         store2.wait_for_change().await;
@@ -137,7 +155,7 @@ async fn extra_records_file_watcher_picks_up_initial_records() {
     let path = dir.path().join("extra.json");
     write_records(&path, &[("static.example.org", "A", "10.0.0.1")]);
 
-    let store = DnsStore::from_spec(DnsConfigSpec::default());
+    let store = DnsStore::from_spec(magic_spec());
     // Poll at a tight interval so the test doesn't take 5s.
     let handle =
         spawn_extra_records_watcher(store.clone(), path.clone(), Some(Duration::from_millis(50)));
@@ -171,7 +189,7 @@ async fn extra_records_file_watcher_picks_up_changes_and_wakes_waiters() {
     let path = dir.path().join("extra.json");
     write_records(&path, &[("first.example", "A", "10.0.0.1")]);
 
-    let store = DnsStore::from_spec(DnsConfigSpec::default());
+    let store = DnsStore::from_spec(magic_spec());
     let handle =
         spawn_extra_records_watcher(store.clone(), path.clone(), Some(Duration::from_millis(50)));
 
@@ -231,7 +249,7 @@ fn dnsconfig_with_only_authoritative_emits_just_that_field() {
         magic_dns: false,
         base_domain: "tail.org".into(),
         authoritative_suffixes: Some(vec!["tail.org".into()]),
-        ..Default::default()
+        ..magic_spec()
     };
     let cfg = build_dns_config(&spec, &[], &[]);
     let json = serde_json::to_string(&cfg).unwrap();
@@ -272,7 +290,7 @@ fn collision_handling_is_stable_under_node_id_reorder() {
             node_id: 7,
         },
     ];
-    let spec = DnsConfigSpec::default();
+    let spec = magic_spec();
     let a = build_dns_config(&spec, &machines_a, &[]);
     let b = build_dns_config(&spec, &machines_b, &[]);
     let mut a_names: Vec<String> = a.extra_records.iter().map(|r| r.name.clone()).collect();
@@ -282,13 +300,13 @@ fn collision_handling_is_stable_under_node_id_reorder() {
     assert_eq!(a_names, b_names);
     // And the lowest node_id keeps the canonical name regardless of
     // input order.
-    assert!(a_names.contains(&"dup.octravpn.example.org".to_string()));
-    assert!(a_names.contains(&"dup-n42.octravpn.example.org".to_string()));
+    assert!(a_names.contains(&"dup.headscale.test".to_string()));
+    assert!(a_names.contains(&"dup-n42.headscale.test".to_string()));
 }
 
 #[test]
 fn extra_records_combined_with_magic_dns_records() {
-    let spec = DnsConfigSpec::default();
+    let spec = magic_spec();
     let extra = [DnsRecord {
         name: "ops.example.org".into(),
         record_type: "A".into(),
@@ -310,7 +328,7 @@ fn extra_records_combined_with_magic_dns_records() {
     assert!(
         cfg.extra_records
             .iter()
-            .any(|r| r.name == "peer-a.octravpn.example.org")
+            .any(|r| r.name == "peer-a.headscale.test")
     );
 }
 
@@ -318,7 +336,7 @@ fn extra_records_combined_with_magic_dns_records() {
 fn dnsstore_arc_clone_shares_state() {
     // The store is cheap to clone (every field is an Arc). Two
     // handles must observe identical mutations.
-    let a = DnsStore::from_spec(DnsConfigSpec::default());
+    let a = DnsStore::from_spec(magic_spec());
     let b: Arc<DnsStore> = Arc::new(a.clone());
     a.set_extra_records(vec![DnsRecord {
         name: "shared".into(),
@@ -336,28 +354,42 @@ fn mapresponse_omits_default_dnsconfig_field() {
     // — this guards against accidental rename drift.
     use headscale_api::tailscale_wire::wire::{DerpMap, DnsConfig, MapNode};
     let r = MapResponse {
-        key_expiry_extension: 0,
-        node: MapNode {
+        node: Some(MapNode {
             id: 1,
             stable_id: "n1".into(),
-            name: "x.octra.test".into(),
+            name: "x.headscale.test".into(),
             user: 1,
             key: format!("nodekey:{}", "aa".repeat(32)),
             machine: None,
             addresses: vec!["100.64.0.1/32".into()],
             allowed_ips: vec!["100.64.0.1/32".into()],
+            primary_routes: Vec::new(),
             hostinfo: headscale_api::tailscale_wire::wire::HostInfo::default(),
+            created: None,
+            key_expiry: None,
+            cap: 0,
+            tags: Vec::new(),
+            last_seen: None,
+            online: None,
             machine_authorized: true,
+            capabilities: Vec::new(),
+            cap_map: std::collections::BTreeMap::new(),
+            expired: false,
+            home_derp: 0,
             disco_key: None,
             endpoints: Vec::new(),
-        },
+            ..MapNode::default()
+        }),
         peers: vec![],
-        dns_config: DnsConfig::default(),
-        derp_map: DerpMap::default(),
-        domain: "octra.test".into(),
+        user_profiles: Vec::new(),
+        dns_config: Some(DnsConfig::default()),
+        derp_map: Some(DerpMap::default()),
+        domain: "headscale.test".into(),
         keep_alive: false,
         node_key_expired: false,
         packet_filter: vec![],
+        ssh_policy: None,
+        ..MapResponse::default()
     };
     let json = serde_json::to_string(&r).unwrap();
     assert!(json.contains("\"DNSConfig\":{}"));

@@ -1,0 +1,17 @@
+{
+  "name": "ssh-validation-tag-src-user-dst",
+  "expect_policy_error": "tags in SSH source cannot access user-owned devices",
+  "policy": {
+    "tagOwners": {
+      "tag:client": ["alice@"]
+    },
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["tag:client"],
+        "dst": ["alice@"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

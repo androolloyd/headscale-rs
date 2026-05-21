@@ -1,0 +1,14 @@
+{
+  "name": "acl-validation-gre-specific-port",
+  "expect_policy_error": "protocol \"gre\" does not support specific ports",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "gre",
+        "src": ["*"],
+        "dst": ["*:443"]
+      }
+    ]
+  }
+}

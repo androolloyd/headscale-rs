@@ -23,6 +23,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "proto/resources.proto",
                     "proto/payments.proto",
                     "proto/health.proto",
+                    "proto/apikey.proto",
+                    "proto/policy.proto",
+                    "proto/preauthkey.proto",
+                    "proto/user.proto",
+                    "proto/headscale.proto",
                 ],
                 &["proto"],
             )?;

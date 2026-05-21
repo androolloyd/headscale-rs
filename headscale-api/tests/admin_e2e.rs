@@ -17,14 +17,20 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use headscale_api::admin::{
-    AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin, router,
+    AdminState, InMemoryPreauthAdmin, PersistentUserAdmin, UserAdmin, UserRegistry,
+    WireMachineAdmin, router,
 };
 use headscale_api::tailscale_wire::{MachineRecord, MachineRegistry};
+use headscale_db::Database;
 use tower::ServiceExt;
 
 const BEARER: &str = "integration-admin-bearer-token";
 
 fn fixture_state() -> AdminState {
+    fixture_state_with_users(UserRegistry::new())
+}
+
+fn fixture_state_with_users(users: impl UserAdmin + 'static) -> AdminState {
     let reg = Arc::new(MachineRegistry::new());
     // Two fixture machines so list-vs-detail tests can't false-positive.
     reg.upsert(
@@ -53,7 +59,7 @@ fn fixture_state() -> AdminState {
     );
     AdminState::builder()
         .bearer_token(BEARER)
-        .users(UserRegistry::new())
+        .users(users)
         .machines(Arc::new(WireMachineAdmin::new(reg)))
         .preauth(Arc::new(InMemoryPreauthAdmin::new()))
         .derp_regions(2)
@@ -140,6 +146,51 @@ async fn admin_router_user_create_then_list() {
 }
 
 #[tokio::test]
+async fn admin_router_can_use_persistent_go_user_store() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
+    let app = router(fixture_state_with_users(PersistentUserAdmin::new(
+        db.pool().clone(),
+    )));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            bearer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/users")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(r#"{"name":"dave"}"#))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let stored = headscale_db::users::get_by_name(db.pool(), "dave")
+        .await
+        .unwrap();
+    assert_eq!(stored.name, "dave");
+
+    let app = router(fixture_state_with_users(PersistentUserAdmin::new(
+        db.pool().clone(),
+    )));
+    let resp = app
+        .oneshot(
+            bearer(Request::builder().method(Method::GET).uri("/api/v1/users"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("dave"));
+}
+
+#[tokio::test]
 async fn admin_router_preauth_mint_returns_full_token() {
     let app = router(fixture_state());
     let resp = app
@@ -159,7 +210,7 @@ async fn admin_router_preauth_mint_returns_full_token() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body = body_string(resp).await;
-    assert!(body.contains("octrapreauth-"));
+    assert!(body.contains("hskey-auth-"));
     assert!(body.contains("tag:dev"));
     assert!(body.contains(r#""reusable":true"#));
 }

@@ -6,7 +6,7 @@
   "wire": {
     "register_request": {
       "NodeKey": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
-      "Auth": { "AuthKey": "octrapreauth-ephemeral" },
+      "Auth": { "AuthKey": "hskey-auth-ephemeral" },
       "Hostinfo": { "Hostname": "ephemeral-peer", "OS": "linux", "OSVersion": "6.9" },
       "Followup": "auth",
       "Ephemeral": true,

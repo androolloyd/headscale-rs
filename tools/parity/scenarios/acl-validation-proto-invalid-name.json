@@ -1,0 +1,14 @@
+{
+  "name": "acl-validation-proto-invalid-name",
+  "expect_policy_error": "must be a known protocol name or valid protocol number",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "definitely-not-a-proto",
+        "src": ["*"],
+        "dst": ["*:*"]
+      }
+    ]
+  }
+}

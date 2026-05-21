@@ -13,7 +13,7 @@
 //! It builds on the two public items below:
 //!
 //!   * [`AdminCmd`] — a clap `Subcommand` enum that bundles every
-//!     admin verb (`users`, `nodes`, `preauthkeys`, `policy`,
+//!     admin verb (`users`, `nodes`, `preauthkeys`, `apikeys`, `policy`,
 //!     `tailnet`). Drop it into your top-level `clap::Parser` derive
 //!     with `#[command(subcommand)]` and the same `users list /
 //!     nodes show / preauthkeys create …` tree appears verbatim.
@@ -33,7 +33,7 @@ pub mod admin;
 use clap::Subcommand;
 
 pub use admin::{
-    AdminClient, AdminError, ConnectArgs, ExitCode, NodesCmd, OutputFormat, PolicyCmd,
+    AdminClient, AdminError, ApiKeysCmd, ConnectArgs, ExitCode, NodesCmd, OutputFormat, PolicyCmd,
     PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
@@ -63,6 +63,12 @@ pub enum AdminCmd {
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
+    },
+    /// Manage API keys.
+    #[command(alias = "apikey", alias = "api")]
+    Apikeys {
+        #[command(subcommand)]
+        action: ApiKeysCmd,
     },
     /// Inspect or update the network policy.
     Policy {
@@ -99,6 +105,7 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
         AdminCmd::Users { action } => admin::run_users(&connect, &action).await,
         AdminCmd::Nodes { action } => admin::run_nodes(&connect, &action).await,
         AdminCmd::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action).await,
+        AdminCmd::Apikeys { action } => admin::run_apikeys(&connect, &action).await,
         AdminCmd::Policy { action } => admin::run_policy(&connect, &action).await,
         AdminCmd::Tailnet { action } => admin::run_tailnet(&connect, &action).await,
     };

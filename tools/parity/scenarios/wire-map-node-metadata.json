@@ -1,0 +1,58 @@
+{
+  "name": "wire-map-node-metadata",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "map_response": {
+      "KeyExpiryExtension": 0,
+      "Node": {
+        "ID": 7,
+        "StableID": "n7",
+        "Name": "router.tail.example",
+        "User": 42,
+        "Sharer": 84,
+        "Key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "KeySignature": "AQI=",
+        "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+        "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+        "Addresses": ["100.64.0.7/32"],
+        "AllowedIPs": ["100.64.0.7/32", "10.0.0.0/24"],
+        "PrimaryRoutes": ["10.0.0.0/24"],
+        "Hostinfo": { "Hostname": "router", "OS": "linux", "OSVersion": "6.8" },
+        "DERP": "127.3.3.40:900",
+        "Tags": ["tag:router"],
+        "Online": true,
+        "MachineAuthorized": true,
+        "Capabilities": ["https://tailscale.com/cap/ssh"],
+        "CapMap": {
+          "funnel": []
+        },
+        "Expired": true,
+        "HomeDERP": 900,
+        "UnsignedPeerAPIOnly": true,
+        "ComputedName": "router",
+        "ComputedNameWithHost": "router (router-host)",
+        "DataPlaneAuditLogID": "node-log-id",
+        "SelfNodeV4MasqAddrForThisPeer": "100.99.99.99",
+        "SelfNodeV6MasqAddrForThisPeer": "fd7a:115c:a1e0::99",
+        "IsWireGuardOnly": true,
+        "IsJailed": true,
+        "ExitNodeDNSResolvers": [
+          {
+            "Addr": "1.1.1.1",
+            "UseWithExitNode": true
+          }
+        ]
+      },
+      "Peers": [],
+      "DNSConfig": {},
+      "DERPMap": {
+        "Regions": {},
+        "omitDefaultRegions": true
+      },
+      "Domain": "tail.example",
+      "KeepAlive": false
+    }
+  }
+}

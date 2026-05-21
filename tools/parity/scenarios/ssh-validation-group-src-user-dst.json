@@ -1,0 +1,17 @@
+{
+  "name": "ssh-validation-group-src-user-dst",
+  "expect_policy_error": "user destination requires source to contain only that same user",
+  "policy": {
+    "groups": {
+      "group:admins": ["alice@"]
+    },
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["group:admins"],
+        "dst": ["alice@"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

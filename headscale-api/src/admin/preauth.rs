@@ -33,12 +33,16 @@ use super::auth::now_unix;
 /// implementations.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreauthAdminKey {
+    /// Upstream-visible numeric row ID.
+    #[serde(default)]
+    pub id: u64,
     /// Full opaque bearer token. Pages show only the first ~10 chars
     /// (so the table doesn't leak the secret to an over-the-shoulder
     /// viewer), but the value here is the actual key — the panel
     /// reveals it once on the create-success flash.
     pub key: String,
-    /// User the key was minted for.
+    /// User the key was minted for. Empty means a tags-only key with no
+    /// owning user, matching headscale-go v0.28's optional user field.
     pub user: String,
     /// Unix-seconds creation timestamp.
     pub created_at: u64,
@@ -98,14 +102,39 @@ pub trait PreauthAdmin: Send + Sync {
     /// by its **prefix** (so admins can paste the truncated form
     /// shown in the table).
     async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError>;
+
+    /// Expire a key by upstream numeric row ID.
+    async fn expire_by_id(&self, id: u64) -> Result<(), PreauthAdminError>;
+
+    /// Delete a key outright by upstream numeric row ID.
+    async fn delete_by_id(&self, id: u64) -> Result<(), PreauthAdminError>;
 }
 
 /// In-memory preauth admin. Used by tests + by deployments that don't
-/// wire in OctraVPN's `PreauthMinter`. Compatible with the
-/// `octrapreauth-<hex>` token format.
+/// wire in a persistent store. Compatible with the upstream
+/// `hskey-auth-<12>-<64>` token format.
 #[derive(Clone, Default)]
 pub struct InMemoryPreauthAdmin {
     inner: Arc<Mutex<HashMap<String, PreauthAdminKey>>>,
+}
+
+const TOKEN_PREFIX: &str = "hskey-auth-";
+const TOKEN_PREFIX_LEN: usize = 12;
+const TOKEN_SECRET_LEN: usize = 64;
+const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+
+fn generate_urlsafe(len: usize) -> String {
+    let mut raw = vec![0u8; len];
+    rand_core::OsRng.fill_bytes(&mut raw);
+    raw.into_iter()
+        .map(|b| URLSAFE[(b & 0b0011_1111) as usize] as char)
+        .collect()
+}
+
+fn generate_preauth_key() -> String {
+    let prefix = generate_urlsafe(TOKEN_PREFIX_LEN);
+    let secret = generate_urlsafe(TOKEN_SECRET_LEN);
+    format!("{TOKEN_PREFIX}{prefix}-{secret}")
 }
 
 impl InMemoryPreauthAdmin {
@@ -124,18 +153,24 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
     }
 
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
-        if req.user.trim().is_empty() {
+        if req.user.trim().is_empty() && req.tags.is_empty() {
             return Err(PreauthAdminError::Invalid(
-                "user must be non-empty".to_string(),
+                "user must be non-empty unless acl_tags are provided".to_string(),
             ));
         }
         const MAX_TTL_SECS: u64 = 365 * 24 * 3600;
         let ttl = req.ttl_secs.clamp(60, MAX_TTL_SECS);
         let now = now_unix();
-        let mut raw = [0u8; 32];
-        rand_core::OsRng.fill_bytes(&mut raw);
-        let key = format!("octrapreauth-{}", hex::encode(raw));
+        let key = generate_preauth_key();
+        let mut g = self.inner.lock();
+        let id = g
+            .values()
+            .map(|key| key.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         let rec = PreauthAdminKey {
+            id,
             key: key.clone(),
             user: req.user,
             created_at: now,
@@ -145,7 +180,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
             tags: req.tags,
             redemptions: 0,
         };
-        self.inner.lock().insert(key, rec.clone());
+        g.insert(key, rec.clone());
         Ok(rec)
     }
 
@@ -169,18 +204,48 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
             None => Err(PreauthAdminError::Unknown(prefix.to_string())),
         }
     }
+
+    async fn expire_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
+        if id == 0 {
+            return Err(PreauthAdminError::Invalid(
+                "id must be non-zero".to_string(),
+            ));
+        }
+        let mut g = self.inner.lock();
+        let Some(rec) = g.values_mut().find(|rec| rec.id == id) else {
+            return Err(PreauthAdminError::Unknown(id.to_string()));
+        };
+        rec.expires_at = now_unix();
+        Ok(())
+    }
+
+    async fn delete_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
+        if id == 0 {
+            return Err(PreauthAdminError::Invalid(
+                "id must be non-zero".to_string(),
+            ));
+        }
+        let mut g = self.inner.lock();
+        let Some(key) = g
+            .iter()
+            .find(|(_, rec)| rec.id == id)
+            .map(|(key, _)| key.clone())
+        else {
+            return Err(PreauthAdminError::Unknown(id.to_string()));
+        };
+        g.remove(&key);
+        Ok(())
+    }
 }
 
 /// Convenience: derive a stable, table-safe display prefix for `key`.
 pub(crate) fn key_prefix(key: &str) -> String {
-    // Show the brand + first 8 secret bytes (16 hex chars). Enough to
-    // disambiguate; not enough to reuse.
-    let head_len = "octrapreauth-".len() + 8;
-    if key.len() > head_len {
-        format!("{}…", &key[..head_len])
-    } else {
-        key.to_string()
+    if let Some(rest) = key.strip_prefix(TOKEN_PREFIX)
+        && rest.len() >= TOKEN_PREFIX_LEN
+    {
+        return format!("{TOKEN_PREFIX}{}-***", &rest[..TOKEN_PREFIX_LEN]);
     }
+    key.to_string()
 }
 
 /// Default TTL used when the form doesn't specify (24 hours).
@@ -236,7 +301,7 @@ mod tests {
         };
         let k = block(a.mint(req)).unwrap();
         assert_eq!(k.user, "alice");
-        assert!(k.key.starts_with("octrapreauth-"));
+        assert!(k.key.starts_with(TOKEN_PREFIX));
         let l = block(a.list());
         assert_eq!(l.len(), 1);
     }
@@ -274,14 +339,13 @@ mod tests {
     #[test]
     fn expire_unknown_prefix_errors() {
         let a = InMemoryPreauthAdmin::new();
-        let e = block(a.expire_by_prefix("octrapreauth-deadbeef")).unwrap_err();
+        let e = block(a.expire_by_prefix("hskey-auth-deadbeef")).unwrap_err();
         assert!(matches!(e, PreauthAdminError::Unknown(_)));
     }
 
     #[test]
     fn key_prefix_truncates_long_keys() {
-        let p = key_prefix("octrapreauth-abcdef0123456789");
-        assert!(p.contains("octrapreauth-"));
-        assert!(p.ends_with('…'));
+        let p = key_prefix("hskey-auth-abcdefghijkl-0123456789abcdef");
+        assert_eq!(p, "hskey-auth-abcdefghijkl-***");
     }
 }

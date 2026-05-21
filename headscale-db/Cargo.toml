@@ -24,13 +24,10 @@ sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "migrate"] }
 # the major series the rest of the workspace already pulls in via
 # transitive deps (see `cargo tree`).
 bcrypt = "0.16"
-# Unix-seconds helper that the preauth row uses for created_at /
-# expires_at / used_at — re-used from the workspace's general
-# time-stamp pattern (sessions table is i64 unix epoch too).
+# Kept for older callers/tests in this crate; modern pre-auth key
+# generation uses URL-safe random bytes to match headscale-go.
 hex = "0.4"
-# Random token bytes for the `octrapreauth-<hex>` plaintext we hash
-# into the row's `key_hash` column. Same `rand_core` the admin
-# in-memory store already uses.
+# Random token bytes for the `hskey-auth-<12>-<64>` plaintext.
 rand_core = { workspace = true }
 
 # Internal crates

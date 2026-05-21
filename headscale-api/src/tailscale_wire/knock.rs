@@ -294,10 +294,13 @@ pub fn wrap_router(inner: Router, cfg: KnockConfig) -> Router {
 fn verify_prefix_knock(req: &Request, cfg: &KnockConfig) -> Result<(), ()> {
     let path = req.uri().path();
     let rest = path.strip_prefix(KNOCK_PATH_PREFIX).ok_or(())?;
-    let knock = match rest.find('/') {
-        Some(i) => &rest[..i],
-        None => rest,
+    let Some(i) = rest.find('/') else {
+        return Err(());
     };
+    if i + 1 == rest.len() {
+        return Err(());
+    }
+    let knock = &rest[..i];
     if cfg.verify(knock) { Ok(()) } else { Err(()) }
 }
 

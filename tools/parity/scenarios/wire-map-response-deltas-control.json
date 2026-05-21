@@ -1,0 +1,131 @@
+{
+  "name": "wire-map-response-deltas-control",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "map_request": {
+      "Version": 112,
+      "Stream": true,
+      "KeepAlive": true,
+      "MapSessionHandle": "sess-1",
+      "MapSessionSeq": 11,
+      "TKAHead": "aum-head",
+      "DebugFlags": ["warn-router-unhealthy", "warn-ip-forwarding-off"]
+    },
+    "map_response": {
+      "MapSessionHandle": "sess-1",
+      "Seq": 12,
+      "KeepAlive": true,
+      "PingRequest": {
+        "URL": "https://control.example/ping/1",
+        "URLIsNoise": true,
+        "Log": true,
+        "Types": "TSMP",
+        "IP": "100.64.0.2",
+        "Payload": "AQI="
+      },
+      "PopBrowserURL": "https://control.example/login",
+      "CollectServices": true,
+      "PeersChanged": [
+        {
+          "ID": 2,
+          "StableID": "n2",
+          "Name": "peer.tail.example",
+          "User": 42,
+          "Key": "nodekey:0200000000000000000000000000000000000000000000000000000000000000",
+          "Machine": "mkey:0300000000000000000000000000000000000000000000000000000000000000",
+          "DiscoKey": "discokey:0400000000000000000000000000000000000000000000000000000000000000",
+          "Addresses": ["100.64.0.2/32"],
+          "AllowedIPs": ["100.64.0.2/32"],
+          "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+          "Online": false,
+          "MachineAuthorized": true,
+          "HomeDERP": 1
+        }
+      ],
+      "PeersRemoved": [3],
+      "PeersChangedPatch": [
+        {
+          "NodeID": 2,
+          "DERPRegion": 1,
+          "Cap": 112,
+          "CapMap": {
+            "funnel": []
+          },
+          "Endpoints": ["198.51.100.2:41641"],
+          "Key": "nodekey:0500000000000000000000000000000000000000000000000000000000000000",
+          "KeySignature": "AQI=",
+          "DiscoKey": "discokey:0600000000000000000000000000000000000000000000000000000000000000",
+          "Online": false,
+          "LastSeen": "2026-05-21T12:30:00Z",
+          "KeyExpiry": "2026-06-21T12:30:00Z"
+        }
+      ],
+      "PeerSeenChange": {
+        "2": true,
+        "3": false
+      },
+      "OnlineChange": {
+        "2": false
+      },
+      "PacketFilters": {
+        "base": [
+          {
+            "SrcIPs": ["100.64.0.1/32"],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.2/32",
+                "Ports": { "First": 22, "Last": 22 }
+              }
+            ],
+            "IPProto": [6]
+          }
+        ],
+        "old": null
+      },
+      "Health": ["control-plane-warning"],
+      "DisplayMessages": {
+        "router-unhealthy": {
+          "Title": "Router unhealthy",
+          "Text": "IP forwarding is disabled.",
+          "Severity": "medium",
+          "ImpactsConnectivity": true,
+          "PrimaryAction": {
+            "URL": "https://example.com/fix",
+            "Label": "Open"
+          }
+        },
+        "old-warning": null
+      },
+      "ControlTime": "2026-05-21T12:34:56Z",
+      "TKAInfo": {
+        "Head": "aum-head"
+      },
+      "DomainDataPlaneAuditLogID": "tailnet-log-id",
+      "Debug": {
+        "SleepSeconds": 1.5,
+        "DisableLogTail": true,
+        "Exit": 5
+      },
+      "ControlDialPlan": {
+        "Candidates": [
+          {
+            "IP": "203.0.113.10",
+            "ACEHost": "ace.example.com",
+            "DialStartDelaySec": 0.25,
+            "DialTimeoutSec": 4.5,
+            "Priority": 10
+          }
+        ]
+      },
+      "ClientVersion": {
+        "LatestVersion": "1.99.0",
+        "Notify": true,
+        "NotifyURL": "https://tailscale.com/download",
+        "NotifyText": "Update available"
+      },
+      "DefaultAutoUpdate": true
+    }
+  }
+}

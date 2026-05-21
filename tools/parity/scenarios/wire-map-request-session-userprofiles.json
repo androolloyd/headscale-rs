@@ -1,0 +1,56 @@
+{
+  "name": "wire-map-request-session-userprofiles",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "map_request": {
+      "Version": 68,
+      "Stream": true,
+      "KeepAlive": true,
+      "Compress": "zstd",
+      "OmitPeers": true,
+      "NodeKey": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+      "MapSessionHandle": "session-1",
+      "MapSessionSeq": 7,
+      "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+      "Endpoints": ["198.51.100.7:41641"],
+      "EndpointTypes": [1],
+      "ReadOnly": true,
+      "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" }
+    },
+    "map_response": {
+      "KeyExpiryExtension": 0,
+      "Node": {
+        "ID": 7,
+        "StableID": "n7",
+        "Name": "peer.tail.example",
+        "User": 42,
+        "Key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+        "Addresses": ["100.64.0.7/32"],
+        "AllowedIPs": ["100.64.0.7/32"],
+        "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+        "MachineAuthorized": true,
+        "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+        "Endpoints": ["198.51.100.7:41641"]
+      },
+      "Peers": [],
+      "UserProfiles": [
+        {
+          "ID": 42,
+          "LoginName": "alice@example.com",
+          "DisplayName": "Alice",
+          "ProfilePicURL": "https://example.com/alice.png"
+        }
+      ],
+      "DNSConfig": {},
+      "DERPMap": {
+        "Regions": {},
+        "omitDefaultRegions": true
+      },
+      "Domain": "tail.example",
+      "KeepAlive": false
+    }
+  }
+}

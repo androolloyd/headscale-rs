@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 
-use self::routes::{PrimaryRouteState, active_approved_routes};
+use self::routes::{DebugRoutes, PrimaryRouteState, active_approved_routes};
 use self::wire::stable_id_from_key;
 
 pub mod basic_handlers;
@@ -394,12 +394,7 @@ impl MachineRegistry {
         snapshot: &HashMap<String, MachineRecord>,
     ) -> HashMap<String, Vec<String>> {
         let mut primary_routes = self.primary_routes.write();
-        let _ = primary_routes.sync_routes(snapshot.iter().map(|(node_key, rec)| {
-            (
-                stable_id_from_key(node_key),
-                active_approved_routes(&rec.available_routes, &rec.approved_routes),
-            )
-        }));
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
 
         snapshot
             .keys()
@@ -412,6 +407,39 @@ impl MachineRegistry {
                 }
             })
             .collect()
+    }
+
+    /// Return the current primary-route debug state after syncing it
+    /// against the supplied registry snapshot.
+    pub fn debug_routes_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> DebugRoutes {
+        let mut primary_routes = self.primary_routes.write();
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        primary_routes.debug_routes()
+    }
+
+    /// Return the text form used by headscale-go's `/debug/routes`.
+    pub fn debug_routes_string_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> String {
+        let mut primary_routes = self.primary_routes.write();
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        primary_routes.debug_string()
+    }
+
+    fn sync_primary_routes_for_snapshot(
+        primary_routes: &mut PrimaryRouteState,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) {
+        let _ = primary_routes.sync_routes(snapshot.iter().map(|(node_key, rec)| {
+            (
+                stable_id_from_key(node_key),
+                active_approved_routes(&rec.available_routes, &rec.approved_routes),
+            )
+        }));
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -944,6 +972,7 @@ pub fn router(state: WireState) -> Router {
             "/swagger/v1/openapiv2.json",
             get(basic_handlers::handle_swagger_api_v1),
         )
+        .route("/debug/routes", get(basic_handlers::handle_debug_routes))
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

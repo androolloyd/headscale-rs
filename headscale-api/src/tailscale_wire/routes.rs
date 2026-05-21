@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::policy::{NodeView, PolicyStore};
+use serde::{Deserialize, Serialize};
 
 fn is_exit_route(prefix: &ipnet::IpNet) -> bool {
     match prefix {
@@ -80,6 +81,14 @@ pub struct PrimaryRouteState {
     primaries: BTreeMap<String, u64>,
 }
 
+/// Structured primary-route state exposed by headscale-go's
+/// `/debug/routes` endpoint.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugRoutes {
+    pub available_routes: BTreeMap<u64, Vec<String>>,
+    pub primary_routes: BTreeMap<String, u64>,
+}
+
 impl PrimaryRouteState {
     pub fn new() -> Self {
         Self::default()
@@ -131,6 +140,34 @@ impl PrimaryRouteState {
                 }
             })
             .collect()
+    }
+
+    pub fn debug_routes(&self) -> DebugRoutes {
+        DebugRoutes {
+            available_routes: self
+                .routes
+                .iter()
+                .map(|(node_id, routes)| (*node_id, routes.iter().cloned().collect()))
+                .collect(),
+            primary_routes: self.primaries.clone(),
+        }
+    }
+
+    pub fn debug_string(&self) -> String {
+        let mut out = String::from("Available routes:\n");
+        for (node_id, routes) in &self.routes {
+            out.push_str(&format!(
+                "\nNode {node_id}: {}",
+                routes.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+
+        out.push_str("\n\nCurrent primary routes:\n");
+        for (route, node_id) in &self.primaries {
+            out.push_str(&format!("\nRoute {route}: {node_id}"));
+        }
+
+        out
     }
 
     fn update_primary_locked(&mut self) -> bool {
@@ -561,5 +598,31 @@ mod tests {
             assert_eq!(stored_routes(&state), case.expected_routes, "{}", case.name);
             assert_eq!(primaries(&state), case.expected_primaries, "{}", case.name);
         }
+    }
+
+    #[test]
+    fn debug_routes_matches_headscale_go_shape_and_filters_exit_routes() {
+        let mut state = PrimaryRouteState::new();
+        state
+            .sync_routes([
+                (2, p(&["10.0.0.0/24", "0.0.0.0/0"])),
+                (1, p(&["10.0.0.0/24", "10.1.0.0/24"])),
+            ])
+            .unwrap();
+
+        assert_eq!(
+            state.debug_routes(),
+            DebugRoutes {
+                available_routes: BTreeMap::from([
+                    (1, p(&["10.0.0.0/24", "10.1.0.0/24"])),
+                    (2, p(&["10.0.0.0/24"])),
+                ]),
+                primary_routes: primary_map(&[("10.0.0.0/24", 1), ("10.1.0.0/24", 1)]),
+            }
+        );
+        assert_eq!(
+            state.debug_string(),
+            "Available routes:\n\nNode 1: 10.0.0.0/24, 10.1.0.0/24\nNode 2: 10.0.0.0/24\n\nCurrent primary routes:\n\nRoute 10.0.0.0/24: 1\nRoute 10.1.0.0/24: 1"
+        );
     }
 }

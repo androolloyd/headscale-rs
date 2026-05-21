@@ -109,6 +109,29 @@ pub async fn handle_blank() -> Response {
 
 use super::WireState;
 
+pub async fn handle_debug_routes(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    let snapshot = state.machines.snapshot();
+    if wants_json(&headers) {
+        let routes = state.machines.debug_routes_for_snapshot(&snapshot);
+        match serde_json::to_string_pretty(&routes) {
+            Ok(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            state.machines.debug_routes_string_for_snapshot(&snapshot),
+        )
+            .into_response()
+    }
+}
+
 pub async fn handle_windows(
     State(state): State<WireState>,
     headers: HeaderMap,
@@ -197,6 +220,13 @@ fn http_error(status: StatusCode, msg: &str) -> Response {
         format!("{msg}\n"),
     )
         .into_response()
+}
+
+fn wants_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("application/json"))
 }
 
 fn control_url(configured: Option<&str>, headers: &HeaderMap, uri: &Uri) -> String {
@@ -360,12 +390,15 @@ fn apple_mobileconfig(url: &str, payload_type: &str, platform: &str) -> String {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRegistry, WireState,
+        MachineRecord, MachineRegistry, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
+        wire::stable_id_from_key,
     };
     use axum::body::to_bytes;
+    use chrono::Utc;
+    use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -385,6 +418,32 @@ mod tests {
             public_control_url: None,
         };
         (state, dir)
+    }
+
+    fn record(
+        node_key: &str,
+        host: u8,
+        available_routes: &[&str],
+        approved_routes: &[&str],
+    ) -> MachineRecord {
+        let mut rec = MachineRecord::new_at(
+            Utc::now(),
+            node_key.to_string(),
+            format!("mkey-{node_key}"),
+            "alice".to_string(),
+            format!("host-{host}"),
+            Ipv4Addr::new(100, 64, 0, host),
+            false,
+        );
+        rec.available_routes = available_routes
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect();
+        rec.approved_routes = approved_routes
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect();
+        rec
     }
 
     #[tokio::test]
@@ -539,6 +598,91 @@ mod tests {
         let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(body.len(), FAVICON_PNG.len());
+    }
+
+    #[tokio::test]
+    async fn debug_routes_text_matches_headscale_go_empty_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/routes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            &body[..],
+            b"Available routes:\n\n\nCurrent primary routes:\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_routes_json_matches_headscale_go_route_state_shape() {
+        let (state, _dir) = fixture_state();
+        let node_a = "debug-node-a";
+        let node_b = "debug-node-b";
+        state.machines.upsert(
+            node_a.to_string(),
+            record(
+                node_a,
+                1,
+                &["10.0.0.0/24", "0.0.0.0/0"],
+                &["10.0.0.0/24", "0.0.0.0/0"],
+            ),
+        );
+        state.machines.upsert(
+            node_b.to_string(),
+            record(node_b, 2, &["10.0.0.0/24"], &["10.0.0.0/24"]),
+        );
+
+        let id_a = stable_id_from_key(node_a);
+        let id_b = stable_id_from_key(node_b);
+        let primary = id_a.min(id_b);
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/routes")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let available = parsed["available_routes"].as_object().unwrap();
+        assert_eq!(
+            available.get(&id_a.to_string()).unwrap(),
+            &serde_json::json!(["10.0.0.0/24"])
+        );
+        assert_eq!(
+            available.get(&id_b.to_string()).unwrap(),
+            &serde_json::json!(["10.0.0.0/24"])
+        );
+        assert_eq!(parsed["primary_routes"]["10.0.0.0/24"], primary);
+        assert!(
+            parsed["primary_routes"].get("0.0.0.0/0").is_none(),
+            "exit routes are excluded from primary route debug state"
+        );
     }
 
     #[tokio::test]

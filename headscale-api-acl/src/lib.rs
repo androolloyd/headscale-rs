@@ -696,7 +696,7 @@ impl AclDoc {
     }
 }
 
-fn wildcard_filter_cidrs() -> Vec<String> {
+pub fn wildcard_filter_cidrs() -> Vec<String> {
     vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
 }
 

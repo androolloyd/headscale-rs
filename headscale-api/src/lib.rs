@@ -20,6 +20,8 @@ pub mod control_auth;
 pub mod gateway;
 #[cfg(feature = "full")]
 pub mod grpc;
+#[cfg(all(feature = "admin", feature = "full"))]
+pub mod grpc_gateway;
 #[cfg(feature = "full")]
 pub mod http;
 #[cfg(feature = "full")]

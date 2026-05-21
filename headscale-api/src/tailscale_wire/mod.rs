@@ -974,6 +974,10 @@ pub fn router(state: WireState) -> Router {
         )
         .route("/debug/routes", get(basic_handlers::handle_debug_routes))
         .route("/debug/derp", get(basic_handlers::handle_debug_derp))
+        .route(
+            "/debug/registration-cache",
+            get(basic_handlers::handle_debug_registration_cache),
+        )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))

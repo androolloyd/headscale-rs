@@ -135,6 +135,15 @@ pub struct DebugDerpNode {
     pub stun_port: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugRegistrationCacheInfo {
+    #[serde(rename = "type")]
+    pub cache_type: String,
+    pub expiration: String,
+    pub cleanup: String,
+    pub status: String,
+}
+
 pub async fn handle_debug_routes(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let snapshot = state.machines.snapshot();
     if wants_json(&headers) {
@@ -177,6 +186,18 @@ pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMa
             debug_derp_string(&state.derp_map),
         )
             .into_response()
+    }
+}
+
+pub async fn handle_debug_registration_cache() -> Response {
+    match serde_json::to_string_pretty(&debug_registration_cache_info()) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
 }
 
@@ -352,6 +373,15 @@ fn debug_derp_string(derp_map: &DerpMap) -> String {
     }
 
     out
+}
+
+fn debug_registration_cache_info() -> DebugRegistrationCacheInfo {
+    DebugRegistrationCacheInfo {
+        cache_type: "zcache".to_string(),
+        expiration: "15m0s".to_string(),
+        cleanup: "20m0s".to_string(),
+        status: "active".to_string(),
+    }
 }
 
 fn control_url(configured: Option<&str>, headers: &HeaderMap, uri: &Uri) -> String {
@@ -925,6 +955,34 @@ mod tests {
         );
         assert_eq!(parsed["regions"]["1"]["nodes"][0]["derp_port"], 443);
         assert_eq!(parsed["regions"]["1"]["nodes"][0]["stun_port"], 3478);
+    }
+
+    #[tokio::test]
+    async fn debug_registration_cache_matches_headscale_go_shape() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/registration-cache")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["type"], "zcache");
+        assert_eq!(parsed["expiration"], "15m0s");
+        assert_eq!(parsed["cleanup"], "20m0s");
+        assert_eq!(parsed["status"], "active");
     }
 
     #[tokio::test]

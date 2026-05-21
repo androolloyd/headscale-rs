@@ -877,6 +877,26 @@ impl AclDoc {
         AclAction::Deny
     }
 
+    /// Return true when `src` can reach `dst` itself or a route served
+    /// by `dst`. This mirrors headscale-go's peer visibility check,
+    /// where a peer is visible if a matcher allows the peer node IP,
+    /// one of its subnet routes, or its default-route exit-node
+    /// prefixes.
+    pub fn can_access_node(
+        &self,
+        src: &NodeView<'_>,
+        dst: &NodeView<'_>,
+        dst_routes: &[String],
+        port: PortRef<'_>,
+    ) -> bool {
+        for rule in &self.rules {
+            if self.matches_node_or_route(rule, src, dst, dst_routes, port) {
+                return rule.action == AclAction::Accept;
+            }
+        }
+        false
+    }
+
     fn matches(
         &self,
         rule: &AclRule,
@@ -887,6 +907,33 @@ impl AclDoc {
         self.principal_matches(&rule.src, src, Some(dst))
             && self.principal_matches(&rule.dst, dst, Some(src))
             && (rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, port)))
+    }
+
+    fn matches_node_or_route(
+        &self,
+        rule: &AclRule,
+        src: &NodeView<'_>,
+        dst: &NodeView<'_>,
+        dst_routes: &[String],
+        port: PortRef<'_>,
+    ) -> bool {
+        self.principal_matches(&rule.src, src, Some(dst))
+            && (self.principal_matches(&rule.dst, dst, Some(src))
+                || self.principals_overlap_routes(&rule.dst, dst_routes))
+            && (rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, port)))
+    }
+
+    fn principals_overlap_routes(&self, principals: &[String], routes: &[String]) -> bool {
+        routes.iter().any(|route| {
+            let Some(route) = parse_cidr(route) else {
+                return false;
+            };
+            principals.iter().any(|principal| {
+                self.expand_principal(principal).iter().any(|expanded| {
+                    parse_cidr(expanded).is_some_and(|allowed| nets_overlap(&allowed, &route))
+                })
+            })
+        })
     }
 
     /// Returns the NodeAttr capability flags that apply to `node`.
@@ -1134,6 +1181,10 @@ fn covers(outer: &IpNet, inner: &IpNet) -> bool {
         }
         _ => false,
     }
+}
+
+fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
+    covers(a, b) || covers(b, a)
 }
 
 fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {

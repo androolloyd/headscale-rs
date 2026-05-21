@@ -33,8 +33,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::policy::{
-    NodeView, PolicyAction, PolicyDoc, PolicyRule, PolicyStore, acl_to_filter_rules,
-    parse_hujson_policy,
+    NodeView, PeerMapNode, PolicyAction, PolicyDoc, PolicyRule, PolicyStore, acl_to_filter_rules,
+    build_peer_map_for_doc, parse_hujson_policy,
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +207,84 @@ fn auto_approve_route_matches_subprefix_via_tag() {
     let exit_node = NodeView::new("100.64.0.3").with_tags(&exit_tags);
     assert!(store.auto_approves_exit_node(&exit_node));
     assert!(!store.auto_approves_exit_node(&plain));
+}
+
+// ---------------------------------------------------------------------------
+// BuildPeerMap / route-aware visibility
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
+    let raw = r#"{
+        "version": 1,
+        "tag_owners": {"tag:server": ["alice@"]},
+        "rules": [
+            {"action":"accept","src":["alice@"],"dst":["tag:server:*"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let nodes = vec![
+        PeerMapNode {
+            id: 1,
+            addr: "100.64.0.1".into(),
+            user: Some("alice".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 2,
+            addr: "100.64.0.2".into(),
+            user: Some("server-owner".into()),
+            tags: vec!["tag:server".into()],
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 3,
+            addr: "100.64.0.3".into(),
+            user: Some("bob".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+    ];
+
+    let peers = build_peer_map_for_doc(&doc, &nodes);
+    assert_eq!(peers.get(&1).cloned().unwrap_or_default(), vec![2]);
+    assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
+    assert_eq!(
+        peers.get(&3).cloned().unwrap_or_default(),
+        Vec::<u64>::new()
+    );
+}
+
+#[test]
+fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
+    let raw = r#"{
+        "version": 1,
+        "rules": [
+            {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16:*"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let nodes = vec![
+        PeerMapNode {
+            id: 1,
+            addr: "100.64.0.1".into(),
+            user: Some("alice".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 2,
+            addr: "100.64.0.2".into(),
+            user: Some("router-owner".into()),
+            tags: Vec::new(),
+            routes: vec!["10.10.1.0/24".into()],
+        },
+    ];
+
+    let peers = build_peer_map_for_doc(&doc, &nodes);
+    assert_eq!(peers.get(&1).cloned().unwrap_or_default(), vec![2]);
+    assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
 }
 
 // ---------------------------------------------------------------------------

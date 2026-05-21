@@ -30,13 +30,16 @@ pub mod filter;
 pub mod hujson;
 pub mod ssh;
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
 pub use doc::{
-    AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, SshRule,
+    AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, PortRef, SshRule,
 };
 pub use filter::acl_to_filter_rules;
 pub use hujson::{PolicyParseError, parse_hujson_policy};
@@ -180,6 +183,18 @@ impl PolicyStore {
         }
     }
 
+    /// Build symmetric peer visibility for the loaded policy. Returns
+    /// `None` when no operator policy has been loaded, which callers
+    /// should treat as headscale-rs' legacy open default.
+    pub fn build_peer_map(&self, nodes: &[PeerMapNode]) -> Option<BTreeMap<u64, Vec<u64>>> {
+        self.inner
+            .state
+            .read()
+            .doc
+            .as_ref()
+            .map(|doc| build_peer_map_for_doc(doc, nodes))
+    }
+
     /// Handle to the broadcast. Map long-pollers register
     /// `notify.notified()` futures in their `select!` loop; the next
     /// [`Self::set`] wakes them all.
@@ -212,4 +227,58 @@ impl NotifyHandle {
     pub async fn changed(&self) {
         self.inner.notify.notified().await;
     }
+}
+
+/// Node facets needed for headscale-go peer-map reduction.
+///
+/// `routes` must contain the active routes this node serves to peers:
+/// primary subnet routes plus active exit-node defaults.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerMapNode {
+    pub id: u64,
+    pub addr: String,
+    pub user: Option<String>,
+    pub tags: Vec<String>,
+    pub routes: Vec<String>,
+}
+
+impl PeerMapNode {
+    fn view(&self) -> NodeView<'_> {
+        NodeView {
+            addr: Some(self.addr.as_str()),
+            user: self.user.as_deref(),
+            tags: &self.tags,
+        }
+    }
+}
+
+/// Build headscale-go-style symmetric peer visibility for a loaded policy.
+///
+/// If either side can access the other node IP or one of the other
+/// node's served routes, both nodes are included in each other's peer
+/// list. This mirrors upstream `PolicyManager.BuildPeerMap`.
+pub fn build_peer_map_for_doc(doc: &PolicyDoc, nodes: &[PeerMapNode]) -> BTreeMap<u64, Vec<u64>> {
+    let mut out: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    for i in 0..nodes.len() {
+        let node_i = &nodes[i];
+        let view_i = node_i.view();
+        for node_j in nodes.iter().skip(i + 1) {
+            if node_i.id == node_j.id {
+                continue;
+            }
+            let view_j = node_j.view();
+            let i_can_access_j =
+                doc.can_access_node(&view_i, &view_j, &node_j.routes, PortRef::any());
+            let j_can_access_i =
+                doc.can_access_node(&view_j, &view_i, &node_i.routes, PortRef::any());
+            if i_can_access_j || j_can_access_i {
+                out.entry(node_i.id).or_default().insert(node_j.id);
+                out.entry(node_j.id).or_default().insert(node_i.id);
+            }
+        }
+    }
+
+    out.into_iter()
+        .map(|(id, peers)| (id, peers.into_iter().collect()))
+        .collect()
 }

@@ -28,7 +28,11 @@
 //!   leaves 4x headroom for slow links. Keepalive bytes are
 //!   `zstd_frame({"KeepAlive":true})`, NOT a bare newline.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json,
@@ -68,7 +72,7 @@ use super::wire::{
 use super::{MachineRecord, WireState};
 
 use crate::dns::{DnsStore, MachineDnsRecord};
-use crate::policy::{NodeView, PolicyStore, SshPolicyNode};
+use crate::policy::{NodeView, PeerMapNode, PolicyStore, SshPolicyNode};
 
 /// Snapshot the registry into MagicDNS-record shape and ask the
 /// operator-configured [`DnsStore`] to build the `DnsConfig` for this
@@ -102,6 +106,62 @@ fn exit_routes_for_snapshot(
             }
         })
         .collect()
+}
+
+fn active_routes_for_snapshot(
+    primary_routes: &HashMap<String, Vec<String>>,
+    exit_routes: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
+    let mut out = primary_routes.clone();
+    for (node_key, routes) in exit_routes {
+        let entry = out.entry(node_key.clone()).or_default();
+        entry.extend(routes.iter().cloned());
+        entry.sort();
+        entry.dedup();
+    }
+    out
+}
+
+fn peer_map_nodes_from_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    active_routes: &HashMap<String, Vec<String>>,
+) -> Vec<PeerMapNode> {
+    snapshot
+        .iter()
+        .map(|(node_key, rec)| PeerMapNode {
+            id: stable_id_from_key(node_key),
+            addr: rec.ipv4.to_string(),
+            user: (!rec.user.is_empty()).then(|| rec.user.clone()),
+            tags: rec.forced_tags.clone(),
+            routes: active_routes.get(node_key).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn allowed_peer_ids_for_snapshot(
+    policy: &PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    active_routes: &HashMap<String, Vec<String>>,
+) -> Option<BTreeSet<u64>> {
+    let nodes = peer_map_nodes_from_snapshot(snapshot, active_routes);
+    let peer_map = policy.build_peer_map(&nodes)?;
+    let self_id = stable_id_from_key(self_node_key);
+    Some(
+        peer_map
+            .get(&self_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    )
+}
+
+fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str) -> bool {
+    match allowed_ids {
+        Some(ids) => ids.contains(&stable_id_from_key(node_key)),
+        None => true,
+    }
 }
 
 fn apply_routes_to_map_node(node: &mut MapNode, primary_routes: &[String], exit_routes: &[String]) {
@@ -374,6 +434,9 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     let tailnet_domain = tailnet_domain(&state.dns);
     let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let allowed_peer_ids =
+        allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
     apply_routes_to_map_node(
         &mut own_node,
@@ -394,6 +457,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     let mut peers: Vec<MapNode> = snapshot
         .iter()
         .filter(|(k, _)| k.as_str() != node_key_hex.as_str())
+        .filter(|(k, _)| peer_allowed(allowed_peer_ids.as_ref(), k.as_str()))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, &tailnet_domain);
             apply_routes_to_map_node(
@@ -625,6 +689,9 @@ fn rebuild_map_chunk(
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let allowed_peer_ids =
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
     apply_routes_to_map_node(
         &mut own_node,
@@ -641,6 +708,7 @@ fn rebuild_map_chunk(
     let mut peers: Vec<MapNode> = snapshot
         .iter()
         .filter(|(k, _)| k.as_str() != self_node_key)
+        .filter(|(k, _)| peer_allowed(allowed_peer_ids.as_ref(), k.as_str()))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, &tailnet_domain);
             apply_routes_to_map_node(
@@ -812,6 +880,26 @@ mod tests {
         rec
     }
 
+    fn policy_record(
+        node_hex: &str,
+        host: &str,
+        last_octet: u8,
+        user: &str,
+        tags: Vec<String>,
+    ) -> MachineRecord {
+        let mut rec = MachineRecord::new_at(
+            chrono::Utc::now(),
+            node_hex.to_string(),
+            String::new(),
+            user.into(),
+            host.into(),
+            Ipv4Addr::new(100, 64, 0, last_octet),
+            false,
+        );
+        rec.forced_tags = tags;
+        rec
+    }
+
     fn owner_for_route(
         routes_by_node: &HashMap<String, Vec<String>>,
         route: &str,
@@ -869,6 +957,116 @@ mod tests {
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_response_reduces_peers_when_policy_is_loaded() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "tag_owners": {"tag:server": ["alice@"]},
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["tag:server:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "aa".repeat(32);
+        let server = "bb".repeat(32);
+        let bob = "cc".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            server.clone(),
+            policy_record(
+                &server,
+                "server",
+                11,
+                "server-owner",
+                vec!["tag:server".into()],
+            ),
+        );
+        state.machines.upsert(
+            bob.clone(),
+            policy_record(&bob, "bob", 12, "bob", Vec::new()),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{server}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let peer_names: Vec<_> = mr.peers.iter().map(|peer| peer.name.as_str()).collect();
+        assert_eq!(peer_names, vec!["alice"]);
+    }
+
+    #[tokio::test]
+    async fn map_response_keeps_subnet_router_visible_when_policy_targets_route() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "ad".repeat(32);
+        let router_key = "be".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            routed_record(&router_key, "router", 11, vec!["10.10.1.0/24".into()]),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.peers.len(), 1);
+        assert_eq!(mr.peers[0].name, "router");
+        assert!(
+            mr.peers[0]
+                .allowed_ips
+                .iter()
+                .any(|route| route == "10.10.1.0/24")
+        );
     }
 
     #[tokio::test]

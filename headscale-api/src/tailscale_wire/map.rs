@@ -437,6 +437,11 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         state.machines.upsert(node_key_hex.clone(), own.clone());
     }
 
+    if req.omit_peers && !req.stream {
+        state.machines.record_mapresponse_endpoint_update("ok");
+        return StatusCode::OK.into_response();
+    }
+
     // Long-poll for a second peer ONLY when this is a non-streaming,
     // non-OmitPeers map call AND we're alone in the tailnet. In every
     // other case the client expects a response IMMEDIATELY — stock
@@ -1137,6 +1142,7 @@ mod tests {
 
         let app = router(state.clone());
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -1160,6 +1166,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(
+            raw.is_empty(),
+            "non-streaming OmitPeers map updates return an empty lite response"
+        );
 
         let rec = state.machines.get(&alice).expect("alice still registered");
         assert_eq!(
@@ -1171,6 +1182,40 @@ mod tests {
             vec!["0.0.0.0/0", "10.20.1.0/24", "::/0"]
         );
 
+        let metrics_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics_resp.status(), StatusCode::OK);
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics.contains("headscale_mapresponse_endpoint_updates_total{status=\"ok\"} 1\n")
+        );
+
+        let peer = "d2".repeat(32);
+        state.machines.upsert(
+            peer.clone(),
+            policy_record(&peer, "peer", 11, "peer", Vec::new()),
+        );
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let node = mr.node.expect("self node");

@@ -156,8 +156,9 @@ async fn admin_delete(admin: &AdminState, id: &str) -> StatusCode {
 }
 
 /// `POST /machine/nodekey:{hex}/map` returning the decoded JSON
-/// response. The wire handler returns `MapResponse` JSON for
-/// `Stream: false` requests (the default body in this helper).
+/// response when the node is expired. Healthy `OmitPeers` requests
+/// are headscale-go-style lite endpoint updates and return an empty
+/// 200 body.
 async fn wire_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
     let router = wire_router(wire.clone());
     let req = Request::builder()
@@ -197,7 +198,7 @@ async fn admin_expire_then_map_returns_logout() {
     // Pre-expire /map happy path — no NodeKeyExpired bit.
     let (s, v) = wire_map(&wire, &"aa".repeat(32)).await;
     assert_eq!(s, StatusCode::OK);
-    assert_ne!(v["NodeKeyExpired"], serde_json::Value::Bool(true));
+    assert!(v.is_null());
 
     // Admin POST /expire (no body → expire immediately).
     let (s, _) = admin_post(&admin, &"aa".repeat(32), "expire", serde_json::json!({})).await;

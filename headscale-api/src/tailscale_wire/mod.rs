@@ -321,6 +321,13 @@ pub struct MachineRegistry {
     /// zero-count entries are retained after disconnect to match
     /// headscale-go's `/debug/batcher` rapid-reconnect state.
     active_connections: RwLock<BTreeMap<u64, usize>>,
+    /// Prometheus-compatible counters for the Tailscale wire surface.
+    metrics: WireMetrics,
+}
+
+#[derive(Default)]
+pub struct WireMetrics {
+    mapresponse_endpoint_updates: RwLock<BTreeMap<String, u64>>,
 }
 
 impl Default for MachineRegistry {
@@ -332,6 +339,7 @@ impl Default for MachineRegistry {
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
             active_connections: RwLock::new(BTreeMap::new()),
+            metrics: WireMetrics::default(),
         }
     }
 }
@@ -472,6 +480,15 @@ impl MachineRegistry {
     /// Snapshot batcher connection state by stable node ID.
     pub fn active_connections(&self) -> BTreeMap<u64, usize> {
         self.active_connections.read().clone()
+    }
+
+    pub(crate) fn record_mapresponse_endpoint_update(&self, status: &str) {
+        let mut updates = self.metrics.mapresponse_endpoint_updates.write();
+        *updates.entry(status.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn mapresponse_endpoint_update_metrics(&self) -> BTreeMap<String, u64> {
+        self.metrics.mapresponse_endpoint_updates.read().clone()
     }
 
     /// Look up a single machine by its hex-encoded node key.

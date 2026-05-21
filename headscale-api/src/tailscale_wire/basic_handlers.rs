@@ -1100,6 +1100,13 @@ fn metrics_text(state: &WireState) -> String {
         "Current number of primary subnet routes.",
         routes.primary_routes.len(),
     );
+    append_counter_family(
+        &mut out,
+        "headscale_mapresponse_endpoint_updates_total",
+        "total count of endpoint updates received",
+        "status",
+        state.machines.mapresponse_endpoint_update_metrics(),
+    );
 
     out
 }
@@ -1117,6 +1124,40 @@ fn append_gauge(out: &mut String, name: &str, help: &str, value: usize) {
     out.push(' ');
     out.push_str(&value.to_string());
     out.push('\n');
+}
+
+fn append_counter_family(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label_name: &str,
+    samples: BTreeMap<String, u64>,
+) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" counter\n");
+    for (label_value, value) in samples {
+        out.push_str(name);
+        out.push('{');
+        out.push_str(label_name);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value));
+        out.push_str("\"} ");
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+}
+
+fn prometheus_label_value(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
 }
 
 fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNode> {

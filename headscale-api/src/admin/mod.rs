@@ -83,6 +83,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::tailscale_wire::routes::normalize_routes;
+
 pub use api_keys::{
     ApiKeyAdmin, ApiKeyAdminError, ApiKeyAdminKey, ApiKeyCreated, ApiKeyMintRequest,
     NoopApiKeyAdmin, PersistentApiKeyAdmin,
@@ -300,6 +302,11 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/v1/machines/:id/logout", post(api_machines_logout))
         .route("/api/v1/machines/:id/rename", post(api_machines_rename))
         .route("/api/v1/machines/:id/tags", post(api_machines_tags))
+        .route("/api/v1/machines/:id/routes", post(api_machines_routes))
+        .route(
+            "/api/v1/machines/:id/approve_routes",
+            post(api_machines_routes),
+        )
         .route(
             "/api/v1/preauthkeys",
             get(api_preauth_list).post(api_preauth_mint),
@@ -975,6 +982,50 @@ async fn api_machines_tags(
     };
     match s.machines.set_tags(&id, body.tags).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiRoutesBody {
+    #[serde(default)]
+    routes: Vec<String>,
+}
+
+async fn api_machines_routes(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    let body: ApiRoutesBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let routes = match normalize_routes(body.routes) {
+        Ok(routes) => routes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid route: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    match s.machines.set_approved_routes(&id, routes).await {
+        Ok(()) => match s.machines.get(&id).await {
+            Some(machine) => Json(machine).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "machine not found after route update"})),
+            )
+                .into_response(),
+        },
+        Err(MachineAdminError::BadRequest(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }

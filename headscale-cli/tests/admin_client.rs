@@ -6,7 +6,7 @@
 //! server runs on an ephemeral port — no shared state between tests
 //! so they parallelise.
 
-use headscale_cli::admin::{AdminError, client::AdminClient};
+use headscale_cli::admin::{AdminError, OutputFormat, client::AdminClient, nodes};
 use httpmock::prelude::*;
 use serde_json::json;
 
@@ -180,6 +180,79 @@ async fn machines_delete() {
     let client = mk_client(&s);
     let path = format!("/machines/{id}");
     client.delete_no_content(&path).await.unwrap();
+}
+
+#[tokio::test]
+async fn nodes_list_routes_fetches_machine_routes() {
+    let s = MockServer::start_async().await;
+    let hit = s
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path("/api/v1/machines")
+                .header("authorization", "Bearer secret-token");
+            then.status(200).json_body(json!([
+                {
+                    "id": "aa".repeat(32),
+                    "name": "router-1",
+                    "user": "alice",
+                    "ipv4": "100.64.0.5",
+                    "online": true,
+                    "last_seen": 1,
+                    "machine_key_hex": "bb".repeat(32),
+                    "os": "linux",
+                    "version": "1.78.0",
+                    "tags": [],
+                    "routes": ["10.0.0.0/24"],
+                    "approved_routes": ["10.0.0.0/24"],
+                    "expired": false
+                }
+            ]));
+        })
+        .await;
+    let client = mk_client(&s);
+    nodes::list_routes(&client, None, OutputFormat::Json)
+        .await
+        .unwrap();
+    hit.assert_async().await;
+}
+
+#[tokio::test]
+async fn nodes_approve_routes_posts_routes_body() {
+    let s = MockServer::start_async().await;
+    let id = "aa".repeat(32);
+    let hit = s
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path(format!("/api/v1/machines/{id}/routes"))
+                .header("authorization", "Bearer secret-token")
+                .json_body(json!({"routes": ["10.0.0.0/24", "0.0.0.0/0"]}));
+            then.status(200).json_body(json!({
+                "id": id.clone(),
+                "name": "router-1",
+                "user": "alice",
+                "ipv4": "100.64.0.5",
+                "online": true,
+                "last_seen": 1,
+                "machine_key_hex": "bb".repeat(32),
+                "os": "linux",
+                "version": "1.78.0",
+                "tags": [],
+                "routes": ["10.0.0.0/24", "0.0.0.0/0", "::/0"],
+                "approved_routes": ["10.0.0.0/24", "0.0.0.0/0", "::/0"],
+                "expired": false
+            }));
+        })
+        .await;
+    let client = mk_client(&s);
+    nodes::approve_routes(
+        &client,
+        &id,
+        vec!["10.0.0.0/24".into(), "0.0.0.0/0".into()],
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+    hit.assert_async().await;
 }
 
 // ---------------------------------------------------------------------------

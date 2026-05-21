@@ -286,6 +286,21 @@ async fn api_preauthkeys_create_with_empty_user_returns_400() {
     );
 }
 
+#[tokio::test]
+async fn api_machine_routes_invalid_prefix_returns_400() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":["not-a-prefix"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("invalid route"));
+}
+
 // ---------------------------------------------------------------------------
 // Not-found / conflict semantics
 // ---------------------------------------------------------------------------
@@ -321,6 +336,20 @@ async fn api_machine_delete_unknown_id_returns_404() {
         .oneshot(req_authed(
             Method::DELETE,
             &format!("/api/v1/machines/{bad}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_machine_routes_unknown_id_returns_404() {
+    let bad = "ff".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{bad}/routes"),
+            r#"{"routes":["10.0.0.0/24"]}"#,
+            Some(BEARER),
         ))
         .await
         .unwrap();
@@ -388,6 +417,41 @@ async fn api_preauth_expire_short_prefix_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_machine_routes_set_approved_routes_and_expand_exit_pair() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":["10.10.0.0/24","0.0.0.0/0","10.10.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(
+        v["approved_routes"],
+        serde_json::json!(["0.0.0.0/0", "10.10.0.0/24", "::/0"])
+    );
+}
+
+#[tokio::test]
+async fn api_machine_approve_routes_alias_matches_upstream_spelling() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/approve_routes"),
+            r#"{"routes":["10.20.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(v["approved_routes"], serde_json::json!(["10.20.0.0/24"]));
 }
 
 // ---------------------------------------------------------------------------

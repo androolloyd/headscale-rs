@@ -48,6 +48,7 @@ fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Re
     })
 }
 
+use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
     stable_id_from_key, strip_key_prefix,
@@ -192,11 +193,43 @@ async fn register_inner(
         .as_ref()
         .map(|h| h.hostname.clone())
         .unwrap_or_default();
-    let available_routes = body
+    let available_routes = match body
         .hostinfo
         .as_ref()
-        .map(|h| h.routable_ips.clone())
-        .unwrap_or_default();
+        .map(|h| normalize_routes(&h.routable_ips))
+        .transpose()
+    {
+        Ok(routes) => routes.unwrap_or_default(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid Hostinfo.RoutableIPs: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let addr = ipv4.to_string();
+    let approved_routes = match auto_approved_routes_for_node(
+        &state.policy,
+        &addr,
+        Some(&user),
+        &redeemed.tags,
+        &[],
+        &available_routes,
+    ) {
+        Ok(routes) => routes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid approved routes: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
     // P1 lifecycle: stamp `created_at` / `last_seen` at registration
     // time + propagate the preauth's `ephemeral` flag. `forced_tags`
     // adopts the preauth's tag list verbatim so the very first /map
@@ -220,7 +253,7 @@ async fn register_inner(
         created_at: now,
         forced_tags: redeemed.tags,
         available_routes,
-        approved_routes: Vec::new(),
+        approved_routes,
         register_method: 1,
     };
     state.machines.upsert(node_key_hex, rec);
@@ -430,6 +463,45 @@ mod tests {
         assert_eq!(rec.hostname, "peer-a");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn register_auto_approves_policy_routes() {
+        let (state, redeemer, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "auto_approvers": {
+                "routes": {"10.30.0.0/16": ["alice@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let authkey = "hskey-auth-alice-routes";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "ab".repeat(32);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.30.1.0/24", "10.99.0.0/24"]);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.available_routes, vec!["10.30.1.0/24", "10.99.0.0/24"]);
+        assert_eq!(rec.approved_routes, vec!["10.30.1.0/24"]);
     }
 
     #[tokio::test]

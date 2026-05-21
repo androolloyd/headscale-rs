@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use crate::policy::{NodeView, PolicyStore};
+
 fn is_exit_route(prefix: &ipnet::IpNet) -> bool {
     match prefix {
         ipnet::IpNet::V4(net) => net.addr() == Ipv4Addr::UNSPECIFIED && net.prefix_len() == 0,
@@ -198,6 +200,47 @@ pub fn active_approved_routes(
         .into_iter()
         .filter(|route| available.contains(route))
         .collect()
+}
+
+/// Preserve existing approved routes and add newly announced routes
+/// that the loaded policy auto-approves for this node.
+///
+/// Mirrors headscale-go `policy.ApproveRoutesWithPolicy`: existing
+/// approvals are never removed here; only an explicit operator action
+/// clears them.
+pub(crate) fn auto_approved_routes_for_node(
+    policy: &PolicyStore,
+    addr: &str,
+    user: Option<&str>,
+    tags: &[String],
+    current_approved: &[String],
+    announced_routes: &[String],
+) -> Result<Vec<String>, String> {
+    let mut approved = normalize_routes(current_approved)?;
+    let announced = normalize_routes(announced_routes)?;
+    let view = NodeView {
+        addr: Some(addr),
+        user,
+        tags,
+    };
+
+    for route in announced {
+        if approved.contains(&route) {
+            continue;
+        }
+        let can_approve = if is_exit_route_str(&route) {
+            policy.auto_approves_exit_node(&view)
+        } else {
+            policy.auto_approves_route(&view, &route)
+        };
+        if can_approve {
+            approved.push(route);
+        }
+    }
+
+    approved.sort();
+    approved.dedup();
+    Ok(approved)
 }
 
 /// Compute the active primary subnet routes per node from a fresh

@@ -64,7 +64,7 @@ fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
 use serde::Serialize;
 
 use super::register::record_to_map_node;
-use super::routes::active_exit_routes;
+use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PortRange,
     stable_id_from_key, strip_key_prefix,
@@ -390,11 +390,48 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         own.endpoints = eps.clone();
         record_changed = true;
     }
-    if let Some(hostinfo) = req.hostinfo.as_ref()
-        && own.available_routes != hostinfo.routable_ips
-    {
-        own.available_routes = hostinfo.routable_ips.clone();
-        record_changed = true;
+    if let Some(hostinfo) = req.hostinfo.as_ref() {
+        let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
+            Ok(routes) => routes,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid Hostinfo.RoutableIPs: {e}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let addr = own.ipv4.to_string();
+        let user = (!own.user.is_empty()).then_some(own.user.as_str());
+        let approved_routes = match auto_approved_routes_for_node(
+            &state.policy,
+            &addr,
+            user,
+            &own.forced_tags,
+            &own.approved_routes,
+            &announced_routes,
+        ) {
+            Ok(routes) => routes,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid approved routes: {e}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        if own.available_routes != announced_routes {
+            own.available_routes = announced_routes;
+            record_changed = true;
+        }
+        if own.approved_routes != approved_routes {
+            own.approved_routes = approved_routes;
+            record_changed = true;
+        }
     }
     if record_changed {
         state.machines.upsert(node_key_hex.clone(), own.clone());
@@ -1067,6 +1104,72 @@ mod tests {
                 .iter()
                 .any(|route| route == "10.10.1.0/24")
         );
+    }
+
+    #[tokio::test]
+    async fn map_request_auto_approves_policy_routes() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "auto_approvers": {
+                "routes": {"10.20.0.0/16": ["alice@"]},
+                "exit_node": ["alice@"]
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "d1".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "RoutableIPs": [
+                                    "10.20.1.0/24",
+                                    "10.99.0.0/24",
+                                    "0.0.0.0/0"
+                                ]
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&alice).expect("alice still registered");
+        assert_eq!(
+            rec.available_routes,
+            vec!["0.0.0.0/0", "10.20.1.0/24", "10.99.0.0/24", "::/0"]
+        );
+        assert_eq!(
+            rec.approved_routes,
+            vec!["0.0.0.0/0", "10.20.1.0/24", "::/0"]
+        );
+
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.expect("self node");
+        assert!(node.allowed_ips.iter().any(|route| route == "10.20.1.0/24"));
+        assert!(node.allowed_ips.iter().any(|route| route == "0.0.0.0/0"));
+        assert!(node.allowed_ips.iter().any(|route| route == "::/0"));
+        assert!(!node.allowed_ips.iter().any(|route| route == "10.99.0.0/24"));
     }
 
     #[tokio::test]

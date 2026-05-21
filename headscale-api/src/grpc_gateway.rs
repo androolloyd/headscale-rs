@@ -21,7 +21,10 @@ use tonic::{Code, Request as TonicRequest, Status};
 
 use crate::generated::headscale_service_server::HeadscaleService;
 use crate::generated::{
-    CreateUserRequest, DeleteUserRequest, HealthRequest, ListUsersRequest, RenameUserRequest, User,
+    ApiKey, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DeleteApiKeyRequest,
+    DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest,
+    GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListPreAuthKeysRequest, ListUsersRequest,
+    PreAuthKey, RenameUserRequest, SetPolicyRequest, User,
 };
 use crate::grpc::upstream::HeadscaleAdminService;
 
@@ -47,6 +50,17 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/user", get(list_users).post(create_user))
         .route("/api/v1/user/:old_id/rename/:new_name", post(rename_user))
         .route("/api/v1/user/:id", delete(delete_user))
+        .route(
+            "/api/v1/preauthkey",
+            get(list_preauth_keys)
+                .post(create_preauth_key)
+                .delete(delete_preauth_key),
+        )
+        .route("/api/v1/preauthkey/expire", post(expire_preauth_key))
+        .route("/api/v1/apikey", get(list_api_keys).post(create_api_key))
+        .route("/api/v1/apikey/expire", post(expire_api_key))
+        .route("/api/v1/apikey/:prefix", delete(delete_api_key))
+        .route("/api/v1/policy", get(get_policy).put(set_policy))
         .with_state(state)
 }
 
@@ -175,6 +189,239 @@ async fn delete_user(
     }
 }
 
+async fn create_preauth_key(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let request = match create_preauth_request(&value) {
+        Ok(body) => tonic_request(&headers, body),
+        Err(status) => return status_response(status),
+    };
+    match state.service.create_pre_auth_key(request).await {
+        Ok(response) => {
+            let pre_auth_key = response.into_inner().pre_auth_key;
+            json_ok(json!({ "preAuthKey": optional_preauth_key_json(pre_auth_key.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn expire_preauth_key(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let id = match u64_field(&value, &["id"], "id") {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .expire_pre_auth_key(tonic_request(&headers, ExpirePreAuthKeyRequest { id }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(status),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct IdQuery {
+    id: u64,
+}
+
+async fn delete_preauth_key(
+    State(state): State<GatewayState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query: IdQuery = match parse_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .delete_pre_auth_key(tonic_request(
+            &headers,
+            DeletePreAuthKeyRequest { id: query.id },
+        ))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(status),
+    }
+}
+
+async fn list_preauth_keys(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    match state
+        .service
+        .list_pre_auth_keys(tonic_request(&headers, ListPreAuthKeysRequest {}))
+        .await
+    {
+        Ok(response) => {
+            let pre_auth_keys = response
+                .into_inner()
+                .pre_auth_keys
+                .iter()
+                .map(preauth_key_json)
+                .collect::<Vec<_>>();
+            json_ok(json!({ "preAuthKeys": pre_auth_keys }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn create_api_key(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let expiration = match timestamp_field(&value, &["expiration"], "expiration") {
+        Ok(expiration) => expiration,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .create_api_key(tonic_request(&headers, CreateApiKeyRequest { expiration }))
+        .await
+    {
+        Ok(response) => json_ok(json!({ "apiKey": response.into_inner().api_key })),
+        Err(status) => status_response(status),
+    }
+}
+
+async fn expire_api_key(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let prefix = match string_field(&value, &["prefix"], "prefix") {
+        Ok(prefix) => prefix,
+        Err(status) => return status_response(status),
+    };
+    let id = match u64_field(&value, &["id"], "id") {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .expire_api_key(tonic_request(&headers, ExpireApiKeyRequest { prefix, id }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(status),
+    }
+}
+
+async fn list_api_keys(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    match state
+        .service
+        .list_api_keys(tonic_request(&headers, ListApiKeysRequest {}))
+        .await
+    {
+        Ok(response) => {
+            let api_keys = response
+                .into_inner()
+                .api_keys
+                .iter()
+                .map(api_key_json)
+                .collect::<Vec<_>>();
+            json_ok(json!({ "apiKeys": api_keys }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn delete_api_key(
+    State(state): State<GatewayState>,
+    Path(prefix): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query: IdQuery = match parse_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .delete_api_key(tonic_request(
+            &headers,
+            DeleteApiKeyRequest {
+                prefix,
+                id: query.id,
+            },
+        ))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(status),
+    }
+}
+
+async fn get_policy(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    match state
+        .service
+        .get_policy(tonic_request(&headers, GetPolicyRequest {}))
+        .await
+    {
+        Ok(response) => {
+            let response = response.into_inner();
+            json_ok(json!({
+                "policy": response.policy,
+                "updatedAt": timestamp_json(response.updated_at.as_ref()),
+            }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn set_policy(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let policy = match string_field(&value, &["policy"], "policy") {
+        Ok(policy) => policy,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .set_policy(tonic_request(&headers, SetPolicyRequest { policy }))
+        .await
+    {
+        Ok(response) => {
+            let response = response.into_inner();
+            json_ok(json!({
+                "policy": response.policy,
+                "updatedAt": timestamp_json(response.updated_at.as_ref()),
+            }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
 fn tonic_request<T>(headers: &HeaderMap, body: T) -> TonicRequest<T> {
     let mut request = TonicRequest::new(body);
     if let Some(value) = headers.get(header::AUTHORIZATION)
@@ -195,6 +442,16 @@ where
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
     if body.is_empty() {
         return Ok(T::default());
+    }
+    serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))
+}
+
+async fn read_json_value(request: Request) -> Result<Value, Status> {
+    let body = to_bytes(request.into_body(), BODY_LIMIT)
+        .await
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    if body.is_empty() {
+        return Ok(Value::Object(Map::new()));
     }
     serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))
 }
@@ -221,6 +478,10 @@ fn optional_user_json(user: Option<&User>) -> Value {
     user.map(user_json).unwrap_or(Value::Null)
 }
 
+fn optional_preauth_key_json(preauth_key: Option<&PreAuthKey>) -> Value {
+    preauth_key.map(preauth_key_json).unwrap_or(Value::Null)
+}
+
 fn user_json(user: &User) -> Value {
     let mut out = Map::new();
     out.insert("id".into(), Value::String(user.id.to_string()));
@@ -240,6 +501,33 @@ fn user_json(user: &User) -> Value {
     Value::Object(out)
 }
 
+fn preauth_key_json(key: &PreAuthKey) -> Value {
+    let mut out = Map::new();
+    out.insert("user".into(), optional_user_json(key.user.as_ref()));
+    out.insert("id".into(), Value::String(key.id.to_string()));
+    out.insert("key".into(), Value::String(key.key.clone()));
+    out.insert("reusable".into(), Value::Bool(key.reusable));
+    out.insert("ephemeral".into(), Value::Bool(key.ephemeral));
+    out.insert("used".into(), Value::Bool(key.used));
+    out.insert("expiration".into(), timestamp_json(key.expiration.as_ref()));
+    out.insert("createdAt".into(), timestamp_json(key.created_at.as_ref()));
+    out.insert(
+        "aclTags".into(),
+        Value::Array(key.acl_tags.iter().cloned().map(Value::String).collect()),
+    );
+    Value::Object(out)
+}
+
+fn api_key_json(key: &ApiKey) -> Value {
+    let mut out = Map::new();
+    out.insert("id".into(), Value::String(key.id.to_string()));
+    out.insert("prefix".into(), Value::String(key.prefix.clone()));
+    out.insert("expiration".into(), timestamp_json(key.expiration.as_ref()));
+    out.insert("createdAt".into(), timestamp_json(key.created_at.as_ref()));
+    out.insert("lastSeen".into(), timestamp_json(key.last_seen.as_ref()));
+    Value::Object(out)
+}
+
 fn timestamp_json(ts: Option<&prost_types::Timestamp>) -> Value {
     let Some(ts) = ts else {
         return Value::Null;
@@ -247,6 +535,114 @@ fn timestamp_json(ts: Option<&prost_types::Timestamp>) -> Value {
     match Utc.timestamp_opt(ts.seconds, ts.nanos as u32).single() {
         Some(dt) => Value::String(dt.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
         None => Value::Null,
+    }
+}
+
+fn create_preauth_request(value: &Value) -> Result<CreatePreAuthKeyRequest, Status> {
+    Ok(CreatePreAuthKeyRequest {
+        user: u64_field(value, &["user"], "user")?,
+        reusable: bool_field(value, &["reusable"], "reusable")?,
+        ephemeral: bool_field(value, &["ephemeral"], "ephemeral")?,
+        expiration: timestamp_field(value, &["expiration"], "expiration")?,
+        acl_tags: string_array_field(value, &["aclTags", "acl_tags"], "aclTags")?,
+    })
+}
+
+fn field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    names.iter().find_map(|name| object.get(*name))
+}
+
+fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, Status> {
+    match field(value, names) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Null) | None => Ok(String::new()),
+        Some(_) => Err(Status::invalid_argument(format!(
+            "invalid value for string field {display}"
+        ))),
+    }
+}
+
+fn bool_field(value: &Value, names: &[&str], display: &str) -> Result<bool, Status> {
+    match field(value, names) {
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(Value::Null) | None => Ok(false),
+        Some(_) => Err(Status::invalid_argument(format!(
+            "invalid value for bool field {display}"
+        ))),
+    }
+}
+
+fn u64_field(value: &Value, names: &[&str], display: &str) -> Result<u64, Status> {
+    match field(value, names) {
+        Some(Value::String(s)) if !s.is_empty() => s.parse::<u64>().map_err(|e| {
+            Status::invalid_argument(format!("type mismatch, parameter: {display}, error: {e}"))
+        }),
+        Some(Value::String(_)) | Some(Value::Null) | None => Ok(0),
+        Some(Value::Number(n)) => n.as_u64().ok_or_else(|| {
+            Status::invalid_argument(format!("invalid value for uint64 field {display}"))
+        }),
+        Some(_) => Err(Status::invalid_argument(format!(
+            "invalid value for uint64 field {display}"
+        ))),
+    }
+}
+
+fn string_array_field(value: &Value, names: &[&str], display: &str) -> Result<Vec<String>, Status> {
+    match field(value, names) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                Value::String(s) => Ok(s.clone()),
+                _ => Err(Status::invalid_argument(format!(
+                    "invalid value for string array field {display}"
+                ))),
+            })
+            .collect(),
+        Some(Value::Null) | None => Ok(Vec::new()),
+        Some(_) => Err(Status::invalid_argument(format!(
+            "invalid value for string array field {display}"
+        ))),
+    }
+}
+
+fn timestamp_field(
+    value: &Value,
+    names: &[&str],
+    display: &str,
+) -> Result<Option<prost_types::Timestamp>, Status> {
+    match field(value, names) {
+        Some(Value::String(s)) if !s.is_empty() => {
+            let parsed = chrono::DateTime::parse_from_rfc3339(s).map_err(|e| {
+                Status::invalid_argument(format!("invalid timestamp field {display}: {e}"))
+            })?;
+            Ok(Some(prost_types::Timestamp {
+                seconds: parsed.timestamp(),
+                nanos: parsed.timestamp_subsec_nanos() as i32,
+            }))
+        }
+        Some(Value::Object(object)) => {
+            let seconds = object
+                .get("seconds")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    Status::invalid_argument(format!("invalid timestamp field {display}"))
+                })?;
+            let nanos = object.get("nanos").and_then(Value::as_i64).unwrap_or(0);
+            if !(0..1_000_000_000).contains(&nanos) {
+                return Err(Status::invalid_argument(format!(
+                    "invalid timestamp field {display}"
+                )));
+            }
+            Ok(Some(prost_types::Timestamp {
+                seconds,
+                nanos: nanos as i32,
+            }))
+        }
+        Some(Value::String(_)) | Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(Status::invalid_argument(format!(
+            "invalid timestamp field {display}"
+        ))),
     }
 }
 

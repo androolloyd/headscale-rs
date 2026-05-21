@@ -209,3 +209,193 @@ async fn grpc_gateway_path_parameter_type_mismatch_is_status_json() {
     );
     assert_eq!(body["details"], serde_json::json!([]));
 }
+
+#[tokio::test]
+async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
+    let (app, token) = fixture().await;
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"preauth-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/preauthkey",
+            Some(&token),
+            Body::from(r#"{"user":"1","reusable":true,"ephemeral":true,"aclTags":["tag:test"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["preAuthKey"]["id"], "1");
+    assert_eq!(body["preAuthKey"]["user"]["id"], "1");
+    assert_eq!(body["preAuthKey"]["user"]["name"], "preauth-user");
+    assert_eq!(body["preAuthKey"]["reusable"], true);
+    assert_eq!(body["preAuthKey"]["ephemeral"], true);
+    assert_eq!(body["preAuthKey"]["used"], false);
+    assert_eq!(
+        body["preAuthKey"]["aclTags"],
+        serde_json::json!(["tag:test"])
+    );
+    assert!(
+        body["preAuthKey"]["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("hskey-auth-")
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/preauthkey",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["preAuthKeys"].as_array().unwrap().len(), 1);
+    assert_eq!(body["preAuthKeys"][0]["id"], "1");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/preauthkey/expire",
+            Some(&token),
+            Body::from(r#"{"id":"1"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::DELETE,
+            "/api/v1/preauthkey?id=1",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn grpc_gateway_apikey_paths_use_protojson_names() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/apikey",
+            Some(&token),
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let new_key = body["apiKey"].as_str().unwrap().to_string();
+    assert!(new_key.starts_with("hskey-api-"));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/apikey",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let keys = body["apiKeys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2);
+    let new_key_row = keys
+        .iter()
+        .find(|key| key["id"] == "2")
+        .expect("new key row");
+    let new_prefix = new_key_row["prefix"].as_str().unwrap().to_string();
+    assert!(new_prefix.starts_with("hskey-api-"));
+    assert!(new_key_row["createdAt"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(new_key_row["expiration"], serde_json::Value::Null);
+    assert_eq!(new_key_row["lastSeen"], serde_json::Value::Null);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/apikey/expire",
+            Some(&token),
+            Body::from(r#"{"id":"2"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::DELETE,
+            &format!("/api/v1/apikey/{new_prefix}"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn grpc_gateway_policy_round_trips_protojson_body() {
+    let (app, token) = fixture().await;
+    let policy = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::PUT,
+            "/api/v1/policy",
+            Some(&token),
+            Body::from(serde_json::json!({ "policy": policy }).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["policy"], policy);
+    assert!(body["updatedAt"].as_str().unwrap().ends_with('Z'));
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/policy",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["policy"], policy);
+    assert!(body["updatedAt"].as_str().unwrap().ends_with('Z'));
+}

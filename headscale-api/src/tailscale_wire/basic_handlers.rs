@@ -201,6 +201,19 @@ pub async fn handle_debug_registration_cache() -> Response {
     }
 }
 
+pub async fn handle_debug_filter(State(state): State<WireState>) -> Response {
+    let filter = super::map::packet_filter_for(&state.policy);
+    match serde_json::to_string_pretty(&filter) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
 pub async fn handle_windows(
     State(state): State<WireState>,
     headers: HeaderMap,
@@ -983,6 +996,81 @@ mod tests {
         assert_eq!(parsed["expiration"], "15m0s");
         assert_eq!(parsed["cleanup"], "20m0s");
         assert_eq!(parsed["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn debug_filter_returns_runtime_allow_all_when_policy_unloaded() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/filter")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed[0]["SrcIPs"],
+            serde_json::json!(["0.0.0.0/0", "::/0"])
+        );
+        assert_eq!(parsed[0]["DstPorts"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn debug_filter_returns_loaded_policy_filter_rules() {
+        let (state, _dir) = fixture_state();
+        let raw_policy = r#"{
+          "version": 1,
+          "rules": [
+            {
+              "action": "accept",
+              "src": ["100.64.0.1/32"],
+              "dst": ["100.64.0.2/32"],
+              "ports": ["tcp/22"]
+            }
+          ]
+        }"#;
+        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/filter")
+                    .header(header::ACCEPT, "text/plain")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert_eq!(parsed[0]["SrcIPs"], serde_json::json!(["100.64.0.1/32"]));
+        assert_eq!(parsed[0]["DstPorts"][0]["IP"], "100.64.0.2/32");
+        assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["First"], 22);
+        assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["Last"], 22);
+        assert_eq!(parsed[0]["IPProto"], serde_json::json!([6]));
     }
 
     #[tokio::test]

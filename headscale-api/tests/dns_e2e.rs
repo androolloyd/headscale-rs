@@ -354,8 +354,7 @@ fn mapresponse_omits_default_dnsconfig_field() {
     // — this guards against accidental rename drift.
     use headscale_api::tailscale_wire::wire::{DerpMap, DnsConfig, MapNode};
     let r = MapResponse {
-        key_expiry_extension: 0,
-        node: MapNode {
+        node: Some(MapNode {
             id: 1,
             stable_id: "n1".into(),
             name: "x.headscale.test".into(),
@@ -364,18 +363,33 @@ fn mapresponse_omits_default_dnsconfig_field() {
             machine: None,
             addresses: vec!["100.64.0.1/32".into()],
             allowed_ips: vec!["100.64.0.1/32".into()],
+            primary_routes: Vec::new(),
             hostinfo: headscale_api::tailscale_wire::wire::HostInfo::default(),
+            created: None,
+            key_expiry: None,
+            cap: 0,
+            tags: Vec::new(),
+            last_seen: None,
+            online: None,
             machine_authorized: true,
+            capabilities: Vec::new(),
+            cap_map: std::collections::BTreeMap::new(),
+            expired: false,
+            home_derp: 0,
             disco_key: None,
             endpoints: Vec::new(),
-        },
+            ..MapNode::default()
+        }),
         peers: vec![],
-        dns_config: DnsConfig::default(),
-        derp_map: DerpMap::default(),
+        user_profiles: Vec::new(),
+        dns_config: Some(DnsConfig::default()),
+        derp_map: Some(DerpMap::default()),
         domain: "headscale.test".into(),
         keep_alive: false,
         node_key_expired: false,
         packet_filter: vec![],
+        ssh_policy: None,
+        ..MapResponse::default()
     };
     let json = serde_json::to_string(&r).unwrap();
     assert!(json.contains("\"DNSConfig\":{}"));

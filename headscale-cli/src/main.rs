@@ -2,7 +2,7 @@
 //!
 //! Command-line interface for running headscale mesh nodes and control planes.
 //! The admin subcommands (`users`, `nodes`, `preauthkeys`, `policy`,
-//! `tailnet`) wrap the `/api/v1/*` surface exposed by the admin GUI
+//! `apikeys`, `tailnet`) wrap the `/api/v1/*` surface exposed by the admin GUI
 //! (#216 / commit `62b956d`).
 
 use std::path::PathBuf;
@@ -18,7 +18,8 @@ mod server;
 
 use config::CliConfig;
 use headscale_cli::admin::{
-    self, AdminError, ConnectArgs, NodesCmd, PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
+    self, AdminError, ApiKeysCmd, ConnectArgs, NodesCmd, PolicyCmd, PreauthKeysCmd, TailnetCmd,
+    UsersCmd,
 };
 
 /// Headscale-rs: WireGuard mesh networking with resource accounting.
@@ -99,6 +100,12 @@ enum Commands {
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
+    },
+    /// Manage API keys.
+    #[command(alias = "apikey", alias = "api")]
+    Apikeys {
+        #[command(subcommand)]
+        action: ApiKeysCmd,
     },
     /// Inspect or update the network policy.
     Policy {
@@ -263,6 +270,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             .await
             .map_err(Into::into),
         Commands::Preauthkeys { action } => admin::run_preauthkeys(&cli.connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Apikeys { action } => admin::run_apikeys(&cli.connect, &action)
             .await
             .map_err(Into::into),
         Commands::Policy { action } => admin::run_policy(&cli.connect, &action)

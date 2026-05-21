@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use headscale_core::swarm_transport::{MeshMessage, MessageCategory};
+use libfuzzer_sys::fuzz_target;
 
 /// Arbitrary message for fuzzing
 #[derive(Debug, Arbitrary)]
@@ -50,8 +50,12 @@ fuzz_target!(|input: FuzzInput| {
         _ => MessageCategory::Other,
     };
 
-    let mut msg = MeshMessage::new(&input.structured.from, &input.structured.to, input.structured.payload.clone())
-        .with_category(category);
+    let mut msg = MeshMessage::new(
+        &input.structured.from,
+        &input.structured.to,
+        input.structured.payload.clone(),
+    )
+    .with_category(category);
 
     if let Some(cid) = &input.structured.correlation_id {
         msg = msg.with_correlation_id(cid.clone());

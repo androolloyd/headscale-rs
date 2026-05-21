@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-internet-src",
+  "expect_policy_error": "\"autogroup:internet\" used in source",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["autogroup:internet"],
+        "dst": ["10.0.0.1:*"]
+      }
+    ]
+  }
+}

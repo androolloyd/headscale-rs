@@ -101,6 +101,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
+        public_control_url: None,
     };
     // tempdir held only inside this fn; the wire layer never reads
     // from it after construction, so leaking is fine for the test.
@@ -447,7 +448,7 @@ async fn gc_ephemeral_removes_stale_devices() {
     let non_ephem = mk_record(0xc2, "perm", 42, false);
     reg.upsert("c2".repeat(32), non_ephem);
 
-    let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+    let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
     assert_eq!(removed, vec!["c0".repeat(32)]);
     assert!(reg.get(&"c0".repeat(32)).is_none());
     assert!(reg.get(&"c1".repeat(32)).is_some());
@@ -459,7 +460,7 @@ async fn gc_ephemeral_leaves_fresh_devices() {
     let reg = Arc::new(MachineRegistry::new());
     let r = mk_record(0xd0, "ephem", 50, true);
     reg.upsert("d0".repeat(32), r);
-    let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+    let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
     assert!(removed.is_empty());
 }
 

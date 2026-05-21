@@ -1,0 +1,12 @@
+{
+  "name": "literal-prefix-tcp22",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["100.64.0.1/32"],
+        "dst": ["100.64.0.2/32:22"]
+      }
+    ]
+  }
+}

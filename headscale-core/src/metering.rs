@@ -99,14 +99,14 @@ impl MeteringSession {
             .checked_add(bytes)
             .ok_or(MeteringError::CounterOverflow)?;
 
-        if let Some(limit) = self.config.bandwidth_limit {
-            if new_total > limit {
-                return Err(MeteringError::BandwidthExceeded {
-                    limit,
-                    current,
-                    requested: bytes,
-                });
-            }
+        if let Some(limit) = self.config.bandwidth_limit
+            && new_total > limit
+        {
+            return Err(MeteringError::BandwidthExceeded {
+                limit,
+                current,
+                requested: bytes,
+            });
         }
 
         self.bytes_in.fetch_add(bytes, Ordering::Relaxed);
@@ -124,14 +124,14 @@ impl MeteringSession {
             .checked_add(bytes)
             .ok_or(MeteringError::CounterOverflow)?;
 
-        if let Some(limit) = self.config.bandwidth_limit {
-            if new_total > limit {
-                return Err(MeteringError::BandwidthExceeded {
-                    limit,
-                    current,
-                    requested: bytes,
-                });
-            }
+        if let Some(limit) = self.config.bandwidth_limit
+            && new_total > limit
+        {
+            return Err(MeteringError::BandwidthExceeded {
+                limit,
+                current,
+                requested: bytes,
+            });
         }
 
         self.bytes_out.fetch_add(bytes, Ordering::Relaxed);
@@ -152,14 +152,14 @@ impl MeteringSession {
             .checked_add(total_new)
             .ok_or(MeteringError::CounterOverflow)?;
 
-        if let Some(limit) = self.config.bandwidth_limit {
-            if new_total > limit {
-                return Err(MeteringError::BandwidthExceeded {
-                    limit,
-                    current,
-                    requested: total_new,
-                });
-            }
+        if let Some(limit) = self.config.bandwidth_limit
+            && new_total > limit
+        {
+            return Err(MeteringError::BandwidthExceeded {
+                limit,
+                current,
+                requested: total_new,
+            });
         }
 
         self.bytes_in.fetch_add(bytes_in, Ordering::Relaxed);

@@ -1,0 +1,14 @@
+{
+  "name": "acl-validation-proto-wildcard",
+  "expect_policy_error": "proto name \"*\" not known",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "*",
+        "src": ["*"],
+        "dst": ["*:*"]
+      }
+    ]
+  }
+}

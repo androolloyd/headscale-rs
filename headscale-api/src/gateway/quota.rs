@@ -117,6 +117,12 @@ impl QuotaManager {
         }
     }
 
+    // `Duration::from_secs(24 * 60 * 60)` would be more readable than the
+    // `from_secs(24 * 60 * 60)` form below, but it's the unstable
+    // `duration_constructors` API which trips E0658 on Rust 1.88
+    // (the downstream octra workspace's CI floor). Keep the
+    // arithmetic form until 1.95+ is the floor.
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     fn default_quotas() -> HashMap<GatewayResourceType, Quota> {
         let mut defaults = HashMap::new();
 
@@ -126,7 +132,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Inference,
                 limit: 1_000_000,
-                reset_period: Some(Duration::from_secs(86400)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 
@@ -136,7 +142,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Compute,
                 limit: 3600,
-                reset_period: Some(Duration::from_secs(86400)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 
@@ -156,7 +162,7 @@ impl QuotaManager {
             Quota {
                 resource_type: GatewayResourceType::Bandwidth,
                 limit: 100 * 1024 * 1024 * 1024,
-                reset_period: Some(Duration::from_secs(86400)),
+                reset_period: Some(Duration::from_secs(24 * 60 * 60)),
             },
         );
 

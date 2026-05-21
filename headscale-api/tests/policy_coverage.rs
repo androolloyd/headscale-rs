@@ -150,16 +150,10 @@ fn pure_comments_yields_json_error() {
 }
 
 #[test]
-fn missing_required_version_field_is_schema_error() {
-    // `version` is non-default — without it serde_json fails the
-    // schema check, surfaced as `PolicyParseError::Schema`.
+fn missing_version_defaults_to_headscale_go_policy_version() {
     let raw = r#"{ "rules": [] }"#;
-    let err = parse_hujson_policy(raw).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("missing field") && msg.contains("version"),
-        "expected schema diagnostic naming 'version', got: {msg}"
-    );
+    let doc = parse_hujson_policy(raw).unwrap();
+    assert_eq!(doc.version, 1);
 }
 
 #[test]
@@ -211,7 +205,7 @@ fn unknown_rule_field_is_schema_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn expand_principal_wildcard_returns_wildcard() {
+fn expand_principal_wildcard_returns_default_cidrs() {
     let d = PolicyDoc::empty();
     assert_eq!(d.expand_principal("*"), vec!["0.0.0.0/0", "::/0"]);
 }
@@ -372,12 +366,47 @@ fn store_set_caches_filter_rules() {
 }
 
 #[test]
+fn store_second_set_recomputes_cached_filter_rules() {
+    let s = PolicyStore::new();
+    let raw_22 = r#"{
+        "version": 1,
+        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}]
+    }"#;
+    let raw_443 = r#"{
+        "version": 1,
+        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/443"]}]
+    }"#;
+
+    s.set(parse_hujson_policy(raw_22).unwrap(), raw_22.to_string());
+    assert_eq!(s.filter_rules()[0].dst_ports[0].ports.first, 22);
+
+    let doc_443 = parse_hujson_policy(raw_443).unwrap();
+    s.set(doc_443.clone(), raw_443.to_string());
+
+    let rules = s.filter_rules();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].dst_ports[0].ports.first, 443);
+    assert_eq!(s.doc().unwrap(), doc_443);
+    assert_eq!(s.raw().unwrap(), raw_443);
+}
+
+#[test]
 fn store_set_preserves_raw_comments_verbatim() {
     let s = PolicyStore::new();
     let raw = "{\n  // comments must survive\n  \"version\":1,\n  \"rules\":[]\n}";
     let doc = parse_hujson_policy(raw).unwrap();
     s.set(doc, raw.to_string());
     assert_eq!(s.raw().unwrap(), raw, "raw bytes round-trip with comments");
+}
+
+#[test]
+fn store_set_at_preserves_supplied_update_timestamp() {
+    let s = PolicyStore::new();
+    let raw = r#"{"version":1,"rules":[]}"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    s.set_at(doc, raw.to_string(), 42);
+    assert_eq!(s.raw().unwrap(), raw);
+    assert_eq!(s.updated_at(), Some(42));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

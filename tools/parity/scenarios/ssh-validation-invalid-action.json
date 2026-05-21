@@ -1,0 +1,14 @@
+{
+  "name": "ssh-validation-invalid-action",
+  "expect_policy_error": "invalid SSH action",
+  "policy": {
+    "ssh": [
+      {
+        "action": "invalid",
+        "src": ["alice@"],
+        "dst": ["autogroup:self"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

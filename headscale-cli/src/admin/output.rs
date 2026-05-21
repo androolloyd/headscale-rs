@@ -145,7 +145,7 @@ mod tests {
         render_table_into(
             &mut buf,
             &["PREFIX", "USER"],
-            &[vec!["octrapreauth-aa…".into(), "alice".into()]],
+            &[vec!["hskey-auth-aaaaaaaaaaaa-***".into(), "alice".into()]],
         )
         .unwrap();
         let s = String::from_utf8(buf).unwrap();

@@ -58,11 +58,9 @@ fuzz_target!(|input: RoutingFuzzInput| {
             RoutingOp::RemoveRoute(spec) => {
                 let route = route_from_spec(spec);
                 table.remove_route(&route.prefix, &route.peer_id);
-                assert!(
-                    table
-                        .all_routes()
-                        .all(|r| r.prefix != route.prefix || r.peer_id != route.peer_id)
-                );
+                assert!(table
+                    .all_routes()
+                    .all(|r| r.prefix != route.prefix || r.peer_id != route.peer_id));
                 assert_table_invariants(&table);
             }
             RoutingOp::LookupV4(addr) => {
@@ -126,12 +124,13 @@ fn expected_lookup(table: &RoutingTable, dst: IpAddr) -> Option<&str> {
                 .prefix_len()
                 .cmp(&b.prefix.prefix_len())
                 .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| b.peer_id.cmp(&a.peer_id))
         })
         .map(|route| route.peer_id.as_str())
 }
 
 fn assert_table_invariants(table: &RoutingTable) {
-    assert_eq!(table.len() == 0, table.is_empty());
+    assert_eq!(table.all_routes().next().is_none(), table.is_empty());
     assert_eq!(table.len(), table.all_routes().count());
     assert!(table.approved_routes().all(|route| route.approved));
 

@@ -15,12 +15,15 @@
         {
             "action": "check",
             "src":    ["group:developers"],
-            "dst":    ["autogroup:tag:dev"],
+            "dst":    ["tag:dev"],
             "users":  ["alice", "bob"]
         }
     ],
     "groups": {
-        "admins":     ["alice@example.com"],
-        "developers": ["bob@example.com"]
+        "group:admins":     ["alice@example.com"],
+        "group:developers": ["bob@example.com"]
+    },
+    "tagOwners": {
+        "tag:dev": ["group:admins"]
     }
 }

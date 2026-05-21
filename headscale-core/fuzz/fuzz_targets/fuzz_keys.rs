@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use headscale_core::keys_wg::{parse_public_key, parse_secret_key, WgKeyPair};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct KeyFuzzInput {

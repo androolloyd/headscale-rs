@@ -1,0 +1,11 @@
+{
+  "name": "autoapprovers-validation-undefined-tag-route",
+  "expect_policy_error": "Tag \"tag:notdefined\" is not defined",
+  "policy": {
+    "autoApprovers": {
+      "routes": {
+        "10.0.0.0/16": ["tag:notdefined"]
+      }
+    }
+  }
+}

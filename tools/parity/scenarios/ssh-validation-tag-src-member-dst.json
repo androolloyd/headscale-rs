@@ -1,0 +1,17 @@
+{
+  "name": "ssh-validation-tag-src-member-dst",
+  "expect_policy_error": "tags in SSH source cannot access autogroup:member",
+  "policy": {
+    "tagOwners": {
+      "tag:client": ["alice@"]
+    },
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["tag:client"],
+        "dst": ["autogroup:member"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

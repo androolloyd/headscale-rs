@@ -45,29 +45,16 @@ impl RoutingTable {
     /// If `approved` is false, the route will be stored but not used for routing.
     pub fn add_route(&mut self, route: Route) {
         // Add to appropriate list and re-sort
-        // Sort by: prefix_len descending (longest first), then priority ascending (lower first)
+        // Sort by: prefix_len descending (longest first), priority ascending
+        // (lower first), then peer ID for deterministic conflict handling.
         match &route.prefix {
             IpNet::V4(_) => {
                 self.ipv4_routes.push(route);
-                self.ipv4_routes.sort_by(|a, b| {
-                    // First compare prefix length (descending - longer prefixes first)
-                    match b.prefix.prefix_len().cmp(&a.prefix.prefix_len()) {
-                        std::cmp::Ordering::Equal => {
-                            // Then compare priority (ascending - lower priority first)
-                            a.priority.cmp(&b.priority)
-                        }
-                        other => other,
-                    }
-                });
+                self.ipv4_routes.sort_by(route_order);
             }
             IpNet::V6(_) => {
                 self.ipv6_routes.push(route);
-                self.ipv6_routes.sort_by(|a, b| {
-                    match b.prefix.prefix_len().cmp(&a.prefix.prefix_len()) {
-                        std::cmp::Ordering::Equal => a.priority.cmp(&b.priority),
-                        other => other,
-                    }
-                });
+                self.ipv6_routes.sort_by(route_order);
             }
         }
     }
@@ -156,6 +143,14 @@ impl RoutingTable {
     pub fn is_empty(&self) -> bool {
         self.ipv4_routes.is_empty() && self.ipv6_routes.is_empty()
     }
+}
+
+fn route_order(a: &Route, b: &Route) -> std::cmp::Ordering {
+    b.prefix
+        .prefix_len()
+        .cmp(&a.prefix.prefix_len())
+        .then_with(|| a.priority.cmp(&b.priority))
+        .then_with(|| a.peer_id.cmp(&b.peer_id))
 }
 
 /// Parse a CIDR string into an IpNet.
@@ -324,6 +319,18 @@ mod tests {
         assert_eq!(
             table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
             Some("high-priority")
+        );
+    }
+
+    #[test]
+    fn test_equal_priority_tie_breaks_by_peer_id() {
+        let mut table = RoutingTable::new();
+        table.add_route(make_route("0.0.0.0/0", "peer-b", 0));
+        table.add_route(make_route("0.0.0.0/0", "peer-a", 0));
+
+        assert_eq!(
+            table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            Some("peer-a")
         );
     }
 

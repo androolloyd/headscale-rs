@@ -286,6 +286,21 @@ async fn api_preauthkeys_create_with_empty_user_returns_400() {
     );
 }
 
+#[tokio::test]
+async fn api_machine_routes_invalid_prefix_returns_400() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":["not-a-prefix"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("invalid route"));
+}
+
 // ---------------------------------------------------------------------------
 // Not-found / conflict semantics
 // ---------------------------------------------------------------------------
@@ -321,6 +336,20 @@ async fn api_machine_delete_unknown_id_returns_404() {
         .oneshot(req_authed(
             Method::DELETE,
             &format!("/api/v1/machines/{bad}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_machine_routes_unknown_id_returns_404() {
+    let bad = "ff".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{bad}/routes"),
+            r#"{"routes":["10.0.0.0/24"]}"#,
+            Some(BEARER),
         ))
         .await
         .unwrap();
@@ -371,7 +400,7 @@ async fn api_preauth_expire_unknown_prefix_returns_404() {
     let resp = app()
         .oneshot(req_authed(
             Method::POST,
-            "/api/v1/preauthkeys/octrapreauth-never/expire",
+            "/api/v1/preauthkeys/hskey-auth-never/expire",
         ))
         .await
         .unwrap();
@@ -388,6 +417,41 @@ async fn api_preauth_expire_short_prefix_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_machine_routes_set_approved_routes_and_expand_exit_pair() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":["10.10.0.0/24","0.0.0.0/0","10.10.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(
+        v["approved_routes"],
+        serde_json::json!(["0.0.0.0/0", "10.10.0.0/24", "::/0"])
+    );
+}
+
+#[tokio::test]
+async fn api_machine_approve_routes_alias_matches_upstream_spelling() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/approve_routes"),
+            r#"{"routes":["10.20.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(v["approved_routes"], serde_json::json!(["10.20.0.0/24"]));
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +492,50 @@ async fn api_policy_put_then_get_round_trips_raw() {
     let b = body(resp).await;
     assert!(b.contains(r#""loaded":true"#));
     assert!(b.contains("// hello"), "raw must preserve comments");
+}
+
+#[tokio::test]
+async fn api_policy_put_auto_approves_existing_node_routes() {
+    let policy = PolicyStore::new();
+    let reg = Arc::new(MachineRegistry::new());
+    let node_key = "7a".repeat(32);
+    let mut rec = MachineRecord::new_at(
+        chrono::Utc::now(),
+        node_key.clone(),
+        "7b".repeat(32),
+        "alice".into(),
+        "router".into(),
+        std::net::Ipv4Addr::new(100, 64, 0, 7),
+        false,
+    );
+    rec.available_routes = vec!["10.77.1.0/24".into(), "10.99.1.0/24".into()];
+    reg.upsert(node_key.clone(), rec);
+    let state = AdminState::builder()
+        .bearer_token(BEARER)
+        .users(UserRegistry::new())
+        .machines(Arc::new(WireMachineAdmin::new(reg.clone())))
+        .preauth(Arc::new(InMemoryPreauthAdmin::new()))
+        .policy(policy)
+        .build();
+    let app = router(state);
+    let raw = r#"{
+        "version": 1,
+        "auto_approvers": {
+            "routes": {"10.77.0.0/16": ["alice@"]}
+        }
+    }"#;
+
+    let resp = app
+        .oneshot(req_put_text("/api/v1/policy", raw, Some(BEARER)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let b = body(resp).await;
+    assert!(b.contains(r#""autoApprovedNodes":1"#));
+
+    let rec = reg.get(&node_key).expect("node still registered");
+    assert_eq!(rec.available_routes, vec!["10.77.1.0/24", "10.99.1.0/24"]);
+    assert_eq!(rec.approved_routes, vec!["10.77.1.0/24"]);
 }
 
 #[tokio::test]
@@ -670,8 +778,8 @@ async fn api_preauthkey_mint_then_expire_round_trip() {
     let start = b.find(key_marker).unwrap() + key_marker.len();
     let end = b[start..].find('"').unwrap() + start;
     let key = &b[start..end];
-    assert!(key.starts_with("octrapreauth-"));
-    let prefix = &key[..18];
+    assert!(key.starts_with("hskey-auth-"));
+    let prefix = &key[..("hskey-auth-".len() + 12)];
 
     let r = app
         .oneshot(req_authed(

@@ -51,9 +51,10 @@ hostname = { workspace = true }
 local-ip-address = { workspace = true }
 
 [dev-dependencies]
-# Mock HTTP server for the admin client unit tests. Pinned minor; the
-# crate is dev-only and not part of the production dep tree.
-httpmock = "0.7"
+# Mock HTTP server for the admin client unit tests. Keep this on the
+# maintained series so supply-chain checks do not inherit old
+# async-std-based test-only transitive deps.
+httpmock = "0.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 

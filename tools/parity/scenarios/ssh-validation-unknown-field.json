@@ -1,0 +1,15 @@
+{
+  "name": "ssh-validation-unknown-field",
+  "expect_policy_error": "INVALID_SSH_FIELD",
+  "policy": {
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["alice@"],
+        "dst": ["alice@"],
+        "users": ["root"],
+        "INVALID_SSH_FIELD": "should fail"
+      }
+    ]
+  }
+}

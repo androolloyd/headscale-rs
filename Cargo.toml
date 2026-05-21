@@ -1,10 +1,15 @@
 [workspace]
 resolver = "2"
+# Only the three "active" crates participate in workspace-wide cargo
+# commands (`cargo build --workspace`, `cargo test --workspace`,
+# `cargo clippy --workspace`). The other four crates
+# (`headscale-core`, `headscale-identity`, `headscale-resources`,
+# `headscale-payments`) remain on disk and are still consumed as path
+# dependencies of the active crates — they will still compile when the
+# active crates compile — but they are no longer first-class workspace
+# members and so won't be lint-gated or test-run on their own. See
+# `CHANGES.md` (2026-05-20) and the per-crate README notes.
 members = [
-    "headscale-core",
-    "headscale-identity",
-    "headscale-resources",
-    "headscale-payments",
     "headscale-api",
     "headscale-api-acl",
     "headscale-db",
@@ -12,6 +17,11 @@ members = [
 ]
 exclude = [
     "headscale-core/fuzz",
+    # Kept on disk but excluded from workspace-wide cargo commands.
+    "headscale-core",
+    "headscale-identity",
+    "headscale-resources",
+    "headscale-payments",
 ]
 
 [workspace.lints.clippy]

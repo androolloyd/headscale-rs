@@ -202,8 +202,7 @@ fn current_window(window_secs: u64) -> u64 {
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Constant-time byte-slice compare. Length-leak is fine: the
@@ -295,10 +294,13 @@ pub fn wrap_router(inner: Router, cfg: KnockConfig) -> Router {
 fn verify_prefix_knock(req: &Request, cfg: &KnockConfig) -> Result<(), ()> {
     let path = req.uri().path();
     let rest = path.strip_prefix(KNOCK_PATH_PREFIX).ok_or(())?;
-    let knock = match rest.find('/') {
-        Some(i) => &rest[..i],
-        None => rest,
+    let Some(i) = rest.find('/') else {
+        return Err(());
     };
+    if i + 1 == rest.len() {
+        return Err(());
+    }
+    let knock = &rest[..i];
     if cfg.verify(knock) { Ok(()) } else { Err(()) }
 }
 

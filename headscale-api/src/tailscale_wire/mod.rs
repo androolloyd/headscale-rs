@@ -45,6 +45,10 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 
+use self::routes::{DebugRoutes, PrimaryRouteState, active_approved_routes};
+use self::wire::stable_id_from_key;
+
+pub mod basic_handlers;
 pub mod be_transport;
 pub mod controlbase;
 pub mod derp_config;
@@ -54,6 +58,7 @@ pub mod map;
 pub mod noise;
 pub mod raw_tls;
 pub mod register;
+pub mod routes;
 pub mod serve;
 pub mod tls;
 pub mod wire;
@@ -251,6 +256,12 @@ pub struct WireState {
     /// `Notify` wakes parked `/map` long-pollers on extra-records
     /// file edits + runtime spec swaps.
     pub dns: Arc<crate::dns::DnsStore>,
+    /// Public control server URL. Headscale-go renders this from
+    /// `cfg.ServerURL` into Apple mobileconfig profiles and Windows
+    /// setup instructions. When unset, the public helper endpoints
+    /// fall back to request host/proto so older embedders keep working
+    /// until full config loading is wired through.
+    pub public_control_url: Option<String>,
 }
 
 /// In-memory machine registry.
@@ -299,6 +310,12 @@ pub struct MachineRegistry {
     /// `changed()` awaits is captured by the next one. This closes
     /// the `Notify`-only lost-wake race.
     pub(crate) gen_tx: Arc<watch::Sender<u64>>,
+    /// Stateful primary-route manager. Headscale-go keeps primary
+    /// route ownership sticky until the current primary stops serving
+    /// a prefix; this state is kept beside the registry so repeated
+    /// map rebuilds do not accidentally steal primaries by recomputing
+    /// from a blank table.
+    primary_routes: RwLock<PrimaryRouteState>,
 }
 
 impl Default for MachineRegistry {
@@ -308,6 +325,7 @@ impl Default for MachineRegistry {
             inner: RwLock::default(),
             notify: Arc::new(Notify::new()),
             gen_tx: Arc::new(gen_tx),
+            primary_routes: RwLock::new(PrimaryRouteState::new()),
         }
     }
 }
@@ -367,6 +385,61 @@ impl MachineRegistry {
     /// `all()` accessor that cloned every record into a `Vec`.
     pub fn snapshot(&self) -> Arc<HashMap<String, MachineRecord>> {
         self.inner.read().clone()
+    }
+
+    /// Compute primary subnet routes for a registry snapshot while
+    /// preserving existing primary ownership where still valid.
+    pub fn primary_routes_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> HashMap<String, Vec<String>> {
+        let mut primary_routes = self.primary_routes.write();
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+
+        snapshot
+            .keys()
+            .filter_map(|node_key| {
+                let routes = primary_routes.primary_routes(stable_id_from_key(node_key));
+                if routes.is_empty() {
+                    None
+                } else {
+                    Some((node_key.clone(), routes))
+                }
+            })
+            .collect()
+    }
+
+    /// Return the current primary-route debug state after syncing it
+    /// against the supplied registry snapshot.
+    pub fn debug_routes_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> DebugRoutes {
+        let mut primary_routes = self.primary_routes.write();
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        primary_routes.debug_routes()
+    }
+
+    /// Return the text form used by headscale-go's `/debug/routes`.
+    pub fn debug_routes_string_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> String {
+        let mut primary_routes = self.primary_routes.write();
+        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        primary_routes.debug_string()
+    }
+
+    fn sync_primary_routes_for_snapshot(
+        primary_routes: &mut PrimaryRouteState,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) {
+        let _ = primary_routes.sync_routes(snapshot.iter().map(|(node_key, rec)| {
+            (
+                stable_id_from_key(node_key),
+                active_approved_routes(&rec.available_routes, &rec.approved_routes),
+            )
+        }));
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -517,6 +590,19 @@ impl MachineRegistry {
         })
     }
 
+    /// Replace a machine's approved subnet routes. Empty list clears
+    /// route approval. The register/map paths maintain
+    /// `available_routes`; this method records operator approval.
+    pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.approved_routes = routes;
+                true
+            }
+            None => false,
+        })
+    }
+
     /// Remove every ephemeral node whose `last_seen` is older than
     /// `grace`. Returns the list of `node_key_hex` strings that were
     /// removed. Mirrors `db.EphemeralGarbageCollect` /
@@ -608,6 +694,9 @@ mod registry_tests {
             ephemeral: false,
             created_at: now,
             forced_tags: Vec::new(),
+            available_routes: Vec::new(),
+            approved_routes: Vec::new(),
+            register_method: 1,
         }
     }
 
@@ -770,7 +859,7 @@ mod registry_tests {
         c.last_seen = Utc::now() - chrono::Duration::days(7); // ancient but not ephemeral
         reg.upsert("nk-c".to_string(), c);
 
-        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
         assert_eq!(removed, vec!["nk-a".to_string()]);
         assert!(reg.get("nk-a").is_none());
         assert!(reg.get("nk-b").is_some(), "fresh ephemeral survives");
@@ -785,7 +874,7 @@ mod registry_tests {
         a.ephemeral = true;
         a.last_seen = Utc::now();
         reg.upsert("nk-a".to_string(), a);
-        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
         assert!(removed.is_empty());
         assert_eq!(reg.len(), 1);
     }
@@ -869,6 +958,29 @@ mod registry_tests {
 pub fn router(state: WireState) -> Router {
     let knock_cfg = state.knock.clone();
     let inner = Router::new()
+        .route("/robots.txt", get(basic_handlers::handle_robots))
+        .route("/health", get(basic_handlers::handle_health))
+        .route("/version", get(basic_handlers::handle_version))
+        .route("/windows", get(basic_handlers::handle_windows))
+        .route("/apple", get(basic_handlers::handle_apple))
+        .route(
+            "/apple/:platform",
+            get(basic_handlers::handle_apple_platform),
+        )
+        .route("/swagger", get(basic_handlers::handle_swagger))
+        .route(
+            "/swagger/v1/openapiv2.json",
+            get(basic_handlers::handle_swagger_api_v1),
+        )
+        .route("/debug/routes", get(basic_handlers::handle_debug_routes))
+        .route("/debug/derp", get(basic_handlers::handle_debug_derp))
+        .route(
+            "/debug/registration-cache",
+            get(basic_handlers::handle_debug_registration_cache),
+        )
+        .route("/debug/filter", get(basic_handlers::handle_debug_filter))
+        .route("/debug/ssh", get(basic_handlers::handle_debug_ssh))
+        .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route("/ts2021", post(noise::handle_ts2021_post))
         .route(
@@ -882,6 +994,7 @@ pub fn router(state: WireState) -> Router {
         // and our own integration tests keep working.
         .route("/machine/register", post(register::handle_register_flat))
         .route("/machine/map", post(map::handle_map_flat))
+        .fallback(basic_handlers::handle_fallback)
         .with_state(state);
 
     // PSK-gated handshake — third layer of the active-probe shield.

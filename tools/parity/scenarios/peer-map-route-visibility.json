@@ -1,0 +1,44 @@
+{
+  "name": "peer-map-route-visibility",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["alice@"],
+        "dst": ["10.10.0.0/16:*", "10.20.0.0/16:*"]
+      }
+    ]
+  },
+  "users": [
+    { "id": 1, "name": "alice" },
+    { "id": 2, "name": "router-owner" }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-laptop",
+      "ipv4": "100.64.0.1"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "approved-router",
+      "ipv4": "100.64.0.2",
+      "routes": ["10.10.1.0/24"],
+      "approved_routes": ["10.10.1.0/24"]
+    },
+    {
+      "id": 3,
+      "user_id": 2,
+      "hostname": "unapproved-router",
+      "ipv4": "100.64.0.3",
+      "routes": ["10.20.1.0/24"]
+    }
+  ],
+  "peer_map_checks": [
+    { "name": "alice-peers", "node_id": 1 },
+    { "name": "approved-router-peers", "node_id": 2 },
+    { "name": "unapproved-router-peers", "node_id": 3 }
+  ]
+}

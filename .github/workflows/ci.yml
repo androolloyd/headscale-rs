@@ -28,22 +28,35 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: nightly
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: cargo fmt excluded crates
+        run: |
+          set -euo pipefail
+          for manifest in \
+            headscale-core/Cargo.toml \
+            headscale-identity/Cargo.toml \
+            headscale-resources/Cargo.toml \
+            headscale-payments/Cargo.toml; do
+            cargo fmt --manifest-path "${manifest}" --all -- --check
+          done
+      - run: cargo fmt --manifest-path headscale-core/fuzz/Cargo.toml --all -- --check
+      - run: cargo fmt --manifest-path tools/parity/headscale-rs/Cargo.toml --all -- --check
 
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       # Workspace-wide gate. The `[workspace.lints]` block in the
       # root Cargo.toml is `warn`-level; `-D warnings` promotes it to
@@ -57,20 +70,100 @@ jobs:
       # Admin is intentionally opt-in, so keep its route/tests surface
       # covered explicitly instead of relying on default feature tests.
       - run: cargo clippy -p headscale-api --no-default-features --features admin --tests -- -D warnings
+      # These crates are intentionally excluded from root workspace
+      # membership but are still part of the repo's security surface.
+      - name: cargo clippy excluded crates
+        run: |
+          set -euo pipefail
+          for manifest in \
+            headscale-core/Cargo.toml \
+            headscale-identity/Cargo.toml \
+            headscale-resources/Cargo.toml \
+            headscale-payments/Cargo.toml; do
+            cargo clippy --manifest-path "${manifest}" --all-targets -- -D warnings
+          done
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
       - run: cargo test --workspace
+      # These crates are excluded from root workspace membership, so
+      # run their unit/property tests explicitly.
+      - name: cargo test excluded crates
+        run: |
+          set -euo pipefail
+          for manifest in \
+            headscale-core/Cargo.toml \
+            headscale-identity/Cargo.toml \
+            headscale-resources/Cargo.toml \
+            headscale-payments/Cargo.toml; do
+            cargo test --manifest-path "${manifest}"
+          done
       # Wire-only test run — same rationale as the wire-only clippy
       # pass above. Keeps the `default-features = false` path live.
       - run: cargo test -p headscale-api --no-default-features
       # Admin-only test run — admin is not a default feature.
       - run: cargo test -p headscale-api --no-default-features --features admin
+
+  fuzz:
+    name: cargo fuzz 10k
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      FUZZ_RUNS: "10000"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            headscale-core/fuzz -> target
+      - run: cargo install cargo-fuzz
+      - name: Build all fuzz targets
+        working-directory: headscale-core/fuzz
+        run: |
+          set -euo pipefail
+          cargo fuzz list | tee /tmp/headscale-fuzz-targets
+          while IFS= read -r target; do
+            echo "::group::build ${target}"
+            cargo fuzz build "${target}"
+            echo "::endgroup::"
+          done < /tmp/headscale-fuzz-targets
+      - name: 10k run all fuzz targets
+        working-directory: headscale-core/fuzz
+        run: |
+          set -euo pipefail
+          while IFS= read -r target; do
+            echo "::group::run ${target} (${FUZZ_RUNS} inputs)"
+            cargo fuzz run "${target}" -- -runs="${FUZZ_RUNS}"
+            echo "::endgroup::"
+          done < /tmp/headscale-fuzz-targets
+
+  parity:
+    name: headscale-go parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/parity/headscale-go/go.mod
+          cache-dependency-path: tools/parity/headscale-go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tools/parity/headscale-rs -> target
+      - run: ./scripts/headscale_go_diff.sh

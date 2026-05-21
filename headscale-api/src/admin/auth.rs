@@ -207,11 +207,8 @@ impl AuthOutcome {
 /// per-route guards can decide redirect vs. 401 themselves.
 pub(crate) fn evaluate_headers(headers: &HeaderMap, auth: &AdminAuth) -> AuthOutcome {
     // 1. Bearer header.
-    if let Some(s) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|hv| hv.to_str().ok())
-        && let Some(tok) = s.strip_prefix("Bearer ")
-        && auth.verify_bearer(tok.trim())
+    if let Some(tok) = bearer_token(headers)
+        && auth.verify_bearer(tok)
     {
         return AuthOutcome::Bearer;
     }
@@ -233,6 +230,14 @@ pub(crate) fn evaluate_headers(headers: &HeaderMap, auth: &AdminAuth) -> AuthOut
         }
     }
     AuthOutcome::Anonymous
+}
+
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|hv| hv.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
 }
 
 /// Build the redirect response browser clients see when they hit an
@@ -265,8 +270,7 @@ pub(crate) fn api_unauthorized() -> Response<Body> {
 pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

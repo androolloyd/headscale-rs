@@ -1,0 +1,14 @@
+{
+  "name": "ssh-validation-undefined-group-src",
+  "expect_policy_error": "Group \"group:notdefined\" is not defined",
+  "policy": {
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["group:notdefined"],
+        "dst": ["user@"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

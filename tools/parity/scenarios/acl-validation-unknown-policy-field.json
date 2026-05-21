@@ -1,0 +1,14 @@
+{
+  "name": "acl-validation-unknown-policy-field",
+  "expect_policy_error": "INVALID_POLICY_FIELD",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*:*"]
+      }
+    ],
+    "INVALID_POLICY_FIELD": "should fail"
+  }
+}

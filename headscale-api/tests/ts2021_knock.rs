@@ -68,6 +68,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock,
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
+        public_control_url: None,
     };
     (state, dir)
 }

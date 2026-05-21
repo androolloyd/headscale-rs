@@ -5,7 +5,7 @@
 //! This module wraps each of those endpoints in a clap subcommand so
 //! the same actions are available from the shell — matching upstream
 //! `juanfont/headscale`'s CLI surface for `users` / `nodes` /
-//! `preauthkeys` / `policy` / `tailnet`.
+//! `preauthkeys` / `apikeys` / `policy` / `tailnet`.
 //!
 //! ## Wire & auth
 //!
@@ -22,6 +22,7 @@
 //! | 5    | entity not found (404)                      |
 //! | 6    | other server-side failure (4xx / 5xx / decode) |
 
+pub mod apikeys;
 pub mod client;
 pub mod duration;
 pub mod nodes;
@@ -147,6 +148,13 @@ pub enum NodesCmd {
         #[arg(long)]
         user: Option<String>,
     },
+    /// List advertised, approved, and serving routes on nodes.
+    #[command(name = "list-routes", alias = "routes", alias = "lsr")]
+    ListRoutes {
+        /// Restrict to one node ID.
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        id: Option<String>,
+    },
     /// Show one node by node_key hex or hostname.
     Show {
         #[arg(value_name = "ID_OR_NAME")]
@@ -184,6 +192,16 @@ pub enum NodesCmd {
         /// Comma-separated tag list, e.g. `tag:prod,tag:web`.
         #[arg(value_name = "TAGS", value_delimiter = ',')]
         tags: Vec<String>,
+    },
+    /// Replace the approved routes for a node.
+    #[command(name = "approve-routes")]
+    ApproveRoutes {
+        /// Node ID.
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        id: String,
+        /// Comma-separated route list. Empty list removes approvals.
+        #[arg(short = 'r', long = "routes", value_delimiter = ',')]
+        routes: Vec<String>,
     },
     /// Delete a node.
     Delete {
@@ -227,6 +245,39 @@ pub enum PreauthKeysCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ApiKeysCmd {
+    /// Mint a fresh API key. The full secret is only shown once.
+    Create {
+        /// Duration the key is valid (e.g. `30m`, `24h`, `90d`).
+        #[arg(short = 'e', long = "expiration", default_value = "90d")]
+        expiration: String,
+    },
+    /// List all known API keys.
+    #[command(alias = "ls", alias = "show")]
+    List,
+    /// Expire an API key by visible prefix or numeric ID.
+    #[command(alias = "revoke", alias = "exp", alias = "e")]
+    Expire {
+        /// API key display prefix, e.g. `hskey-api-abcdefghijkl-***`.
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// API key numeric ID.
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+    /// Delete an API key by visible prefix or numeric ID.
+    #[command(alias = "remove", alias = "del")]
+    Delete {
+        /// API key display prefix, e.g. `hskey-api-abcdefghijkl-***`.
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// API key numeric ID.
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum PolicyCmd {
     /// Fetch the policy currently loaded on the server.
     Get,
@@ -265,11 +316,15 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
     let client = conn.build_client()?;
     match cmd {
         NodesCmd::List { user } => nodes::list(&client, user.as_deref(), conn.fmt()).await,
+        NodesCmd::ListRoutes { id } => nodes::list_routes(&client, id.as_deref(), conn.fmt()).await,
         NodesCmd::Show { id_or_name } => nodes::show(&client, id_or_name, conn.fmt()).await,
         NodesCmd::Expire { id, at } => nodes::expire(&client, id, at.as_deref()).await,
         NodesCmd::Logout { id } => nodes::logout(&client, id).await,
         NodesCmd::Rename { id, hostname } => nodes::rename(&client, id, hostname).await,
         NodesCmd::Tags { id, tags } => nodes::tags(&client, id, tags.clone()).await,
+        NodesCmd::ApproveRoutes { id, routes } => {
+            nodes::approve_routes(&client, id, routes.clone(), conn.fmt()).await
+        }
         NodesCmd::Delete { id } => nodes::delete(&client, id).await,
     }
 }
@@ -300,6 +355,16 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             preauthkeys::list(&client, user.as_deref(), conn.fmt()).await
         }
         PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+    }
+}
+
+pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), AdminError> {
+    let client = conn.build_client()?;
+    match cmd {
+        ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, conn.fmt()).await,
+        ApiKeysCmd::List => apikeys::list(&client, conn.fmt()).await,
+        ApiKeysCmd::Expire { prefix, id } => apikeys::expire(&client, prefix.as_deref(), *id).await,
+        ApiKeysCmd::Delete { prefix, id } => apikeys::delete(&client, prefix.as_deref(), *id).await,
     }
 }
 

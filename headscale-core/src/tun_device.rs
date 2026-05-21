@@ -55,11 +55,6 @@ impl TunDevice {
             .mtu(config.mtu)
             .up();
 
-        #[cfg(target_os = "linux")]
-        tun_config.platform_config(|p| {
-            p.packet_information(false);
-        });
-
         let device =
             tun::create_as_async(&tun_config).map_err(|e| TunError::Create(e.to_string()))?;
 

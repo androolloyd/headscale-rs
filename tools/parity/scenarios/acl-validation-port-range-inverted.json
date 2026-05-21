@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-port-range-inverted",
+  "expect_policy_error": "invalid port range: first port is greater than last port",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*:22-10"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-port-invalid-number",
+  "expect_policy_error": "invalid port number",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*:abc"]
+      }
+    ]
+  }
+}

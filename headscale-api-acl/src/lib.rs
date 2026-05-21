@@ -82,7 +82,7 @@ pub enum AclAction {
 ///
 /// `#[serde(deny_unknown_fields)]`: a misspelled rule field is a
 /// loud error, not a silently permissive ACL.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclRule {
     pub action: AclAction,
@@ -90,6 +90,67 @@ pub struct AclRule {
     pub dst: Vec<String>,
     #[serde(default)]
     pub ports: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for AclRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawRule {
+            action: AclAction,
+            #[serde(default)]
+            proto: Option<String>,
+            src: Vec<String>,
+            dst: Vec<String>,
+            #[serde(default)]
+            ports: Vec<String>,
+            #[serde(flatten)]
+            extra: BTreeMap<String, serde_json::Value>,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        if let Some(key) = raw.extra.keys().find(|key| !key.starts_with('#')) {
+            return Err(serde::de::Error::unknown_field(
+                key,
+                &["action", "proto", "src", "dst", "ports"],
+            ));
+        }
+        let proto = raw.proto.as_deref().map(|p| p.trim().to_ascii_lowercase());
+        if let Some(proto) = proto.as_deref() {
+            validate_upstream_proto(proto).map_err(serde::de::Error::custom)?;
+        }
+        let legacy_proto = proto.as_deref().unwrap_or("*");
+        let upstream_proto = proto.as_deref().unwrap_or("");
+        let mut dst = Vec::with_capacity(raw.dst.len());
+        let mut ports = Vec::new();
+
+        for port in raw.ports {
+            validate_proto_port_compat(legacy_proto, &port).map_err(serde::de::Error::custom)?;
+            ports.extend(normalize_port_spec(legacy_proto, &port));
+        }
+
+        for raw_dst in raw.dst {
+            if let Some((alias, port_spec)) =
+                split_upstream_dst_ports(&raw_dst).map_err(serde::de::Error::custom)?
+            {
+                validate_proto_port_compat(upstream_proto, port_spec)
+                    .map_err(serde::de::Error::custom)?;
+                dst.push(alias.to_string());
+                ports.extend(normalize_port_spec(upstream_proto, port_spec));
+            } else {
+                dst.push(raw_dst);
+            }
+        }
+
+        Ok(Self {
+            action: raw.action,
+            src: raw.src,
+            dst,
+            ports,
+        })
+    }
 }
 
 /// One `nodeAttrs` grant. Mirrors upstream
@@ -117,8 +178,9 @@ pub struct AutoApprovers {
 }
 
 /// SSH grant. Minimal mirror of upstream `SSH` rule — `action`,
-/// `src`, `dst`, `users`. `deny_unknown_fields` mirrors the rest of
-/// the schema; unknown SSH keys are loud parse errors.
+/// `src`, `dst`, `users`, and optional `checkPeriod`.
+/// `deny_unknown_fields` mirrors the rest of the schema; unknown SSH
+/// keys are loud parse errors.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshRule {
@@ -127,6 +189,8 @@ pub struct SshRule {
     pub dst: Vec<String>,
     #[serde(default)]
     pub users: Vec<String>,
+    #[serde(default, rename = "check_period", alias = "checkPeriod")]
+    pub check_period: Option<String>,
 }
 
 /// Top-level ACL document.
@@ -137,6 +201,7 @@ pub struct SshRule {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclDoc {
+    #[serde(default = "default_policy_version")]
     pub version: u32,
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
@@ -161,8 +226,8 @@ pub struct AclDoc {
     /// `node_attrs` / `nodeAttrs`.
     #[serde(default, alias = "nodeAttrs")]
     pub node_attrs: Vec<NodeAttrGrant>,
-    /// `ssh` grants. Parsed and round-tripped — not yet compiled
-    /// into a wire SSHPolicy.
+    /// `ssh` grants. Parsed, validated, round-tripped, and compiled by
+    /// `headscale-api` into a wire SSHPolicy.
     #[serde(default)]
     pub ssh: Vec<SshRule>,
     /// Rule list. Upstream `juanfont/headscale` calls this field
@@ -170,6 +235,10 @@ pub struct AclDoc {
     /// either spelling acceptable.
     #[serde(default, alias = "acls")]
     pub rules: Vec<AclRule>,
+}
+
+const fn default_policy_version() -> u32 {
+    1
 }
 
 /// A node's identity facets used during principal / autogroup
@@ -253,7 +322,10 @@ impl AclDoc {
     /// Parse a TOML document. Unknown top-level fields and unknown
     /// rule fields are rejected.
     pub fn from_toml(input: &str) -> Result<Self, PolicyParseError> {
-        toml::from_str(input).map_err(|e| PolicyParseError::Schema(e.to_string()))
+        let doc: Self =
+            toml::from_str(input).map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+        validate_policy(&doc).map_err(PolicyParseError::Schema)?;
+        Ok(doc)
     }
 
     /// Parse a hujson document. See [`parse_hujson_policy`].
@@ -304,12 +376,15 @@ impl AclDoc {
                 src.sort();
                 dst.sort();
                 users.sort();
-                serde_json::json!({
-                    "action": s.action,
-                    "src": src,
-                    "dst": dst,
-                    "users": users,
-                })
+                let mut value = serde_json::Map::new();
+                value.insert("action".to_string(), serde_json::json!(s.action));
+                value.insert("src".to_string(), serde_json::json!(src));
+                value.insert("dst".to_string(), serde_json::json!(dst));
+                value.insert("users".to_string(), serde_json::json!(users));
+                if let Some(check_period) = &s.check_period {
+                    value.insert("check_period".to_string(), serde_json::json!(check_period));
+                }
+                serde_json::Value::Object(value)
             })
             .collect();
         serde_json::json!({
@@ -376,7 +451,336 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let stripped = strip_hujson(raw);
     let value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
-    serde_json::from_value::<AclDoc>(value).map_err(|e| PolicyParseError::Schema(e.to_string()))
+    let doc = serde_json::from_value::<AclDoc>(value)
+        .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+    validate_policy(&doc).map_err(PolicyParseError::Schema)?;
+    Ok(doc)
+}
+
+fn validate_policy(doc: &AclDoc) -> Result<(), String> {
+    let mut errs = Vec::new();
+
+    for rule in &doc.rules {
+        validate_acl_rule(doc, rule, &mut errs);
+    }
+    for ssh in &doc.ssh {
+        validate_ssh_rule(doc, ssh, &mut errs);
+    }
+    for owners in doc.tag_owners.values() {
+        for owner in owners {
+            validate_owner_ref(doc, owner, &mut errs);
+        }
+    }
+    for approvers in doc.auto_approvers.routes.values() {
+        for approver in approvers {
+            validate_approver_ref(doc, approver, &mut errs);
+        }
+    }
+    for approver in &doc.auto_approvers.exit_node {
+        validate_approver_ref(doc, approver, &mut errs);
+    }
+
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
+    }
+}
+
+fn validate_acl_rule(doc: &AclDoc, rule: &AclRule, errs: &mut Vec<String>) {
+    for src in &rule.src {
+        validate_acl_src_alias(src, errs);
+        validate_acl_ref(doc, src, errs);
+    }
+    for dst in &rule.dst {
+        validate_acl_dst_alias(dst, errs);
+        validate_acl_ref(doc, dst, errs);
+    }
+}
+
+fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "self" => errs.push(
+            r#""autogroup:self" used in source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for ACL sources, can be [autogroup:member autogroup:tagged]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_acl_dst_alias(alias: &str, errs: &mut Vec<String>) {
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" | "member" | "tagged" | "self" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for ACL destinations, can be [autogroup:internet autogroup:member autogroup:tagged autogroup:self]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
+    match rule.action.as_str() {
+        "accept" | "check" => {}
+        other => errs.push(format!(
+            "invalid SSH action {other:?}, must be one of: accept, check"
+        )),
+    }
+
+    if let Some(period) = rule.check_period.as_deref()
+        && parse_duration_nanos(period).is_none()
+    {
+        errs.push(format!("not a valid duration string: {period:?}"));
+    }
+
+    for user in &rule.users {
+        if user.starts_with("autogroup:") && user != "autogroup:nonroot" {
+            errs.push(format!(
+                "autogroup {user:?} is not supported for SSH user, can be [autogroup:nonroot]"
+            ));
+        }
+    }
+
+    for src in &rule.src {
+        validate_ssh_src_alias(src, errs);
+        validate_group_ref(doc, src, errs);
+        validate_tag_ref(doc, src, errs);
+    }
+    for dst in &rule.dst {
+        validate_ssh_dst_alias(dst, errs);
+        validate_tag_ref(doc, dst, errs);
+    }
+    validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
+}
+
+fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, alias, errs);
+    validate_tag_ref(doc, alias, errs);
+
+    if let Some(host) = alias.strip_prefix("host:") {
+        if !host_defined(doc, host) {
+            errs.push(format!(
+                "Host {host:?} is not defined in the Policy, please define or remove the reference to it"
+            ));
+        }
+        return;
+    }
+
+    if is_bare_host_alias(alias) && !host_defined(doc, alias) {
+        errs.push(format!(
+            "Host {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, owner, errs);
+    if owner.starts_with("tag:") {
+        validate_tag_ref(doc, owner, errs);
+    }
+}
+
+fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
+    validate_group_ref(doc, approver, errs);
+    validate_tag_ref(doc, approver, errs);
+}
+
+fn validate_group_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    if alias.starts_with("group:") && !group_defined(doc, alias) {
+        errs.push(format!(
+            "Group {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn validate_tag_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    if alias.starts_with("tag:") && !tag_defined(doc, alias) {
+        errs.push(format!(
+            "Tag {alias:?} is not defined in the Policy, please define or remove the reference to it"
+        ));
+    }
+}
+
+fn group_defined(doc: &AclDoc, group: &str) -> bool {
+    doc.groups.contains_key(group)
+        || group
+            .strip_prefix("group:")
+            .is_some_and(|short| doc.groups.contains_key(short))
+}
+
+fn tag_defined(doc: &AclDoc, tag: &str) -> bool {
+    doc.tag_owners.contains_key(tag)
+        || doc.tags.contains_key(tag)
+        || tag
+            .strip_prefix("tag:")
+            .is_some_and(|short| doc.tag_owners.contains_key(short) || doc.tags.contains_key(short))
+}
+
+fn host_defined(doc: &AclDoc, host: &str) -> bool {
+    doc.hosts.contains_key(host)
+}
+
+fn is_bare_host_alias(alias: &str) -> bool {
+    alias != "*"
+        && !alias.contains('@')
+        && !alias.contains(':')
+        && !alias.starts_with("group:")
+        && !alias.starts_with("tag:")
+        && !alias.starts_with("autogroup:")
+        && !alias.starts_with("ipset:")
+        && parse_cidr(alias).is_none()
+}
+
+fn validate_ssh_src_alias(alias: &str, errs: &mut Vec<String>) {
+    if alias == "*" {
+        errs.push("alias v2.Asterix is not supported for SSH source".to_string());
+        return;
+    }
+
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in SSH source, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" => {}
+        "nonroot" | "self" => errs.push(format!(
+            "autogroup {alias:?} is not supported for SSH sources, can be [autogroup:member autogroup:tagged]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_dst_alias(alias: &str, errs: &mut Vec<String>) {
+    if alias == "*" {
+        errs.push(
+            "wildcard (*) is not supported as SSH destination; use 'autogroup:member' for user-owned devices, 'autogroup:tagged' for tagged devices, or specific tags/users"
+                .to_string(),
+        );
+        return;
+    }
+
+    let Some(ag) = alias.strip_prefix("autogroup:") else {
+        return;
+    };
+    match ag {
+        "internet" => errs.push(
+            r#""autogroup:internet" used in SSH destination, it can only be used in ACL destinations"#
+                .to_string(),
+        ),
+        "member" | "tagged" | "self" => {}
+        "nonroot" => errs.push(format!(
+            "autogroup {alias:?} is not supported for SSH sources, can be [autogroup:member autogroup:tagged autogroup:self]"
+        )),
+        _ => errs.push(format!(
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+        )),
+    }
+}
+
+fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut Vec<String>) {
+    let mut src_has_tagged_entities = false;
+    let mut src_has_groups = false;
+    let mut src_usernames: Vec<&str> = Vec::new();
+
+    for src in srcs {
+        if src.starts_with("tag:") || src == "autogroup:tagged" {
+            src_has_tagged_entities = true;
+        } else if src.starts_with("group:") || src == "autogroup:member" {
+            src_has_groups = true;
+        } else if src.contains('@') && !src_usernames.contains(&src.as_str()) {
+            src_usernames.push(src.as_str());
+        }
+    }
+
+    for dst in dsts {
+        if dst.contains('@') {
+            if src_has_tagged_entities {
+                errs.push(format!(
+                    "tags in SSH source cannot access user-owned devices ({dst}); use autogroup:tagged or specific tags as destinations instead"
+                ));
+            }
+            if src_has_groups || src_usernames.len() != 1 || src_usernames[0] != dst.as_str() {
+                errs.push(format!(
+                    "user destination requires source to contain only that same user {dst:?}; use autogroup:self instead for same-user SSH access"
+                ));
+            }
+        } else if dst == "autogroup:self" && src_has_tagged_entities {
+            errs.push(
+                "autogroup:self destination requires source to contain only users or groups, not tags or autogroup:tagged"
+                    .to_string(),
+            );
+        } else if dst == "autogroup:member" && src_has_tagged_entities {
+            errs.push(
+                "tags in SSH source cannot access autogroup:member (user-owned devices)"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+fn parse_duration_nanos(input: &str) -> Option<i64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "0" {
+        return Some(0);
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut pos = 0usize;
+    let mut total: i128 = 0;
+    while pos < bytes.len() {
+        if !bytes[pos].is_ascii_digit() {
+            return None;
+        }
+        let start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        let value: i128 = trimmed[start..pos].parse().ok()?;
+        let unit_start = pos;
+        while pos < bytes.len() && !bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        let unit = &trimmed[unit_start..pos];
+        let multiplier: i128 = match unit {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60 * 1_000_000_000,
+            "h" => 60 * 60 * 1_000_000_000,
+            "d" => 24 * 60 * 60 * 1_000_000_000,
+            "w" => 7 * 24 * 60 * 60 * 1_000_000_000,
+            "y" => 365 * 24 * 60 * 60 * 1_000_000_000,
+            _ => return None,
+        };
+        total = total.checked_add(value.checked_mul(multiplier)?)?;
+    }
+    i64::try_from(total).ok()
 }
 
 /// Strip `//` + `/* … */` comments and trailing commas. Preserves
@@ -473,6 +877,26 @@ impl AclDoc {
         AclAction::Deny
     }
 
+    /// Return true when `src` can reach `dst` itself or a route served
+    /// by `dst`. This mirrors headscale-go's peer visibility check,
+    /// where a peer is visible if a matcher allows the peer node IP,
+    /// one of its subnet routes, or its default-route exit-node
+    /// prefixes.
+    pub fn can_access_node(
+        &self,
+        src: &NodeView<'_>,
+        dst: &NodeView<'_>,
+        dst_routes: &[String],
+        port: PortRef<'_>,
+    ) -> bool {
+        for rule in &self.rules {
+            if self.matches_node_or_route(rule, src, dst, dst_routes, port) {
+                return rule.action == AclAction::Accept;
+            }
+        }
+        false
+    }
+
     fn matches(
         &self,
         rule: &AclRule,
@@ -483,6 +907,33 @@ impl AclDoc {
         self.principal_matches(&rule.src, src, Some(dst))
             && self.principal_matches(&rule.dst, dst, Some(src))
             && (rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, port)))
+    }
+
+    fn matches_node_or_route(
+        &self,
+        rule: &AclRule,
+        src: &NodeView<'_>,
+        dst: &NodeView<'_>,
+        dst_routes: &[String],
+        port: PortRef<'_>,
+    ) -> bool {
+        self.principal_matches(&rule.src, src, Some(dst))
+            && (self.principal_matches(&rule.dst, dst, Some(src))
+                || self.principals_overlap_routes(&rule.dst, dst_routes))
+            && (rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, port)))
+    }
+
+    fn principals_overlap_routes(&self, principals: &[String], routes: &[String]) -> bool {
+        routes.iter().any(|route| {
+            let Some(route) = parse_cidr(route) else {
+                return false;
+            };
+            principals.iter().any(|principal| {
+                self.expand_principal(principal).iter().any(|expanded| {
+                    parse_cidr(expanded).is_some_and(|allowed| nets_overlap(&allowed, &route))
+                })
+            })
+        })
     }
 
     /// Returns the NodeAttr capability flags that apply to `node`.
@@ -513,6 +964,9 @@ impl AclDoc {
         let Some(advertised) = parse_cidr(prefix) else {
             return false;
         };
+        if is_default_route(&advertised) {
+            return false;
+        }
         for (key, principals) in &self.auto_approvers.routes {
             let Some(approver_net) = parse_cidr(key) else {
                 continue;
@@ -540,8 +994,8 @@ impl AclDoc {
     /// suitable for a static `tailcfg.FilterRule.SrcIPs` / `DstIPs`
     /// entry. Group references expand to their members; `host:` /
     /// `ipset:` resolve to their CIDR contents; the flattenable
-    /// autogroups (`internet`, `member`) collapse to the IPv4+IPv6
-    /// zero-prefix pair used by headscale-go FilterRules; the
+    /// autogroups (`internet`, `member`) collapse to the IPv4 and
+    /// IPv6 default routes; the
     /// non-flattenable autogroups (`self`, `nonroot`, `tagged`,
     /// `tag:*`) return an empty list — the FilterRule layer drops
     /// the rule rather than silently leaking it as `*`.
@@ -550,7 +1004,7 @@ impl AclDoc {
             return wildcard_filter_cidrs();
         }
         if let Some(g) = token.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(g) {
+            if let Some(members) = self.groups.get(g).or_else(|| self.groups.get(token)) {
                 return members.clone();
             }
             return Vec::new();
@@ -572,6 +1026,9 @@ impl AclDoc {
                 return wildcard_filter_cidrs();
             }
             return Vec::new();
+        }
+        if let Some(cidr) = self.hosts.get(token) {
+            return vec![cidr.clone()];
         }
         vec![token.to_string()]
     }
@@ -600,13 +1057,13 @@ impl AclDoc {
             return true;
         }
         if let Some(group) = entry.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(group) {
+            if let Some(members) = self.groups.get(group).or_else(|| self.groups.get(entry)) {
                 return members.iter().any(|m| identity_matches(m, principal));
             }
             return false;
         }
         if let Some(tag) = entry.strip_prefix("tag:") {
-            return principal.tags.iter().any(|t| t == tag);
+            return principal.tags.iter().any(|t| tag_matches(t, tag));
         }
         if let Some(ag) = entry.strip_prefix("autogroup:") {
             return autogroup_matches(ag, principal, peer);
@@ -622,6 +1079,9 @@ impl AclDoc {
                 return cidrs.iter().any(|c| addr_in_cidr(principal.addr, c));
             }
             return false;
+        }
+        if let Some(cidr) = self.hosts.get(entry) {
+            return addr_in_cidr(principal.addr, cidr);
         }
         if entry.contains('/') {
             return addr_in_cidr(principal.addr, entry);
@@ -640,17 +1100,30 @@ fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
     {
         return true;
     }
-    if let Some(user) = principal.user
-        && entry == user
+    if principal.tags.is_empty()
+        && let Some(user) = principal.user
+        && user_matches(entry, user)
     {
         return true;
     }
     false
 }
 
+fn user_matches(entry: &str, user: &str) -> bool {
+    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
+}
+
+fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
+    node_tag == policy_tag_without_prefix
+        || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
+}
+
 fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeView<'_>>) -> bool {
-    if kind == "internet" || kind == "member" {
+    if kind == "internet" {
         return true;
+    }
+    if kind == "member" {
+        return principal.tags.is_empty();
     }
     if kind == "nonroot" {
         return principal.tags.is_empty();
@@ -659,21 +1132,30 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         return !principal.tags.is_empty();
     }
     if let Some(tag) = kind.strip_prefix("tag:") {
-        return principal.tags.iter().any(|t| t == tag);
+        return principal.tags.iter().any(|t| tag_matches(t, tag));
     }
     if kind == "self" {
         let Some(peer) = peer else {
             return false;
         };
         if let (Some(a), Some(b)) = (principal.addr, peer.addr) {
-            return a == b;
+            if a == b {
+                return true;
+            }
         }
         if let (Some(a), Some(b)) = (principal.user, peer.user) {
-            return a == b;
+            return principal.tags.is_empty() && peer.tags.is_empty() && a == b;
         }
         return false;
     }
     false
+}
+
+fn is_default_route(net: &IpNet) -> bool {
+    match net {
+        IpNet::V4(v4) => v4.prefix_len() == 0,
+        IpNet::V6(v6) => v6.prefix_len() == 0,
+    }
 }
 
 /// Parse a CIDR or bare-address string into an `IpNet`. A bare
@@ -706,6 +1188,10 @@ fn covers(outer: &IpNet, inner: &IpNet) -> bool {
     }
 }
 
+fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
+    covers(a, b) || covers(b, a)
+}
+
 fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
     let Some(addr) = addr else {
         return false;
@@ -719,16 +1205,171 @@ fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
     net.contains(&parsed)
 }
 
+fn split_upstream_dst_ports(dst: &str) -> Result<Option<(&str, &str)>, String> {
+    let Some((alias, port_spec)) = dst.rsplit_once(':') else {
+        return Ok(None);
+    };
+    if alias.is_empty() || alias.ends_with(':') || is_namespaced_alias_without_port(dst) {
+        return Ok(None);
+    }
+    validate_upstream_port_spec(port_spec)?;
+    Ok(Some((alias, port_spec)))
+}
+
+fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
+    if spec.contains('/') || spec.starts_with("*:") {
+        return vec![spec.to_string()];
+    }
+    let mut out = Vec::new();
+    for part in spec.split(',').map(str::trim) {
+        if validate_upstream_port_spec(part).is_err() {
+            continue;
+        }
+        if proto.is_empty() {
+            out.push(format!("tcp/{part}"));
+            out.push(format!("udp/{part}"));
+        } else {
+            out.push(format!("{proto}/{part}"));
+        }
+    }
+    out
+}
+
+fn validate_upstream_proto(proto: &str) -> Result<(), String> {
+    match proto {
+        "" | "icmp" | "igmp" | "ipv4" | "ip-in-ip" | "tcp" | "egp" | "igp" | "udp" | "gre"
+        | "esp" | "ah" | "sctp" => Ok(()),
+        "*" => Err(
+            "proto name \"*\" not known; use protocol number 0-255 or protocol name (icmp, tcp, udp, etc.)"
+                .to_string(),
+        ),
+        other => {
+            if other == "0" || (other.len() > 1 && other.starts_with('0')) {
+                return Err(format!(
+                    "leading 0 not permitted in protocol number \"{other}\""
+                ));
+            }
+            match other.parse::<u16>() {
+                Ok(1..=255) => Ok(()),
+                Ok(n) => Err(format!("protocol number {n} out of range (0-255)")),
+                Err(_) => Err(format!(
+                    "invalid protocol {other:?}: must be a known protocol name or valid protocol number 0-255"
+                )),
+            }
+        }
+    }
+}
+
+fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
+    if matches!(proto, "" | "*" | "tcp" | "udp" | "sctp") || spec.contains('/') {
+        return Ok(());
+    }
+    let has_specific_port = spec.split(',').map(str::trim).any(|part| part != "*");
+    if has_specific_port {
+        return Err(format!(
+            "protocol {proto:?} does not support specific ports; only \"*\" is allowed"
+        ));
+    }
+    Ok(())
+}
+
+fn is_namespaced_alias_without_port(dst: &str) -> bool {
+    ["tag:", "group:", "autogroup:", "host:", "ipset:"]
+        .iter()
+        .any(|prefix| dst.starts_with(prefix) && !dst[prefix.len()..].contains(':'))
+}
+
+fn validate_upstream_port_spec(spec: &str) -> Result<(), String> {
+    if spec == "*" {
+        return Ok(());
+    }
+    for part in spec.split(',').map(str::trim) {
+        if part.contains('-') {
+            let range_parts: Vec<&str> = part.split('-').filter(|part| !part.is_empty()).collect();
+            if range_parts.len() != 2 {
+                return Err("invalid port range format".to_string());
+            }
+            let first = parse_upstream_port(range_parts[0])?;
+            let last = parse_upstream_port(range_parts[1])?;
+            if first > last {
+                return Err("invalid port range: first port is greater than last port".to_string());
+            }
+        } else {
+            let port = parse_upstream_port(part)?;
+            if port < 1 {
+                return Err("first port must be >0, or use '*' for wildcard".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_upstream_port(port: &str) -> Result<u16, String> {
+    let parsed: i64 = port
+        .parse()
+        .map_err(|_| "invalid port number".to_string())?;
+    if !(0..=65_535).contains(&parsed) {
+        return Err("port number out of range".to_string());
+    }
+    Ok(parsed as u16)
+}
+
 fn port_matches(pattern: &str, port: PortRef<'_>) -> bool {
     let pat = pattern.strip_prefix("*:").unwrap_or(pattern);
     let (proto_part, port_part) = pat.split_once('/').unwrap_or((pat, "*"));
-    let proto_ok = proto_part == "*" || port.proto.is_none_or(|p| p == proto_part);
-    let port_ok = port_part == "*"
-        || match (port.port, port_part.parse::<u16>()) {
-            (Some(p), Ok(want)) => p == want,
-            _ => false,
-        };
+    let proto_ok = proto_part == "*" || port.proto.is_none_or(|p| proto_matches(proto_part, p));
+    let port_ok = port_part == "*" || port.port.is_none_or(|p| port_part_matches(port_part, p));
     proto_ok && port_ok
+}
+
+fn proto_matches(pattern: &str, actual: &str) -> bool {
+    if pattern.eq_ignore_ascii_case(actual) {
+        return true;
+    }
+    let Some(pattern_nums) = proto_numbers(pattern) else {
+        return false;
+    };
+    let Some(actual_nums) = proto_numbers(actual) else {
+        return false;
+    };
+    pattern_nums.iter().any(|p| actual_nums.contains(p))
+}
+
+fn proto_numbers(proto: &str) -> Option<Vec<u16>> {
+    let lower = proto.to_ascii_lowercase();
+    let nums: &[u16] = match lower.as_str() {
+        "icmp" => &[1, 58],
+        "igmp" => &[2],
+        "ipv4" | "ip-in-ip" => &[4],
+        "tcp" => &[6],
+        "egp" => &[8],
+        "igp" => &[9],
+        "udp" => &[17],
+        "gre" => &[47],
+        "esp" => &[50],
+        "ah" => &[51],
+        "ipv6-icmp" => &[58],
+        "sctp" => &[132],
+        "fc" => &[133],
+        _ => {
+            let n: u16 = lower.parse().ok()?;
+            if !(1..=255).contains(&n) {
+                return None;
+            }
+            return Some(vec![n]);
+        }
+    };
+    Some(nums.to_vec())
+}
+
+fn port_part_matches(port_part: &str, port: u16) -> bool {
+    if let Some((lo, hi)) = port_part.split_once('-') {
+        let (Ok(lo), Ok(hi)) = (lo.parse::<u16>(), hi.parse::<u16>()) else {
+            return false;
+        };
+        return lo <= port && port <= hi;
+    }
+    port_part.parse::<u16>().is_ok_and(|want| port == want)
 }
 
 // =====================================================================
@@ -841,6 +1482,124 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hujson_accepts_headscale_go_policy_without_version() {
+        let raw =
+            r#"{"acls":[{"action":"accept","src":["100.64.0.1/32"],"dst":["100.64.0.2/32:22"]}]}"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.rules.len(), 1);
+        assert_eq!(doc.rules[0].dst, vec!["100.64.0.2/32"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
+    }
+
+    #[test]
+    fn hujson_accepts_headscale_go_dst_ports_for_tag_and_proto() {
+        let raw = r#"{
+            "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:server": ["alice@"]
+            },
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["tag:client"],"dst":["tag:server:80,443"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["tag:server"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/80", "tcp/443"]);
+    }
+
+    #[test]
+    fn hujson_accepts_headscale_go_dst_ports_for_bare_host_alias() {
+        let raw = r#"{
+            "hosts": {"server": "100.64.0.2/32"},
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["100.64.0.1/32"],"dst":["server:22"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["server"]);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22"]);
+    }
+
+    #[test]
+    fn hujson_does_not_treat_bare_ipv6_literal_as_dst_port() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["fd7a:115c:a1e0::1"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules[0].dst, vec!["fd7a:115c:a1e0::1"]);
+        assert!(doc.rules[0].ports.is_empty());
+    }
+
+    #[test]
+    fn hujson_ignores_acl_metadata_fields_starting_with_hash() {
+        let raw = r##"{
+            "acls": [
+                {
+                    "#comment": "admin UI metadata",
+                    "#ui": {"row": 1},
+                    "action": "accept",
+                    "src": ["100.64.0.1/32"],
+                    "dst": ["100.64.0.2/32:22"]
+                }
+            ]
+        }"##;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules.len(), 1);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_proto_wildcard() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","proto":"*","src":["*"],"dst":["*:22"]}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        assert!(format!("{err}").contains("proto name"));
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_icmp_specific_port() {
+        let raw = r#"{
+            "acls": [
+                {"action":"accept","proto":"icmp","src":["*"],"dst":["*:22"]}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        assert!(format!("{err}").contains("does not support specific ports"));
+    }
+
+    #[test]
+    fn hujson_rejects_headscale_go_invalid_dst_ports() {
+        for (dst, expected) in [
+            ("*:0", "first port must be >0"),
+            ("*:65536", "port number out of range"),
+            (
+                "*:22-10",
+                "invalid port range: first port is greater than last port",
+            ),
+            ("*:abc", "invalid port number"),
+        ] {
+            let raw = format!(
+                r#"{{
+                    "acls": [
+                        {{"action":"accept","src":["*"],"dst":["{dst}"]}}
+                    ]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).unwrap_err();
+            assert!(
+                format!("{err}").contains(expected),
+                "{dst} should contain {expected:?}, got {err}"
+            );
+        }
+    }
+
     // --- Evaluate --------------------------------------------------
 
     #[test]
@@ -936,6 +1695,50 @@ mod tests {
     }
 
     #[test]
+    fn port_range_matches_inside_bounds() {
+        let doc = AclDoc {
+            version: 1,
+            rules: vec![AclRule {
+                action: AclAction::Accept,
+                src: vec!["*".into()],
+                dst: vec!["*".into()],
+                ports: vec!["tcp/8000-9000".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 8443)),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 9443)),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
+    fn numeric_proto_matches_named_port_ref() {
+        let doc = AclDoc {
+            version: 1,
+            rules: vec![AclRule {
+                action: AclAction::Accept,
+                src: vec!["*".into()],
+                dst: vec!["*".into()],
+                ports: vec!["6/443".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("tcp", 443)),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.decide("a", "b", PortRef::new("udp", 443)),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
     fn legacy_port_pattern_star_colon_tcp_22() {
         let doc = AclDoc {
             version: 1,
@@ -977,11 +1780,17 @@ mod tests {
     }
 
     #[test]
-    fn autogroup_member_matches_any_node() {
+    fn autogroup_member_matches_untagged_nodes() {
         let doc = doc_with_rule(&["autogroup:member"], &["*"]);
         let s = NodeView::new("100.64.0.1");
         let d = NodeView::new("100.64.0.2");
+        let tags = vec!["tag:router".to_string()];
+        let tagged = NodeView::new("100.64.0.3").with_tags(&tags);
         assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
+        assert_eq!(
+            doc.evaluate_with(&tagged, &d, PortRef::any()),
+            AclAction::Deny
+        );
     }
 
     #[test]
@@ -1075,6 +1884,17 @@ mod tests {
     }
 
     #[test]
+    fn autogroup_self_matches_same_user_with_different_addrs() {
+        let doc = doc_with_rule(&["autogroup:member"], &["autogroup:self"]);
+        let user = "alice".to_string();
+        let s = NodeView::new("100.64.0.1").with_user(&user);
+        let d = NodeView::new("100.64.0.2").with_user(&user);
+        let bob = NodeView::new("100.64.0.3").with_user("bob");
+        assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
+        assert_eq!(doc.evaluate_with(&s, &bob, PortRef::any()), AclAction::Deny);
+    }
+
+    #[test]
     fn bare_tag_prefix_matches_tagged_principal() {
         let doc = doc_with_rule(&["tag:router"], &["*"]);
         let tags: Vec<String> = vec!["router".into()];
@@ -1096,6 +1916,23 @@ mod tests {
     #[test]
     fn host_alias_matches_address_inside_cidr() {
         let mut doc = doc_with_rule(&["*"], &["host:office"]);
+        doc.hosts.insert("office".into(), "10.0.0.0/8".into());
+        let s = NodeView::new("100.64.0.1");
+        let inside = NodeView::new("10.5.5.5");
+        let outside = NodeView::new("8.8.8.8");
+        assert_eq!(
+            doc.evaluate_with(&s, &inside, PortRef::any()),
+            AclAction::Accept
+        );
+        assert_eq!(
+            doc.evaluate_with(&s, &outside, PortRef::any()),
+            AclAction::Deny
+        );
+    }
+
+    #[test]
+    fn bare_host_alias_matches_address_inside_cidr() {
+        let mut doc = doc_with_rule(&["*"], &["office"]);
         doc.hosts.insert("office".into(), "10.0.0.0/8".into());
         let s = NodeView::new("100.64.0.1");
         let inside = NodeView::new("10.5.5.5");
@@ -1255,6 +2092,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_approve_route_accepts_prefixed_node_tags() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.auto_approvers
+            .routes
+            .insert("10.0.0.0/8".into(), vec!["tag:router".into()]);
+        let tags = vec!["tag:router".into()];
+        let router = NodeView::new("100.64.0.1").with_tags(&tags);
+        assert!(doc.auto_approves_route(&router, "10.0.0.0/8"));
+    }
+
+    #[test]
+    fn auto_approve_route_rejects_default_route_without_exit_node() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups.insert("admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("0.0.0.0/0".into(), vec!["group:admins".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("::/0".into(), vec!["group:admins".into()]);
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(!doc.auto_approves_route(&alice, "0.0.0.0/0"));
+        assert!(!doc.auto_approves_route(&alice, "::/0"));
+    }
+
+    #[test]
     fn auto_approve_route_matches_subprefix() {
         let mut doc = AclDoc {
             version: 1,
@@ -1314,6 +2183,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_approve_route_matches_legacy_user_suffix() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups.insert("admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers
+            .routes
+            .insert("172.16.0.0/12".into(), vec!["group:admins".into()]);
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(doc.auto_approves_route(&alice, "172.16.0.0/16"));
+    }
+
+    #[test]
+    fn auto_approve_exit_node_matches_prefixed_group_key() {
+        let mut doc = AclDoc {
+            version: 1,
+            ..Default::default()
+        };
+        doc.groups
+            .insert("group:admins".into(), vec!["alice@".into()]);
+        doc.auto_approvers.exit_node = vec!["group:admins".into()];
+        let alice = NodeView::new("100.64.0.1").with_user("alice");
+        assert!(doc.auto_approves_exit_node(&alice));
+    }
+
+    #[test]
     fn auto_approve_exit_node_matches_tag() {
         let mut doc = AclDoc {
             version: 1,
@@ -1364,11 +2260,16 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [auto_approvers]
             exit_node = ["tag:exit", "tag:router"]
             [auto_approvers.routes]
             "10.0.0.0/8" = ["tag:router"]
             "172.16.0.0/12" = ["group:admins"]
+            [tag_owners]
+            "tag:exit" = ["group:admins"]
+            "tag:router" = ["group:admins"]
         "#,
         )
         .unwrap();
@@ -1408,6 +2309,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [tag_owners]
             "tag:router" = ["group:admins"]
         "#,
@@ -1421,6 +2324,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [groups]
+            admins = ["alice@"]
             [[ssh]]
             action = "accept"
             src = ["group:admins"]
@@ -1432,6 +2337,90 @@ mod tests {
         assert_eq!(doc.ssh.len(), 1);
         assert_eq!(doc.ssh[0].action, "accept");
         assert_eq!(doc.ssh[0].users, vec!["root"]);
+    }
+
+    #[test]
+    fn rejects_invalid_ssh_action_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "invalid",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid SSH action"));
+    }
+
+    #[test]
+    fn rejects_acl_autogroup_internet_source_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["autogroup:internet"],
+                "dst": ["10.0.0.1:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#""autogroup:internet" used in source"#));
+    }
+
+    #[test]
+    fn rejects_acl_autogroup_self_source_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["autogroup:self"],
+                "dst": ["10.0.0.1:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#""autogroup:self" used in source"#));
+    }
+
+    #[test]
+    fn rejects_ssh_wildcard_destination_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["*"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("wildcard (*) is not supported as SSH destination"));
+    }
+
+    #[test]
+    fn rejects_tagged_ssh_sources_to_user_destinations_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:client": ["alice@"]},
+              "ssh": [{
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["alice@"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("tags in SSH source cannot access user-owned devices"));
     }
 
     #[test]
@@ -1460,6 +2449,8 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [tagOwners]
+            "tag:exit" = ["alice@"]
             [autoApprovers]
             exitNode = ["tag:exit"]
             "#,
@@ -1521,6 +2512,29 @@ mod tests {
         assert_eq!(
             doc.evaluate_with(&alice, &dst, PortRef::any()),
             AclAction::Accept
+        );
+    }
+
+    #[test]
+    fn tagged_node_does_not_match_user_or_group_identity() {
+        let mut doc = doc_with_rule(&["group:admins"], &["*"]);
+        doc.groups.insert("admins".into(), vec!["alice".into()]);
+        let tags = vec!["tag:router".to_string()];
+        let tagged = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &tags,
+        };
+        let dst = NodeView::new("100.64.0.5");
+        assert_eq!(
+            doc.evaluate_with(&tagged, &dst, PortRef::any()),
+            AclAction::Deny
+        );
+
+        let direct = doc_with_rule(&["alice"], &["*"]);
+        assert_eq!(
+            direct.evaluate_with(&tagged, &dst, PortRef::any()),
+            AclAction::Deny
         );
     }
 
@@ -1610,9 +2624,9 @@ mod tests {
     // --- expand_principal ------------------------------------------
 
     #[test]
-    fn expand_principal_wildcard_returns_wildcard() {
+    fn expand_principal_wildcard_returns_default_cidrs() {
         let d = AclDoc::empty();
-        assert_eq!(d.expand_principal("*"), wildcard_filter_cidrs());
+        assert_eq!(d.expand_principal("*"), vec!["0.0.0.0/0", "::/0"]);
     }
 
     #[test]
@@ -1627,6 +2641,24 @@ mod tests {
         d.groups
             .insert("admins".to_string(), vec!["a".to_string(), "b".to_string()]);
         assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn expand_principal_prefixed_group_key_returns_members() {
+        let mut d = AclDoc::empty();
+        d.groups.insert(
+            "group:admins".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn expand_principal_bare_host_returns_cidr() {
+        let mut d = AclDoc::empty();
+        d.hosts
+            .insert("server".to_string(), "100.64.0.2/32".to_string());
+        assert_eq!(d.expand_principal("server"), vec!["100.64.0.2/32"]);
     }
 
     #[test]

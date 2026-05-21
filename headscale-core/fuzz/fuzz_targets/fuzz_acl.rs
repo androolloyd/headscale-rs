@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use headscale_core::acl::{AclPolicy, AclEvaluator, AclContext, AclDestination, Action};
+use headscale_core::acl::{AclContext, AclDestination, AclEvaluator, AclPolicy, Action};
+use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr};
 
 /// Arbitrary ACL context for fuzzing
@@ -77,7 +77,11 @@ fuzz_target!(|input: FuzzInput| {
     assert!(matches!(result, Action::Accept | Action::Deny));
 
     // With allow-fleet policy, everything should be accepted
-    assert_eq!(result, Action::Accept, "Default allow-fleet should accept all");
+    assert_eq!(
+        result,
+        Action::Accept,
+        "Default allow-fleet should accept all"
+    );
 
     // Test 3: Deny-all policy
     let deny_evaluator = AclEvaluator::deny_all();

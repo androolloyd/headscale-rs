@@ -48,6 +48,7 @@ fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Re
     })
 }
 
+use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
     stable_id_from_key, strip_key_prefix,
@@ -192,6 +193,43 @@ async fn register_inner(
         .as_ref()
         .map(|h| h.hostname.clone())
         .unwrap_or_default();
+    let available_routes = match body
+        .hostinfo
+        .as_ref()
+        .map(|h| normalize_routes(&h.routable_ips))
+        .transpose()
+    {
+        Ok(routes) => routes.unwrap_or_default(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid Hostinfo.RoutableIPs: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let addr = ipv4.to_string();
+    let approved_routes = match auto_approved_routes_for_node(
+        &state.policy,
+        &addr,
+        Some(&user),
+        &redeemed.tags,
+        &[],
+        &available_routes,
+    ) {
+        Ok(routes) => routes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid approved routes: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
     // P1 lifecycle: stamp `created_at` / `last_seen` at registration
     // time + propagate the preauth's `ephemeral` flag. `forced_tags`
     // adopts the preauth's tag list verbatim so the very first /map
@@ -214,6 +252,9 @@ async fn register_inner(
         ephemeral: redeemed.ephemeral,
         created_at: now,
         forced_tags: redeemed.tags,
+        available_routes,
+        approved_routes,
+        register_method: 1,
     };
     state.machines.upsert(node_key_hex, rec);
 
@@ -233,6 +274,7 @@ async fn register_inner(
         node_key_expired: false,
         auth_url: String::new(),
         machine_authorized: true,
+        error: String::new(),
     };
     Json(resp).into_response()
 }
@@ -271,6 +313,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
     } else {
         Some(format!("mkey:{}", rec.machine_key_hex))
     };
+    let expired = rec.is_expired_at(chrono::Utc::now());
     MapNode {
         id,
         stable_id,
@@ -279,22 +322,37 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         key: format!("nodekey:{}", rec.node_key_hex),
         machine,
         addresses: vec![format!("{}/32", rec.ipv4)],
-        allowed_ips: vec![format!("{}/32", rec.ipv4)],
+        allowed_ips: std::iter::once(format!("{}/32", rec.ipv4))
+            .chain(rec.approved_routes.iter().cloned())
+            .collect(),
+        primary_routes: rec.approved_routes.clone(),
         hostinfo: HostInfo {
             hostname: rec.hostname.clone(),
             os: String::new(),
             os_version: String::new(),
+            routable_ips: rec.available_routes.clone(),
         },
+        created: Some(rec.created_at),
+        key_expiry: rec.expiry,
+        cap: 0,
+        tags: rec.forced_tags.clone(),
+        last_seen: Some(rec.last_seen),
+        online: Some(!expired),
         // Any record in [`MachineRegistry`] passed
         // [`PreauthRedeemer::redeem`]; mirror the bit into the
         // netmap so the daemon advances past `NeedsMachineAuth`.
         machine_authorized: true,
+        capabilities: Vec::new(),
+        cap_map: std::collections::BTreeMap::new(),
+        expired,
+        home_derp: 0,
         // Wall 7: fan the client-provided DiscoKey + Endpoints back
         // out so `wgengine.Reconfig` materialises this peer. Empty /
         // None ⇒ omitted on the wire (see `skip_serializing_if` on
         // `MapNode.disco_key` + `MapNode.endpoints`).
         disco_key: rec.disco_key.clone(),
         endpoints: rec.endpoints.clone(),
+        ..MapNode::default()
     }
 }
 
@@ -325,6 +383,7 @@ mod tests {
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
+            public_control_url: None,
         };
         (state, redeemer, dir)
     }
@@ -338,26 +397,33 @@ mod tests {
     }
 
     #[test]
-    fn record_to_map_node_omits_suffix_when_domain_is_empty() {
-        let record = MachineRecord::new_at(
+    fn record_to_map_node_emits_approved_routes() {
+        let mut record = MachineRecord::new_at(
             chrono::Utc::now(),
             "aa".repeat(32),
             "bb".repeat(32),
             "alice".into(),
-            "peer-a".into(),
-            std::net::Ipv4Addr::new(100, 64, 0, 8),
+            "router-a".into(),
+            Ipv4Addr::new(100, 64, 0, 8),
             false,
         );
+        record.available_routes = vec!["10.0.0.0/24".into(), "fd7a:115c:a1e0::/48".into()];
+        record.approved_routes = vec!["10.0.0.0/24".into()];
 
-        let node = record_to_map_node(&record, "");
+        let node = record_to_map_node(&record, "octra.test");
 
-        assert_eq!(node.name, "peer-a");
+        assert_eq!(node.allowed_ips, vec!["100.64.0.8/32", "10.0.0.0/24"]);
+        assert_eq!(node.primary_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(
+            node.hostinfo.routable_ips,
+            vec!["10.0.0.0/24", "fd7a:115c:a1e0::/48"]
+        );
     }
 
     #[tokio::test]
     async fn happy_path_redeems_key() {
         let (state, redeemer, _dir) = fixture();
-        let authkey = "octrapreauth-alice-test-key";
+        let authkey = "hskey-auth-alice-test-key";
         redeemer.insert(authkey, "alice");
         let app = router(state.clone());
         let node_key_hex = "aa".repeat(32);
@@ -400,11 +466,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_auto_approves_policy_routes() {
+        let (state, redeemer, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "auto_approvers": {
+                "routes": {"10.30.0.0/16": ["alice@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let authkey = "hskey-auth-alice-routes";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "ab".repeat(32);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.30.1.0/24", "10.99.0.0/24"]);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.available_routes, vec!["10.30.1.0/24", "10.99.0.0/24"]);
+        assert_eq!(rec.approved_routes, vec!["10.30.1.0/24"]);
+    }
+
+    #[tokio::test]
     async fn rejects_unknown_authkey() {
         let (state, _redeemer, _dir) = fixture();
         let app = router(state);
         let node_key_hex = "bb".repeat(32);
-        let body = req_body(&node_key_hex, "octrapreauth-deadbeef");
+        let body = req_body(&node_key_hex, "hskey-auth-deadbeef");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -448,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn flat_register_extracts_node_key_from_body() {
         let (state, redeemer, _dir) = fixture();
-        let authkey = "octrapreauth-flat-alice";
+        let authkey = "hskey-auth-flat-alice";
         redeemer.insert(authkey, "alice");
         let app = router(state.clone());
         let node_key_hex = "11".repeat(32);
@@ -480,7 +585,7 @@ mod tests {
     #[tokio::test]
     async fn keyed_register_still_works_after_flat_addition() {
         let (state, redeemer, _dir) = fixture();
-        let authkey = "octrapreauth-keyed-regression";
+        let authkey = "hskey-auth-keyed-regression";
         redeemer.insert(authkey, "bob");
         let app = router(state.clone());
         let node_key_hex = "22".repeat(32);
@@ -525,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_mismatched_node_key() {
         let (state, redeemer, _dir) = fixture();
-        let authkey = "octrapreauth-mismatch-test";
+        let authkey = "hskey-auth-mismatch-test";
         redeemer.insert(authkey, "u");
         let app = router(state);
         let body = req_body(&"aa".repeat(32), authkey);

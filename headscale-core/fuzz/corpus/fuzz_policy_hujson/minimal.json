@@ -1,0 +1,1 @@
+{"version":1,"acls":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}

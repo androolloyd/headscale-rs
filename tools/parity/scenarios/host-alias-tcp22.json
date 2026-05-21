@@ -1,0 +1,16 @@
+{
+  "name": "host-alias-tcp22",
+  "policy": {
+    "hosts": {
+      "server": "100.64.0.2/32"
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "tcp",
+        "src": ["100.64.0.1/32"],
+        "dst": ["server:22"]
+      }
+    ]
+  }
+}

@@ -1,19 +1,30 @@
 [package]
 name = "headscale-identity"
 description = "DID authentication and key management"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Excluded from `[workspace.members]` as of 2026-05-20; kept on disk
+# because the active crates (`headscale-api`, `headscale-db`,
+# `headscale-cli`) still consume it via path dependency. Not published
+# to crates.io. Package metadata is inlined (not `.workspace = true`)
+# so the crate can be cargo-built from its own directory without a
+# workspace root. See `CHANGES.md` for the deprecation contract.
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
 
+# NOTE: dependency declarations were inlined (not `.workspace = true`)
+# on 2026-05-20 when this crate was removed from `[workspace.members]`.
+# Versions match what the workspace `[workspace.dependencies]` table
+# declares as of that date.
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-ed25519-dalek.workspace = true
-blake2.workspace = true
-thiserror.workspace = true
-rand_core.workspace = true
-bs58.workspace = true
-multibase.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ed25519-dalek = "2.2"
+blake2 = "0.10"
+thiserror = "2.0"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+bs58 = "0.5"
+multibase = "0.9"
 
-[lints]
-workspace = true
+# No `[lints] workspace = true` here — this crate is no longer a
+# workspace member.

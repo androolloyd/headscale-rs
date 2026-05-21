@@ -12,14 +12,14 @@
 //!
 //! Both families read + mutate the same backing state:
 //!
-//! * Users live in [`users::UserRegistry`] — a new in-memory store next
-//!   to [`crate::tailscale_wire::MachineRegistry`]. Persistence is
-//!   intentionally out of scope for v0; the same volatile-by-design
-//!   model the rest of the wire / portal surface uses today.
-//! * Machines come from [`crate::tailscale_wire::MachineRegistry`] via
-//!   the [`machines::WireMachineAdmin`] adapter (which layers
-//!   "expired" / "deleted" sidecars on top because the wire registry
-//!   is intentionally read-only outside of `register`).
+//! * Users live behind [`users::UserAdmin`]. Tests and ephemeral
+//!   deployments can use [`users::UserRegistry`]; replacement-compatible
+//!   deployments can use [`users::PersistentUserAdmin`] against the
+//!   Go-shaped SQLite `users` table.
+//! * Machines come from either [`crate::tailscale_wire::MachineRegistry`] via
+//!   [`machines::WireMachineAdmin`] for wire-only Octra deployments, or from
+//!   the Go-shaped SQLite `nodes` table via [`machines::PersistentMachineAdmin`]
+//!   for replacement-compatible admin/gRPC deployments.
 //! * Pre-auth keys come from the embedding host through the
 //!   [`preauth::PreauthAdmin`] trait; OctraVPN's `PreauthMinter`
 //!   implements this in the mesh crate's bridge code. An in-process
@@ -38,6 +38,10 @@
 //!     # ip_allocator: todo!(),
 //!     # machines: Arc::new(tailscale_wire::MachineRegistry::new()),
 //!     # derp_map: Arc::new(Default::default()),
+//!     # policy: Arc::new(Default::default()),
+//!     # knock: tailscale_wire::KnockConfig::disabled(),
+//!     # dns: Arc::new(Default::default()),
+//!     # public_control_url: Some("https://headscale.example".into()),
 //! };
 //! let admin_state = admin::AdminState::builder()
 //!     .bearer_token("op-secret-token")
@@ -56,6 +60,7 @@
 //! crates that only want the wire layer can disable it with
 //! `default-features = false`.
 
+pub mod api_keys;
 pub mod auth;
 pub mod machines;
 pub mod preauth;
@@ -71,20 +76,28 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{FromRef, Path, RawQuery, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::tailscale_wire::routes::normalize_routes;
+
+pub use api_keys::{
+    ApiKeyAdmin, ApiKeyAdminError, ApiKeyAdminKey, ApiKeyCreated, ApiKeyMintRequest,
+    NoopApiKeyAdmin, PersistentApiKeyAdmin,
+};
 pub use auth::{AdminAuth, AuthOutcome, SESSION_COOKIE, SESSION_TTL_SECS};
-pub use machines::{MachineAdmin, MachineAdminError, MachineAdminRecord, WireMachineAdmin};
+pub use machines::{
+    MachineAdmin, MachineAdminError, MachineAdminRecord, PersistentMachineAdmin, WireMachineAdmin,
+};
 pub use preauth::{
     InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,
 };
 pub use preauth_persistent::PersistentPreauthAdmin;
-pub use users::{UserRecord, UserRegistry, UserRegistryError};
+pub use users::{PersistentUserAdmin, UserAdmin, UserRecord, UserRegistry, UserRegistryError};
 
 use views::Section;
 
@@ -97,9 +110,10 @@ use views::Section;
 #[derive(Clone)]
 pub struct AdminState {
     pub auth: AdminAuth,
-    pub users: UserRegistry,
+    pub users: Arc<dyn UserAdmin>,
     pub machines: Arc<dyn MachineAdmin>,
     pub preauth: Arc<dyn PreauthAdmin>,
+    pub api_keys: Arc<dyn ApiKeyAdmin>,
     /// DERP region count for the read-only tailnet page. The full
     /// DERP map isn't passed through — the admin module doesn't need
     /// to introspect it for v0.
@@ -120,9 +134,10 @@ impl AdminState {
 #[derive(Default)]
 pub struct AdminStateBuilder {
     bearer_token: Option<String>,
-    users: Option<UserRegistry>,
+    users: Option<Arc<dyn UserAdmin>>,
     machines: Option<Arc<dyn MachineAdmin>>,
     preauth: Option<Arc<dyn PreauthAdmin>>,
+    api_keys: Option<Arc<dyn ApiKeyAdmin>>,
     derp_regions: usize,
     policy: Option<crate::policy::PolicyStore>,
 }
@@ -132,7 +147,14 @@ impl AdminStateBuilder {
         self.bearer_token = Some(t.into());
         self
     }
-    pub fn users(mut self, u: UserRegistry) -> Self {
+    pub fn users<U>(mut self, u: U) -> Self
+    where
+        U: UserAdmin + 'static,
+    {
+        self.users = Some(Arc::new(u));
+        self
+    }
+    pub fn users_arc(mut self, u: Arc<dyn UserAdmin>) -> Self {
         self.users = Some(u);
         self
     }
@@ -142,6 +164,10 @@ impl AdminStateBuilder {
     }
     pub fn preauth(mut self, p: Arc<dyn PreauthAdmin>) -> Self {
         self.preauth = Some(p);
+        self
+    }
+    pub fn api_keys(mut self, a: Arc<dyn ApiKeyAdmin>) -> Self {
+        self.api_keys = Some(a);
         self
     }
     pub fn derp_regions(mut self, n: usize) -> Self {
@@ -160,13 +186,18 @@ impl AdminStateBuilder {
     pub fn build(self) -> AdminState {
         AdminState {
             auth: AdminAuth::new(self.bearer_token.unwrap_or_default()),
-            users: self.users.unwrap_or_default(),
+            users: self
+                .users
+                .unwrap_or_else(|| Arc::new(UserRegistry::new()) as Arc<dyn UserAdmin>),
             machines: self
                 .machines
                 .unwrap_or_else(|| Arc::new(NoopMachines) as Arc<dyn MachineAdmin>),
             preauth: self
                 .preauth
                 .unwrap_or_else(|| Arc::new(InMemoryPreauthAdmin::new()) as Arc<dyn PreauthAdmin>),
+            api_keys: self
+                .api_keys
+                .unwrap_or_else(|| Arc::new(NoopApiKeyAdmin) as Arc<dyn ApiKeyAdmin>),
             derp_regions: self.derp_regions,
             policy: self.policy.unwrap_or_default(),
         }
@@ -192,6 +223,12 @@ impl MachineAdmin for NoopMachines {
     async fn get(&self, _: &str) -> Option<MachineAdminRecord> {
         None
     }
+    async fn create(
+        &self,
+        record: MachineAdminRecord,
+    ) -> Result<MachineAdminRecord, MachineAdminError> {
+        Err(MachineAdminError::NotFound(record.id))
+    }
     async fn expire_at(
         &self,
         id: &str,
@@ -206,6 +243,13 @@ impl MachineAdmin for NoopMachines {
         Err(MachineAdminError::NotFound(id.to_string()))
     }
     async fn set_tags(&self, id: &str, _t: Vec<String>) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
+    async fn set_approved_routes(
+        &self,
+        id: &str,
+        _routes: Vec<String>,
+    ) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
@@ -258,6 +302,11 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/v1/machines/:id/logout", post(api_machines_logout))
         .route("/api/v1/machines/:id/rename", post(api_machines_rename))
         .route("/api/v1/machines/:id/tags", post(api_machines_tags))
+        .route("/api/v1/machines/:id/routes", post(api_machines_routes))
+        .route(
+            "/api/v1/machines/:id/approve_routes",
+            post(api_machines_routes),
+        )
         .route(
             "/api/v1/preauthkeys",
             get(api_preauth_list).post(api_preauth_mint),
@@ -265,6 +314,17 @@ pub fn router(state: AdminState) -> Router {
         .route(
             "/api/v1/preauthkeys/:prefix/expire",
             post(api_preauth_expire),
+        )
+        .route(
+            "/api/v1/apikey",
+            get(api_keys_list)
+                .post(api_keys_mint)
+                .delete(api_keys_delete_body),
+        )
+        .route("/api/v1/apikey/expire", post(api_keys_expire))
+        .route(
+            "/api/v1/apikey/:prefix",
+            axum::routing::delete(api_keys_delete),
         )
         .route("/api/v1/policy", get(api_policy_get).put(api_policy_put))
         .route("/api/v1/policy/validate", post(api_policy_validate))
@@ -299,13 +359,41 @@ fn guard_html(state: &AdminState, req: &Request) -> Result<AuthOutcome, Response
 /// JSON auth gate. Returns a 401 JSON body on anonymous access. See
 /// [`guard_html`] for the rationale on the `allow(result_large_err)`.
 #[allow(clippy::result_large_err)]
-fn guard_api(state: &AdminState, req: &Request) -> Result<AuthOutcome, Response> {
-    let outcome = auth::evaluate_headers(req.headers(), &state.auth);
+async fn guard_api(state: &AdminState, headers: HeaderMap) -> Result<AuthOutcome, Response> {
+    let outcome = auth::evaluate_headers(&headers, &state.auth);
     if outcome.is_authenticated() {
         Ok(outcome)
+    } else if let Some(token) = auth::bearer_token(&headers).map(str::to_owned)
+        && state.api_keys.validate(&token).await
+    {
+        Ok(AuthOutcome::Bearer)
     } else {
         Err(auth::api_unauthorized())
     }
+}
+
+fn user_store_html_error(e: &UserRegistryError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(
+            views::shell(
+                "User store error",
+                Section::Users,
+                true,
+                views::error_page(500, &e.to_string()),
+            )
+            .into_string(),
+        ),
+    )
+        .into_response()
+}
+
+fn user_store_api_error(e: &UserRegistryError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": e.to_string()})),
+    )
+        .into_response()
 }
 
 /// Verify the CSRF token from a form. For bearer-token clients this is
@@ -338,11 +426,15 @@ async fn page_dashboard(State(s): State<AdminState>, req: Request) -> Response {
         .iter()
         .filter(|k| k.expires_at > auth::now_unix())
         .count();
+    let user_count = match s.users.len().await {
+        Ok(n) => n,
+        Err(e) => return user_store_html_error(&e),
+    };
     let body = views::shell(
         "Dashboard",
         Section::Dashboard,
         outcome.is_authenticated(),
-        views::dashboard(machines.len(), online, s.users.len(), live),
+        views::dashboard(machines.len(), online, user_count, live),
     );
     Html(body.into_string()).into_response()
 }
@@ -456,7 +548,10 @@ async fn page_users(State(s): State<AdminState>, RawQuery(q): RawQuery, req: Req
         Ok(o) => o,
         Err(r) => return r,
     };
-    let users = s.users.all();
+    let users = match s.users.all().await {
+        Ok(users) => users,
+        Err(e) => return user_store_html_error(&e),
+    };
     let flash = q
         .as_deref()
         .and_then(|qs| qs.split('&').find_map(|kv| kv.strip_prefix("err=")))
@@ -490,7 +585,7 @@ async fn post_users_create(State(s): State<AdminState>, req: Request) -> Respons
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    match s.users.create(form.name.trim()) {
+    match s.users.create(form.name.trim()).await {
         Ok(_) => Redirect::to("/admin/users").into_response(),
         Err(e) => {
             Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string()))).into_response()
@@ -514,7 +609,7 @@ async fn post_users_delete(
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    let _ = s.users.delete(&name);
+    let _ = s.users.delete(&name).await;
     Redirect::to("/admin/users").into_response()
 }
 
@@ -594,10 +689,10 @@ async fn post_preauth_mint(State(s): State<AdminState>, req: Request) -> Respons
     let user = req.user.clone();
     match s.preauth.mint(req).await {
         Ok(k) => {
-            s.users.touch(&user);
+            let _ = s.users.touch(&user).await;
             // Redirect with the key prefix so the page can splash the
             // full token from `s.preauth.list()` on render.
-            let head_len = "octrapreauth-".len() + 8;
+            let head_len = "hskey-auth-".len() + 12;
             let prefix = &k.key[..head_len.min(k.key.len())];
             Redirect::to(&format!("/admin/preauthkeys?minted={}", urlencode(prefix)))
                 .into_response()
@@ -708,10 +803,13 @@ async fn get_logout(State(_s): State<AdminState>) -> Response {
 // ---------------------------------------------------------------------------
 
 async fn api_users_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
-    Json(s.users.all()).into_response()
+    match s.users.all().await {
+        Ok(users) => Json(users).into_response(),
+        Err(e) => user_store_api_error(&e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -720,14 +818,14 @@ struct ApiUserCreate {
 }
 
 async fn api_users_create(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let body: ApiUserCreate = match read_json(req).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match s.users.create(body.name.trim()) {
+    match s.users.create(body.name.trim()).await {
         Ok(rec) => (StatusCode::CREATED, Json(rec)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -742,17 +840,17 @@ async fn api_users_delete(
     Path(name): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
-    match s.users.delete(&name) {
+    match s.users.delete(&name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
 async fn api_machines_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     Json(s.machines.list().await).into_response()
@@ -763,7 +861,7 @@ async fn api_machines_get(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     match s.machines.get(&id).await {
@@ -784,7 +882,7 @@ async fn api_machines_expire(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     // Body is optional — empty body ⇒ expire immediately.
@@ -829,7 +927,7 @@ async fn api_machines_logout(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     match s.machines.logout(&id).await {
@@ -848,7 +946,7 @@ async fn api_machines_rename(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let body: ApiRenameBody = match read_json(req).await {
@@ -875,7 +973,7 @@ async fn api_machines_tags(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let body: ApiTagsBody = match read_json(req).await {
@@ -888,12 +986,56 @@ async fn api_machines_tags(
     }
 }
 
+#[derive(Deserialize)]
+struct ApiRoutesBody {
+    #[serde(default)]
+    routes: Vec<String>,
+}
+
+async fn api_machines_routes(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    let body: ApiRoutesBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let routes = match normalize_routes(body.routes) {
+        Ok(routes) => routes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid route: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    match s.machines.set_approved_routes(&id, routes).await {
+        Ok(()) => match s.machines.get(&id).await {
+            Some(machine) => Json(machine).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "machine not found after route update"})),
+            )
+                .into_response(),
+        },
+        Err(MachineAdminError::BadRequest(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 async fn api_machines_delete(
     State(s): State<AdminState>,
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     match s.machines.delete(&id).await {
@@ -903,7 +1045,7 @@ async fn api_machines_delete(
 }
 
 async fn api_preauth_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     Json(s.preauth.list().await).into_response()
@@ -926,7 +1068,7 @@ fn default_ttl_secs() -> u64 {
 }
 
 async fn api_preauth_mint(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let body: ApiPreauthCreate = match read_json(req).await {
@@ -955,10 +1097,144 @@ async fn api_preauth_expire(
     Path(prefix): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     match s.preauth.expire_by_prefix(&prefix).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_keys_list(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    Json(json!({ "api_keys": s.api_keys.list().await })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ApiKeyCreateBody {
+    #[serde(default)]
+    expiration: Option<ApiKeyExpiration>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ApiKeyExpiration {
+    Unix(i64),
+    Rfc3339(String),
+}
+
+impl ApiKeyExpiration {
+    fn to_unix(&self) -> Result<i64, String> {
+        match self {
+            Self::Unix(v) => Ok(*v),
+            Self::Rfc3339(s) => chrono::DateTime::parse_from_rfc3339(s)
+                .map(|t| t.timestamp())
+                .map_err(|e| format!("invalid expiration: {e}")),
+        }
+    }
+}
+
+async fn api_keys_mint(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    let body: ApiKeyCreateBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let expiration = match body.expiration.as_ref().map(ApiKeyExpiration::to_unix) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+        }
+        None => None,
+    };
+    match s.api_keys.mint(ApiKeyMintRequest { expiration }).await {
+        Ok(k) => (StatusCode::CREATED, Json(k)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiKeyIdentifyBody {
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    id: Option<u64>,
+}
+
+async fn api_keys_expire(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    let body: ApiKeyIdentifyBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.prefix.is_some() == body.id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "provide exactly one of prefix or id"})),
+        )
+            .into_response();
+    }
+    let result = if let Some(id) = body.id {
+        s.api_keys.expire_by_id(id).await
+    } else {
+        s.api_keys
+            .expire_by_prefix(body.prefix.as_deref().unwrap_or_default())
+            .await
+    };
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_keys_delete(
+    State(s): State<AdminState>,
+    Path(prefix): Path<String>,
+    req: Request,
+) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    match s.api_keys.delete_by_prefix(&prefix).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn api_keys_delete_body(State(s): State<AdminState>, req: Request) -> Response {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+        return r;
+    }
+    let body: ApiKeyIdentifyBody = match read_json(req).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.prefix.is_some() == body.id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "provide exactly one of prefix or id"})),
+        )
+            .into_response();
+    }
+    let result = if let Some(id) = body.id {
+        s.api_keys.delete_by_id(id).await
+    } else {
+        s.api_keys
+            .delete_by_prefix(body.prefix.as_deref().unwrap_or_default())
+            .await
+    };
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -978,7 +1254,7 @@ async fn api_preauth_expire(
 /// included) so the CLI can fetch + re-push without a re-serialise
 /// round-trip.
 async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let doc = s.policy.doc();
@@ -1001,7 +1277,7 @@ async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
 /// atomically and every parked `/map` long-poller wakes within
 /// ~1 ms.
 async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
@@ -1025,11 +1301,23 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
         Ok(doc) => {
             let n_rules = doc.rules.len();
             s.policy.set(doc, raw);
+            let auto_approved_nodes =
+                match machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await {
+                    Ok(count) => count,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                };
             (
                 StatusCode::OK,
                 Json(json!({
                     "applied": true,
                     "rules": n_rules,
+                    "autoApprovedNodes": auto_approved_nodes,
                 })),
             )
                 .into_response()
@@ -1048,7 +1336,7 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
 /// `{"error": "..."}` on failure. Operators wire this into pre-commit
 /// hooks to catch typos before pushing.
 async fn api_policy_validate(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
@@ -1083,7 +1371,7 @@ async fn api_policy_validate(State(s): State<AdminState>, req: Request) -> Respo
 }
 
 async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, &req) {
+    if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
     Json(json!({

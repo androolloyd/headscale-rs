@@ -11,7 +11,7 @@ pub async fn upsert_node(pool: &SqlitePool, node: &Node) -> Result<()> {
 
     sqlx::query(
         r"
-        INSERT INTO nodes (
+        INSERT INTO octra_nodes (
             id, name, wg_pubkey, addresses, endpoints, last_seen, online,
             cap_relay, cap_inference, cap_storage, cap_compute, cap_seed,
             updated_at
@@ -58,7 +58,7 @@ pub async fn get_node(pool: &SqlitePool, id: &str) -> Result<Node> {
             id, name, wg_pubkey, addresses, endpoints, last_seen, online,
             cap_relay, cap_inference, cap_storage, cap_compute, cap_seed,
             created_at, updated_at
-        FROM nodes
+        FROM octra_nodes
         WHERE id = ?
         ",
     )
@@ -81,7 +81,7 @@ pub async fn list_nodes(pool: &SqlitePool) -> Result<Vec<Node>> {
             id, name, wg_pubkey, addresses, endpoints, last_seen, online,
             cap_relay, cap_inference, cap_storage, cap_compute, cap_seed,
             created_at, updated_at
-        FROM nodes
+        FROM octra_nodes
         ORDER BY last_seen DESC
         ",
     )
@@ -96,17 +96,21 @@ pub async fn list_nodes(pool: &SqlitePool) -> Result<Vec<Node>> {
 /// Get nodes with a specific capability.
 pub async fn list_nodes_with_capability(pool: &SqlitePool, capability: &str) -> Result<Vec<Node>> {
     let query = match capability {
-        "relay" => "SELECT * FROM nodes WHERE cap_relay = 1 AND online = 1 ORDER BY last_seen DESC",
+        "relay" => {
+            "SELECT * FROM octra_nodes WHERE cap_relay = 1 AND online = 1 ORDER BY last_seen DESC"
+        }
         "inference" => {
-            "SELECT * FROM nodes WHERE cap_inference = 1 AND online = 1 ORDER BY last_seen DESC"
+            "SELECT * FROM octra_nodes WHERE cap_inference = 1 AND online = 1 ORDER BY last_seen DESC"
         }
         "storage" => {
-            "SELECT * FROM nodes WHERE cap_storage = 1 AND online = 1 ORDER BY last_seen DESC"
+            "SELECT * FROM octra_nodes WHERE cap_storage = 1 AND online = 1 ORDER BY last_seen DESC"
         }
         "compute" => {
-            "SELECT * FROM nodes WHERE cap_compute = 1 AND online = 1 ORDER BY last_seen DESC"
+            "SELECT * FROM octra_nodes WHERE cap_compute = 1 AND online = 1 ORDER BY last_seen DESC"
         }
-        "seed" => "SELECT * FROM nodes WHERE cap_seed = 1 AND online = 1 ORDER BY last_seen DESC",
+        "seed" => {
+            "SELECT * FROM octra_nodes WHERE cap_seed = 1 AND online = 1 ORDER BY last_seen DESC"
+        }
         _ => return Ok(Vec::new()),
     };
 
@@ -121,7 +125,7 @@ pub async fn list_nodes_with_capability(pool: &SqlitePool, capability: &str) -> 
 pub async fn update_heartbeat(pool: &SqlitePool, node_id: &str) -> Result<()> {
     let result = sqlx::query(
         r"
-        UPDATE nodes
+        UPDATE octra_nodes
         SET last_seen = unixepoch(), online = 1, updated_at = unixepoch()
         WHERE id = ?
         ",
@@ -141,7 +145,7 @@ pub async fn update_heartbeat(pool: &SqlitePool, node_id: &str) -> Result<()> {
 pub async fn mark_offline(pool: &SqlitePool, node_id: &str) -> Result<()> {
     sqlx::query(
         r"
-        UPDATE nodes
+        UPDATE octra_nodes
         SET online = 0, updated_at = unixepoch()
         WHERE id = ?
         ",
@@ -157,7 +161,7 @@ pub async fn mark_offline(pool: &SqlitePool, node_id: &str) -> Result<()> {
 pub async fn delete_node(pool: &SqlitePool, node_id: &str) -> Result<()> {
     sqlx::query(
         r"
-        DELETE FROM nodes WHERE id = ?
+        DELETE FROM octra_nodes WHERE id = ?
         ",
     )
     .bind(node_id)

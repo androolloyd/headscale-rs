@@ -110,7 +110,7 @@ async fn post_create_then_get_list_round_trip() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let created = body_json(resp).await;
     let key = created["key"].as_str().expect("key in response");
-    assert!(key.starts_with("octrapreauth-"));
+    assert!(key.starts_with("hskey-auth-"));
     assert_eq!(created["user"], "alice");
     assert_eq!(created["reusable"], false);
     assert_eq!(created["tags"][0], "tag:dev");
@@ -259,8 +259,9 @@ async fn expire_endpoint_marks_row_expired() {
         .unwrap();
     let key = body_json(resp).await["key"].as_str().unwrap().to_string();
     // The admin route takes a prefix in the URL path — match what the
-    // CLI sends ("octrapreauth-<8 hex chars>").
-    let head_len = "octrapreauth-".len() + 8;
+    // CLI sends a display prefix (`hskey-auth-<12>-***`); a shorter
+    // unique token prefix is accepted by the admin route.
+    let head_len = "hskey-auth-".len() + 12;
     let prefix = &key[..head_len];
 
     let resp = app
@@ -281,7 +282,7 @@ async fn expire_unknown_prefix_returns_404() {
     let (app, _store) = fixture().await;
     let resp = app
         .oneshot(req_post_empty(
-            "/api/v1/preauthkeys/octrapreauth-deadbeef/expire",
+            "/api/v1/preauthkeys/hskey-auth-deadbeef/expire",
         ))
         .await
         .unwrap();

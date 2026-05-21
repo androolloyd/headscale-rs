@@ -577,14 +577,14 @@ impl TunnelManager {
         match &result {
             TunnResult::WriteToTunnelV4(_, _)
             | TunnResult::WriteToTunnelV6(_, _)
-            | TunnResult::WriteToNetwork(_) => {
-                if tunnel.endpoint != Some(src_addr) {
-                    tunnel.set_endpoint(src_addr);
-                    let _ = self.event_tx.send(TunnelEvent::EndpointChanged {
-                        peer_id: peer_id.to_string(),
-                        endpoint: src_addr,
-                    });
-                }
+            | TunnResult::WriteToNetwork(_)
+                if tunnel.endpoint != Some(src_addr) =>
+            {
+                tunnel.set_endpoint(src_addr);
+                let _ = self.event_tx.send(TunnelEvent::EndpointChanged {
+                    peer_id: peer_id.to_string(),
+                    endpoint: src_addr,
+                });
             }
             _ => {}
         }

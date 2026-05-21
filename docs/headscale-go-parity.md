@@ -1,0 +1,93 @@
+# Headscale-go Parity Ledger
+
+Baseline: `github.com/juanfont/headscale v0.28.0`, pinned by
+`tools/parity/headscale-go/go.mod`.
+
+This ledger tracks observable behavior that must match before
+`headscale-rs` can claim full parity with headscale-go. Rows marked
+`Done` have differential tests or direct Rust tests in this repo.
+Rows marked `Partial` have some implementation or tests but do not
+cover the whole upstream surface. Rows marked `Missing` need product
+implementation and parity tests.
+
+## Executable Parity
+
+The default differential gate is:
+
+```sh
+./scripts/headscale_go_diff.sh
+```
+
+It compares `tools/parity/headscale-rs` with headscale-go v0.28.0
+over every checked-in `tools/parity/scenarios/*.json` scenario.
+
+Current executable coverage:
+
+| Surface | Status | Evidence |
+| --- | --- | --- |
+| ACL literal prefixes and ports | Done | `literal-prefix-*` scenarios |
+| ACL protocol names and numbers | Done | `acl-comment-fields-and-protocols`, `literal-prefix-proto-number-tcp` |
+| ACL users, groups, tags, hosts, autogroups | Done | `acl-principal-resolution-matrix`, `host-alias-tcp22` |
+| ACL parser and validator errors | Done | `acl-validation-*` scenarios for autogroups, unknown fields, missing references, protocols, and ports |
+| Policy missing-reference validation | Done | `acl-validation-undefined-*`, `ssh-validation-undefined-*`, `tagowners-validation-undefined-group`, `autoapprovers-validation-undefined-tag-route` |
+| Per-node `autogroup:self` filter reduction | Done | `acl-autogroup-self-per-node` |
+| Peer map / matcher visibility | Done | `peer-map-symmetric-one-way`, `peer-map-route-visibility`, and `acl-autogroup-self-per-node` `peer_map_checks` cover `PolicyManager.BuildPeerMap` symmetric one-way ACL visibility, active approved route visibility, unapproved route exclusion, and per-node `autogroup:self` peer maps |
+| `tagOwners` authorization | Done | `tag-owners-matrix` |
+| `autoApprovers` route and exit-node checks | Done | `route-autoapprove*` scenarios |
+| SSH policy compilation and validation | Done | `ssh-policy-matrix`, `ssh-validation-*` scenarios |
+| Tailcfg DNS, DERP, register, map, SSHPolicy JSON summaries | Partial | `wire-*` scenarios, including `MapRequest` session/debug fields, broad `MapNode` metadata/CapMap, `MapResponse` peer/filter deltas, health/display/debug/control fields, `UserProfiles`, and `SSHPolicy`; runtime map node names/domains now derive from the configured DNS base domain instead of an Octra-specific core default |
+| Public control HTTP basics | Partial | `tailscale_wire::basic_handlers::tests::*` covers headscale-go-compatible `/robots.txt`, `/health`, `/version`, `/windows`, `/apple`, `/apple/{platform}`, `/swagger`, `/swagger/v1/openapiv2.json`, `/favicon.ico`, and blank fallback response shapes on the unauthenticated control listener; Apple/Windows profile URLs prefer `WireState.public_control_url` to mirror headscale-go `cfg.ServerURL`, with request-derived fallback until full config loading supplies it |
+| API-key persistence, admin REST auth, CLI, and gRPC slice | Partial | `headscale-db::api_keys` unit tests, `headscale-api/tests/api_keys_e2e.rs`, `headscale-cli/tests/admin_client.rs`, `grpc::upstream_tests::*`, and `headscale-api/tests/grpc_gateway_e2e.rs` cover headscale-go key shape, Go-compatible `api_keys.hash`/datetime row layout, bcrypt-secret storage, legacy rows, prefix parsing, validate/expire/delete/list, bearer auth, CLI HTTP wiring, the four upstream `HeadscaleService` API-key RPCs, opt-in gRPC bearer API-key auth, grpc-gateway `/api/v1/apikey` create/list/expire/delete paths, and a tonic service mount helper |
+| Pre-auth-key persistence, admin REST/CLI, and gRPC slice | Partial | `headscale-db::preauth_keys` unit tests, `headscale-api/tests/preauth_e2e.rs`, `headscale-cli/tests/admin_client.rs`, `grpc::upstream_tests::*`, and `headscale-api/tests/grpc_gateway_e2e.rs` cover create/list/expire/delete, headscale-go `hskey-auth-<12>-<64>` token shape, Go-compatible `pre_auth_keys.prefix/hash/used` row layout, nullable numeric `user_id` storage when a persistent user resolver is wired, reusable/ephemeral/used/tags, tags-only keys, ID-based upstream gRPC RPCs, grpc-gateway `/api/v1/preauthkey` create/list/expire/delete paths, and tag/user validation; exact upstream error text and registration use of persisted node FKs remain open |
+| Node gRPC slice | Partial | `proto/node.proto` now matches the upstream `headscale.v1.Node` message/RPC schema instead of the previous Octra mesh schema, and `grpc::upstream_tests::*` covers `ListNodes`, `GetNode`, `SetTags`, `SetApprovedRoutes`, `BackfillNodeIPs`, `DebugCreateNode`, `RegisterNode` from the debug registration cache, `RenameNode`, `ExpireNode`, and `DeleteNode`; `headscale-api/tests/grpc_gateway_e2e.rs` covers the matching grpc-gateway `/api/v1/debug/node`, `/api/v1/node`, `/api/v1/node/register`, `/api/v1/node/backfillips`, and node ID subpaths with protojson-style node bodies. `headscale-db::headscale_nodes` covers the Go-shaped `nodes` row layout/core node mutations, and `PersistentMachineAdmin` now lets admin/gRPC node operations expose numeric `nodes.id` values from SQLite. Route responses preserve headscale-go sticky primary-route ownership and keep exit routes out of `PrimaryRoutes` while surfacing them as serving routes where upstream does. Runtime map/registration still use the current wire registry by default, and web/OIDC registration-cache integration remains open |
+| Policy and health gRPC slice | Partial | `grpc::upstream_tests::*`, `headscale-api/tests/grpc_gateway_e2e.rs`, and `headscale-db::policies` cover upstream `GetPolicy`, `SetPolicy`, and `Health` RPCs backed by `PolicyStore`, preserving raw HUJSON and update timestamps across both tonic and grpc-gateway `/api/v1/policy`/`/api/v1/health`; health now pings a wired database health probe/SQLite pool and surfaces headscale-go-style ping failures through gRPC and grpc-gateway. DB-mode policy persistence now appends Go-shaped `policies` rows, reads the latest non-deleted row, and errors on missing policy rows like upstream; explicit file mode reads raw policy files and rejects `SetPolicy` before parsing. Full config-driven policy-mode wiring remains open |
+| User admin and gRPC slice | Partial | Admin REST/CLI user CRUD plus `grpc::upstream_tests::*` cover upstream `CreateUser`, `RenameUser`, `DeleteUser`, and `ListUsers` RPCs with numeric IDs and profile fields; `headscale-api/tests/grpc_gateway_e2e.rs` covers the upstream grpc-gateway singular `/api/v1/user` create/list/rename/delete paths with bearer API-key auth and protojson-style uint64/status response shapes. `headscale-db::users` now covers the headscale-go `users` row shape, provider/profile fields, uniqueness indexes, OIDC rename rejection, and DNS-hostname validation. `UserAdmin` now has both in-memory and SQLite-backed adapters, and admin/gRPC tests exercise the persistent Go-shaped user store; exact upstream error text, user/node FK enforcement, and web/OIDC user lifecycle remain open |
+
+`ipsets` are intentionally not in the differential harness because the
+pinned headscale-go v0.28 policy struct does not expose them. Rust
+supports `ipsets` as an extension; add differential coverage only after
+the Go baseline is bumped to a version that exposes the same surface.
+
+## Full Parity Matrix
+
+| Area | Status | Required work |
+| --- | --- | --- |
+| Config loading | Partial | Match `config.yaml` search paths, env overrides, validation, TLS/ACME, metrics, DNS, DERP, OIDC, database, and CLI config fields; DNS spec defaults now match headscale-go v0.28 (`magic_dns=true`, empty `base_domain`) and expose validation for the required MagicDNS base domain. |
+| Database models | Partial | Match users, nodes, preauth keys, API keys, routes, policies, migrations, soft-delete behavior, timestamps, expiry, and uniqueness constraints; API-key, pre-auth-key, user, policy history, and canonical node row shapes now track headscale-go, legacy Octra mesh nodes are isolated in `octra_nodes`, admin/gRPC users and nodes can use Go-compatible SQLite stores, and preauth rows can store numeric user IDs. Route state and the live wire runtime are still not fully DB-backed. |
+| Node registration | Partial | Match preauth-key registration, reusable/ephemeral/expired keys, CLI debug registration, web registration, OIDC registration, machine-key reuse, node-key expiry, forced tags, and duplicate handling; pre-auth key token/storage format plus user/node storage shapes now match upstream, CLI debug registration can persist through the Go-shaped node adapter, and wire registration now normalizes advertised routes and persists policy auto-approved routes. Real wire registration still uses the current Rust machine registry, and web/OIDC registration are not yet wired through the persisted node FK model. |
+| Poll/map runtime | Partial | Match `/machine/{key}/map`, streaming updates, keep-alives, full vs incremental map responses, peer changes, endpoint updates, disco key updates, hostinfo updates, logout, and expiry behavior; map node FQDNs now follow the configured DNS base domain, loaded policies now reduce visible peers using symmetric node/route access checks, and map HostInfo route updates now persist newly policy auto-approved routes while preserving existing approvals, leaving downstream Octra domains to Octra-side wiring. |
+| Tailcfg wire model | Partial | `MapRequest` session/keepalive/debug fields, broad `MapNode` metadata including tags/routes/capabilities/CapMap and WireGuard-only metadata, nodeAttrs-to-CapMap emission, policy-driven `MapResponse.Peers` reduction for node IPs and served routes, `MapResponse.UserProfiles`, peer deltas, packet-filter deltas, health/display/debug/control messages, and `SSHPolicy` are covered at the JSON/runtime-test layer; still wire these into full route state, per-node packet-filter reduction, and client capability negotiation. |
+| Policy parsing and validation | Partial | SSH parser/error parity plus ACL autogroup placement, unknown fields, missing group/tag/host references, protocol/port errors, and policy update cache invalidation are covered; still add remaining edge-case validation coverage. |
+| Peer map/matchers | Partial | Exact differential `peer_map_checks` now compare Rust against headscale-go `PolicyManager.BuildPeerMap` for symmetric one-way ACL visibility, active approved route visibility, unapproved route exclusion, and per-node `autogroup:self` peer maps; `headscale-api/tests/policy_consolidation.rs` covers the Rust helper directly, and `tailscale_wire::map::tests::map_response_*policy*` verifies loaded policies reduce `/map` peers while preserving route-visible routers. Still wire the remaining `MatchersForNode` cache edges and per-node packet-filter reduction into runtime/integration coverage. |
+| Tailscale SSH | Partial | Differential compiler and validation coverage exists and `MapResponse.SSHPolicy` is emitted; still add real-client SSH integration. |
+| DNS/MagicDNS | Partial | Match MagicDNS names, search domains, split DNS, resolvers, extra records, collisions, machine records, IPv4/IPv6, disabled DNS, and hot reload behavior; default/base-domain validation now follows headscale-go while downstream domains remain embedder-supplied. |
+| Routes | Partial | Advertised and approved route storage now feeds node gRPC responses and map response `AllowedIPs`/primary routes, with stateful headscale-go-style sticky primary promotion/failover, exit routes separated from subnet `PrimaryRoutes`, registration/map paths applying policy `autoApprovers`, admin/gRPC policy updates re-running auto-approval across existing nodes without removing existing approvals, and admin REST/CLI route listing plus approval updates writing the same approved-route state; still match full route update propagation and real-client route integration. |
+| Tags | Partial | Match tag ownership, forced tags, invalid tag handling, registration tags, tag removal, and tagged-node user semantics across policy, API, CLI, and map responses. |
+| API keys | Partial | DB-backed create/list/expire/delete, headscale-go `hskey-api-<12>-<64>` shape, Go-compatible `api_keys.hash`/datetime row layout, bcrypt secret hashing, legacy `prefix.secret` validation, REST bearer-auth middleware, `headscale apikeys` CLI, upstream `HeadscaleService` API-key RPCs, grpc-gateway API-key paths, and opt-in gRPC bearer API-key auth are covered; still add broader upstream integration coverage. |
+| Upstream gRPC API | Partial | The `User`, `Node`, `ApiKey`, `PreAuthKey`, `Policy`, and `Health` proto messages plus their implemented `headscale.v1.HeadscaleService` RPCs are generated and backed by admin state, with users/nodes/API keys/preauth keys able to use Go-compatible SQLite adapters; debug-created CLI registration, node route operations, numeric SQLite node IDs, auth-required service mode, a tonic mount helper, and grpc-gateway-backed `Health`/`User`/`PreAuthKey`/`ApiKey`/`Node`/`Policy`/`DebugCreateNode` HTTP annotation slices are covered. External listener wiring, exact grpc-gateway error text/query parser edge cases, version/reflection surfaces, and broader integration tests remain open. |
+| REST/swagger API | Partial | Match `/api/v1`, `/swagger`, `/version`, auth, request/response shapes, status codes, and error bodies; the public wire router now covers `/robots.txt`, `/health`, `/version`, `/windows`, `/apple`, `/apple/{platform}`, `/swagger`, `/swagger/v1/openapiv2.json`, `/debug/routes`, `/debug/derp`, `/debug/registration-cache`, `/debug/filter`, `/debug/ssh`, `/favicon.ico`, and blank fallback with config-backed helper URLs where upstream uses `server_url`. `grpc_gateway::router` now covers the pinned v0.28 `headscale.v1.HeadscaleService` HTTP annotations for `/api/v1/health`, singular `/api/v1/user`, `/api/v1/preauthkey`, `/api/v1/apikey`, `/api/v1/node`, `/api/v1/debug/node`, and `/api/v1/policy` paths with API-key bearer auth and protojson-style success/status bodies; exact upstream grpc-gateway parser/error edge cases and full external serving integration remain open. |
+| CLI parity | Partial | Users, nodes, node route listing/approval, preauthkeys, apikeys, policy, and tailnet have HTTP-admin wrappers and tests; still match upstream command groups, remaining aliases, output formats, config/env handling, remote gRPC mode, and externally visible error text. |
+| OIDC | Missing | Match provider discovery, callback flow, user mapping, profile refresh, allowed domains/users/groups, expiry, nonce/state, and registration integration. |
+| Web registration | Missing | Match browser auth flow, templates, registration URLs, pending-machine state, expiry, and CLI/API approval behavior. |
+| Embedded DERP | Partial | Match DERP server, DERP map loading/defaults, verify endpoint, STUN behavior, private DERP config, TLS behavior, and integration coverage; `/debug/derp` now exposes the configured DERP map in headscale-go text/JSON shapes. |
+| Noise/control protocol | Partial | Match Noise handshake, controlbase transport, TS2021 behavior, error paths, early noise response, key rotation, and client compatibility. |
+| State manager | Partial | Registry generation watches, policy/DNS wake-ups, ephemeral GC, route primary-state updates, route-debug snapshots, and policy-update route auto-approval fan-out have local coverage; still match headscale-go node update batching, full state-change reason sets, route update propagation, and remaining map/debug state. |
+| Metrics/debug | Partial | `/debug/routes`, `/debug/derp`, `/debug/registration-cache`, `/debug/filter`, and `/debug/ssh` now mirror headscale-go debug shapes for primary routes, DERP map inspection, registration-cache metadata, current packet filters, and per-node SSH policy output; still match remaining debug endpoints, Prometheus metrics, pprof-compatible surfaces where applicable, and operational logs that tests depend on. |
+| Integration test parity | Missing | Port upstream integration scenarios or run both servers through the same Tailscale client test harness for auth key, web auth, OIDC, ACL, SSH, DNS, routes, tags, DERP, API auth, and CLI. |
+
+## Next Implementation Order
+
+1. Turn the expanded tailcfg model into real runtime behavior: stateful
+   map sessions, incremental peer/filter deltas, route state, and
+   capability-version negotiation.
+2. Extend the upstream headscale v1 `HeadscaleService` beyond the
+   user/API-key/preauth-key/node/policy/health RPCs: route-specific
+   state, debug/version operations, external gRPC listener wiring, and
+   grpc-gateway-compatible HTTP annotations.
+3. Port the remaining route state behavior: enabled-state
+   transitions, auto-approval integration, API/CLI state changes, and
+   persistence.
+4. Add remaining edge-case validator scenarios.
+5. Add a real-client integration harness that can run one scenario
+   against headscale-go and headscale-rs with the same Tailscale
+   client image.

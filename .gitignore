@@ -1,11 +1,16 @@
 /target
 **/target
 /Cargo.lock
+/headscale-core/Cargo.lock
+/headscale-identity/Cargo.lock
+/headscale-resources/Cargo.lock
+/headscale-payments/Cargo.lock
 .DS_Store
 *.swp
 *.swo
 .idea/
 .vscode/
+fuzz-runs/
 
 # Local headscale-db runtime artifacts; schema/docs/migrations remain tracked.
 /headscale-db/.env

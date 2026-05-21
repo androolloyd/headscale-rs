@@ -1,0 +1,13 @@
+{
+  "name": "literal-prefix-icmp-wildcard",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "icmp",
+        "src": ["100.64.0.1/32"],
+        "dst": ["100.64.0.2/32:*"]
+      }
+    ]
+  }
+}

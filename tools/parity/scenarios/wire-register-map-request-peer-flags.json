@@ -1,0 +1,95 @@
+{
+  "name": "wire-register-map-request-peer-flags",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "register_request": {
+      "NodeKey": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+      "Auth": { "AuthKey": "hskey-auth-ephemeral" },
+      "Hostinfo": { "Hostname": "ephemeral-peer", "OS": "linux", "OSVersion": "6.9" },
+      "Followup": "auth",
+      "Ephemeral": true,
+      "Expiry": "2026-06-01T00:00:00Z"
+    },
+    "register_response": {
+      "User": {
+        "ID": 77,
+        "LoginName": "bob",
+        "DisplayName": "Bob"
+      },
+      "Login": {
+        "ID": 77,
+        "Provider": "octravpn-preauth",
+        "LoginName": "bob",
+        "DisplayName": "Bob"
+      },
+      "NodeKeyExpired": true,
+      "AuthURL": "https://login.example/auth",
+      "MachineAuthorized": false,
+      "Error": "expired key"
+    },
+    "map_request": {
+      "Version": 96,
+      "Stream": true,
+      "Compress": "zstd",
+      "OmitPeers": true,
+      "NodeKey": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+      "DiscoKey": "discokey:3300000000000000000000000000000000000000000000000000000000000000",
+      "Endpoints": ["198.51.100.10:41641", "[2001:db8::10]:41641"],
+      "Hostinfo": { "Hostname": "ephemeral-peer", "OS": "linux", "OSVersion": "6.9" }
+    },
+    "map_response": {
+      "KeyExpiryExtension": 0,
+      "Node": {
+        "ID": 10,
+        "StableID": "n10",
+        "Name": "ephemeral-peer.tail.example",
+        "User": 77,
+        "Key": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+        "Machine": "mkey:2200000000000000000000000000000000000000000000000000000000000000",
+        "Addresses": ["100.64.0.10/32"],
+        "AllowedIPs": ["100.64.0.10/32"],
+        "Hostinfo": { "Hostname": "ephemeral-peer", "OS": "linux", "OSVersion": "6.9" },
+        "MachineAuthorized": true,
+        "DiscoKey": "discokey:3300000000000000000000000000000000000000000000000000000000000000",
+        "Endpoints": ["198.51.100.10:41641"]
+      },
+      "Peers": [
+        {
+          "ID": 11,
+          "StableID": "n11",
+          "Name": "peer.tail.example",
+          "User": 78,
+          "Key": "nodekey:4400000000000000000000000000000000000000000000000000000000000000",
+          "Machine": "mkey:5500000000000000000000000000000000000000000000000000000000000000",
+          "Addresses": ["100.64.0.11/32"],
+          "AllowedIPs": ["100.64.0.11/32"],
+          "Hostinfo": { "Hostname": "peer", "OS": "darwin", "OSVersion": "15.0" },
+          "MachineAuthorized": true,
+          "DiscoKey": "discokey:6600000000000000000000000000000000000000000000000000000000000000",
+          "Endpoints": ["203.0.113.11:41641"]
+        }
+      ],
+      "DNSConfig": {
+        "Domains": ["tail.example"],
+        "Proxied": true
+      },
+      "DERPMap": {
+        "Regions": {},
+        "omitDefaultRegions": true
+      },
+      "Domain": "tail.example",
+      "KeepAlive": true,
+      "PacketFilter": [
+        {
+          "SrcIPs": ["100.64.0.10/32"],
+          "DstPorts": [
+            { "IP": "100.64.0.11/32", "Ports": { "First": 22, "Last": 22 } }
+          ],
+          "IPProto": [6]
+        }
+      ]
+    }
+  }
+}

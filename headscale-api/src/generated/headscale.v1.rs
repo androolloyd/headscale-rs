@@ -24,912 +24,316 @@ pub struct Status {
     #[prost(string, optional, tag = "3")]
     pub error_code: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Node capabilities
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct NodeCapabilities {
-    #[prost(bool, tag = "1")]
-    pub relay: bool,
-    #[prost(bool, tag = "2")]
-    pub inference: bool,
-    #[prost(bool, tag = "3")]
-    pub storage: bool,
-    #[prost(bool, tag = "4")]
-    pub compute: bool,
-    #[prost(bool, tag = "5")]
-    pub seed: bool,
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct User {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(string, tag = "4")]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub email: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub provider_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub profile_pic_url: ::prost::alloc::string::String,
 }
-/// Node in the mesh
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateUserRequest {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub email: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub picture_url: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateUserResponse {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<User>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RenameUserRequest {
+    #[prost(uint64, tag = "1")]
+    pub old_id: u64,
+    #[prost(string, tag = "2")]
+    pub new_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RenameUserResponse {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<User>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteUserRequest {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteUserResponse {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListUsersRequest {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub email: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListUsersResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub users: ::prost::alloc::vec::Vec<User>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PreAuthKey {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<User>,
+    #[prost(uint64, tag = "2")]
+    pub id: u64,
+    #[prost(string, tag = "3")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub reusable: bool,
+    #[prost(bool, tag = "5")]
+    pub ephemeral: bool,
+    #[prost(bool, tag = "6")]
+    pub used: bool,
+    #[prost(message, optional, tag = "7")]
+    pub expiration: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "8")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(string, repeated, tag = "9")]
+    pub acl_tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreatePreAuthKeyRequest {
+    #[prost(uint64, tag = "1")]
+    pub user: u64,
+    #[prost(bool, tag = "2")]
+    pub reusable: bool,
+    #[prost(bool, tag = "3")]
+    pub ephemeral: bool,
+    #[prost(message, optional, tag = "4")]
+    pub expiration: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(string, repeated, tag = "5")]
+    pub acl_tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreatePreAuthKeyResponse {
+    #[prost(message, optional, tag = "1")]
+    pub pre_auth_key: ::core::option::Option<PreAuthKey>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ExpirePreAuthKeyRequest {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ExpirePreAuthKeyResponse {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeletePreAuthKeyRequest {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeletePreAuthKeyResponse {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ListPreAuthKeysRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPreAuthKeysResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub pre_auth_keys: ::prost::alloc::vec::Vec<PreAuthKey>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Node {
-    /// DID
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
     #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
+    pub machine_key: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub wg_pubkey: ::prost::alloc::string::String,
-    /// IP addresses
-    #[prost(string, repeated, tag = "4")]
-    pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub node_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub disco_key: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "5")]
-    pub endpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(uint64, tag = "6")]
-    pub last_seen: u64,
+    pub ip_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "6")]
+    pub name: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "7")]
-    pub capabilities: ::core::option::Option<NodeCapabilities>,
-    #[prost(bool, tag = "8")]
+    pub user: ::core::option::Option<User>,
+    #[prost(message, optional, tag = "8")]
+    pub last_seen: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "10")]
+    pub expiry: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "11")]
+    pub pre_auth_key: ::core::option::Option<PreAuthKey>,
+    #[prost(message, optional, tag = "12")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(enumeration = "RegisterMethod", tag = "13")]
+    pub register_method: i32,
+    #[prost(string, tag = "21")]
+    pub given_name: ::prost::alloc::string::String,
+    #[prost(bool, tag = "22")]
     pub online: bool,
+    #[prost(string, repeated, tag = "23")]
+    pub approved_routes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "24")]
+    pub available_routes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "25")]
+    pub subnet_routes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "26")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-/// Node registration request
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RegisterRequest {
-    /// DID
+pub struct RegisterNodeRequest {
     #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
+    pub user: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub wg_pubkey: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "4")]
-    pub endpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "5")]
-    pub capabilities: ::core::option::Option<NodeCapabilities>,
-}
-/// Node registration response
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RegisterResponse {
-    #[prost(string, repeated, tag = "1")]
-    pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(message, repeated, tag = "2")]
-    pub peers: ::prost::alloc::vec::Vec<PeerInfo>,
-    #[prost(message, optional, tag = "3")]
-    pub derp_map: ::core::option::Option<DerpMap>,
-}
-/// Peer information
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PeerInfo {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub wg_pubkey: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "3")]
-    pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "4")]
-    pub endpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "5")]
-    pub allowed_ips: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-/// DERP server map
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DerpMap {
-    #[prost(message, repeated, tag = "1")]
-    pub regions: ::prost::alloc::vec::Vec<DerpRegion>,
+    pub key: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DerpRegion {
-    #[prost(uint32, tag = "1")]
-    pub id: u32,
-    #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag = "3")]
-    pub nodes: ::prost::alloc::vec::Vec<DerpNode>,
+pub struct RegisterNodeResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DerpNode {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub url: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "3")]
-    pub stun_port: u32,
-}
-/// Update node request
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct UpdateNodeRequest {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "2")]
-    pub name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "3")]
-    pub wg_pubkey: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "4")]
-    pub endpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "5")]
-    pub capabilities: ::core::option::Option<NodeCapabilities>,
-}
-/// Get node request
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetNodeRequest {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
-}
-/// List nodes request
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct ListNodesRequest {
-    #[prost(bool, optional, tag = "1")]
-    pub online_only: ::core::option::Option<bool>,
-    #[prost(uint32, optional, tag = "2")]
-    pub limit: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "3")]
-    pub offset: ::core::option::Option<u32>,
+pub struct GetNodeRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
 }
-/// List nodes response
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetNodeResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetTagsRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(string, repeated, tag = "2")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetTagsResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetApprovedRoutesRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(string, repeated, tag = "2")]
+    pub routes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetApprovedRoutesResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteNodeRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteNodeResponse {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ExpireNodeRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub expiry: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExpireNodeResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RenameNodeRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+    #[prost(string, tag = "2")]
+    pub new_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RenameNodeResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListNodesRequest {
+    #[prost(string, tag = "1")]
+    pub user: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListNodesResponse {
     #[prost(message, repeated, tag = "1")]
     pub nodes: ::prost::alloc::vec::Vec<Node>,
-    #[prost(uint32, tag = "2")]
-    pub total: u32,
 }
-/// Delete node request
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DeleteNodeRequest {
+pub struct DebugCreateNodeRequest {
     #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
+    pub user: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub routes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-/// Heartbeat request
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct HeartbeatRequest {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "2")]
-    pub endpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+pub struct DebugCreateNodeResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
 }
-/// Get peers request
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BackfillNodeIPsRequest {
+    #[prost(bool, tag = "1")]
+    pub confirmed: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetPeersRequest {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
+pub struct BackfillNodeIPsResponse {
+    #[prost(string, repeated, tag = "1")]
+    pub changes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-/// Get peers response
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetPeersResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub peers: ::prost::alloc::vec::Vec<PeerInfo>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RegisterMethod {
+    Unspecified = 0,
+    AuthKey = 1,
+    Cli = 2,
+    Oidc = 3,
 }
-/// Generated client implementations.
-pub mod node_service_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    /// Node management service
-    #[derive(Debug, Clone)]
-    pub struct NodeServiceClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl NodeServiceClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
+impl RegisterMethod {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REGISTER_METHOD_UNSPECIFIED",
+            Self::AuthKey => "REGISTER_METHOD_AUTH_KEY",
+            Self::Cli => "REGISTER_METHOD_CLI",
+            Self::Oidc => "REGISTER_METHOD_OIDC",
         }
     }
-    impl<T> NodeServiceClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::BoxBody>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REGISTER_METHOD_UNSPECIFIED" => Some(Self::Unspecified),
+            "REGISTER_METHOD_AUTH_KEY" => Some(Self::AuthKey),
+            "REGISTER_METHOD_CLI" => Some(Self::Cli),
+            "REGISTER_METHOD_OIDC" => Some(Self::Oidc),
+            _ => None,
         }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> NodeServiceClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::BoxBody>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::BoxBody>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            NodeServiceClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        /// Register a new node in the mesh
-        pub async fn register(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RegisterRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/Register",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "Register"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Update node information
-        pub async fn update_node(
-            &mut self,
-            request: impl tonic::IntoRequest<super::UpdateNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Node>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/UpdateNode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "UpdateNode"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Get node by ID
-        pub async fn get_node(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Node>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/GetNode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "GetNode"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// List all nodes in the mesh
-        pub async fn list_nodes(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListNodesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListNodesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/ListNodes",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "ListNodes"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Delete a node
-        pub async fn delete_node(
-            &mut self,
-            request: impl tonic::IntoRequest<super::DeleteNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Status>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/DeleteNode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "DeleteNode"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Heartbeat to maintain online status
-        pub async fn heartbeat(
-            &mut self,
-            request: impl tonic::IntoRequest<super::HeartbeatRequest>,
-        ) -> std::result::Result<tonic::Response<super::Status>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/Heartbeat",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "Heartbeat"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Get peers for a node
-        pub async fn get_peers(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetPeersRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPeersResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/headscale.v1.NodeService/GetPeers",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("headscale.v1.NodeService", "GetPeers"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod node_service_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with NodeServiceServer.
-    #[async_trait]
-    pub trait NodeService: std::marker::Send + std::marker::Sync + 'static {
-        /// Register a new node in the mesh
-        async fn register(
-            &self,
-            request: tonic::Request<super::RegisterRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterResponse>,
-            tonic::Status,
-        >;
-        /// Update node information
-        async fn update_node(
-            &self,
-            request: tonic::Request<super::UpdateNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Node>, tonic::Status>;
-        /// Get node by ID
-        async fn get_node(
-            &self,
-            request: tonic::Request<super::GetNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Node>, tonic::Status>;
-        /// List all nodes in the mesh
-        async fn list_nodes(
-            &self,
-            request: tonic::Request<super::ListNodesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListNodesResponse>,
-            tonic::Status,
-        >;
-        /// Delete a node
-        async fn delete_node(
-            &self,
-            request: tonic::Request<super::DeleteNodeRequest>,
-        ) -> std::result::Result<tonic::Response<super::Status>, tonic::Status>;
-        /// Heartbeat to maintain online status
-        async fn heartbeat(
-            &self,
-            request: tonic::Request<super::HeartbeatRequest>,
-        ) -> std::result::Result<tonic::Response<super::Status>, tonic::Status>;
-        /// Get peers for a node
-        async fn get_peers(
-            &self,
-            request: tonic::Request<super::GetPeersRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPeersResponse>,
-            tonic::Status,
-        >;
-    }
-    /// Node management service
-    #[derive(Debug)]
-    pub struct NodeServiceServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> NodeServiceServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for NodeServiceServer<T>
-    where
-        T: NodeService,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::BoxBody>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/headscale.v1.NodeService/Register" => {
-                    #[allow(non_camel_case_types)]
-                    struct RegisterSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::RegisterRequest>
-                    for RegisterSvc<T> {
-                        type Response = super::RegisterResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RegisterRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::register(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RegisterSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/UpdateNode" => {
-                    #[allow(non_camel_case_types)]
-                    struct UpdateNodeSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::UpdateNodeRequest>
-                    for UpdateNodeSvc<T> {
-                        type Response = super::Node;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::UpdateNodeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::update_node(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = UpdateNodeSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/GetNode" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetNodeSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::GetNodeRequest>
-                    for GetNodeSvc<T> {
-                        type Response = super::Node;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetNodeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::get_node(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetNodeSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/ListNodes" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListNodesSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::ListNodesRequest>
-                    for ListNodesSvc<T> {
-                        type Response = super::ListNodesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListNodesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::list_nodes(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListNodesSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/DeleteNode" => {
-                    #[allow(non_camel_case_types)]
-                    struct DeleteNodeSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::DeleteNodeRequest>
-                    for DeleteNodeSvc<T> {
-                        type Response = super::Status;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::DeleteNodeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::delete_node(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = DeleteNodeSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/Heartbeat" => {
-                    #[allow(non_camel_case_types)]
-                    struct HeartbeatSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::HeartbeatRequest>
-                    for HeartbeatSvc<T> {
-                        type Response = super::Status;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::HeartbeatRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::heartbeat(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = HeartbeatSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/headscale.v1.NodeService/GetPeers" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetPeersSvc<T: NodeService>(pub Arc<T>);
-                    impl<
-                        T: NodeService,
-                    > tonic::server::UnaryService<super::GetPeersRequest>
-                    for GetPeersSvc<T> {
-                        type Response = super::GetPeersResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetPeersRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as NodeService>::get_peers(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetPeersSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(empty_body());
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for NodeServiceServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "headscale.v1.NodeService";
-    impl<T> tonic::server::NamedService for NodeServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
     }
 }
 /// Inference specification
@@ -3498,6 +2902,2237 @@ pub mod health_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "headscale.v1.HealthService";
     impl<T> tonic::server::NamedService for HealthServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ApiKey {
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    #[prost(string, tag = "2")]
+    pub prefix: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub expiration: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "4")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "5")]
+    pub last_seen: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CreateApiKeyRequest {
+    #[prost(message, optional, tag = "1")]
+    pub expiration: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateApiKeyResponse {
+    #[prost(string, tag = "1")]
+    pub api_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExpireApiKeyRequest {
+    #[prost(string, tag = "1")]
+    pub prefix: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ExpireApiKeyResponse {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ListApiKeysRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListApiKeysResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub api_keys: ::prost::alloc::vec::Vec<ApiKey>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeleteApiKeyRequest {
+    #[prost(string, tag = "1")]
+    pub prefix: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub id: u64,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteApiKeyResponse {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetPolicyRequest {
+    #[prost(string, tag = "1")]
+    pub policy: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetPolicyResponse {
+    #[prost(string, tag = "1")]
+    pub policy: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetPolicyRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPolicyResponse {
+    #[prost(string, tag = "1")]
+    pub policy: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HealthRequest {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HealthResponse {
+    #[prost(bool, tag = "1")]
+    pub database_connectivity: bool,
+}
+/// Generated client implementations.
+pub mod headscale_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct HeadscaleServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl HeadscaleServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> HeadscaleServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> HeadscaleServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            HeadscaleServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn create_user(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/CreateUser",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "CreateUser"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn rename_user(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RenameUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RenameUserResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/RenameUser",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "RenameUser"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_user(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteUserResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/DeleteUser",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "DeleteUser"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_users(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListUsersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListUsersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ListUsers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "ListUsers"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_pre_auth_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreatePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreatePreAuthKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/CreatePreAuthKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "CreatePreAuthKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn expire_pre_auth_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExpirePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpirePreAuthKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ExpirePreAuthKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "ExpirePreAuthKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_pre_auth_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeletePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeletePreAuthKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/DeletePreAuthKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "DeletePreAuthKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_pre_auth_keys(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListPreAuthKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPreAuthKeysResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ListPreAuthKeys",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "ListPreAuthKeys"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn debug_create_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DebugCreateNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DebugCreateNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/DebugCreateNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "DebugCreateNode"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/GetNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "GetNode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_tags(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetTagsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetTagsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/SetTags",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "SetTags"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_approved_routes(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetApprovedRoutesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetApprovedRoutesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/SetApprovedRoutes",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "SetApprovedRoutes"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn register_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/RegisterNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "RegisterNode"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/DeleteNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "DeleteNode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn expire_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExpireNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpireNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ExpireNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "ExpireNode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn rename_node(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RenameNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RenameNodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/RenameNode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "RenameNode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_nodes(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListNodesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListNodesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ListNodes",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "ListNodes"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn backfill_node_i_ps(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BackfillNodeIPsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BackfillNodeIPsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/BackfillNodeIPs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "BackfillNodeIPs"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_api_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateApiKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/CreateApiKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "CreateApiKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn expire_api_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExpireApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpireApiKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ExpireApiKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "ExpireApiKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_api_keys(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListApiKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListApiKeysResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/ListApiKeys",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "ListApiKeys"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_api_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteApiKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/DeleteApiKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "DeleteApiKey"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/GetPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "GetPolicy"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/SetPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "SetPolicy"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn health(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HealthRequest>,
+        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/Health",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "Health"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod headscale_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with HeadscaleServiceServer.
+    #[async_trait]
+    pub trait HeadscaleService: std::marker::Send + std::marker::Sync + 'static {
+        async fn create_user(
+            &self,
+            request: tonic::Request<super::CreateUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserResponse>,
+            tonic::Status,
+        >;
+        async fn rename_user(
+            &self,
+            request: tonic::Request<super::RenameUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RenameUserResponse>,
+            tonic::Status,
+        >;
+        async fn delete_user(
+            &self,
+            request: tonic::Request<super::DeleteUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteUserResponse>,
+            tonic::Status,
+        >;
+        async fn list_users(
+            &self,
+            request: tonic::Request<super::ListUsersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListUsersResponse>,
+            tonic::Status,
+        >;
+        async fn create_pre_auth_key(
+            &self,
+            request: tonic::Request<super::CreatePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreatePreAuthKeyResponse>,
+            tonic::Status,
+        >;
+        async fn expire_pre_auth_key(
+            &self,
+            request: tonic::Request<super::ExpirePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpirePreAuthKeyResponse>,
+            tonic::Status,
+        >;
+        async fn delete_pre_auth_key(
+            &self,
+            request: tonic::Request<super::DeletePreAuthKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeletePreAuthKeyResponse>,
+            tonic::Status,
+        >;
+        async fn list_pre_auth_keys(
+            &self,
+            request: tonic::Request<super::ListPreAuthKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPreAuthKeysResponse>,
+            tonic::Status,
+        >;
+        async fn debug_create_node(
+            &self,
+            request: tonic::Request<super::DebugCreateNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DebugCreateNodeResponse>,
+            tonic::Status,
+        >;
+        async fn get_node(
+            &self,
+            request: tonic::Request<super::GetNodeRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetNodeResponse>, tonic::Status>;
+        async fn set_tags(
+            &self,
+            request: tonic::Request<super::SetTagsRequest>,
+        ) -> std::result::Result<tonic::Response<super::SetTagsResponse>, tonic::Status>;
+        async fn set_approved_routes(
+            &self,
+            request: tonic::Request<super::SetApprovedRoutesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetApprovedRoutesResponse>,
+            tonic::Status,
+        >;
+        async fn register_node(
+            &self,
+            request: tonic::Request<super::RegisterNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterNodeResponse>,
+            tonic::Status,
+        >;
+        async fn delete_node(
+            &self,
+            request: tonic::Request<super::DeleteNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteNodeResponse>,
+            tonic::Status,
+        >;
+        async fn expire_node(
+            &self,
+            request: tonic::Request<super::ExpireNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpireNodeResponse>,
+            tonic::Status,
+        >;
+        async fn rename_node(
+            &self,
+            request: tonic::Request<super::RenameNodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RenameNodeResponse>,
+            tonic::Status,
+        >;
+        async fn list_nodes(
+            &self,
+            request: tonic::Request<super::ListNodesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListNodesResponse>,
+            tonic::Status,
+        >;
+        async fn backfill_node_i_ps(
+            &self,
+            request: tonic::Request<super::BackfillNodeIPsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BackfillNodeIPsResponse>,
+            tonic::Status,
+        >;
+        async fn create_api_key(
+            &self,
+            request: tonic::Request<super::CreateApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateApiKeyResponse>,
+            tonic::Status,
+        >;
+        async fn expire_api_key(
+            &self,
+            request: tonic::Request<super::ExpireApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExpireApiKeyResponse>,
+            tonic::Status,
+        >;
+        async fn list_api_keys(
+            &self,
+            request: tonic::Request<super::ListApiKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListApiKeysResponse>,
+            tonic::Status,
+        >;
+        async fn delete_api_key(
+            &self,
+            request: tonic::Request<super::DeleteApiKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteApiKeyResponse>,
+            tonic::Status,
+        >;
+        async fn get_policy(
+            &self,
+            request: tonic::Request<super::GetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPolicyResponse>,
+            tonic::Status,
+        >;
+        async fn set_policy(
+            &self,
+            request: tonic::Request<super::SetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPolicyResponse>,
+            tonic::Status,
+        >;
+        async fn health(
+            &self,
+            request: tonic::Request<super::HealthRequest>,
+        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status>;
+    }
+    #[derive(Debug)]
+    pub struct HeadscaleServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> HeadscaleServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for HeadscaleServiceServer<T>
+    where
+        T: HeadscaleService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::BoxBody>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/headscale.v1.HeadscaleService/CreateUser" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateUserSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::CreateUserRequest>
+                    for CreateUserSvc<T> {
+                        type Response = super::CreateUserResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateUserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::create_user(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateUserSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/RenameUser" => {
+                    #[allow(non_camel_case_types)]
+                    struct RenameUserSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::RenameUserRequest>
+                    for RenameUserSvc<T> {
+                        type Response = super::RenameUserResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RenameUserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::rename_user(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RenameUserSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/DeleteUser" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteUserSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::DeleteUserRequest>
+                    for DeleteUserSvc<T> {
+                        type Response = super::DeleteUserResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteUserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::delete_user(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteUserSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ListUsers" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListUsersSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ListUsersRequest>
+                    for ListUsersSvc<T> {
+                        type Response = super::ListUsersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListUsersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::list_users(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListUsersSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/CreatePreAuthKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreatePreAuthKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::CreatePreAuthKeyRequest>
+                    for CreatePreAuthKeySvc<T> {
+                        type Response = super::CreatePreAuthKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreatePreAuthKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::create_pre_auth_key(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreatePreAuthKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ExpirePreAuthKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExpirePreAuthKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ExpirePreAuthKeyRequest>
+                    for ExpirePreAuthKeySvc<T> {
+                        type Response = super::ExpirePreAuthKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExpirePreAuthKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::expire_pre_auth_key(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExpirePreAuthKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/DeletePreAuthKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeletePreAuthKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::DeletePreAuthKeyRequest>
+                    for DeletePreAuthKeySvc<T> {
+                        type Response = super::DeletePreAuthKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeletePreAuthKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::delete_pre_auth_key(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeletePreAuthKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ListPreAuthKeys" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListPreAuthKeysSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ListPreAuthKeysRequest>
+                    for ListPreAuthKeysSvc<T> {
+                        type Response = super::ListPreAuthKeysResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListPreAuthKeysRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::list_pre_auth_keys(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListPreAuthKeysSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/DebugCreateNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct DebugCreateNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::DebugCreateNodeRequest>
+                    for DebugCreateNodeSvc<T> {
+                        type Response = super::DebugCreateNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DebugCreateNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::debug_create_node(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DebugCreateNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/GetNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::GetNodeRequest>
+                    for GetNodeSvc<T> {
+                        type Response = super::GetNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::get_node(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/SetTags" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetTagsSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::SetTagsRequest>
+                    for SetTagsSvc<T> {
+                        type Response = super::SetTagsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetTagsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::set_tags(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetTagsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/SetApprovedRoutes" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetApprovedRoutesSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::SetApprovedRoutesRequest>
+                    for SetApprovedRoutesSvc<T> {
+                        type Response = super::SetApprovedRoutesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetApprovedRoutesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::set_approved_routes(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetApprovedRoutesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/RegisterNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct RegisterNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::RegisterNodeRequest>
+                    for RegisterNodeSvc<T> {
+                        type Response = super::RegisterNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RegisterNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::register_node(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RegisterNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/DeleteNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::DeleteNodeRequest>
+                    for DeleteNodeSvc<T> {
+                        type Response = super::DeleteNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::delete_node(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ExpireNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExpireNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ExpireNodeRequest>
+                    for ExpireNodeSvc<T> {
+                        type Response = super::ExpireNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExpireNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::expire_node(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExpireNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/RenameNode" => {
+                    #[allow(non_camel_case_types)]
+                    struct RenameNodeSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::RenameNodeRequest>
+                    for RenameNodeSvc<T> {
+                        type Response = super::RenameNodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RenameNodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::rename_node(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RenameNodeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ListNodes" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListNodesSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ListNodesRequest>
+                    for ListNodesSvc<T> {
+                        type Response = super::ListNodesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListNodesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::list_nodes(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListNodesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/BackfillNodeIPs" => {
+                    #[allow(non_camel_case_types)]
+                    struct BackfillNodeIPsSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::BackfillNodeIPsRequest>
+                    for BackfillNodeIPsSvc<T> {
+                        type Response = super::BackfillNodeIPsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BackfillNodeIPsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::backfill_node_i_ps(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BackfillNodeIPsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/CreateApiKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateApiKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::CreateApiKeyRequest>
+                    for CreateApiKeySvc<T> {
+                        type Response = super::CreateApiKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateApiKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::create_api_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateApiKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ExpireApiKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExpireApiKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ExpireApiKeyRequest>
+                    for ExpireApiKeySvc<T> {
+                        type Response = super::ExpireApiKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExpireApiKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::expire_api_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExpireApiKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/ListApiKeys" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListApiKeysSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::ListApiKeysRequest>
+                    for ListApiKeysSvc<T> {
+                        type Response = super::ListApiKeysResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListApiKeysRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::list_api_keys(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListApiKeysSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/DeleteApiKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteApiKeySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::DeleteApiKeyRequest>
+                    for DeleteApiKeySvc<T> {
+                        type Response = super::DeleteApiKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteApiKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::delete_api_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteApiKeySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/GetPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPolicySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::GetPolicyRequest>
+                    for GetPolicySvc<T> {
+                        type Response = super::GetPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::get_policy(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetPolicySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/SetPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetPolicySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::SetPolicyRequest>
+                    for SetPolicySvc<T> {
+                        type Response = super::SetPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::set_policy(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetPolicySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/Health" => {
+                    #[allow(non_camel_case_types)]
+                    struct HealthSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::HealthRequest>
+                    for HealthSvc<T> {
+                        type Response = super::HealthResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::HealthRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::health(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = HealthSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(empty_body());
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for HeadscaleServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "headscale.v1.HeadscaleService";
+    impl<T> tonic::server::NamedService for HeadscaleServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

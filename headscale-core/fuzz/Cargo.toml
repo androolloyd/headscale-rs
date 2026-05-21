@@ -15,9 +15,18 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 tokio = { version = "1.42", features = ["rt"] }
 ipnet = "2.9"
+serde = "1"
+serde_json = "1"
 
 [dependencies.headscale-core]
 path = ".."
+
+[dependencies.headscale-api-acl]
+path = "../../headscale-api-acl"
+
+[dependencies.headscale-api]
+path = "../../headscale-api"
+default-features = false
 
 [dependencies.boringtun]
 version = "0.7.1"
@@ -106,6 +115,22 @@ bench = false
 [[bin]]
 name = "fuzz_routing"
 path = "fuzz_targets/fuzz_routing.rs"
+test = false
+doc = false
+bench = false
+
+# Canonical headscale-api-acl HuJSON/parser/evaluator fuzz target
+[[bin]]
+name = "fuzz_policy_hujson"
+path = "fuzz_targets/fuzz_policy_hujson.rs"
+test = false
+doc = false
+bench = false
+
+# Tailscale wire JSON shape fuzz target
+[[bin]]
+name = "fuzz_tailscale_wire"
+path = "fuzz_targets/fuzz_tailscale_wire.rs"
 test = false
 doc = false
 bench = false

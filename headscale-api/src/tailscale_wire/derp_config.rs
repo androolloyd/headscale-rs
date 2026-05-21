@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn round_trip_one_region_fixture() {
         let fixture = serde_json::json!({
-            "OmitDefaultRegions": true,
+            "omitDefaultRegions": true,
             "Regions": {
                 "1": {
                     "RegionID": 1,
@@ -113,7 +113,7 @@ mod tests {
         assert!(json.contains("\"HostName\""));
         assert!(json.contains("\"DERPPort\""));
         assert!(json.contains("\"InsecureForTests\""));
-        assert!(json.contains("\"OmitDefaultRegions\""));
+        assert!(json.contains("\"omitDefaultRegions\""));
     }
 
     #[test]

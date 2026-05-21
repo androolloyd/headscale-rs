@@ -3,7 +3,10 @@
 //! called these "machines"; the v1 GUI exposes them under that name,
 //! but the CLI verb is `nodes` to match upstream's modern naming.)
 
+use std::collections::BTreeMap;
+
 use headscale_api::admin::MachineAdminRecord;
+use headscale_api::tailscale_wire::routes::{active_exit_routes, primary_routes_by_node};
 
 use super::AdminError;
 use super::client::AdminClient;
@@ -21,6 +24,30 @@ pub async fn list(
     match fmt {
         OutputFormat::Json => print_json(&nodes)?,
         OutputFormat::Table => render_nodes(&nodes),
+    }
+    Ok(())
+}
+
+pub async fn list_routes(
+    client: &AdminClient,
+    id: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let mut nodes = if let Some(id) = id {
+        vec![
+            client
+                .get_json::<MachineAdminRecord>(&format!("/machines/{id}"))
+                .await?,
+        ]
+    } else {
+        client
+            .get_json::<Vec<MachineAdminRecord>>("/machines")
+            .await?
+    };
+    nodes.retain(|n| !n.routes.is_empty() || !n.approved_routes.is_empty());
+    match fmt {
+        OutputFormat::Json => print_json(&nodes)?,
+        OutputFormat::Table => render_routes(&nodes),
     }
     Ok(())
 }
@@ -92,6 +119,25 @@ pub async fn tags(client: &AdminClient, id: &str, tags: Vec<String>) -> Result<(
         println!("Cleared forced tags on node '{id}'");
     } else {
         println!("Set forced tags on node '{id}': {}", tags.join(", "));
+    }
+    Ok(())
+}
+
+pub async fn approve_routes(
+    client: &AdminClient,
+    id: &str,
+    routes: Vec<String>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let path = format!("/machines/{id}/routes");
+    let body = serde_json::json!({ "routes": routes });
+    let node: MachineAdminRecord = client.post_json(&path, &body).await?;
+    match fmt {
+        OutputFormat::Json => print_json(&node)?,
+        OutputFormat::Table => {
+            println!("Node updated");
+            render_routes(&[node]);
+        }
     }
     Ok(())
 }
@@ -171,6 +217,65 @@ fn render_one(n: &MachineAdminRecord) {
     if !n.routes.is_empty() {
         println!("  Routes:    {}", n.routes.join(", "));
     }
+    if !n.approved_routes.is_empty() {
+        println!("  Approved:  {}", n.approved_routes.join(", "));
+    }
+}
+
+fn render_routes(nodes: &[MachineAdminRecord]) {
+    if nodes.is_empty() {
+        println!("No routes advertised or approved.");
+        return;
+    }
+    let serving = serving_routes(nodes);
+    let rows: Vec<Vec<String>> = nodes
+        .iter()
+        .map(|n| {
+            vec![
+                short_id(&n.id),
+                n.name.clone(),
+                n.approved_routes.join("\n"),
+                n.routes.join("\n"),
+                serving.get(&n.id).cloned().unwrap_or_default().join("\n"),
+            ]
+        })
+        .collect();
+    print_table(
+        &[
+            "ID",
+            "HOSTNAME",
+            "APPROVED",
+            "AVAILABLE",
+            "SERVING (PRIMARY)",
+        ],
+        &rows,
+    );
+}
+
+fn serving_routes(nodes: &[MachineAdminRecord]) -> BTreeMap<String, Vec<String>> {
+    let primary = primary_routes_by_node(nodes.iter().enumerate().map(|(idx, n)| {
+        let node_id = if n.node_id == 0 {
+            (idx + 1) as u64
+        } else {
+            n.node_id
+        };
+        (
+            n.id.as_str(),
+            node_id,
+            n.routes.as_slice(),
+            n.approved_routes.as_slice(),
+        )
+    }));
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let mut routes = primary.get(&n.id).cloned().unwrap_or_default();
+            routes.extend(active_exit_routes(&n.routes, &n.approved_routes));
+            routes.sort();
+            routes.dedup();
+            (!routes.is_empty()).then(|| (n.id.clone(), routes))
+        })
+        .collect()
 }
 
 /// Truncate the node_key-hex ID to its first 12 chars for the table

@@ -8,7 +8,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use headscale_api::{
     policy::{
-        NodeView, PolicyAction, PolicyDoc, SshPolicyNode, compile_ssh_policy, parse_hujson_policy,
+        NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, build_peer_map_for_doc,
+        compile_ssh_policy, parse_hujson_policy,
     },
     tailscale_wire::wire::{
         DerpMap, DnsConfig, HostInfo, MapNode, MapRequest, MapResponse, RegisterRequest,
@@ -29,6 +30,8 @@ struct Scenario {
     nodes: Vec<ScenarioNode>,
     #[serde(default)]
     filter_node_checks: Vec<FilterNodeCheck>,
+    #[serde(default)]
+    peer_map_checks: Vec<PeerMapCheck>,
     #[serde(default)]
     route_checks: Vec<RouteCheck>,
     #[serde(default)]
@@ -58,10 +61,20 @@ struct ScenarioNode {
     ipv6: String,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    routes: Vec<String>,
+    #[serde(default)]
+    approved_routes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FilterNodeCheck {
+    name: String,
+    node_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerMapCheck {
     name: String,
     node_id: u64,
 }
@@ -115,6 +128,8 @@ struct ScenarioOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     filter_for_nodes: Vec<FilterForNodeOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    peer_maps: Vec<PeerMapOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     route_approvals: Vec<RouteApprovalOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tag_checks: Vec<TagCheckOut>,
@@ -128,6 +143,12 @@ struct ScenarioOutput {
 struct FilterForNodeOut {
     name: String,
     rules: Vec<FilterRuleOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct PeerMapOut {
+    name: String,
+    peers: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -472,6 +493,7 @@ fn main() -> Result<()> {
                         filter: Vec::new(),
                         policy_error: Some(expect.to_string()),
                         filter_for_nodes: Vec::new(),
+                        peer_maps: Vec::new(),
                         route_approvals: Vec::new(),
                         tag_checks: Vec::new(),
                         ssh_policies: Vec::new(),
@@ -483,13 +505,14 @@ fn main() -> Result<()> {
         }
         let doc =
             parsed.with_context(|| format!("headscale-rs parsing policy for {}", scenario.name))?;
-        let filter_nodes = build_filter_nodes(&scenario);
+        let filter_nodes = build_filter_nodes(&scenario)?;
         out.push(ScenarioOutput {
             engine: "headscale-rs",
             name: scenario.name.clone(),
             filter: compile_filter_rules(&doc, &filter_nodes, None),
             policy_error: None,
             filter_for_nodes: run_filter_node_checks(&scenario, &doc, &filter_nodes)?,
+            peer_maps: run_peer_map_checks(&scenario, &doc, &filter_nodes)?,
             route_approvals: run_route_checks(&scenario, &doc)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
@@ -507,9 +530,10 @@ struct FilterNode {
     user: Option<String>,
     addrs: Vec<String>,
     tags: Vec<String>,
+    routes: Vec<String>,
 }
 
-fn build_filter_nodes(scenario: &Scenario) -> Vec<FilterNode> {
+fn build_filter_nodes(scenario: &Scenario) -> Result<Vec<FilterNode>> {
     let users = scenario
         .users
         .iter()
@@ -534,14 +558,29 @@ fn build_filter_nodes(scenario: &Scenario) -> Vec<FilterNode> {
             if !node.ipv6.is_empty() {
                 addrs.push(node.ipv6.clone());
             }
-            FilterNode {
+            Ok(FilterNode {
                 id: node.id,
                 user: users.get(&node.user_id).cloned(),
                 addrs,
                 tags: node.tags.clone(),
-            }
+                routes: active_routes(node)?,
+            })
         })
         .collect()
+}
+
+fn active_routes(node: &ScenarioNode) -> Result<Vec<String>> {
+    let announced =
+        normalize_prefixes(&node.routes).with_context(|| format!("node {} routes", node.id))?;
+    let approved = normalize_prefixes(&node.approved_routes)
+        .with_context(|| format!("node {} approved_routes", node.id))?;
+    let mut out = announced
+        .into_iter()
+        .filter(|route| approved.contains(route))
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 fn run_filter_node_checks(
@@ -563,6 +602,47 @@ fn run_filter_node_checks(
         out.push(FilterForNodeOut {
             name: check.name.clone(),
             rules: compile_filter_rules(doc, nodes, Some(check.node_id)),
+        });
+    }
+    Ok(out)
+}
+
+fn run_peer_map_checks(
+    scenario: &Scenario,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+) -> Result<Vec<PeerMapOut>> {
+    if scenario.peer_map_checks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let peer_nodes = nodes
+        .iter()
+        .map(|node| PeerMapNode {
+            id: node.id,
+            addr: node.addrs.first().cloned().unwrap_or_default(),
+            user: node.user.clone(),
+            tags: node.tags.clone(),
+            routes: node.routes.clone(),
+        })
+        .collect::<Vec<_>>();
+    let peer_map = build_peer_map_for_doc(doc, &peer_nodes);
+
+    let mut out = Vec::with_capacity(scenario.peer_map_checks.len());
+    for check in &scenario.peer_map_checks {
+        nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "peer map check {} references unknown node {}",
+                    check.name, check.node_id
+                )
+            })?;
+        let peers = peer_map.get(&check.node_id).cloned().unwrap_or_default();
+        out.push(PeerMapOut {
+            name: check.name.clone(),
+            peers,
         });
     }
     Ok(out)

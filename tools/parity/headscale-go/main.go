@@ -23,6 +23,7 @@ type scenario struct {
 	Users            []scenarioUser    `json:"users,omitempty"`
 	Nodes            []scenarioNode    `json:"nodes,omitempty"`
 	FilterNodeChecks []filterNodeCheck `json:"filter_node_checks,omitempty"`
+	PeerMapChecks    []peerMapCheck    `json:"peer_map_checks,omitempty"`
 	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
 	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
 	SSHChecks        []sshCheck        `json:"ssh_checks,omitempty"`
@@ -37,12 +38,14 @@ type scenarioUser struct {
 }
 
 type scenarioNode struct {
-	ID       uint64   `json:"id"`
-	UserID   uint     `json:"user_id"`
-	Hostname string   `json:"hostname"`
-	IPv4     string   `json:"ipv4"`
-	IPv6     string   `json:"ipv6,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
+	ID             uint64   `json:"id"`
+	UserID         uint     `json:"user_id"`
+	Hostname       string   `json:"hostname"`
+	IPv4           string   `json:"ipv4"`
+	IPv6           string   `json:"ipv6,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Routes         []string `json:"routes,omitempty"`
+	ApprovedRoutes []string `json:"approved_routes,omitempty"`
 }
 
 type scenarioOutput struct {
@@ -51,6 +54,7 @@ type scenarioOutput struct {
 	Filter         []filterRuleOut    `json:"filter"`
 	PolicyError    string             `json:"policy_error,omitempty"`
 	FilterForNodes []filterForNodeOut `json:"filter_for_nodes,omitempty"`
+	PeerMaps       []peerMapOut       `json:"peer_maps,omitempty"`
 	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
 	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
 	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
@@ -65,6 +69,16 @@ type filterNodeCheck struct {
 type filterForNodeOut struct {
 	Name  string          `json:"name"`
 	Rules []filterRuleOut `json:"rules"`
+}
+
+type peerMapCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
+}
+
+type peerMapOut struct {
+	Name  string   `json:"name"`
+	Peers []uint64 `json:"peers"`
 }
 
 type routeCheck struct {
@@ -348,6 +362,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
+	peerMaps, err := runPeerMapChecks(sc.PeerMapChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	routeApprovals, err := runRouteChecks(sc.RouteChecks, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
@@ -369,6 +387,7 @@ func runScenario(path string) (scenarioOutput, error) {
 		Name:           sc.Name,
 		Filter:         normalizeFilterRules(rules),
 		FilterForNodes: filterForNodes,
+		PeerMaps:       peerMaps,
 		RouteApprovals: routeApprovals,
 		TagChecks:      tagChecks,
 		SSHPolicies:    sshPolicies,
@@ -412,16 +431,32 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 			}
 			ip6Ptr = &ip
 		}
+		routes, err := parsePrefixes(n.Routes)
+		if err != nil {
+			return nil, fmt.Errorf("parse node %d routes: %w", n.ID, err)
+		}
+		approvedRoutes, err := parsePrefixes(n.ApprovedRoutes)
+		if err != nil {
+			return nil, fmt.Errorf("parse node %d approved_routes: %w", n.ID, err)
+		}
+		var hostinfo *tailcfg.Hostinfo
+		if len(routes) > 0 {
+			hostinfo = &tailcfg.Hostinfo{
+				RoutableIPs: routes,
+			}
+		}
 		userID := n.UserID
 		node := &types.Node{
-			ID:        types.NodeID(n.ID),
-			Hostname:  n.Hostname,
-			GivenName: n.Hostname,
-			UserID:    &userID,
-			User:      users[n.UserID],
-			IPv4:      ipPtr,
-			IPv6:      ip6Ptr,
-			Tags:      n.Tags,
+			ID:             types.NodeID(n.ID),
+			Hostname:       n.Hostname,
+			GivenName:      n.Hostname,
+			UserID:         &userID,
+			User:           users[n.UserID],
+			IPv4:           ipPtr,
+			IPv6:           ip6Ptr,
+			Tags:           n.Tags,
+			Hostinfo:       hostinfo,
+			ApprovedRoutes: approvedRoutes,
 		}
 		nodes = append(nodes, node)
 	}
@@ -480,6 +515,32 @@ func runFilterNodeChecks(checks []filterNodeCheck, pm policy.PolicyManager, node
 		out = append(out, filterForNodeOut{
 			Name:  check.Name,
 			Rules: normalizeFilterRules(rules),
+		})
+	}
+	return out, nil
+}
+
+func runPeerMapChecks(checks []peerMapCheck, pm policy.PolicyManager, nodes types.Nodes) ([]peerMapOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	peerMap := pm.BuildPeerMap(nodes.ViewSlice())
+	out := make([]peerMapOut, 0, len(checks))
+	for _, check := range checks {
+		if findNode(nodes, check.NodeID) == nil {
+			return nil, fmt.Errorf("peer map check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		peers := peerMap[types.NodeID(check.NodeID)]
+		ids := make([]uint64, 0, len(peers))
+		for _, peer := range peers {
+			ids = append(ids, peer.ID().Uint64())
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			return ids[i] < ids[j]
+		})
+		out = append(out, peerMapOut{
+			Name:  check.Name,
+			Peers: ids,
 		})
 	}
 	return out, nil

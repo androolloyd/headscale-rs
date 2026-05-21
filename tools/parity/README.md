@@ -23,6 +23,9 @@ Scenarios may also include:
   `headscale-go`'s `ApproveRoutesWithPolicy`.
 - `filter_node_checks`: per-node `FilterForNode` checks, including
   `autogroup:self` reduction.
+- `peer_map_checks`: per-node peer visibility checks compared against
+  `headscale-go`'s `PolicyManager.BuildPeerMap`, including symmetric
+  one-way ACL visibility and route-backed subnet-router visibility.
 - `tag_checks`: `NodeCanHaveTag` checks for `tagOwners` behavior.
 - `ssh_checks`: per-node `SSHPolicy` checks, including SSH user maps,
   `autogroup:self`, tagged destinations, host destinations, and `checkPeriod`.

@@ -1119,8 +1119,11 @@ fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
 }
 
 fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeView<'_>>) -> bool {
-    if kind == "internet" || kind == "member" {
+    if kind == "internet" {
         return true;
+    }
+    if kind == "member" {
+        return principal.tags.is_empty();
     }
     if kind == "nonroot" {
         return principal.tags.is_empty();
@@ -1136,10 +1139,12 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
             return false;
         };
         if let (Some(a), Some(b)) = (principal.addr, peer.addr) {
-            return a == b;
+            if a == b {
+                return true;
+            }
         }
         if let (Some(a), Some(b)) = (principal.user, peer.user) {
-            return a == b;
+            return principal.tags.is_empty() && peer.tags.is_empty() && a == b;
         }
         return false;
     }
@@ -1775,11 +1780,17 @@ mod tests {
     }
 
     #[test]
-    fn autogroup_member_matches_any_node() {
+    fn autogroup_member_matches_untagged_nodes() {
         let doc = doc_with_rule(&["autogroup:member"], &["*"]);
         let s = NodeView::new("100.64.0.1");
         let d = NodeView::new("100.64.0.2");
+        let tags = vec!["tag:router".to_string()];
+        let tagged = NodeView::new("100.64.0.3").with_tags(&tags);
         assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
+        assert_eq!(
+            doc.evaluate_with(&tagged, &d, PortRef::any()),
+            AclAction::Deny
+        );
     }
 
     #[test]
@@ -1870,6 +1881,17 @@ mod tests {
         };
         assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
         assert_eq!(doc.evaluate_with(&s, &s2, PortRef::any()), AclAction::Deny);
+    }
+
+    #[test]
+    fn autogroup_self_matches_same_user_with_different_addrs() {
+        let doc = doc_with_rule(&["autogroup:member"], &["autogroup:self"]);
+        let user = "alice".to_string();
+        let s = NodeView::new("100.64.0.1").with_user(&user);
+        let d = NodeView::new("100.64.0.2").with_user(&user);
+        let bob = NodeView::new("100.64.0.3").with_user("bob");
+        assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
+        assert_eq!(doc.evaluate_with(&s, &bob, PortRef::any()), AclAction::Deny);
     }
 
     #[test]

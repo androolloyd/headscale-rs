@@ -59,5 +59,11 @@
     { "name": "alice-a-filter", "node_id": 1 },
     { "name": "bob-a-filter", "node_id": 3 },
     { "name": "tagged-router-filter", "node_id": 4 }
+  ],
+  "peer_map_checks": [
+    { "name": "alice-a-peers", "node_id": 1 },
+    { "name": "alice-b-peers", "node_id": 2 },
+    { "name": "bob-a-peers", "node_id": 3 },
+    { "name": "tagged-router-peers", "node_id": 4 }
   ]
 }

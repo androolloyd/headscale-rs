@@ -671,6 +671,30 @@ async fn grpc_gateway_policy_round_trips_protojson_body() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_policy_missing_database_row_is_status_json() {
+    let (app, token, _db) = fixture_with_db().await;
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/policy",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], 2);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("acl policy not found")
+    );
+}
+
+#[tokio::test]
 async fn grpc_gateway_policy_persists_in_database_mode() {
     let (app, token, db) = fixture_with_db().await;
     let first = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:22"]}]}"#;

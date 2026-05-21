@@ -147,6 +147,7 @@ pub mod services {
 pub mod upstream {
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -192,9 +193,17 @@ pub mod upstream {
         machines: Arc<dyn MachineAdmin>,
         database_health: Option<Arc<dyn DatabaseHealthCheck>>,
         policy_persistence: Option<Arc<dyn PolicyPersistence>>,
+        policy_mode: PolicyMode,
         pending_nodes: Arc<RwLock<BTreeMap<String, MachineAdminRecord>>>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum PolicyMode {
+        Memory,
+        Database,
+        File { path: PathBuf },
     }
 
     #[async_trait]
@@ -278,6 +287,7 @@ pub mod upstream {
                 machines,
                 database_health: None,
                 policy_persistence: None,
+                policy_mode: PolicyMode::Memory,
                 pending_nodes: Arc::new(RwLock::new(BTreeMap::new())),
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
@@ -302,12 +312,18 @@ pub mod upstream {
             policy_persistence: Arc<dyn PolicyPersistence>,
         ) -> Self {
             self.policy_persistence = Some(policy_persistence);
+            self.policy_mode = PolicyMode::Database;
             self
         }
 
         #[cfg(feature = "admin")]
         pub fn with_policy_pool(self, pool: sqlx::SqlitePool) -> Self {
             self.with_policy_persistence(Arc::new(pool))
+        }
+
+        pub fn with_policy_file(mut self, path: impl Into<PathBuf>) -> Self {
+            self.policy_mode = PolicyMode::File { path: path.into() };
+            self
         }
 
         pub async fn load_policy_from_persistence(&self) -> Result<bool, Status> {
@@ -874,26 +890,44 @@ pub mod upstream {
             request: Request<GetPolicyRequest>,
         ) -> Result<Response<GetPolicyResponse>, Status> {
             self.authorize(&request).await?;
-            if let Some(policy_persistence) = &self.policy_persistence {
-                let policy = policy_persistence
-                    .get_latest_policy()
-                    .await
-                    .map_err(|e| Status::unknown(format!("loading policy from database: {e}")))?;
-                return Ok(Response::new(match policy {
-                    Some(policy) => GetPolicyResponse {
+            match &self.policy_mode {
+                PolicyMode::Database => {
+                    let policy_persistence = self.policy_persistence.as_ref().ok_or_else(|| {
+                        Status::unknown(
+                            "loading ACL from database: policy database is not configured",
+                        )
+                    })?;
+                    let policy = policy_persistence
+                        .get_latest_policy()
+                        .await
+                        .map_err(|e| Status::unknown(format!("loading ACL from database: {e}")))?;
+                    let Some(policy) = policy else {
+                        return Err(Status::unknown(
+                            "loading ACL from database: acl policy not found",
+                        ));
+                    };
+                    Ok(Response::new(GetPolicyResponse {
                         policy: policy.policy,
                         updated_at: Some(unix_to_timestamp(policy.updated_at)),
-                    },
-                    None => GetPolicyResponse {
-                        policy: String::new(),
+                    }))
+                }
+                PolicyMode::File { path } => {
+                    let policy = tokio::fs::read_to_string(path).await.map_err(|e| {
+                        Status::unknown(format!(
+                            "reading policy from path {:?}: {e}",
+                            path.display().to_string()
+                        ))
+                    })?;
+                    Ok(Response::new(GetPolicyResponse {
+                        policy,
                         updated_at: None,
-                    },
-                }));
+                    }))
+                }
+                PolicyMode::Memory => Ok(Response::new(GetPolicyResponse {
+                    policy: self.policy.raw().unwrap_or_default(),
+                    updated_at: self.policy.updated_at().map(unix_to_timestamp),
+                })),
             }
-            Ok(Response::new(GetPolicyResponse {
-                policy: self.policy.raw().unwrap_or_default(),
-                updated_at: self.policy.updated_at().map(unix_to_timestamp),
-            }))
         }
 
         async fn set_policy(
@@ -902,22 +936,35 @@ pub mod upstream {
         ) -> Result<Response<SetPolicyResponse>, Status> {
             self.authorize(&request).await?;
             let policy = request.into_inner().policy;
+            if matches!(self.policy_mode, PolicyMode::File { .. }) {
+                return Err(Status::unknown(
+                    "update is disabled for modes other than 'database'",
+                ));
+            }
             let doc = parse_hujson_policy(&policy)
                 .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
-            let (policy, updated_at) = if let Some(policy_persistence) = &self.policy_persistence {
-                let persisted = policy_persistence
-                    .set_policy(&policy)
-                    .await
-                    .map_err(|e| Status::unknown(format!("persisting policy to database: {e}")))?;
-                self.policy
-                    .set_at(doc, persisted.policy.clone(), persisted.updated_at);
-                (persisted.policy, persisted.updated_at)
-            } else {
-                self.policy.set(doc, policy.clone());
-                (
-                    policy,
-                    self.policy.updated_at().unwrap_or_else(current_unix_i64),
-                )
+            let (policy, updated_at) = match &self.policy_mode {
+                PolicyMode::Database => {
+                    let policy_persistence = self.policy_persistence.as_ref().ok_or_else(|| {
+                        Status::unknown(
+                            "persisting policy to database: policy database is not configured",
+                        )
+                    })?;
+                    let persisted = policy_persistence.set_policy(&policy).await.map_err(|e| {
+                        Status::unknown(format!("persisting policy to database: {e}"))
+                    })?;
+                    self.policy
+                        .set_at(doc, persisted.policy.clone(), persisted.updated_at);
+                    (persisted.policy, persisted.updated_at)
+                }
+                PolicyMode::Memory => {
+                    self.policy.set(doc, policy.clone());
+                    (
+                        policy,
+                        self.policy.updated_at().unwrap_or_else(current_unix_i64),
+                    )
+                }
+                PolicyMode::File { .. } => unreachable!("file mode returned before parsing"),
             };
             crate::admin::machines::apply_policy_auto_approvals(
                 &self.policy,
@@ -1296,6 +1343,7 @@ pub mod upstream {
 
 #[cfg(all(test, feature = "admin"))]
 mod upstream_tests {
+    use std::fs;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
@@ -2342,6 +2390,42 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_database_get_missing_policy_errors() {
+        let (service, _db) = admin_service_with_policy_db().await;
+        let err = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert!(err.message().contains("acl policy not found"));
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_file_mode_reads_file_and_rejects_set() {
+        let (service, _machines) = admin_service_with_machines().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl.hujson");
+        let raw = "{\n  // file mode keeps raw HuJSON\n  \"acls\": []\n}";
+        fs::write(&path, raw).unwrap();
+        let service = service.with_policy_file(path);
+
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, raw);
+        assert!(got.updated_at.is_none());
+
+        let err = service
+            .set_policy(Request::new(SetPolicyRequest { policy: "{".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert!(err.message().contains("update is disabled"));
     }
 
     #[tokio::test]

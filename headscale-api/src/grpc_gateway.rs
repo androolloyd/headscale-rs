@@ -21,10 +21,13 @@ use tonic::{Code, Request as TonicRequest, Status};
 
 use crate::generated::headscale_service_server::HeadscaleService;
 use crate::generated::{
-    ApiKey, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DeleteApiKeyRequest,
-    DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest,
-    GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListPreAuthKeysRequest, ListUsersRequest,
-    PreAuthKey, RenameUserRequest, SetPolicyRequest, User,
+    ApiKey, BackfillNodeIPsRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest,
+    CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest,
+    DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest,
+    ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest,
+    ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest, Node, PreAuthKey, RegisterMethod,
+    RegisterNodeRequest, RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest,
+    SetPolicyRequest, SetTagsRequest, User,
 };
 use crate::grpc::upstream::HeadscaleAdminService;
 
@@ -60,6 +63,18 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/apikey", get(list_api_keys).post(create_api_key))
         .route("/api/v1/apikey/expire", post(expire_api_key))
         .route("/api/v1/apikey/:prefix", delete(delete_api_key))
+        .route("/api/v1/debug/node", post(debug_create_node))
+        .route("/api/v1/node", get(list_nodes))
+        .route("/api/v1/node/register", post(register_node))
+        .route("/api/v1/node/backfillips", post(backfill_node_ips))
+        .route("/api/v1/node/:node_id", get(get_node).delete(delete_node))
+        .route("/api/v1/node/:node_id/tags", post(set_tags))
+        .route(
+            "/api/v1/node/:node_id/approve_routes",
+            post(set_approved_routes),
+        )
+        .route("/api/v1/node/:node_id/expire", post(expire_node))
+        .route("/api/v1/node/:node_id/rename/:new_name", post(rename_node))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
         .with_state(state)
 }
@@ -376,6 +391,290 @@ async fn delete_api_key(
     }
 }
 
+async fn debug_create_node(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let request = match debug_create_node_request(&value) {
+        Ok(body) => tonic_request(&headers, body),
+        Err(status) => return status_response(status),
+    };
+    match state.service.debug_create_node(request).await {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RegisterNodeQuery {
+    user: String,
+    key: String,
+}
+
+async fn register_node(
+    State(state): State<GatewayState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query: RegisterNodeQuery = match parse_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .register_node(tonic_request(
+            &headers,
+            RegisterNodeRequest {
+                user: query.user,
+                key: query.key,
+            },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ListNodesQuery {
+    user: String,
+}
+
+async fn list_nodes(
+    State(state): State<GatewayState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query: ListNodesQuery = match parse_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .list_nodes(tonic_request(
+            &headers,
+            ListNodesRequest { user: query.user },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let nodes = response
+                .into_inner()
+                .nodes
+                .iter()
+                .map(node_json)
+                .collect::<Vec<_>>();
+            json_ok(json!({ "nodes": nodes }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn get_node(
+    State(state): State<GatewayState>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .get_node(tonic_request(&headers, GetNodeRequest { node_id }))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn set_tags(
+    State(state): State<GatewayState>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let tags = match string_array_field(&value, &["tags"], "tags") {
+        Ok(tags) => tags,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .set_tags(tonic_request(&headers, SetTagsRequest { node_id, tags }))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn set_approved_routes(
+    State(state): State<GatewayState>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(status),
+    };
+    let routes = match string_array_field(&value, &["routes"], "routes") {
+        Ok(routes) => routes,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .set_approved_routes(tonic_request(
+            &headers,
+            SetApprovedRoutesRequest { node_id, routes },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn delete_node(
+    State(state): State<GatewayState>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .delete_node(tonic_request(&headers, DeleteNodeRequest { node_id }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(status),
+    }
+}
+
+async fn expire_node(
+    State(state): State<GatewayState>,
+    Path(node_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    let expiry = match query_timestamp(raw_query.as_deref(), "expiry") {
+        Ok(expiry) => expiry,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .expire_node(tonic_request(
+            &headers,
+            ExpireNodeRequest { node_id, expiry },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+async fn rename_node(
+    State(state): State<GatewayState>,
+    Path((node_id, new_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let node_id = match parse_path_u64("node_id", &node_id) {
+        Ok(id) => id,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .rename_node(tonic_request(
+            &headers,
+            RenameNodeRequest { node_id, new_name },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(status),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BackfillNodeIpsQuery {
+    confirmed: bool,
+}
+
+async fn backfill_node_ips(
+    State(state): State<GatewayState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query: BackfillNodeIpsQuery = match parse_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(status),
+    };
+    match state
+        .service
+        .backfill_node_i_ps(tonic_request(
+            &headers,
+            BackfillNodeIPsRequest {
+                confirmed: query.confirmed,
+            },
+        ))
+        .await
+    {
+        Ok(response) => json_ok(json!({ "changes": response.into_inner().changes })),
+        Err(status) => status_response(status),
+    }
+}
+
 async fn get_policy(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
     match state
         .service
@@ -482,6 +781,10 @@ fn optional_preauth_key_json(preauth_key: Option<&PreAuthKey>) -> Value {
     preauth_key.map(preauth_key_json).unwrap_or(Value::Null)
 }
 
+fn optional_node_json(node: Option<&Node>) -> Value {
+    node.map(node_json).unwrap_or(Value::Null)
+}
+
 fn user_json(user: &User) -> Value {
     let mut out = Map::new();
     out.insert("id".into(), Value::String(user.id.to_string()));
@@ -499,6 +802,79 @@ fn user_json(user: &User) -> Value {
         Value::String(user.profile_pic_url.clone()),
     );
     Value::Object(out)
+}
+
+fn node_json(node: &Node) -> Value {
+    let mut out = Map::new();
+    out.insert("id".into(), Value::String(node.id.to_string()));
+    out.insert("machineKey".into(), Value::String(node.machine_key.clone()));
+    out.insert("nodeKey".into(), Value::String(node.node_key.clone()));
+    out.insert("discoKey".into(), Value::String(node.disco_key.clone()));
+    out.insert(
+        "ipAddresses".into(),
+        Value::Array(
+            node.ip_addresses
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    out.insert("name".into(), Value::String(node.name.clone()));
+    out.insert("user".into(), optional_user_json(node.user.as_ref()));
+    out.insert("lastSeen".into(), timestamp_json(node.last_seen.as_ref()));
+    out.insert("expiry".into(), timestamp_json(node.expiry.as_ref()));
+    out.insert(
+        "preAuthKey".into(),
+        optional_preauth_key_json(node.pre_auth_key.as_ref()),
+    );
+    out.insert("createdAt".into(), timestamp_json(node.created_at.as_ref()));
+    out.insert(
+        "registerMethod".into(),
+        register_method_json(node.register_method),
+    );
+    out.insert("givenName".into(), Value::String(node.given_name.clone()));
+    out.insert("online".into(), Value::Bool(node.online));
+    out.insert(
+        "approvedRoutes".into(),
+        Value::Array(
+            node.approved_routes
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    out.insert(
+        "availableRoutes".into(),
+        Value::Array(
+            node.available_routes
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    out.insert(
+        "subnetRoutes".into(),
+        Value::Array(
+            node.subnet_routes
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    out.insert(
+        "tags".into(),
+        Value::Array(node.tags.iter().cloned().map(Value::String).collect()),
+    );
+    Value::Object(out)
+}
+
+fn register_method_json(method: i32) -> Value {
+    let method = RegisterMethod::try_from(method).unwrap_or(RegisterMethod::Unspecified);
+    Value::String(method.as_str_name().to_string())
 }
 
 fn preauth_key_json(key: &PreAuthKey) -> Value {
@@ -545,6 +921,15 @@ fn create_preauth_request(value: &Value) -> Result<CreatePreAuthKeyRequest, Stat
         ephemeral: bool_field(value, &["ephemeral"], "ephemeral")?,
         expiration: timestamp_field(value, &["expiration"], "expiration")?,
         acl_tags: string_array_field(value, &["aclTags", "acl_tags"], "aclTags")?,
+    })
+}
+
+fn debug_create_node_request(value: &Value) -> Result<DebugCreateNodeRequest, Status> {
+    Ok(DebugCreateNodeRequest {
+        user: string_field(value, &["user"], "user")?,
+        key: string_field(value, &["key"], "key")?,
+        name: string_field(value, &["name"], "name")?,
+        routes: string_array_field(value, &["routes"], "routes")?,
     })
 }
 
@@ -644,6 +1029,65 @@ fn timestamp_field(
             "invalid timestamp field {display}"
         ))),
     }
+}
+
+fn query_timestamp(
+    query: Option<&str>,
+    name: &str,
+) -> Result<Option<prost_types::Timestamp>, Status> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Ok(None);
+    };
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    let mut direct = None;
+    let mut seconds = None;
+    let mut nanos = None;
+    for (key, value) in pairs {
+        if key == name {
+            direct = Some(value);
+        } else if key == format!("{name}.seconds") {
+            seconds = Some(value);
+        } else if key == format!("{name}.nanos") {
+            nanos = Some(value);
+        }
+    }
+
+    if let Some(value) = direct {
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let parsed = chrono::DateTime::parse_from_rfc3339(&value).map_err(|e| {
+            Status::invalid_argument(format!("invalid timestamp field {name}: {e}"))
+        })?;
+        return Ok(Some(prost_types::Timestamp {
+            seconds: parsed.timestamp(),
+            nanos: parsed.timestamp_subsec_nanos() as i32,
+        }));
+    }
+
+    let Some(seconds) = seconds else {
+        return Ok(None);
+    };
+    let seconds = seconds.parse::<i64>().map_err(|e| {
+        Status::invalid_argument(format!(
+            "type mismatch, parameter: {name}.seconds, error: {e}"
+        ))
+    })?;
+    let nanos = match nanos {
+        Some(nanos) if !nanos.is_empty() => nanos.parse::<i32>().map_err(|e| {
+            Status::invalid_argument(format!(
+                "type mismatch, parameter: {name}.nanos, error: {e}"
+            ))
+        })?,
+        _ => 0,
+    };
+    if !(0..1_000_000_000).contains(&nanos) {
+        return Err(Status::invalid_argument(format!(
+            "invalid timestamp field {name}"
+        )));
+    }
+    Ok(Some(prost_types::Timestamp { seconds, nanos }))
 }
 
 fn json_ok(value: Value) -> Response {

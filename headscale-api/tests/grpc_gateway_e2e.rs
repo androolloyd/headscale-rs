@@ -211,6 +211,214 @@ async fn grpc_gateway_path_parameter_type_mismatch_is_status_json() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
+    let (app, token) = fixture().await;
+    let registration_key = "abcdefghijklmnopqrstuvwx";
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"node-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/debug/node",
+            Some(&token),
+            Body::from(format!(
+                r#"{{"user":"node-user","key":"{registration_key}","name":"debug-router","routes":["10.10.0.0/24"]}}"#
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let node_id = body["node"]["id"].as_str().unwrap().to_string();
+    assert!(!node_id.is_empty());
+    assert!(
+        body["node"]["machineKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("mkey:")
+    );
+    assert!(
+        body["node"]["nodeKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("nodekey:")
+    );
+    assert_eq!(body["node"]["name"], "debug-router");
+    assert_eq!(body["node"]["givenName"], "debug-router");
+    assert_eq!(body["node"]["user"]["name"], "node-user");
+    assert_eq!(
+        body["node"]["registerMethod"],
+        "REGISTER_METHOD_UNSPECIFIED"
+    );
+    assert_eq!(
+        body["node"]["availableRoutes"],
+        serde_json::json!(["10.10.0.0/24"])
+    );
+    assert_eq!(body["node"]["approvedRoutes"], serde_json::json!([]));
+    assert_eq!(body["node"]["subnetRoutes"], serde_json::json!([]));
+    assert!(body["node"]["createdAt"].as_str().unwrap().ends_with('Z'));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/register?user=node-user&key={registration_key}"),
+            Some(&token),
+            Body::from(r#"{"ignored":true}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["id"], node_id);
+    assert_eq!(body["node"]["registerMethod"], "REGISTER_METHOD_CLI");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/node?user=node-user",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(body["nodes"][0]["id"], node_id);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            &format!("/api/v1/node/{node_id}"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["id"], node_id);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/tags"),
+            Some(&token),
+            Body::from(r#"{"tags":["tag:router"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["tags"], serde_json::json!(["tag:router"]));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/approve_routes"),
+            Some(&token),
+            Body::from(r#"{"routes":["10.10.0.0/24"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["node"]["approvedRoutes"],
+        serde_json::json!(["10.10.0.0/24"])
+    );
+    assert_eq!(
+        body["node"]["subnetRoutes"],
+        serde_json::json!(["10.10.0.0/24"])
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/rename/new-router"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["name"], "new-router");
+    assert_eq!(body["node"]["givenName"], "new-router");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/expire?expiry=2030-01-02T03%3A04%3A05Z"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["expiry"], "2030-01-02T03:04:05Z");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/node/backfillips?confirmed=true",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({ "changes": [] }));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::DELETE,
+            &format!("/api/v1/node/{node_id}"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/node",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["nodes"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
     let (app, token) = fixture().await;
 

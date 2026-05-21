@@ -12,12 +12,21 @@ use headscale_api::admin::{
     ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentPreauthAdmin,
     PersistentUserAdmin, WireMachineAdmin,
 };
-use headscale_api::grpc::upstream::HeadscaleAdminService;
+use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::grpc_gateway;
 use headscale_api::policy::PolicyStore;
 use headscale_api::tailscale_wire::MachineRegistry;
 use serde_json::Value;
 use tower::ServiceExt;
+
+struct FailingDatabaseHealth;
+
+#[async_trait::async_trait]
+impl DatabaseHealthCheck for FailingDatabaseHealth {
+    async fn ping(&self) -> Result<(), String> {
+        Err("forced offline".to_string())
+    }
+}
 
 async fn fixture() -> (Router, String) {
     let db = headscale_db::Database::in_memory()
@@ -41,7 +50,35 @@ async fn fixture() -> (Router, String) {
         preauth,
         PolicyStore::new(),
         machines,
+    )
+    .with_database_pool(db.pool().clone());
+    (grpc_gateway::router(service), created.api_key)
+}
+
+async fn fixture_with_failing_health() -> (Router, String) {
+    let db = headscale_db::Database::in_memory()
+        .await
+        .expect("open in-memory db");
+    db.migrate().await.expect("migrate");
+
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
+    let created = api_keys
+        .mint(ApiKeyMintRequest { expiration: None })
+        .await
+        .expect("mint api key");
+    let preauth = Arc::new(
+        PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
     );
+    let machines = Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new())));
+    let service = HeadscaleAdminService::with_user_admin(
+        users,
+        api_keys,
+        preauth,
+        PolicyStore::new(),
+        machines,
+    )
+    .with_database_health(Arc::new(FailingDatabaseHealth));
     (grpc_gateway::router(service), created.api_key)
 }
 
@@ -99,6 +136,25 @@ async fn grpc_gateway_health_requires_bearer_and_returns_protojson_status() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     assert_eq!(body["databaseConnectivity"], true);
+}
+
+#[tokio::test]
+async fn grpc_gateway_health_surfaces_database_ping_failure() {
+    let (app, token) = fixture_with_failing_health().await;
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/health",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], 2);
+    assert_eq!(body["message"], "database ping failed: forced offline");
 }
 
 #[tokio::test]

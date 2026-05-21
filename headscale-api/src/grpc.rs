@@ -190,9 +190,27 @@ pub mod upstream {
         preauth: Arc<dyn PreauthAdmin>,
         policy: PolicyStore,
         machines: Arc<dyn MachineAdmin>,
+        database_health: Option<Arc<dyn DatabaseHealthCheck>>,
         pending_nodes: Arc<RwLock<BTreeMap<String, MachineAdminRecord>>>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
+    }
+
+    #[async_trait]
+    pub trait DatabaseHealthCheck: Send + Sync {
+        async fn ping(&self) -> Result<(), String>;
+    }
+
+    #[cfg(feature = "admin")]
+    #[async_trait]
+    impl DatabaseHealthCheck for sqlx::SqlitePool {
+        async fn ping(&self) -> Result<(), String> {
+            sqlx::query("SELECT 1")
+                .execute(self)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
     }
 
     impl HeadscaleAdminService {
@@ -219,10 +237,24 @@ pub mod upstream {
                 preauth,
                 policy,
                 machines,
+                database_health: None,
                 pending_nodes: Arc::new(RwLock::new(BTreeMap::new())),
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
             }
+        }
+
+        pub fn with_database_health(
+            mut self,
+            database_health: Arc<dyn DatabaseHealthCheck>,
+        ) -> Self {
+            self.database_health = Some(database_health);
+            self
+        }
+
+        #[cfg(feature = "admin")]
+        pub fn with_database_pool(self, pool: sqlx::SqlitePool) -> Self {
+            self.with_database_health(Arc::new(pool))
         }
 
         pub fn require_api_key_auth(mut self) -> Self {
@@ -803,6 +835,12 @@ pub mod upstream {
             request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
             self.authorize(&request).await?;
+            if let Some(database_health) = &self.database_health {
+                database_health
+                    .ping()
+                    .await
+                    .map_err(|e| Status::unknown(format!("database ping failed: {e}")))?;
+            }
             Ok(Response::new(HealthResponse {
                 database_connectivity: true,
             }))
@@ -1163,7 +1201,7 @@ mod upstream_tests {
     use chrono::Utc;
     use tonic::Request;
 
-    use super::upstream::HeadscaleAdminService;
+    use super::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
     use crate::admin::{
         ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentMachineAdmin,
         PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
@@ -1181,6 +1219,15 @@ mod upstream_tests {
     use crate::policy::PolicyStore;
     use crate::tailscale_wire::MachineRegistry;
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
+
+    struct FailingDatabaseHealth;
+
+    #[async_trait::async_trait]
+    impl DatabaseHealthCheck for FailingDatabaseHealth {
+        async fn ping(&self) -> Result<(), String> {
+            Err("forced offline".to_string())
+        }
+    }
 
     async fn admin_service() -> HeadscaleAdminService {
         admin_service_with_machines().await.0
@@ -1201,7 +1248,8 @@ mod upstream_tests {
             ),
             PolicyStore::new(),
             Arc::new(WireMachineAdmin::new(machines.clone())),
-        );
+        )
+        .with_database_pool(db.pool().clone());
         (service, machines)
     }
 
@@ -1221,7 +1269,8 @@ mod upstream_tests {
             ),
             PolicyStore::new(),
             Arc::new(WireMachineAdmin::new(machines)),
-        );
+        )
+        .with_database_pool(db.pool().clone());
         (service, api_keys)
     }
 
@@ -1242,7 +1291,8 @@ mod upstream_tests {
             ),
             PolicyStore::new(),
             machines,
-        );
+        )
+        .with_database_pool(db.pool().clone());
         (service, db)
     }
 
@@ -2211,6 +2261,20 @@ mod upstream_tests {
             .unwrap()
             .into_inner();
         assert!(health.database_connectivity);
+    }
+
+    #[tokio::test]
+    async fn upstream_health_grpc_fails_when_database_ping_fails() {
+        let service = admin_service()
+            .await
+            .with_database_health(Arc::new(FailingDatabaseHealth));
+
+        let err = service
+            .health(Request::new(HealthRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "database ping failed: forced offline");
     }
 }
 

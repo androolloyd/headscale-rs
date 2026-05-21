@@ -1,0 +1,82 @@
+{
+  "name": "route-autoapprove-matrix",
+  "policy": {
+    "groups": {
+      "group:admins": ["alice@"]
+    },
+    "tagOwners": {
+      "tag:router": ["alice@"],
+      "tag:exit": ["alice@"]
+    },
+    "acls": [
+      { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "10.0.0.0/8": ["alice@"],
+        "172.16.0.0/12": ["group:admins"],
+        "192.168.0.0/16": ["tag:router"]
+      },
+      "exitNode": ["group:admins", "tag:exit"]
+    }
+  },
+  "users": [
+    { "id": 1, "name": "alice" },
+    { "id": 2, "name": "bob" }
+  ],
+  "nodes": [
+    { "id": 1, "user_id": 1, "hostname": "alice-laptop", "ipv4": "100.64.0.1" },
+    { "id": 2, "user_id": 2, "hostname": "bob-laptop", "ipv4": "100.64.0.2" },
+    {
+      "id": 3,
+      "user_id": 1,
+      "hostname": "router",
+      "ipv4": "100.64.0.3",
+      "tags": ["tag:router"]
+    },
+    {
+      "id": 4,
+      "user_id": 2,
+      "hostname": "exit",
+      "ipv4": "100.64.0.4",
+      "tags": ["tag:exit"]
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "user-exact-and-subprefix-approved",
+      "node_id": 1,
+      "announced_routes": ["10.0.0.0/8", "10.42.0.0/16"]
+    },
+    {
+      "name": "user-superprefix-rejected",
+      "node_id": 1,
+      "announced_routes": ["10.0.0.0/7"]
+    },
+    {
+      "name": "plain-user-not-in-approvers-rejected",
+      "node_id": 2,
+      "announced_routes": ["10.42.0.0/16"]
+    },
+    {
+      "name": "tagged-node-does-not-inherit-user-approver",
+      "node_id": 3,
+      "announced_routes": ["10.42.0.0/16"]
+    },
+    {
+      "name": "tagged-node-uses-tag-approver",
+      "node_id": 3,
+      "announced_routes": ["192.168.1.0/24"]
+    },
+    {
+      "name": "group-exit-node-approves-defaults",
+      "node_id": 1,
+      "announced_routes": ["0.0.0.0/0", "::/0"]
+    },
+    {
+      "name": "tag-exit-node-approves-defaults",
+      "node_id": 4,
+      "announced_routes": ["0.0.0.0/0", "::/0"]
+    }
+  ]
+}

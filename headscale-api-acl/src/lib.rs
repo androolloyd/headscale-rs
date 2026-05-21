@@ -98,7 +98,6 @@ impl<'de> Deserialize<'de> for AclRule {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct RawRule {
             action: AclAction,
             #[serde(default)]
@@ -107,9 +106,17 @@ impl<'de> Deserialize<'de> for AclRule {
             dst: Vec<String>,
             #[serde(default)]
             ports: Vec<String>,
+            #[serde(flatten)]
+            extra: BTreeMap<String, serde_json::Value>,
         }
 
         let raw = RawRule::deserialize(deserializer)?;
+        if let Some(key) = raw.extra.keys().find(|key| !key.starts_with('#')) {
+            return Err(serde::de::Error::unknown_field(
+                key,
+                &["action", "proto", "src", "dst", "ports"],
+            ));
+        }
         let proto = raw.proto.as_deref().map(|p| p.trim().to_ascii_lowercase());
         if let Some(proto) = proto.as_deref() {
             validate_upstream_proto(proto).map_err(serde::de::Error::custom)?;
@@ -706,7 +713,8 @@ fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
     {
         return true;
     }
-    if let Some(user) = principal.user
+    if principal.tags.is_empty()
+        && let Some(user) = principal.user
         && user_matches(entry, user)
     {
         return true;
@@ -1097,6 +1105,24 @@ mod tests {
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(doc.rules[0].dst, vec!["fd7a:115c:a1e0::1"]);
         assert!(doc.rules[0].ports.is_empty());
+    }
+
+    #[test]
+    fn hujson_ignores_acl_metadata_fields_starting_with_hash() {
+        let raw = r##"{
+            "acls": [
+                {
+                    "#comment": "admin UI metadata",
+                    "#ui": {"row": 1},
+                    "action": "accept",
+                    "src": ["100.64.0.1/32"],
+                    "dst": ["100.64.0.2/32:22"]
+                }
+            ]
+        }"##;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.rules.len(), 1);
+        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
     }
 
     #[test]
@@ -1921,6 +1947,29 @@ mod tests {
         assert_eq!(
             doc.evaluate_with(&alice, &dst, PortRef::any()),
             AclAction::Accept
+        );
+    }
+
+    #[test]
+    fn tagged_node_does_not_match_user_or_group_identity() {
+        let mut doc = doc_with_rule(&["group:admins"], &["*"]);
+        doc.groups.insert("admins".into(), vec!["alice".into()]);
+        let tags = vec!["tag:router".to_string()];
+        let tagged = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &tags,
+        };
+        let dst = NodeView::new("100.64.0.5");
+        assert_eq!(
+            doc.evaluate_with(&tagged, &dst, PortRef::any()),
+            AclAction::Deny
+        );
+
+        let direct = doc_with_rule(&["alice"], &["*"]);
+        assert_eq!(
+            direct.evaluate_with(&tagged, &dst, PortRef::any()),
+            AclAction::Deny
         );
     }
 

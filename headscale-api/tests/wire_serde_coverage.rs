@@ -118,6 +118,20 @@ fn register_request_optional_fields_default_to_none() {
     assert!(r.auth.is_none());
     assert!(r.hostinfo.is_none());
     assert!(r.followup.is_none());
+    assert!(!r.ephemeral);
+    assert!(r.expiry.is_none());
+}
+
+#[test]
+fn register_request_accepts_ephemeral_and_expiry() {
+    let j = r#"{
+        "NodeKey":"nodekey:cafe",
+        "Ephemeral": true,
+        "Expiry": "2026-06-01T00:00:00Z"
+    }"#;
+    let r: RegisterRequest = serde_json::from_str(j).unwrap();
+    assert!(r.ephemeral);
+    assert!(r.expiry.is_some());
 }
 
 #[test]
@@ -145,6 +159,7 @@ fn register_response_emits_auth_url_all_caps() {
         node_key_expired: false,
         auth_url: String::new(),
         machine_authorized: true,
+        error: String::new(),
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     // The all-caps rename is load-bearing — Go's decoder treats
@@ -156,6 +171,7 @@ fn register_response_emits_auth_url_all_caps() {
     assert_eq!(v["User"]["ID"], 1);
     assert!(v["User"].get("Id").is_none());
     assert_eq!(v["Login"]["ID"], 1);
+    assert!(v.get("Error").is_none());
 }
 
 // ---------------------------------------------------------------------------

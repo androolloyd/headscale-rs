@@ -188,6 +188,15 @@ pub struct RegisterRequest {
     /// silence "missing field" deserialise errors on edge cases.
     #[serde(default)]
     pub followup: Option<String>,
+    /// Whether the client requests ephemeral registration. Upstream
+    /// `tailcfg.RegisterRequest.Ephemeral` is a plain bool.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// Requested node-key expiry. We do not currently honor the
+    /// client-supplied value in the register handler, but accepting it
+    /// keeps the wire shape aligned with `tailcfg`.
+    #[serde(default)]
+    pub expiry: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -242,6 +251,9 @@ pub struct RegisterResponse {
     /// Per-machine flag the client polls for in subsequent `/map`
     /// calls. True ⇒ "you're admitted into the tailnet."
     pub machine_authorized: bool,
+    /// Upstream error string for denied or follow-up register flows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -744,6 +756,8 @@ mod tests {
                 os_version: "6.6".into(),
             }),
             followup: None,
+            ephemeral: false,
+            expiry: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         // Field names PascalCased on the wire.

@@ -233,6 +233,7 @@ async fn register_inner(
         node_key_expired: false,
         auth_url: String::new(),
         machine_authorized: true,
+        error: String::new(),
     };
     Json(resp).into_response()
 }

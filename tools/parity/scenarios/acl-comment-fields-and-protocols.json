@@ -1,0 +1,24 @@
+{
+  "name": "acl-comment-fields-and-protocols",
+  "policy": {
+    "hosts": {
+      "server": "100.64.0.2/32"
+    },
+    "acls": [
+      {
+        "#comment": "headscale-go ignores ACL metadata keys that start with #",
+        "action": "accept",
+        "proto": "sctp",
+        "src": ["100.64.0.1/32"],
+        "dst": ["server:5000-5002"]
+      },
+      {
+        "#ui": { "row": "gre-wildcard" },
+        "action": "accept",
+        "proto": "gre",
+        "src": ["100.64.0.1/32"],
+        "dst": ["100.64.0.2/32:*"]
+      }
+    ]
+  }
+}

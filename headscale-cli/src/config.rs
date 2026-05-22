@@ -279,6 +279,7 @@ impl CliConfig {
             }
         }?;
         config.normalize_upstream_aliases();
+        reject_removed_config_keys(contents, format)?;
         Ok(config)
     }
 
@@ -288,6 +289,11 @@ impl CliConfig {
         K: AsRef<str>,
         V: AsRef<str>,
     {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<Vec<_>>();
+        reject_removed_oidc_env_keys(&vars)?;
         self.oidc
             .apply_headscale_env_overrides_from(vars)
             .context("failed to apply OIDC environment overrides")
@@ -511,6 +517,140 @@ fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+#[derive(Clone, Copy)]
+struct RemovedConfigKey {
+    path: &'static [&'static str],
+    display: &'static str,
+    replacement: Option<&'static str>,
+    hint: Option<&'static str>,
+}
+
+const REMOVED_CONFIG_KEYS: &[RemovedConfigKey] = &[
+    RemovedConfigKey {
+        path: &["oidc", "strip_email_domain"],
+        display: "oidc.strip_email_domain",
+        replacement: None,
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["oidc", "map_legacy_users"],
+        display: "oidc.map_legacy_users",
+        replacement: None,
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["oidc", "expiry"],
+        display: "oidc.expiry",
+        replacement: Some("node.expiry"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["randomize_client_port"],
+        display: "randomize_client_port",
+        replacement: Some("randomizeClientPort"),
+        hint: Some(
+            r#"Set "randomizeClientPort": true at the top level of your policy file, or grant the cap per-node via a "nodeAttrs" entry."#,
+        ),
+    },
+];
+
+const REMOVED_OIDC_ENV_KEYS: &[(&str, &str)] = &[(
+    "HEADSCALE_OIDC_EXPIRY",
+    "oidc.expiry was removed; use node.expiry instead",
+)];
+
+fn reject_removed_config_keys(contents: &str, format: ConfigFormat) -> Result<()> {
+    match format {
+        ConfigFormat::Toml => {
+            let value: toml::Value =
+                toml::from_str(contents).context("failed to parse TOML config")?;
+            for key in REMOVED_CONFIG_KEYS {
+                if toml_has_path(&value, key.path) {
+                    bail!("{}", removed_config_key_message(*key));
+                }
+            }
+        }
+        ConfigFormat::Yaml => {
+            let value: serde_yaml::Value =
+                serde_yaml::from_str(contents).context("failed to parse YAML config")?;
+            for key in REMOVED_CONFIG_KEYS {
+                if yaml_has_path(&value, key.path) {
+                    bail!("{}", removed_config_key_message(*key));
+                }
+            }
+        }
+        ConfigFormat::Json => {
+            let value: serde_json::Value =
+                serde_json::from_str(contents).context("failed to parse JSON config")?;
+            for key in REMOVED_CONFIG_KEYS {
+                if json_has_path(&value, key.path) {
+                    bail!("{}", removed_config_key_message(*key));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn reject_removed_oidc_env_keys(vars: &[(String, String)]) -> Result<()> {
+    for (key, _) in vars {
+        if let Some((_, message)) = REMOVED_OIDC_ENV_KEYS
+            .iter()
+            .find(|(removed_key, _)| key == removed_key)
+        {
+            bail!("{message}");
+        }
+    }
+
+    Ok(())
+}
+
+fn removed_config_key_message(key: RemovedConfigKey) -> String {
+    match (key.replacement, key.hint) {
+        (Some(replacement), Some(hint)) => format!(
+            "config key {} was removed; use {} instead. {}",
+            key.display, replacement, hint
+        ),
+        (Some(replacement), None) => format!(
+            "config key {} was removed; use {} instead",
+            key.display, replacement
+        ),
+        (None, Some(hint)) => format!("config key {} was removed. {}", key.display, hint),
+        (None, None) => format!("config key {} was removed", key.display),
+    }
+}
+
+fn toml_has_path(value: &toml::Value, path: &[&str]) -> bool {
+    let Some((first, rest)) = path.split_first() else {
+        return true;
+    };
+    value
+        .get(*first)
+        .is_some_and(|value| toml_has_path(value, rest))
+}
+
+fn json_has_path(value: &serde_json::Value, path: &[&str]) -> bool {
+    let Some((first, rest)) = path.split_first() else {
+        return true;
+    };
+    value
+        .get(*first)
+        .is_some_and(|value| json_has_path(value, rest))
+}
+
+fn yaml_has_path(value: &serde_yaml::Value, path: &[&str]) -> bool {
+    let Some((first, rest)) = path.split_first() else {
+        return true;
+    };
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return false;
+    };
+    mapping
+        .get(serde_yaml::Value::String((*first).to_string()))
+        .is_some_and(|value| yaml_has_path(value, rest))
+}
+
 fn deserialize_u32_from_int_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -651,7 +791,6 @@ impl Default for LoggingConfig {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
 
     use super::*;
 
@@ -662,7 +801,6 @@ mod tests {
         assert!(config.oidc.only_start_if_oidc_is_available);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
         assert!(config.oidc.email_verified_required);
-        assert_eq!(config.oidc.expiry, Duration::from_secs(180 * 24 * 60 * 60));
         assert!(!config.oidc.use_expiry_from_token);
         assert!(!config.oidc.pkce.enabled);
         assert_eq!(config.oidc.pkce.method, "S256");
@@ -681,7 +819,6 @@ only_start_if_oidc_is_available = false
 issuer = "https://issuer.example"
 client_id = "headscale-rs"
 client_secret_path = "{}"
-expiry = "0"
 use_expiry_from_token = true
 scope = ["openid", "profile", "email", "groups"]
 allowed_domains = ["example.com"]
@@ -1044,7 +1181,6 @@ verify_clients = true
 oidc:
   issuer: https://issuer.example
   client_id: yaml-client
-  expiry: 14d
   allowed_domains:
     - example.com
 ";
@@ -1053,7 +1189,6 @@ oidc:
 
         assert_eq!(config.oidc.issuer, "https://issuer.example");
         assert_eq!(config.oidc.client_id, "yaml-client");
-        assert_eq!(config.oidc.expiry, Duration::from_secs(14 * 24 * 60 * 60));
         assert_eq!(config.oidc.allowed_domains, ["example.com"]);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
         assert!(config.oidc.only_start_if_oidc_is_available);
@@ -1106,7 +1241,6 @@ dns:
                     "alice@example.com,bob@example.com",
                 ),
                 ("HEADSCALE_OIDC_EMAIL_VERIFIED_REQUIRED", "false"),
-                ("HEADSCALE_OIDC_EXPIRY", "7d"),
                 ("HEADSCALE_OIDC_PKCE_ENABLED", "true"),
             ])
             .unwrap();
@@ -1119,8 +1253,63 @@ dns:
             ["alice@example.com", "bob@example.com"]
         );
         assert!(!config.oidc.email_verified_required);
-        assert_eq!(config.oidc.expiry, Duration::from_secs(7 * 24 * 60 * 60));
         assert!(config.oidc.pkce.enabled);
+    }
+
+    #[test]
+    fn rejects_removed_oidc_expiry_config_key() {
+        let err = CliConfig::parse(
+            r#"
+[oidc]
+expiry = "14d"
+"#,
+            ConfigFormat::Toml,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("oidc.expiry"));
+        assert!(err.contains("node.expiry"));
+    }
+
+    #[test]
+    fn rejects_removed_oidc_strip_email_domain_config_key() {
+        let err = CliConfig::parse(
+            r"
+oidc:
+  strip_email_domain: true
+",
+            ConfigFormat::Yaml,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("oidc.strip_email_domain"));
+        assert!(err.contains("removed"));
+    }
+
+    #[test]
+    fn rejects_removed_randomize_client_port_config_key() {
+        let err =
+            CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("randomize_client_port"));
+        assert!(err.contains("randomizeClientPort"));
+        assert!(err.contains("policy file"));
+    }
+
+    #[test]
+    fn rejects_removed_oidc_expiry_env_override() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_oidc_env_overrides_from([("HEADSCALE_OIDC_EXPIRY", "7d")])
+            .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("oidc.expiry"));
+        assert!(err.contains("node.expiry"));
     }
 
     #[test]

@@ -41,6 +41,14 @@ impl Database {
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
             .idle_timeout(Duration::from_secs(300))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(url)
             .await?;
 
@@ -77,6 +85,11 @@ mod tests {
     async fn test_database_creation() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
         db.close().await;
     }
 }

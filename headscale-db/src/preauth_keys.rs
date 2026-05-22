@@ -375,12 +375,22 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
     let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
         .bind(id)
         .execute(pool)
-        .await?
+        .await
+        .map_err(map_destroy_err)?
         .rows_affected();
     if n == 0 {
         return Err(DbError::NotFound(format!("preauth_key id={id}")));
     }
     Ok(())
+}
+
+fn map_destroy_err(e: sqlx::Error) -> DbError {
+    match &e {
+        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+            DbError::Constraint("preauth key is still assigned to a node".into())
+        }
+        _ => DbError::from(e),
+    }
 }
 
 /// List all keys belonging to `user_id`, newest first.
@@ -484,7 +494,8 @@ pub async fn try_use(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Database;
+    use crate::{Database, headscale_nodes, users};
+    use serde_json::json;
 
     async fn fresh_db() -> Database {
         let db = Database::in_memory().await.expect("open in-memory");
@@ -743,6 +754,74 @@ mod tests {
         // get_by_token also misses now.
         let e2 = get_by_token(db.pool(), &c.plaintext).await.unwrap_err();
         assert!(matches!(e2, DbError::NotFound(_)));
+    }
+
+    /// Go: TestCannotDeleteAssignedPreAuthKey.
+    #[tokio::test]
+    async fn destroy_assigned_key_fails_like_headscale_go() {
+        let db = fresh_db().await;
+        let user = users::create(
+            db.pool(),
+            users::CreateParams {
+                name: "assigned-user".into(),
+                display_name: "Assigned User".into(),
+                email: "assigned@example.com".into(),
+                provider_identifier: None,
+                provider: headscale_nodes::REGISTER_METHOD_CLI.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let created = create_for_test(
+            db.pool(),
+            CreateParams {
+                user_id: user.id.to_string(),
+                reusable: false,
+                ephemeral: false,
+                tags: vec!["tag:good".into()],
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let node = headscale_nodes::create(
+            db.pool(),
+            headscale_nodes::CreateParams {
+                machine_key: "mkey:assigned".into(),
+                node_key: "nodekey:assigned".into(),
+                disco_key: "discokey:assigned".into(),
+                endpoints: Vec::new(),
+                host_info: json!({"Hostname": "assigned-node"}),
+                ipv4: Some("100.64.0.10".into()),
+                ipv6: None,
+                hostname: "assigned-node".into(),
+                given_name: "assigned-node".into(),
+                user_id: Some(user.id),
+                register_method: headscale_nodes::REGISTER_METHOD_AUTH_KEY.into(),
+                tags: vec!["tag:good".into()],
+                auth_key_id: Some(created.row.id),
+                expiry: None,
+                last_seen: None,
+                approved_routes: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = destroy(db.pool(), created.row.id).await.unwrap_err();
+        assert!(matches!(err, DbError::Constraint(_)));
+        assert_eq!(
+            headscale_nodes::get_by_id(db.pool(), node.id)
+                .await
+                .unwrap()
+                .auth_key_id,
+            Some(created.row.id)
+        );
+        assert_eq!(
+            get_by_id(db.pool(), created.row.id).await.unwrap().id,
+            created.row.id
+        );
     }
 
     #[tokio::test]

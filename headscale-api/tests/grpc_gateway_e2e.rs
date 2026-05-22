@@ -376,6 +376,19 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     let body = body_json(resp).await;
     assert_eq!(body["node"]["id"], node_id);
 
+    let policy = r#"{"tagOwners":{"tag:router":["alice@"]}}"#;
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::PUT,
+            "/api/v1/policy",
+            Some(&token),
+            Body::from(serde_json::json!({ "policy": policy }).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
     let resp = app
         .clone()
         .oneshot(req(

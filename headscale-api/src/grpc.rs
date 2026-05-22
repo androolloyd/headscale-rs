@@ -660,6 +660,18 @@ pub mod upstream {
             for tag in &body.tags {
                 validate_tag(tag)?;
             }
+            let invalid_tags = body
+                .tags
+                .iter()
+                .filter(|tag| !self.policy.tag_exists(tag))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !invalid_tags.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "requested tags [{}] are invalid or not permitted",
+                    invalid_tags.join(" ")
+                )));
+            }
             let node = self.machine_by_id(body.node_id).await?;
             self.machines
                 .set_tags(&node.id, body.tags)
@@ -2063,6 +2075,13 @@ mod upstream_tests {
             .expect("node");
         assert_eq!(got.name, "alpha");
 
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: r#"{"tagOwners":{"tag:server":["alice@"]}}"#.into(),
+            }))
+            .await
+            .expect("tag owner policy");
+
         let tagged = service
             .set_tags(Request::new(SetTagsRequest {
                 node_id,
@@ -2166,6 +2185,16 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("requested tags"));
 
         let err = service
             .set_approved_routes(Request::new(SetApprovedRoutesRequest {

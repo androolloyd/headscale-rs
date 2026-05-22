@@ -141,6 +141,22 @@ impl PolicyStore {
         self.inner.state.read().doc.clone()
     }
 
+    /// True iff the loaded policy defines `tag`.
+    ///
+    /// Mirrors headscale-go's `PolicyManager.TagExists` use in
+    /// `State.SetNodeTags`: admin/gRPC tag assignment is an operator
+    /// action, so it checks tag existence in policy, not per-user
+    /// ownership. No loaded policy means no tag is assignable.
+    pub fn tag_exists(&self, tag: &str) -> bool {
+        self.inner.state.read().doc.as_ref().is_some_and(|doc| {
+            doc.tag_owners.contains_key(tag)
+                || doc.tags.contains_key(tag)
+                || tag.strip_prefix("tag:").is_some_and(|short| {
+                    doc.tag_owners.contains_key(short) || doc.tags.contains_key(short)
+                })
+        })
+    }
+
     /// Capability flags `node` should receive per the loaded policy's
     /// `node_attrs` block. Empty vec when no policy is loaded.
     ///

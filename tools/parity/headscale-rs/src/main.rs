@@ -468,6 +468,8 @@ struct HostInfoSummary {
     os: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     os_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    container: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     env: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -478,6 +480,8 @@ struct HostInfoSummary {
     distro_code_name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     app: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desktop: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     package: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -512,14 +516,38 @@ struct HostInfoSummary {
     ssh_host_keys: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     cloud: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    userspace: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    userspace_router: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_connector: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     services_hash: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     exit_node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_encrypted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mapping_varies_by_dest_ip: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_ipv6: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_has_ipv6: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_udp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_icmp_v4: Option<bool>,
     #[serde(skip_serializing_if = "is_zero_i32")]
     preferred_derp: i32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     have_port_map: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upnp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pmp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pcp: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     link_type: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1744,18 +1772,53 @@ fn json_string<T: Serialize>(value: Option<T>) -> String {
 }
 
 fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
-    let (preferred_derp, have_port_map, link_type, firewall_mode) =
-        hostinfo.net_info.map_or_else(
-            || (0, false, String::new(), String::new()),
-            |net_info| {
-                (
-                    net_info.preferred_derp,
-                    net_info.have_port_map,
-                    net_info.link_type,
-                    net_info.firewall_mode,
-                )
-            },
-        );
+    let (
+        mapping_varies_by_dest_ip,
+        working_ipv6,
+        os_has_ipv6,
+        working_udp,
+        working_icmp_v4,
+        preferred_derp,
+        have_port_map,
+        upnp,
+        pmp,
+        pcp,
+        link_type,
+        firewall_mode,
+    ) = hostinfo.net_info.map_or_else(
+        || {
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                false,
+                None,
+                None,
+                None,
+                String::new(),
+                String::new(),
+            )
+        },
+        |net_info| {
+            (
+                net_info.mapping_varies_by_dest_ip,
+                net_info.working_ipv6,
+                net_info.os_has_ipv6,
+                net_info.working_udp,
+                net_info.working_icmp_v4,
+                net_info.preferred_derp,
+                net_info.have_port_map,
+                net_info.upnp,
+                net_info.pmp,
+                net_info.pcp,
+                net_info.link_type,
+                net_info.firewall_mode,
+            )
+        },
+    );
     HostInfoSummary {
         ipn_version: hostinfo.ipn_version,
         frontend_log_id: hostinfo.frontend_log_id,
@@ -1763,11 +1826,13 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         hostname: hostinfo.hostname,
         os: hostinfo.os,
         os_version: hostinfo.os_version,
+        container: hostinfo.container,
         env: hostinfo.env,
         distro: hostinfo.distro,
         distro_version: hostinfo.distro_version,
         distro_code_name: hostinfo.distro_code_name,
         app: hostinfo.app,
+        desktop: hostinfo.desktop,
         package: hostinfo.package,
         device_model: hostinfo.device_model,
         push_device_token: hostinfo.push_device_token,
@@ -1785,10 +1850,22 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         wol_macs: hostinfo.wol_macs,
         ssh_host_keys: hostinfo.ssh_host_keys,
         cloud: hostinfo.cloud,
+        userspace: hostinfo.userspace,
+        userspace_router: hostinfo.userspace_router,
+        app_connector: hostinfo.app_connector,
         services_hash: hostinfo.services_hash,
         exit_node_id: hostinfo.exit_node_id,
+        state_encrypted: hostinfo.state_encrypted,
+        mapping_varies_by_dest_ip,
+        working_ipv6,
+        os_has_ipv6,
+        working_udp,
+        working_icmp_v4,
         preferred_derp,
         have_port_map,
+        upnp,
+        pmp,
+        pcp,
         link_type,
         firewall_mode,
     }

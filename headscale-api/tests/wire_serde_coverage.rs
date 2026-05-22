@@ -94,11 +94,13 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         hostname: "h1".into(),
         os: "linux".into(),
         os_version: "6.6".into(),
+        container: Some(true),
         env: "kn".into(),
         distro: "ubuntu".into(),
         distro_version: "24.04".into(),
         distro_code_name: "noble".into(),
         app: "tsnet-app".into(),
+        desktop: Some(false),
         package: "apt".into(),
         device_model: "vm".into(),
         push_device_token: "push-token-1".into(),
@@ -117,11 +119,23 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         wol_macs: vec!["00:11:22:33:44:55".into()],
         ssh_host_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey".into()],
         cloud: "aws".into(),
+        userspace: Some(false),
+        userspace_router: Some(true),
+        app_connector: Some(false),
         services_hash: "services-hash-1".into(),
         exit_node_id: "n99".into(),
+        state_encrypted: Some(true),
         net_info: Some(NetInfo {
+            mapping_varies_by_dest_ip: Some(true),
+            working_ipv6: Some(false),
+            os_has_ipv6: Some(true),
+            working_udp: Some(true),
+            working_icmp_v4: Some(false),
             preferred_derp: 7,
             have_port_map: true,
+            upnp: Some(true),
+            pmp: Some(false),
+            pcp: Some(true),
             link_type: "wired".into(),
             firewall_mode: "nft-default".into(),
             ..NetInfo::default()
@@ -141,18 +155,34 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["IPNVersion"], "1.94.1");
     assert_eq!(v["FrontendLogID"], "frontend-log-1");
     assert_eq!(v["BackendLogID"], "backend-log-1");
+    assert_eq!(v["Container"], true);
+    assert_eq!(v["Desktop"], false);
     assert_eq!(v["WoLMACs"], serde_json::json!(["00:11:22:33:44:55"]));
     assert_eq!(
         v["sshHostKeys"],
         serde_json::json!(["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"])
     );
     assert_eq!(v["ExitNodeID"], "n99");
+    assert_eq!(v["Userspace"], false);
+    assert_eq!(v["UserspaceRouter"], true);
+    assert_eq!(v["AppConnector"], false);
+    assert_eq!(v["StateEncrypted"], true);
+    assert_eq!(v["NetInfo"]["MappingVariesByDestIP"], true);
+    assert_eq!(v["NetInfo"]["WorkingIPv6"], false);
+    assert_eq!(v["NetInfo"]["OSHasIPv6"], true);
+    assert_eq!(v["NetInfo"]["WorkingUDP"], true);
+    assert_eq!(v["NetInfo"]["WorkingICMPv4"], false);
     assert_eq!(v["NetInfo"]["HavePortMap"], true);
+    assert_eq!(v["NetInfo"]["UPnP"], true);
+    assert_eq!(v["NetInfo"]["PMP"], false);
+    assert_eq!(v["NetInfo"]["PCP"], true);
     assert_eq!(v["NetInfo"]["LinkType"], "wired");
     assert_eq!(v["NetInfo"]["FirewallMode"], "nft-default");
     assert!(v.get("OsVersion").is_none());
     let back: HostInfo = serde_json::from_value(v).unwrap();
     assert_eq!(back.ipn_version, "1.94.1");
+    assert_eq!(back.container, Some(true));
+    assert_eq!(back.desktop, Some(false));
     assert!(back.shields_up);
     assert!(back.sharee_node);
     assert!(back.no_logs_no_support);
@@ -162,8 +192,21 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(back.go_arch, "amd64");
     assert_eq!(back.go_arch_var, "v3");
     assert_eq!(back.go_version, "go1.25.5");
+    assert_eq!(back.userspace, Some(false));
+    assert_eq!(back.userspace_router, Some(true));
+    assert_eq!(back.app_connector, Some(false));
+    assert_eq!(back.state_encrypted, Some(true));
     assert_eq!(back.ssh_host_keys.len(), 1);
-    assert_eq!(back.net_info.unwrap().firewall_mode, "nft-default");
+    let net_info = back.net_info.unwrap();
+    assert_eq!(net_info.mapping_varies_by_dest_ip, Some(true));
+    assert_eq!(net_info.working_ipv6, Some(false));
+    assert_eq!(net_info.os_has_ipv6, Some(true));
+    assert_eq!(net_info.working_udp, Some(true));
+    assert_eq!(net_info.working_icmp_v4, Some(false));
+    assert_eq!(net_info.upnp, Some(true));
+    assert_eq!(net_info.pmp, Some(false));
+    assert_eq!(net_info.pcp, Some(true));
+    assert_eq!(net_info.firewall_mode, "nft-default");
 }
 
 #[test]

@@ -324,6 +324,37 @@ pub struct RegisterAuth {
 #[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetInfo {
+    /// NAT mappings vary by destination IP.
+    #[serde(
+        default,
+        rename = "MappingVariesByDestIP",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mapping_varies_by_dest_ip: Option<bool>,
+    /// Whether the host has working IPv6 connectivity.
+    #[serde(
+        default,
+        rename = "WorkingIPv6",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub working_ipv6: Option<bool>,
+    /// Whether the OS supports IPv6 at all.
+    #[serde(default, rename = "OSHasIPv6", skip_serializing_if = "Option::is_none")]
+    pub os_has_ipv6: Option<bool>,
+    /// Whether UDP appears usable.
+    #[serde(
+        default,
+        rename = "WorkingUDP",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub working_udp: Option<bool>,
+    /// Whether ICMPv4 appears usable.
+    #[serde(
+        default,
+        rename = "WorkingICMPv4",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub working_icmp_v4: Option<bool>,
     /// `tailcfg.NetInfo.PreferredDERP`; zero means disconnected or
     /// unknown and is omitted by tailcfg.
     #[serde(default, rename = "PreferredDERP", skip_serializing_if = "is_zero_i32")]
@@ -331,6 +362,12 @@ pub struct NetInfo {
     /// Whether the client currently has an active port-map.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub have_port_map: bool,
+    #[serde(default, rename = "UPnP", skip_serializing_if = "Option::is_none")]
+    pub upnp: Option<bool>,
+    #[serde(default, rename = "PMP", skip_serializing_if = "Option::is_none")]
+    pub pmp: Option<bool>,
+    #[serde(default, rename = "PCP", skip_serializing_if = "Option::is_none")]
+    pub pcp: Option<bool>,
     /// Current link type, if known (`wired`, `wifi`, `mobile`, ...).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_type: String,
@@ -371,6 +408,10 @@ pub struct HostInfo {
     /// wire byte-identical.
     #[serde(default, rename = "OSVersion")]
     pub os_version: String,
+    /// Optional bools map to Tailscale's `opt.Bool`: absent/null is
+    /// unset, while both true and false are meaningful when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub env: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -381,6 +422,8 @@ pub struct HostInfo {
     pub distro_code_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub package: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -430,6 +473,12 @@ pub struct HostInfo {
     pub ssh_host_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cloud: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userspace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userspace_router: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_connector: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub services_hash: String,
     #[serde(
@@ -438,6 +487,8 @@ pub struct HostInfo {
         skip_serializing_if = "String::is_empty"
     )]
     pub exit_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_encrypted: Option<bool>,
     /// NAT/check results advertised by the client. We currently persist
     /// the preferred DERP field for map-node and stream-patch parity.
     #[serde(default, rename = "NetInfo", skip_serializing_if = "Option::is_none")]

@@ -296,11 +296,13 @@ type hostInfoSummary struct {
 	Hostname        string   `json:"hostname,omitempty"`
 	OS              string   `json:"os,omitempty"`
 	OSVersion       string   `json:"os_version,omitempty"`
+	Container       *bool    `json:"container,omitempty"`
 	Env             string   `json:"env,omitempty"`
 	Distro          string   `json:"distro,omitempty"`
 	DistroVersion   string   `json:"distro_version,omitempty"`
 	DistroCodeName  string   `json:"distro_code_name,omitempty"`
 	App             string   `json:"app,omitempty"`
+	Desktop         *bool    `json:"desktop,omitempty"`
 	Package         string   `json:"package,omitempty"`
 	DeviceModel     string   `json:"device_model,omitempty"`
 	PushDeviceToken string   `json:"push_device_token,omitempty"`
@@ -318,10 +320,22 @@ type hostInfoSummary struct {
 	WoLMACs         []string `json:"wol_macs,omitempty"`
 	SSHHostKeys     []string `json:"ssh_host_keys,omitempty"`
 	Cloud           string   `json:"cloud,omitempty"`
+	Userspace       *bool    `json:"userspace,omitempty"`
+	UserspaceRouter *bool    `json:"userspace_router,omitempty"`
+	AppConnector    *bool    `json:"app_connector,omitempty"`
 	ServicesHash    string   `json:"services_hash,omitempty"`
 	ExitNodeID      string   `json:"exit_node_id,omitempty"`
+	StateEncrypted  *bool    `json:"state_encrypted,omitempty"`
+	MappingVaries   *bool    `json:"mapping_varies_by_dest_ip,omitempty"`
+	WorkingIPv6     *bool    `json:"working_ipv6,omitempty"`
+	OSHasIPv6       *bool    `json:"os_has_ipv6,omitempty"`
+	WorkingUDP      *bool    `json:"working_udp,omitempty"`
+	WorkingICMPv4   *bool    `json:"working_icmp_v4,omitempty"`
 	PreferredDERP   int      `json:"preferred_derp,omitempty"`
 	HavePortMap     bool     `json:"have_port_map,omitempty"`
+	UPnP            *bool    `json:"upnp,omitempty"`
+	PMP             *bool    `json:"pmp,omitempty"`
+	PCP             *bool    `json:"pcp,omitempty"`
 	LinkType        string   `json:"link_type,omitempty"`
 	FirewallMode    string   `json:"firewall_mode,omitempty"`
 }
@@ -1142,11 +1156,27 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 	var havePortMap bool
 	var linkType string
 	var firewallMode string
+	var mappingVaries *bool
+	var workingIPv6 *bool
+	var osHasIPv6 *bool
+	var workingUDP *bool
+	var workingICMPv4 *bool
+	var upnp *bool
+	var pmp *bool
+	var pcp *bool
 	if netInfo := hostinfo.NetInfo(); netInfo.Valid() {
 		preferredDERP = netInfo.PreferredDERP()
 		havePortMap = netInfo.HavePortMap()
 		linkType = netInfo.LinkType()
 		firewallMode = netInfo.FirewallMode()
+		mappingVaries = optBoolPtr(netInfo.MappingVariesByDestIP())
+		workingIPv6 = optBoolPtr(netInfo.WorkingIPv6())
+		osHasIPv6 = optBoolPtr(netInfo.OSHasIPv6())
+		workingUDP = optBoolPtr(netInfo.WorkingUDP())
+		workingICMPv4 = optBoolPtr(netInfo.WorkingICMPv4())
+		upnp = optBoolPtr(netInfo.UPnP())
+		pmp = optBoolPtr(netInfo.PMP())
+		pcp = optBoolPtr(netInfo.PCP())
 	}
 	return &hostInfoSummary{
 		IPNVersion:      hostinfo.IPNVersion(),
@@ -1155,11 +1185,13 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		Hostname:        hostinfo.Hostname(),
 		OS:              hostinfo.OS(),
 		OSVersion:       hostinfo.OSVersion(),
+		Container:       optBoolPtr(hostinfo.Container()),
 		Env:             hostinfo.Env(),
 		Distro:          hostinfo.Distro(),
 		DistroVersion:   hostinfo.DistroVersion(),
 		DistroCodeName:  hostinfo.DistroCodeName(),
 		App:             hostinfo.App(),
+		Desktop:         optBoolPtr(hostinfo.Desktop()),
 		Package:         hostinfo.Package(),
 		DeviceModel:     hostinfo.DeviceModel(),
 		PushDeviceToken: hostinfo.PushDeviceToken(),
@@ -1177,10 +1209,22 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		WoLMACs:         hostinfo.WoLMACs().AsSlice(),
 		SSHHostKeys:     hostinfo.SSH_HostKeys().AsSlice(),
 		Cloud:           hostinfo.Cloud(),
+		Userspace:       optBoolPtr(hostinfo.Userspace()),
+		UserspaceRouter: optBoolPtr(hostinfo.UserspaceRouter()),
+		AppConnector:    optBoolPtr(hostinfo.AppConnector()),
 		ServicesHash:    hostinfo.ServicesHash(),
 		ExitNodeID:      string(hostinfo.ExitNodeID()),
+		StateEncrypted:  optBoolPtr(hostinfo.StateEncrypted()),
+		MappingVaries:   mappingVaries,
+		WorkingIPv6:     workingIPv6,
+		OSHasIPv6:       osHasIPv6,
+		WorkingUDP:      workingUDP,
+		WorkingICMPv4:   workingICMPv4,
 		PreferredDERP:   preferredDERP,
 		HavePortMap:     havePortMap,
+		UPnP:            upnp,
+		PMP:             pmp,
+		PCP:             pcp,
 		LinkType:        linkType,
 		FirewallMode:    firewallMode,
 	}

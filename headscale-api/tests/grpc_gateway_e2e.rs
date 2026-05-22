@@ -121,6 +121,22 @@ fn req(method: Method, uri: &str, token: Option<&str>, body: impl Into<Body>) ->
         .unwrap()
 }
 
+fn req_raw_auth(
+    method: Method,
+    uri: &str,
+    authorization: Option<&str>,
+    body: impl Into<Body>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(authorization) = authorization {
+        builder = builder.header(header::AUTHORIZATION, authorization);
+    }
+    builder
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.into())
+        .unwrap()
+}
+
 async fn body_json(resp: Response) -> Value {
     let body = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     serde_json::from_slice(&body).unwrap_or_else(|e| {
@@ -129,6 +145,51 @@ async fn body_json(resp: Response) -> Value {
             String::from_utf8_lossy(&body)
         )
     })
+}
+
+async fn assert_status_json(
+    resp: Response,
+    expected_http_status: u16,
+    expected_grpc_code: i64,
+    message_fragment: &str,
+    context: &str,
+) {
+    assert_eq!(
+        resp.status().as_u16(),
+        expected_http_status,
+        "{context}: HTTP status"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "{context}: content-type"
+    );
+    let body = body_json(resp).await;
+    let object = body
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: status body was not a JSON object: {body}"));
+    assert_eq!(
+        object.len(),
+        3,
+        "{context}: status body should only contain code/message/details: {body}"
+    );
+    assert_eq!(
+        body["code"].as_i64(),
+        Some(expected_grpc_code),
+        "{context}: grpc code"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(message_fragment),
+        "{context}: message {:?} did not contain {:?}",
+        body["message"],
+        message_fragment
+    );
+    assert_eq!(body["details"], serde_json::json!([]), "{context}: details");
 }
 
 async fn assert_plain_unauthorized(resp: Response) {
@@ -145,6 +206,63 @@ async fn assert_plain_unauthorized(resp: Response) {
     );
     let body = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     assert_eq!(body.as_ref(), b"Unauthorized");
+}
+
+#[tokio::test]
+async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        authorization: Option<&'static str>,
+        body: &'static str,
+    }
+
+    let (app, _token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "missing bearer on malformed JSON",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            authorization: None,
+            body: "{",
+        },
+        Case {
+            name: "malformed authorization scheme on malformed query",
+            method: Method::GET,
+            uri: "/api/v1/user?id=not-a-number",
+            authorization: Some("Token definitely-invalid"),
+            body: "",
+        },
+        Case {
+            name: "invalid bearer on malformed path",
+            method: Method::DELETE,
+            uri: "/api/v1/user/not-a-number",
+            authorization: Some("Bearer definitely-invalid"),
+            body: "",
+        },
+        Case {
+            name: "empty bearer token",
+            method: Method::GET,
+            uri: "/api/v1/health",
+            authorization: Some("Bearer "),
+            body: "",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                case.method,
+                case.uri,
+                case.authorization,
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "{}", case.name);
+        assert_plain_unauthorized(resp).await;
+    }
 }
 
 #[tokio::test]
@@ -358,6 +476,146 @@ async fn grpc_gateway_path_parameter_type_mismatch_is_status_json() {
             .contains("type mismatch, parameter: id")
     );
     assert_eq!(body["details"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn grpc_gateway_malformed_json_failures_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "create user body",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            body: "{",
+            message_fragment: "EOF while parsing",
+        },
+        Case {
+            name: "set policy body",
+            method: Method::PUT,
+            uri: "/api/v1/policy",
+            body: r#"{"policy":"#,
+            message_fragment: "EOF while parsing",
+        },
+        Case {
+            name: "debug node body",
+            method: Method::POST,
+            uri: "/api/v1/debug/node",
+            body: r#"{"user":"node-user","routes":["10.0.0.0/24",]}"#,
+            message_fragment: "trailing comma",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_query_parser_failures_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "uint64 query field",
+            method: Method::GET,
+            uri: "/api/v1/user?id=not-a-number",
+            message_fragment: "invalid digit",
+        },
+        Case {
+            name: "bool query field",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed=not-bool",
+            message_fragment: "provided string was not `true` or `false`",
+        },
+        Case {
+            name: "timestamp seconds query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry.seconds=not-a-number",
+            message_fragment: "type mismatch, parameter: expiry.seconds",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(case.method, case.uri, Some(&token), Body::empty()))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_path_parser_failures_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: Body,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "user id decimal syntax",
+            method: Method::DELETE,
+            uri: "/api/v1/user/not-a-number",
+            body: Body::empty(),
+            message_fragment: "type mismatch, parameter: id",
+        },
+        Case {
+            name: "node id hex syntax",
+            method: Method::GET,
+            uri: "/api/v1/node/0xzz",
+            body: Body::empty(),
+            message_fragment: r#"strconv.ParseUint: parsing "0xzz": invalid syntax"#,
+        },
+        Case {
+            name: "node id uint64 overflow",
+            method: Method::POST,
+            uri: "/api/v1/node/18446744073709551616/tags",
+            body: Body::from("{}"),
+            message_fragment: "value out of range",
+        },
+        Case {
+            name: "rename node id parameter name",
+            method: Method::POST,
+            uri: "/api/v1/node/not-a-number/rename/new-name",
+            body: Body::empty(),
+            message_fragment: "type mismatch, parameter: node_id",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(case.method, case.uri, Some(&token), case.body))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
 }
 
 #[tokio::test]

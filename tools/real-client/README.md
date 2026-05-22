@@ -64,7 +64,7 @@ headscale-rs wire surface.
 
 ## Auth-Key Smoke
 
-The first runnable stock-client scenario is:
+The first runnable stock-client scenario runs against headscale-rs:
 
 ```sh
 tools/real-client/authkey-smoke.sh
@@ -82,3 +82,20 @@ Useful knobs:
 - `TAILSCALE_IMAGE` defaults to `tailscale/tailscale:v1.94.1`.
 - `REAL_CLIENT_WORKDIR` defaults to `target/real-client/authkey-smoke`.
 - `REAL_CLIENT_TIMEOUT_SECS` defaults to `120`.
+
+The matching headscale-go v0.28.0 smoke is:
+
+```sh
+tools/real-client/authkey-headscale-go-smoke.sh
+```
+
+It installs the pinned upstream headscale-go binary into the per-run work
+directory, starts a local SQLite-backed server with a local DERP map fixture,
+mints the same reusable auth-key shape through the upstream CLI, runs the same
+stock Tailscale client image, and asserts that headscale-go registered one
+`alice` node.
+
+Additional knobs:
+
+- `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
+- `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.

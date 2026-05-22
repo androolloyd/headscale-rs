@@ -137,6 +137,22 @@ Useful knobs:
 - `REAL_CLIENT_CLIENT_COUNT` defaults to `2`.
 - `REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX` defaults to `tail.test`.
 
+## ACL Peer Visibility Smoke
+
+The ACL allow scenario starts two stock clients with a loaded policy that allows
+`alice@` devices to reach other `alice@` devices, then asserts each client sees
+exactly one peer:
+
+```sh
+tools/real-client/acl-allow-smoke.sh
+tools/real-client/acl-allow-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_POLICY_JSON` can override the generated allow policy.
+- `REAL_CLIENT_EXPECT_PEER_COUNT` defaults to `1`.
+
 ## Advertised Route Smoke
 
 The route-advertisement scenario reuses the auth-key setup and adds

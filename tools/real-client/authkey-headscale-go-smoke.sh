@@ -22,6 +22,7 @@ preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
+expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -31,6 +32,11 @@ mkdir -p "${work_dir}/bin"
 
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+
+if [[ -n "${expected_peer_count}" ]] && ! [[ "${expected_peer_count}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_PEER_COUNT must be a non-negative integer, got ${expected_peer_count}" >&2
   exit 2
 fi
 
@@ -119,17 +125,30 @@ run_with_timeout() {
 
 tailscale_logged_in() {
   local client_name="$1"
-  docker exec "${client_name}" tailscale status --json 2>/dev/null |
-    ruby -rjson -e '
-      status = JSON.parse(STDIN.read)
-      self_node = status["Self"] || {}
-      ips = Array(status["TailscaleIPs"])
-      ok = status["HaveNodeKey"] &&
-        status["AuthURL"].to_s.empty? &&
-        self_node["InNetworkMap"] &&
-        ips.any? { |ip| ip.start_with?("100.") }
-      exit(ok ? 0 : 1)
-    '
+  local status_json
+  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    self_node = status["Self"] || {}
+    ips = Array(status["TailscaleIPs"])
+    ok = status["HaveNodeKey"] &&
+      status["AuthURL"].to_s.empty? &&
+      self_node["InNetworkMap"] &&
+      ips.any? { |ip| ip.start_with?("100.") }
+    exit(ok ? 0 : 1)
+  ' <<<"${status_json}"
+}
+
+tailscale_peer_count_matches() {
+  local client_name="$1"
+  local count="$2"
+  local status_json
+  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    peers = status["Peer"] || {}
+    exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
+  ' "${count}" <<<"${status_json}"
 }
 
 dump_client_debug() {
@@ -418,6 +437,34 @@ if [[ -n "${expected_magic_dns_suffix}" ]]; then
     end
     puts JSON.pretty_generate({magic_dns_suffix: expected_suffix, clients: status_paths.length})
   ' "${expected_magic_dns_suffix}" "${magicdns_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_peer_count}" ]]; then
+  echo "::group::assert client peer visibility"
+  peer_status_paths=()
+  for client_name in "${client_names[@]}"; do
+    if ! wait_for "tailscale peer count ${expected_peer_count} for ${client_name}" \
+      "tailscale_peer_count_matches '${client_name}' '${expected_peer_count}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    status_path="${work_dir}/${client_name}.peer-status.json"
+    docker exec "${client_name}" tailscale status --json >"${status_path}"
+    peer_status_paths+=("${status_path}")
+  done
+  ruby -rjson -e '
+    expected_count = Integer(ARGV.fetch(0))
+    status_paths = ARGV.drop(1)
+    status_paths.each do |path|
+      status = JSON.parse(File.read(path))
+      self_host = status.fetch("Self").fetch("HostName")
+      peers = status["Peer"] || {}
+      abort("#{path}: expected #{expected_count} peers, got #{peers.length}") unless peers.length == expected_count
+      peer_hosts = peers.each_value.map { |peer| peer.fetch("HostName") }.sort
+      puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
+    end
+  ' "${expected_peer_count}" "${peer_status_paths[@]}"
   echo "::endgroup::"
 fi
 

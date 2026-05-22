@@ -7,6 +7,7 @@
 //! generation, auth URL construction, token exchange, and ID-token validation.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -96,10 +97,21 @@ pub struct OidcProviderMetadata {
     pub jwks_uri: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OidcAuthRuntime {
     config: Arc<OidcAuthConfig>,
     registrations: Arc<OidcRegistrationCache>,
+    users: Option<Arc<dyn OidcUserStore>>,
+}
+
+impl fmt::Debug for OidcAuthRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcAuthRuntime")
+            .field("config", &self.config)
+            .field("registrations", &self.registrations)
+            .field("users", &self.users.as_ref().map(|_| "<configured>"))
+            .finish()
+    }
 }
 
 impl OidcAuthRuntime {
@@ -107,6 +119,7 @@ impl OidcAuthRuntime {
         Self {
             config: Arc::new(config),
             registrations: Arc::new(OidcRegistrationCache::new(DEFAULT_OIDC_AUTH_CACHE_EXPIRY)),
+            users: None,
         }
     }
 
@@ -117,7 +130,13 @@ impl OidcAuthRuntime {
         Self {
             config: Arc::new(config),
             registrations,
+            users: None,
         }
+    }
+
+    pub fn with_user_store(mut self, users: Arc<dyn OidcUserStore>) -> Self {
+        self.users = Some(users);
+        self
     }
 
     pub fn registration(&self, state: &str) -> Option<OidcRegistrationInfo> {
@@ -530,6 +549,25 @@ pub struct OidcUserProfile {
     pub profile_pic_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcStoredUser {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+    pub email: String,
+    pub provider_identifier: String,
+    pub provider: String,
+    pub profile_pic_url: String,
+}
+
+#[async_trait::async_trait]
+pub trait OidcUserStore: Send + Sync {
+    async fn create_or_update_oidc_user(
+        &self,
+        profile: OidcUserProfile,
+    ) -> Result<OidcStoredUser, String>;
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OidcAuthorizationError {
     #[error("unauthorised domain")]
@@ -724,6 +762,21 @@ pub async fn handle_callback(
         }
         let _node_expiry =
             determine_node_expiry(&runtime.config.policy, id_token.expiry, Utc::now());
+        let profile =
+            user_profile_from_claims(&claims, runtime.config.policy.email_verified_required);
+        let _user = if let Some(users) = &runtime.users {
+            match users.create_or_update_oidc_user(profile).await {
+                Ok(user) => Some(user),
+                Err(_) => {
+                    return oidc_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Could not create or update user".to_string(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
     }
 
     oidc_error_response(
@@ -1276,6 +1329,34 @@ mod tests {
     use super::*;
     use axum::http::{HeaderMap, header};
     use chrono::TimeZone;
+
+    #[derive(Debug, Default)]
+    struct MockOidcUserStore {
+        profiles: RwLock<Vec<OidcUserProfile>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl OidcUserStore for MockOidcUserStore {
+        async fn create_or_update_oidc_user(
+            &self,
+            profile: OidcUserProfile,
+        ) -> Result<OidcStoredUser, String> {
+            if self.fail {
+                return Err("store failed".to_string());
+            }
+            self.profiles.write().push(profile.clone());
+            Ok(OidcStoredUser {
+                id: 42,
+                name: profile.name,
+                display_name: profile.display_name,
+                email: profile.email,
+                provider_identifier: profile.provider_identifier,
+                provider: profile.provider,
+                profile_pic_url: profile.profile_pic_url,
+            })
+        }
+    }
 
     fn cfg() -> OidcPolicyConfig {
         OidcPolicyConfig {
@@ -1940,6 +2021,117 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         assert_eq!(userinfo_auth.read().as_deref(), Some("Bearer access-token"));
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_upserts_authorized_merged_profile_when_store_is_configured() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = Some(format!("{base_url}/userinfo"));
+        config.policy = OidcPolicyConfig {
+            allowed_groups: vec!["userinfo-group".into()],
+            allowed_domains: vec!["example.com".into()],
+            allowed_users: vec!["userinfo@example.com".into()],
+            ..OidcPolicyConfig::default()
+        };
+        let store = Arc::new(MockOidcUserStore::default());
+        let runtime = OidcAuthRuntime::new(config).with_user_store(store.clone());
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let profiles = store.profiles.read();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(
+            profiles[0],
+            OidcUserProfile {
+                name: "userinfo".into(),
+                display_name: "User Info Name".into(),
+                email: "userinfo@example.com".into(),
+                provider_identifier: "https://issuer.example/subject".into(),
+                provider: REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: "https://example.com/userinfo.png".into(),
+            }
+        );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_maps_user_store_failure_to_upstream_error_response() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        let runtime = OidcAuthRuntime::new(config).with_user_store(Arc::new(MockOidcUserStore {
+            fail: true,
+            ..MockOidcUserStore::default()
+        }));
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_body(response).await,
+            "Could not create or update user"
+        );
     }
 
     #[cfg(feature = "full")]

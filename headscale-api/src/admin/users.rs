@@ -349,6 +349,38 @@ impl PersistentUserAdmin {
 }
 
 #[async_trait]
+impl crate::oidc::OidcUserStore for PersistentUserAdmin {
+    async fn create_or_update_oidc_user(
+        &self,
+        profile: crate::oidc::OidcUserProfile,
+    ) -> Result<crate::oidc::OidcStoredUser, String> {
+        let row = headscale_db::users::create_or_update_oidc_user(
+            &self.pool,
+            headscale_db::users::OidcUserParams {
+                name: profile.name,
+                display_name: profile.display_name,
+                email: profile.email,
+                provider_identifier: profile.provider_identifier,
+                profile_pic_url: profile.profile_pic_url,
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let record = Self::row_to_record(row);
+        Ok(crate::oidc::OidcStoredUser {
+            id: record.id,
+            name: record.name,
+            display_name: record.display_name,
+            email: record.email,
+            provider_identifier: record.provider_id,
+            provider: record.provider,
+            profile_pic_url: record.profile_pic_url,
+        })
+    }
+}
+
+#[async_trait]
 impl UserAdmin for PersistentUserAdmin {
     async fn create(&self, name: &str) -> Result<UserRecord, UserRegistryError> {
         self.create_detailed(name, "", "", "").await
@@ -606,5 +638,57 @@ mod tests {
         assert_eq!(listed[0].provider_id, "https://issuer/sub");
         assert_eq!(listed[0].created_at, 10);
         assert_eq!(listed[0].last_activity, 11);
+    }
+
+    #[tokio::test]
+    async fn persistent_user_admin_upserts_oidc_profiles_for_callback() {
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = PersistentUserAdmin::new(db.pool().clone());
+
+        let created = crate::oidc::OidcUserStore::create_or_update_oidc_user(
+            &users,
+            crate::oidc::OidcUserProfile {
+                name: "alice".into(),
+                display_name: "Alice Smith".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: "https://issuer.example/subject".into(),
+                provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: "https://example.com/alice.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.name, "alice");
+        assert_eq!(created.provider, crate::oidc::REGISTER_METHOD_OIDC);
+
+        let updated = crate::oidc::OidcUserStore::create_or_update_oidc_user(
+            &users,
+            crate::oidc::OidcUserProfile {
+                name: String::new(),
+                display_name: "Alice Jones".into(),
+                email: "alice.jones@example.com".into(),
+                provider_identifier: "https://issuer.example/subject".into(),
+                provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: "https://example.com/alice-jones.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.name, "alice");
+        assert_eq!(updated.display_name, "Alice Jones");
+        assert_eq!(updated.email, "alice.jones@example.com");
+        assert_eq!(
+            updated.provider_identifier,
+            "https://issuer.example/subject"
+        );
+        assert_eq!(
+            updated.profile_pic_url,
+            "https://example.com/alice-jones.png"
+        );
+        assert_eq!(users.all().await.unwrap().len(), 1);
     }
 }

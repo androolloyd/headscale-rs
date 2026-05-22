@@ -66,18 +66,24 @@ Crash handling contract:
 
 ## Parity
 
-Parity work should be proven with fixtures or differential tests, not comments.
-The current fixtures cover:
+Parity work should be proven with fixtures, differential tests, or paired
+stock-client smokes, not comments. The current fixtures cover:
 
 - preauth persistence semantics against upstream headscale-go test names;
 - `tools/parity/scenarios/*.json` differential cases against pinned
-  `github.com/juanfont/headscale v0.28.0` policy-to-`tailcfg.FilterRule`
-  output;
+  `github.com/juanfont/headscale v0.28.0` policy, peer-map, route
+  auto-approval, SSH-policy, and `tailcfg` JSON output;
 - Tailscale wire acronym fields such as `AuthURL`, `DNSConfig`, `DERPMap`,
   `AllowedIPs`, `DiscoKey`, and `ID`;
-- ACL default-deny, first-match-wins, group ordering canonicalisation, node
-  attrs, ipsets, hosts, auto-approvers, and HuJSON compatibility.
+- ACL default-deny, first-match-wins, group ordering canonicalisation, hosts,
+  auto-approvers, and HuJSON compatibility; Rust-extension node attrs/ipsets
+  are fuzzed but intentionally outside pinned v0.28 differential parity.
+- real Tailscale client auth-key, web registration, tag, ACL visibility,
+  MagicDNS enabled/custom/disabled, and route primary/failover/withdrawal
+  smokes against both headscale-rs and pinned headscale-go.
 
-The next parity layer should run small headscale-go and headscale-rs instances
-side by side, then compare observable JSON responses and state transitions for
-registration, map polling, route approval, policy updates, and preauth-key use.
+The next parity layer should close the remaining paired stock-client and
+serving-topology gaps: OIDC callback completion, Tailscale SSH, DERP/STUN,
+private DERP, API auth, CLI over upstream gRPC, config-driven process wiring,
+and the remaining DNS/ACL/route edge matrices tracked in
+`docs/headscale-go-parity.md`.

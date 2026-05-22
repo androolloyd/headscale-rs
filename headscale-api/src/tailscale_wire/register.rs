@@ -139,16 +139,41 @@ async fn register_inner(
     body: RegisterRequest,
 ) -> axum::response::Response {
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
+    let now = chrono::Utc::now();
+
+    if let Some(expiry) = body.expiry {
+        if expiry <= now {
+            if let Some(record) = state.machines.get(&node_key_hex) {
+                return logout_existing_node(&state, &node_key_hex, &record, expiry);
+            }
+        }
+    }
+
     if authkey.is_empty() {
+        if let Some(record) = state.machines.get(&node_key_hex) {
+            if record.is_expired_at(now) {
+                return Json(node_key_expired_response(false)).into_response();
+            }
+            if let Some(expiry) = body.expiry {
+                if expiry > now {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorBody {
+                            error: "extending key is not allowed".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            } else {
+                return Json(register_response_for_record(&record)).into_response();
+            }
+        }
+
         if body
             .followup
             .as_deref()
             .is_some_and(|followup| !followup.is_empty())
         {
-            if let Some(record) = state.machines.get(&node_key_hex) {
-                return Json(register_response_for_record(&record)).into_response();
-            }
-
             let registration_id = match registration_id_from_followup(
                 body.followup
                     .as_deref()
@@ -305,17 +330,8 @@ async fn register_interactive(
         .insert(registration_id.clone(), record);
 
     Json(RegisterResponse {
-        user: SimpleUser {
-            id: 0,
-            login_name: String::new(),
-            display_name: String::new(),
-        },
-        login: SimpleLogin {
-            id: 0,
-            provider: String::new(),
-            login_name: String::new(),
-            display_name: String::new(),
-        },
+        user: empty_simple_user(),
+        login: empty_simple_login(),
         node_key_expired: false,
         auth_url: auth_url_for_registration(&state, &registration_id),
         machine_authorized: false,
@@ -350,6 +366,26 @@ fn hostname_and_routes(
     Ok((hostname, available_routes))
 }
 
+fn logout_existing_node(
+    state: &WireState,
+    node_key_hex: &str,
+    record: &MachineRecord,
+    expiry: chrono::DateTime<chrono::Utc>,
+) -> axum::response::Response {
+    if record.ephemeral {
+        state.machines.delete(node_key_hex);
+        return Json(node_key_expired_response(false)).into_response();
+    }
+
+    state.machines.set_expiry(node_key_hex, Some(expiry));
+    let updated = state.machines.get(node_key_hex).unwrap_or_else(|| {
+        let mut updated = record.clone();
+        updated.expiry = Some(expiry);
+        updated
+    });
+    Json(register_response_for_record(&updated)).into_response()
+}
+
 fn allocate_register_ip(
     state: &WireState,
     alloc_input: &str,
@@ -363,6 +399,34 @@ fn allocate_register_ip(
         )
             .into_response()
     })
+}
+
+fn empty_simple_user() -> SimpleUser {
+    SimpleUser {
+        id: 0,
+        login_name: String::new(),
+        display_name: String::new(),
+    }
+}
+
+fn empty_simple_login() -> SimpleLogin {
+    SimpleLogin {
+        id: 0,
+        provider: String::new(),
+        login_name: String::new(),
+        display_name: String::new(),
+    }
+}
+
+fn node_key_expired_response(machine_authorized: bool) -> RegisterResponse {
+    RegisterResponse {
+        user: empty_simple_user(),
+        login: empty_simple_login(),
+        node_key_expired: true,
+        auth_url: String::new(),
+        machine_authorized,
+        error: String::new(),
+    }
 }
 
 fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
@@ -503,7 +567,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRegistry, WireState,
+        MachineRegistry, RedeemOk, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -623,6 +687,188 @@ mod tests {
         assert_eq!(rec.hostname, "peer-a");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn existing_node_no_auth_restart_returns_current_registration() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-restart-alice";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "31".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let restart_body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+        });
+        let restart_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&restart_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart_resp.status(), StatusCode::OK);
+        let raw = to_bytes(restart_resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+        assert_eq!(rr.user.login_name, "alice");
+        assert!(rr.auth_url.is_empty());
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.registration_cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_node_no_auth_future_expiry_is_rejected() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-future-expiry";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "32".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Expiry": future,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "extending key is not allowed");
+        assert!(state.machines.get(&node_key_hex).unwrap().expiry.is_none());
+        assert!(state.registration_cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_node_no_auth_past_expiry_logs_out_persistent_node() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-logout-persistent";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "33".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Expiry": past,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.node_key_expired);
+        assert!(rr.machine_authorized);
+        assert_eq!(rr.user.login_name, "alice");
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert!(rec.is_expired_at(chrono::Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn existing_node_no_auth_past_expiry_deletes_ephemeral_node() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-logout-ephemeral";
+        redeemer.insert_full(authkey, RedeemOk::for_user("alice").ephemeral(true));
+        let app = router(state.clone());
+        let node_key_hex = "34".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.get(&node_key_hex).unwrap().ephemeral);
+
+        let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Expiry": past,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.node_key_expired);
+        assert!(!rr.machine_authorized);
+        assert!(state.machines.get(&node_key_hex).is_none());
     }
 
     #[tokio::test]

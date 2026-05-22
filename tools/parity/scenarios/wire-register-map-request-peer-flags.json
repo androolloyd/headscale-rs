@@ -42,7 +42,6 @@
       "Hostinfo": { "Hostname": "ephemeral-peer", "OS": "linux", "OSVersion": "6.9" }
     },
     "map_response": {
-      "KeyExpiryExtension": 0,
       "Node": {
         "ID": 10,
         "StableID": "n10",

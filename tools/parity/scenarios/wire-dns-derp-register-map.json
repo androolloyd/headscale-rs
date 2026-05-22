@@ -73,7 +73,6 @@
       "MachineAuthorized": true
     },
     "map_response": {
-      "KeyExpiryExtension": 0,
       "Node": {
         "ID": 7,
         "StableID": "n7",

@@ -421,9 +421,12 @@ fn map_request_disco_key_round_trip() {
         map_session_handle: "session-1".into(),
         map_session_seq: 7,
         disco_key: Some("discokey:beef".into()),
-        hardware_attestation_key: None,
-        hardware_attestation_key_signature: String::new(),
-        hardware_attestation_key_signature_timestamp: None,
+        hardware_attestation_key: Some(
+            "hwattestpub:046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+                .into(),
+        ),
+        hardware_attestation_key_signature: "YXR0ZXN0LXNpZw==".into(),
+        hardware_attestation_key_signature_timestamp: Some("2026-05-22T12:00:00Z".parse().unwrap()),
         endpoints: Some(vec!["198.51.100.1:41641".into()]),
         endpoint_types: vec![1],
         read_only: true,
@@ -437,12 +440,18 @@ fn map_request_disco_key_round_trip() {
     assert!(j.contains("\"Endpoints\":[\"198.51.100.1:41641\"]"));
     assert!(j.contains("\"MapSessionHandle\":\"session-1\""));
     assert!(j.contains("\"EndpointTypes\":[1]"));
+    assert!(j.contains("\"HardwareAttestationKey\":\"hwattestpub:"));
+    assert!(j.contains("\"HardwareAttestationKeySignature\":\"YXR0ZXN0LXNpZw==\""));
+    assert!(j.contains("\"HardwareAttestationKeySignatureTimestamp\":\"2026-05-22T12:00:00Z\""));
     assert!(j.contains("\"ConnectionHandleForTest\":\"conn-test-1\""));
     let back: MapRequest = serde_json::from_str(&j).unwrap();
     assert_eq!(back.disco_key.as_deref(), Some("discokey:beef"));
     assert_eq!(back.endpoints.as_ref().unwrap().len(), 1);
     assert_eq!(back.endpoint_types, vec![1]);
     assert_eq!(back.map_session_seq, 7);
+    assert!(back.hardware_attestation_key.is_some());
+    assert_eq!(back.hardware_attestation_key_signature, "YXR0ZXN0LXNpZw==");
+    assert!(back.hardware_attestation_key_signature_timestamp.is_some());
     assert_eq!(back.connection_handle_for_test, "conn-test-1");
 }
 

@@ -766,9 +766,6 @@ pub struct MapResponse {
         skip_serializing_if = "String::is_empty"
     )]
     pub pop_browser_url: String,
-    /// `key_expiry_extension` in upstream; unused here, kept for shape.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub key_expiry_extension: u64,
     /// Own node record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<MapNode>,

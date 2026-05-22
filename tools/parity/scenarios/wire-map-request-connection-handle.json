@@ -11,6 +11,9 @@
       "Compress": "zstd",
       "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
       "DiscoKey": "discokey:3434343434343434343434343434343434343434343434343434343434343434",
+      "HardwareAttestationKey": "hwattestpub:046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+      "HardwareAttestationKeySignature": "YXR0ZXN0LXNpZw==",
+      "HardwareAttestationKeySignatureTimestamp": "2026-05-22T12:00:00Z",
       "Hostinfo": {
         "Hostname": "connection-handle-peer",
         "OS": "linux",

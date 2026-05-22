@@ -37,6 +37,7 @@
 //!     # preauth: todo!(),
 //!     # ip_allocator: todo!(),
 //!     # machines: Arc::new(tailscale_wire::MachineRegistry::new()),
+//!     # registration_store: None,
 //!     # derp_map: Arc::new(Default::default()),
 //!     # policy: Arc::new(Default::default()),
 //!     # knock: tailscale_wire::KnockConfig::disabled(),

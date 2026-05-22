@@ -64,6 +64,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         preauth: Arc::new(AlwaysRejectRedeemer),
         ip_allocator: Arc::new(FixedIpAllocator),
         machines: Arc::new(MachineRegistry::new()),
+        registration_store: None,
         derp_map: Arc::new(tailscale_wire::wire::DerpMap::default()),
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock,

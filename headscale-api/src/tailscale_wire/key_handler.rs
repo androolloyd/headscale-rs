@@ -85,6 +85,7 @@ mod tests {
             preauth: Arc::new(MockRedeemer::new()),
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
+            registration_store: None,
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),

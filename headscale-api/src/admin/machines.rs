@@ -57,12 +57,14 @@ use sqlx::SqlitePool;
 
 use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
-    MachineRecord, MachineRegistry, RegistrationCache, routes::auto_approved_routes_for_node,
+    MachineRecord, MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration,
+    RegistrationCache, routes::auto_approved_routes_for_node,
 };
 
 use super::auth::now_unix;
 use super::users::UserAdmin;
 
+const REGISTER_METHOD_AUTH_KEY: i32 = 1;
 const REGISTER_METHOD_OIDC: i32 = 3;
 
 /// Admin-side view of one registered machine.
@@ -380,8 +382,31 @@ impl PersistentMachineAdmin {
 
     pub async fn create_or_update_auth_path(
         &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_inner(record, policy, None, true)
+            .await
+    }
+
+    pub async fn create_or_update_auth_key_path(
+        &self,
+        record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let mut record = machine_admin_record_from_wire(&record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        self.create_or_update_auth_path_inner(record, policy, auth_key_id, false)
+            .await
+    }
+
+    async fn create_or_update_auth_path_inner(
+        &self,
         mut record: MachineAdminRecord,
         policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        validate_requested_tags: bool,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
@@ -393,13 +418,14 @@ impl PersistentMachineAdmin {
             .parse::<Ipv4Addr>()
             .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
         let user_id = self.user_id_for_record(&record).await?;
-        if validate_requested_tags_for_node(
-            policy,
-            record.ipv4.as_str(),
-            record.user.as_str(),
-            &mut record.tags,
-        )
-        .map_err(MachineAdminError::BadRequest)?
+        if validate_requested_tags
+            && validate_requested_tags_for_node(
+                policy,
+                record.ipv4.as_str(),
+                record.user.as_str(),
+                &mut record.tags,
+            )
+            .map_err(MachineAdminError::BadRequest)?
         {
             record.expiry = None;
         }
@@ -461,7 +487,7 @@ impl PersistentMachineAdmin {
             let row = headscale_db::headscale_nodes::update_from_auth_path(
                 &self.pool,
                 existing.id,
-                create_params_for_record(&record, user_id),
+                create_params_for_record_with_auth_key(&record, user_id, auth_key_id),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -482,13 +508,18 @@ impl PersistentMachineAdmin {
                 &record.routes,
             )
             .map_err(MachineAdminError::BadRequest)?;
-            self.create(record)
-                .await
-                .map(|record| AuthPathRegistrationResult {
-                    record,
-                    new_node: true,
-                    replaced_node_key_hex: None,
-                })
+            let row = headscale_db::headscale_nodes::create(
+                &self.pool,
+                create_params_for_record_with_auth_key(&record, user_id, auth_key_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            let record = self.row_to_record(row).await;
+            Ok(AuthPathRegistrationResult {
+                record,
+                new_node: true,
+                replaced_node_key_hex: None,
+            })
         }
     }
 
@@ -581,7 +612,8 @@ impl PersistentMachineAdmin {
                 .unwrap_or("unknown")
                 .to_string(),
             version: host_info
-                .get("App")
+                .get("OSVersion")
+                .or_else(|| host_info.get("App"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string(),
@@ -639,6 +671,26 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         } else {
             Err(crate::oidc::OidcRegistrationError::SessionExpired)
         }
+    }
+}
+
+#[async_trait]
+impl MachineRegistrationStore for PersistentMachineAdmin {
+    async fn create_or_update_auth_key_registration(
+        &self,
+        record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let result = self
+            .create_or_update_auth_key_path(record, policy, auth_key_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let record = machine_admin_record_to_wire(&result.record).map_err(|err| err.to_string())?;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: result.replaced_node_key_hex,
+        })
     }
 }
 
@@ -944,6 +996,14 @@ fn create_params_for_record(
     record: &MachineAdminRecord,
     user_id: Option<i64>,
 ) -> headscale_db::headscale_nodes::CreateParams {
+    create_params_for_record_with_auth_key(record, user_id, None)
+}
+
+fn create_params_for_record_with_auth_key(
+    record: &MachineAdminRecord,
+    user_id: Option<i64>,
+    auth_key_id: Option<i64>,
+) -> headscale_db::headscale_nodes::CreateParams {
     headscale_db::headscale_nodes::CreateParams {
         machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
         node_key: key_with_prefix("nodekey:", &record.id),
@@ -957,7 +1017,7 @@ fn create_params_for_record(
         user_id,
         register_method: register_method_to_db(record.register_method),
         tags: record.tags.clone(),
-        auth_key_id: None,
+        auth_key_id,
         expiry: record.expiry.map(|expiry| expiry as i64),
         last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
         approved_routes: record.approved_routes.clone(),
@@ -1097,6 +1157,8 @@ fn routes_from_host_info(host_info: &Value) -> Vec<String> {
 fn host_info_for_record(record: &MachineAdminRecord) -> Value {
     json!({
         "Hostname": record.name,
+        "OS": record.os,
+        "OSVersion": record.version,
         "RoutableIPs": record.routes,
     })
 }
@@ -1504,6 +1566,127 @@ mod tests {
         assert_eq!(
             raw.register_method,
             headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_auth_key_path_writes_auth_key_metadata() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let preauth = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: vec!["tag:server".into()],
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut record = machine_admin_record_to_wire(&persistent_record()).unwrap();
+        record.forced_tags = vec!["tag:server".into()];
+        record.available_routes = vec!["10.0.0.0/24".into()];
+        record.approved_routes = vec!["10.0.0.0/24".into()];
+
+        let result = admin
+            .create_or_update_auth_key_path(
+                record.clone(),
+                &PolicyStore::new(),
+                Some(preauth.row.id),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        assert_eq!(result.record.register_method, REGISTER_METHOD_AUTH_KEY);
+        assert_eq!(result.record.tags, vec!["tag:server"]);
+        assert_eq!(result.record.routes, vec!["10.0.0.0/24"]);
+        assert_eq!(result.record.approved_routes, vec!["10.0.0.0/24"]);
+        let raw = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{}", record.node_key_hex),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
+        );
+        assert_eq!(raw.auth_key_id, Some(preauth.row.id));
+        assert_eq!(raw.tag_list(), vec!["tag:server"]);
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_auth_key_path_reauth_updates_existing_row() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let first_key = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let second_key = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let original = machine_admin_record_to_wire(&persistent_record()).unwrap();
+        let created = admin
+            .create_or_update_auth_key_path(
+                original.clone(),
+                &PolicyStore::new(),
+                Some(first_key.row.id),
+            )
+            .await
+            .unwrap();
+
+        let mut rotated = original.clone();
+        rotated.node_key_hex = "cc".repeat(32);
+        rotated.hostname = "alice-rotated".into();
+        rotated.ipv4 = Ipv4Addr::new(100, 64, 99, 99);
+        rotated.available_routes = vec!["10.1.0.0/24".into()];
+        let result = admin
+            .create_or_update_auth_key_path(
+                rotated.clone(),
+                &PolicyStore::new(),
+                Some(second_key.row.id),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.new_node);
+        assert_eq!(result.replaced_node_key_hex, Some(original.node_key_hex));
+        assert_eq!(result.record.node_id, created.record.node_id);
+        assert_eq!(result.record.id, rotated.node_key_hex);
+        assert_eq!(result.record.ipv4, created.record.ipv4);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let raw =
+            headscale_db::headscale_nodes::get_by_id(db.pool(), created.record.node_id as i64)
+                .await
+                .unwrap();
+        assert_eq!(raw.node_key, format!("nodekey:{}", rotated.node_key_hex));
+        assert_eq!(raw.auth_key_id, Some(second_key.row.id));
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
         );
     }
 

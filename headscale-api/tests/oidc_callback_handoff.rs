@@ -186,6 +186,7 @@ fn wire_state() -> (WireState, TempDir) {
         preauth: Arc::new(RejectingPreauth),
         ip_allocator: Arc::new(FixedIpAllocator),
         machines: Arc::new(MachineRegistry::new()),
+        registration_store: None,
         derp_map: Arc::new(DerpMap::default()),
         policy: Arc::new(PolicyStore::new()),
         knock: KnockConfig::disabled(),

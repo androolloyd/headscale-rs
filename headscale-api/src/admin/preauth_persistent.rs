@@ -131,6 +131,7 @@ impl PersistentPreauthAdmin {
         RedeemOk::for_user(self.display_user_for_row(row).await)
             .ephemeral(row.ephemeral)
             .tags(row.tag_list())
+            .auth_key_id(row.id)
     }
 
     async fn row_to_admin_key(&self, row: &PreauthKeyRow) -> PreauthAdminKey {
@@ -440,16 +441,20 @@ mod tests {
 
         let first = s.redeem(&used.key).await.unwrap();
         assert_eq!(first.user, "alice");
+        assert_eq!(first.auth_key_id, Some(used.id as i64));
         let e = s.redeem(&used.key).await.unwrap_err();
         assert_eq!(e, RedeemError::AlreadyUsed);
         let looked_up = s.lookup(&used.key).await.unwrap();
         assert_eq!(looked_up.user, "alice");
+        assert_eq!(looked_up.auth_key_id, Some(used.id as i64));
 
         let expired = s.mint(alice_req()).await.unwrap();
         s.expire_by_id(expired.id).await.unwrap();
         let e = s.redeem(&expired.key).await.unwrap_err();
         assert_eq!(e, RedeemError::Expired);
-        assert_eq!(s.lookup(&expired.key).await.unwrap().user, "alice");
+        let looked_up = s.lookup(&expired.key).await.unwrap();
+        assert_eq!(looked_up.user, "alice");
+        assert_eq!(looked_up.auth_key_id, Some(expired.id as i64));
     }
 
     #[tokio::test]

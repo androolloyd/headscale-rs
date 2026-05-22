@@ -157,6 +157,11 @@ pub struct RedeemOk {
     /// rendered MapNode carries them. Operators can later override
     /// via `POST /api/v1/machines/{id}/tags`.
     pub tags: Vec<String>,
+    /// Numeric `pre_auth_keys.id` when the redeemer is backed by the
+    /// headscale-go-shaped SQLite table. Volatile redeemers leave this
+    /// empty, but persistent wire registration uses it to preserve
+    /// `nodes.auth_key_id` like upstream.
+    pub auth_key_id: Option<i64>,
 }
 
 impl RedeemOk {
@@ -168,6 +173,7 @@ impl RedeemOk {
             user: user.into(),
             ephemeral: false,
             tags: Vec::new(),
+            auth_key_id: None,
         }
     }
     pub fn ephemeral(mut self, e: bool) -> Self {
@@ -176,6 +182,10 @@ impl RedeemOk {
     }
     pub fn tags(mut self, t: Vec<String>) -> Self {
         self.tags = t;
+        self
+    }
+    pub fn auth_key_id(mut self, id: i64) -> Self {
+        self.auth_key_id = Some(id);
         self
     }
 }
@@ -228,6 +238,30 @@ pub trait IpAllocator: Send + Sync {
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError>;
 }
 
+/// Result of persisting a wire registration into the durable node store.
+#[derive(Debug, Clone)]
+pub struct PersistedMachineRegistration {
+    pub record: MachineRecord,
+    pub replaced_node_key_hex: Option<String>,
+}
+
+/// Optional persistence hook for wire registration.
+///
+/// The wire layer still owns the live [`MachineRegistry`] projection
+/// used by `/map`; this trait lets embedders make the durable
+/// headscale-go-shaped `nodes` table canonical for registration
+/// writes, then project the persisted row back into that live
+/// registry.
+#[async_trait]
+pub trait MachineRegistrationStore: Send + Sync {
+    async fn create_or_update_auth_key_registration(
+        &self,
+        record: MachineRecord,
+        policy: &crate::policy::PolicyStore,
+        auth_key_id: Option<i64>,
+    ) -> Result<PersistedMachineRegistration, String>;
+}
+
 /// Shared state for every handler under [`router`].
 ///
 /// Cheap to clone: every field is an `Arc`. Construct once at node
@@ -247,6 +281,10 @@ pub struct WireState {
     /// node_key (hex) → machine record. Map long-poll reads this to
     /// build the peer list; register writes to it on success.
     pub machines: Arc<MachineRegistry>,
+    /// Optional durable registration store. When set, auth-key
+    /// registration writes to this store first and treats
+    /// [`Self::machines`] as a projection of the persisted row.
+    pub registration_store: Option<Arc<dyn MachineRegistrationStore>>,
     /// DERP map served on `/machine/map`. `Arc` because it's shared
     /// across every map handler invocation and never mutated after
     /// startup. Defaults to empty (`DerpMap::default()`) — non-interop
@@ -1389,6 +1427,7 @@ mod registry_tests {
             preauth: Arc::new(MockRedeemer::new()),
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
+            registration_store: None,
             derp_map: Arc::new(wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: KnockConfig::disabled(),

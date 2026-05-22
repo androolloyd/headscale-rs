@@ -399,7 +399,39 @@ async fn register_inner(
         ssh_host_keys,
         register_method: 1,
     };
-    if let Some((old_node_key_hex, _)) = existing_machine {
+
+    if let Some(store) = &state.registration_store {
+        let saved = match store
+            .create_or_update_auth_key_registration(
+                rec.clone(),
+                state.policy.as_ref(),
+                redeemed.auth_key_id,
+            )
+            .await
+        {
+            Ok(saved) => saved,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody {
+                        error: format!("persisting node registration failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
+            state.machines.replace_node_key(
+                old_node_key_hex,
+                saved.record.node_key_hex.clone(),
+                saved.record,
+            );
+        } else {
+            state
+                .machines
+                .upsert(saved.record.node_key_hex.clone(), saved.record);
+        }
+    } else if let Some((old_node_key_hex, _)) = existing_machine {
         state
             .machines
             .replace_node_key(&old_node_key_hex, node_key_hex.clone(), rec);
@@ -818,7 +850,8 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRegistry, RedeemOk, WireState,
+        MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration, RedeemOk,
+        WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey},
         router, router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -838,6 +871,7 @@ mod tests {
             preauth: Arc::new(redeemer.clone()),
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
+            registration_store: None,
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
@@ -874,6 +908,29 @@ mod tests {
             },
             policy: crate::oidc::OidcPolicyConfig::default(),
         })
+    }
+
+    #[derive(Default)]
+    struct RecordingRegistrationStore {
+        calls: parking_lot::Mutex<Vec<(MachineRecord, Option<i64>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MachineRegistrationStore for RecordingRegistrationStore {
+        async fn create_or_update_auth_key_registration(
+            &self,
+            mut record: MachineRecord,
+            _policy: &crate::policy::PolicyStore,
+            auth_key_id: Option<i64>,
+        ) -> Result<PersistedMachineRegistration, String> {
+            self.calls.lock().push((record.clone(), auth_key_id));
+            record.hostname = "persisted-peer".into();
+            record.ipv4 = Ipv4Addr::new(100, 64, 9, 9);
+            Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: None,
+            })
+        }
     }
 
     #[test]
@@ -1036,6 +1093,200 @@ mod tests {
         assert_eq!(rec.os_version, "6.6");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn authkey_register_projects_persistent_store_result() {
+        let (mut state, redeemer, _dir) = fixture();
+        let store = Arc::new(RecordingRegistrationStore::default());
+        state.registration_store = Some(store.clone());
+        let authkey = "hskey-auth-persistent-store";
+        redeemer.insert_full(authkey, RedeemOk::for_user("alice").auth_key_id(42));
+        let app = router(state.clone());
+        let node_key_hex = "11".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+
+        let calls = store.calls.lock();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, Some(42));
+        assert_eq!(calls[0].0.hostname, "peer-a");
+        drop(calls);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.hostname, "persisted-peer");
+        assert_eq!(rec.ipv4, Ipv4Addr::new(100, 64, 9, 9));
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn authkey_register_persistent_store_writes_go_node_fk() {
+        use crate::admin::machines::PersistentMachineAdmin;
+        use crate::admin::preauth::{PreauthAdmin, PreauthMintRequest};
+        use crate::admin::preauth_persistent::PersistentPreauthAdmin;
+        use crate::admin::users::{PersistentUserAdmin, UserAdmin};
+
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let preauth = Arc::new(
+            PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
+        );
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users));
+        let key = preauth
+            .mint(PreauthMintRequest {
+                user: "alice".into(),
+                ttl_secs: 3600,
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let (mut state, _redeemer, _dir) = fixture();
+        state.preauth = preauth;
+        state.registration_store = Some(machines);
+        let app = router(state.clone());
+        let node_key_hex = "16".repeat(32);
+        let body = req_body(&node_key_hex, &key.key);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{node_key_hex}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.auth_key_id, Some(key.id as i64));
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
+        );
+        let host_info = raw.host_info_value();
+        assert_eq!(host_info["OS"], "linux");
+        assert_eq!(host_info["OSVersion"], "6.6");
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.user, "alice");
+        assert_eq!(rec.os, "linux");
+        assert_eq!(rec.os_version, "6.6");
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn authkey_register_persistent_store_rekeys_existing_machine() {
+        use crate::admin::machines::PersistentMachineAdmin;
+        use crate::admin::preauth::{PreauthAdmin, PreauthMintRequest};
+        use crate::admin::preauth_persistent::PersistentPreauthAdmin;
+        use crate::admin::users::{PersistentUserAdmin, UserAdmin};
+
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let preauth = Arc::new(
+            PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
+        );
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users));
+        let mint = || PreauthMintRequest {
+            user: "alice".into(),
+            ttl_secs: 3600,
+            reusable: false,
+            ephemeral: false,
+            tags: Vec::new(),
+        };
+        let first_key = preauth.mint(mint()).await.unwrap();
+        let second_key = preauth.mint(mint()).await.unwrap();
+
+        let (mut state, _redeemer, _dir) = fixture();
+        state.preauth = preauth;
+        state.registration_store = Some(machines);
+        let app = router(state.clone());
+        let first_node_key = "19".repeat(32);
+        let second_node_key = "1a".repeat(32);
+        let machine_key_hex = "91".repeat(32);
+
+        let mut first = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{first_node_key}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&req_body(&first_node_key, &first_key.key)).unwrap(),
+            ))
+            .unwrap();
+        first
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first_ip = state.machines.get(&first_node_key).unwrap().ipv4;
+
+        let mut second_body = req_body(&second_node_key, &second_key.key);
+        second_body["Hostinfo"]["Hostname"] = serde_json::json!("peer-rotated");
+        let mut second = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{second_node_key}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&second_body).unwrap(),
+            ))
+            .unwrap();
+        second
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.oneshot(second).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.machines.get(&first_node_key).is_none());
+        let rotated = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(rotated.machine_key_hex, machine_key_hex);
+        assert_eq!(rotated.hostname, "peer-rotated");
+        assert_eq!(rotated.ipv4, first_ip);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let raw = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{second_node_key}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.auth_key_id, Some(second_key.id as i64));
+        assert_eq!(raw.ipv4, Some(first_ip.to_string()));
     }
 
     #[tokio::test]

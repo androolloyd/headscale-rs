@@ -187,6 +187,7 @@ async fn build_persistent_wire_runtime(
         preauth,
         ip_allocator: Arc::new(CgnatIpAllocator),
         machines: wire_registry,
+        registration_store: Some(machines),
         derp_map: Arc::new(DerpMap::default()),
         policy,
         knock: KnockConfig::disabled(),

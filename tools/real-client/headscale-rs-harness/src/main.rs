@@ -263,6 +263,7 @@ async fn main() -> Result<()> {
         preauth: redeemer.clone(),
         ip_allocator: Arc::new(HarnessIpAllocator),
         machines: machines.clone(),
+        registration_store: None,
         derp_map,
         policy: policy.clone(),
         knock: KnockConfig::disabled(),

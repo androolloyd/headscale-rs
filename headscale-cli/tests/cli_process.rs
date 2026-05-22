@@ -99,8 +99,14 @@ fn configtest_loads_default_config_from_current_directory() {
     fs::write(
         cwd.path().join("config.yaml"),
         r#"
-server:
-  server_url: "http://127.0.0.1:8080"
+server_url: "http://127.0.0.1:8080"
+listen_addr: "127.0.0.1:8080"
+database:
+  type: sqlite
+  sqlite:
+    path: "/tmp/headscale-rs-test.sqlite"
+noise:
+  private_key_path: "noise_private.key"
 dns:
   magic_dns: false
 "#,

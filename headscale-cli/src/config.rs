@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use headscale_api::dns::DnsConfigSpec;
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 const DEFAULT_CONFIG_FILENAMES: &[&str] =
     &["config.yaml", "config.yml", "config.json", "config.toml"];
@@ -15,6 +15,43 @@ const DEFAULT_CONFIG_FILENAMES: &[&str] =
 pub(crate) struct CliConfig {
     /// Server mode configuration
     pub server: Option<ServerConfig>,
+    /// Upstream top-level `server_url`.
+    #[serde(default, skip_serializing)]
+    pub(crate) server_url: Option<String>,
+    /// Upstream top-level `listen_addr`.
+    #[serde(default, skip_serializing)]
+    pub(crate) listen_addr: Option<String>,
+    /// Upstream top-level `grpc_listen_addr`.
+    #[serde(default, skip_serializing)]
+    pub(crate) grpc_listen_addr: Option<String>,
+    /// Upstream top-level `grpc_allow_insecure`.
+    #[serde(default, skip_serializing)]
+    pub(crate) grpc_allow_insecure: Option<bool>,
+    /// Upstream top-level Unix-socket permission.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u32_from_int_or_string",
+        skip_serializing
+    )]
+    pub(crate) unix_socket_permission: Option<u32>,
+    /// Upstream top-level `noise` block.
+    #[serde(default, skip_serializing)]
+    pub(crate) noise: Option<UpstreamNoiseConfig>,
+    /// Upstream top-level `prefixes` block.
+    #[serde(default, skip_serializing)]
+    pub(crate) prefixes: Option<UpstreamPrefixesConfig>,
+    /// Upstream top-level `database` block.
+    #[serde(default, skip_serializing)]
+    pub(crate) database: Option<UpstreamDatabaseConfig>,
+    /// Upstream top-level TLS/ACME fields used by config validation.
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_letsencrypt_hostname: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_cert_path: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_key_path: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_letsencrypt_challenge_type: Option<String>,
     /// Upstream-compatible operator CLI gRPC settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<AdminCliConfig>,
@@ -75,7 +112,10 @@ pub(crate) struct ServerConfig {
     #[serde(default = "default_unix_socket")]
     pub unix_socket: PathBuf,
     /// Filesystem permission applied to the local gRPC Unix socket.
-    #[serde(default = "default_unix_socket_permission")]
+    #[serde(
+        default = "default_unix_socket_permission",
+        deserialize_with = "deserialize_u32_from_int_or_string"
+    )]
     pub unix_socket_permission: u32,
     /// Optional remote gRPC TCP listen address.
     #[serde(default = "default_grpc_listen_addr")]
@@ -157,11 +197,42 @@ pub(crate) struct LoggingConfig {
     pub format: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UpstreamNoiseConfig {
+    #[serde(default)]
+    private_key_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UpstreamPrefixesConfig {
+    #[serde(default)]
+    v4: Option<String>,
+    #[serde(default)]
+    v6: Option<String>,
+    #[serde(default)]
+    allocation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UpstreamDatabaseConfig {
+    #[serde(default, rename = "type")]
+    database_type: Option<String>,
+    #[serde(default)]
+    sqlite: Option<UpstreamSqliteConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UpstreamSqliteConfig {
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
 impl CliConfig {
     /// Load configuration from a file.
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let mut config = Self::parse(&contents, ConfigFormat::from_path(path))?;
+        config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
@@ -191,13 +262,14 @@ impl CliConfig {
         }
 
         let mut config = Self::default();
+        config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
 
     fn parse(contents: &str, format: ConfigFormat) -> Result<Self> {
-        match format {
+        let mut config: Self = match format {
             ConfigFormat::Toml => toml::from_str(contents).context("failed to parse TOML config"),
             ConfigFormat::Yaml => {
                 serde_yaml::from_str(contents).context("failed to parse YAML config")
@@ -205,7 +277,9 @@ impl CliConfig {
             ConfigFormat::Json => {
                 serde_json::from_str(contents).context("failed to parse JSON config")
             }
-        }
+        }?;
+        config.normalize_upstream_aliases();
+        Ok(config)
     }
 
     fn apply_oidc_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -225,6 +299,76 @@ impl CliConfig {
             .context("failed to resolve OIDC client secret")
     }
 
+    fn normalize_upstream_aliases(&mut self) {
+        let had_server_block = self.server.is_some();
+        let has_server_alias = self.server_url.is_some()
+            || self.listen_addr.is_some()
+            || self.grpc_listen_addr.is_some()
+            || self.grpc_allow_insecure.is_some()
+            || self.unix_socket.is_some()
+            || self.unix_socket_permission.is_some()
+            || self
+                .noise
+                .as_ref()
+                .is_some_and(|noise| noise.private_key_path.is_some())
+            || self
+                .prefixes
+                .as_ref()
+                .is_some_and(|prefixes| prefixes.v4.is_some())
+            || self
+                .database
+                .as_ref()
+                .is_some_and(|database| database.sqlite_path().is_some());
+
+        if !has_server_alias {
+            return;
+        }
+
+        let mut server = self.server.take().unwrap_or_default();
+        if let Some(server_url) = non_empty_clone(self.server_url.as_ref()) {
+            server.server_url = Some(server_url);
+        }
+        if let Some(listen_addr) = non_empty_clone(self.listen_addr.as_ref()) {
+            server.listen = listen_addr;
+        }
+        if let Some(grpc_listen_addr) = non_empty_clone(self.grpc_listen_addr.as_ref()) {
+            server.grpc_listen_addr = grpc_listen_addr;
+        }
+        if let Some(grpc_allow_insecure) = self.grpc_allow_insecure {
+            server.grpc_allow_insecure = grpc_allow_insecure;
+        }
+        if !had_server_block && let Some(unix_socket) = self.unix_socket.clone() {
+            server.unix_socket = unix_socket;
+        }
+        if !had_server_block && let Some(unix_socket_permission) = self.unix_socket_permission {
+            server.unix_socket_permission = unix_socket_permission;
+        }
+        if let Some(noise_private_key_path) = self
+            .noise
+            .as_ref()
+            .and_then(|noise| noise.private_key_path.as_ref())
+        {
+            server.state_dir = state_dir_from_noise_private_key(noise_private_key_path);
+        }
+        if let Some(prefix_v4) = self
+            .prefixes
+            .as_ref()
+            .and_then(|prefixes| prefixes.v4.as_ref())
+            && !prefix_v4.trim().is_empty()
+        {
+            server.mesh_cidr.clone_from(prefix_v4);
+        }
+        if let Some(sqlite_path) = self
+            .database
+            .as_ref()
+            .and_then(UpstreamDatabaseConfig::sqlite_path)
+        {
+            server.db_path = sqlite_path;
+        }
+
+        self.server = Some(server);
+    }
+
     /// Save configuration to a file.
     #[allow(dead_code)]
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
@@ -237,6 +381,8 @@ impl CliConfig {
     /// binding listeners or opening long-running services.
     pub(crate) fn validate_for_configtest(&self) -> Result<()> {
         self.oidc.validate().context("invalid OIDC configuration")?;
+        self.validate_upstream_database_config()?;
+        self.validate_upstream_tls_config()?;
 
         let server = self.server.as_ref().context(
             "server.server_url is required so clients receive absolute registration URLs",
@@ -271,6 +417,61 @@ impl CliConfig {
 
         Ok(())
     }
+
+    fn validate_upstream_database_config(&self) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let Some(database_type) = database.database_type.as_deref() else {
+            return Ok(());
+        };
+        if matches!(database_type, "sqlite" | "sqlite3") {
+            return Ok(());
+        }
+        bail!("database.type {database_type:?} is not supported yet; only sqlite is wired");
+    }
+
+    fn validate_upstream_tls_config(&self) -> Result<()> {
+        let letsencrypt_hostname = self
+            .tls_letsencrypt_hostname
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let cert_path = self
+            .tls_cert_path
+            .as_ref()
+            .is_some_and(|value| !value.as_os_str().is_empty());
+        let key_path = self
+            .tls_key_path
+            .as_ref()
+            .is_some_and(|value| !value.as_os_str().is_empty());
+        if letsencrypt_hostname && (cert_path || key_path) {
+            bail!("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both");
+        }
+
+        if let Some(challenge_type) = self
+            .tls_letsencrypt_challenge_type
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            && challenge_type != "HTTP-01"
+            && challenge_type != "TLS-ALPN-01"
+        {
+            bail!(
+                "the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl UpstreamDatabaseConfig {
+    fn sqlite_path(&self) -> Option<PathBuf> {
+        self.sqlite
+            .as_ref()
+            .and_then(|sqlite| sqlite.path.as_ref())
+            .filter(|path| !path.as_os_str().is_empty())
+            .cloned()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +498,64 @@ fn default_config_dirs() -> Vec<PathBuf> {
     }
     dirs.push(PathBuf::from("."));
     dirs
+}
+
+fn non_empty_clone(value: Option<&String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty()).cloned()
+}
+
+fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn deserialize_u32_from_int_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = U32Repr::deserialize(deserializer)?;
+    parse_u32_repr(value).map_err(de::Error::custom)
+}
+
+fn deserialize_optional_u32_from_int_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<U32Repr>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_u32_repr(value).map(Some).map_err(de::Error::custom)
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum U32Repr {
+    Int(u32),
+    String(String),
+}
+
+fn parse_u32_repr(value: U32Repr) -> Result<u32, String> {
+    match value {
+        U32Repr::Int(value) => Ok(value),
+        U32Repr::String(value) => {
+            let trimmed = value.trim();
+            if let Some(octal) = trimmed
+                .strip_prefix("0o")
+                .or_else(|| trimmed.strip_prefix("0O"))
+            {
+                u32::from_str_radix(octal, 8)
+                    .map_err(|err| format!("invalid octal permission {trimmed:?}: {err}"))
+            } else {
+                trimmed
+                    .parse::<u32>()
+                    .map_err(|err| format!("invalid integer permission {trimmed:?}: {err}"))
+            }
+        }
+    }
 }
 
 fn oidc_config_is_default(config: &OidcConfig) -> bool {
@@ -505,6 +764,96 @@ grpc_allow_insecure = true
         assert_eq!(server.unix_socket_permission, 0o700);
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
+    }
+
+    #[test]
+    fn loads_upstream_top_level_server_yaml_into_runtime_config() {
+        let source = r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:8080"
+grpc_listen_addr: "127.0.0.1:50443"
+grpc_allow_insecure: true
+unix_socket: "/run/headscale/headscale.sock"
+unix_socket_permission: "0o760"
+
+noise:
+  private_key_path: "/srv/headscale/noise_private.key"
+
+prefixes:
+  v4: "100.100.0.0/16"
+  v6: "fd7a:115c:a1e0::/48"
+
+database:
+  type: sqlite
+  sqlite:
+    path: "/srv/headscale/db.sqlite"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let server = config.server.unwrap();
+
+        assert_eq!(
+            server.server_url.as_deref(),
+            Some("https://headscale.example")
+        );
+        assert_eq!(server.listen, "127.0.0.1:8080");
+        assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
+        assert!(server.grpc_allow_insecure);
+        assert_eq!(
+            server.unix_socket,
+            PathBuf::from("/run/headscale/headscale.sock")
+        );
+        assert_eq!(server.unix_socket_permission, 0o760);
+        assert_eq!(server.state_dir, PathBuf::from("/srv/headscale"));
+        assert_eq!(server.mesh_cidr, "100.100.0.0/16");
+        assert_eq!(server.db_path, PathBuf::from("/srv/headscale/db.sqlite"));
+    }
+
+    #[test]
+    fn configtest_accepts_minimal_upstream_yaml() {
+        let source = r#"
+noise:
+  private_key_path: "private_key.pem"
+server_url: "https://derp.no"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        let server = config.server.unwrap();
+        assert_eq!(server.server_url.as_deref(), Some("https://derp.no"));
+        assert_eq!(server.state_dir, PathBuf::from("."));
+    }
+
+    #[test]
+    fn configtest_rejects_unsupported_postgres_config() {
+        let source = r#"
+server_url: "https://headscale.example"
+database:
+  type: postgres
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("database.type \"postgres\" is not supported"));
+    }
+
+    #[test]
+    fn configtest_rejects_upstream_tls_conflicts() {
+        let source = r#"
+server_url: "https://headscale.example"
+tls_letsencrypt_hostname: "headscale.example"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(
+            format!("{err:#}")
+                .contains("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path")
+        );
     }
 
     #[test]

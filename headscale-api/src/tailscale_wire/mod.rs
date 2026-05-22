@@ -1344,6 +1344,10 @@ pub fn router(state: WireState) -> Router {
         )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
+        .route(
+            "/register/:registration_id",
+            get(basic_handlers::handle_web_register),
+        )
         .route("/ts2021", post(noise::handle_ts2021_post))
         .route(
             "/machine/:node_key/register",

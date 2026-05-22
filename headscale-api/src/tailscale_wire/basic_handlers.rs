@@ -24,6 +24,7 @@ use super::{
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
+const REGISTRATION_ID_LENGTH: usize = 24;
 const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH not set";
 const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
@@ -126,6 +127,19 @@ pub async fn handle_swagger_api_v1() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
         SWAGGER_JSON,
+    )
+        .into_response()
+}
+
+pub async fn handle_web_register(Path(registration_id): Path<String>) -> Response {
+    if registration_id.len() != REGISTRATION_ID_LENGTH {
+        return http_error(StatusCode::BAD_REQUEST, "invalid registration id");
+    }
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        register_web_html(&registration_id),
     )
         .into_response()
 }
@@ -2287,6 +2301,13 @@ fn debug_index_html() -> String {
     out
 }
 
+fn register_web_html(registration_id: &str) -> String {
+    let escaped_registration_id = html_escape(registration_id);
+    format!(
+        r#"<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" href="/favicon.ico"><title>Registration - Headscale</title></head><body translate="no"><main><h1>Machine registration</h1><p>Run the command below in the headscale server to add this machine to your network:</p><pre><code>headscale nodes register --key {escaped_registration_id} --user USERNAME</code></pre><footer>Powered by <a href="https://github.com/juanfont/headscale" rel="noreferrer noopener" target="_blank">Headscale</a></footer></main></body></html>"#
+    )
+}
+
 fn html_escape(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -2523,6 +2544,77 @@ mod tests {
         assert!(parsed.go.version.starts_with("rustc "));
         assert!(!parsed.go.os.is_empty());
         assert!(!parsed.go.arch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn web_register_renders_headscale_go_cli_instruction() {
+        let (state, _dir) = fixture_state();
+        let registration_id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/register/{registration_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains("<title>Registration - Headscale</title>"),
+            "{body}"
+        );
+        assert!(body.contains("<h1>Machine registration</h1>"), "{body}");
+        assert!(
+            body.contains(&format!(
+                "headscale nodes register --key {registration_id} --user USERNAME"
+            )),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_register_rejects_invalid_registration_id_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/register/short")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"invalid registration id\n");
+    }
+
+    #[test]
+    fn web_register_template_escapes_registration_id_in_command() {
+        let html = register_web_html("abc<&\"'defghijklmnopqrs");
+        assert!(
+            html.contains("abc&lt;&amp;&quot;&#39;defghijklmnopqrs"),
+            "{html}"
+        );
+        assert!(!html.contains("abc<&\"'defghijklmnopqrs"), "{html}");
     }
 
     #[tokio::test]
@@ -3029,6 +3121,18 @@ mod tests {
             .unwrap();
         assert_eq!(verify_resp.status(), StatusCode::OK);
 
+        let register_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/register/3oYCOZYA2zZmGB4PQ7aHBaMi")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register_resp.status(), StatusCode::OK);
+
         let metrics_resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -3058,6 +3162,12 @@ mod tests {
         assert!(
             body.contains(
                 "headscale_http_requests_total{code=\"200\",method=\"POST\",path=\"/verify\"} 1\n"
+            ),
+            "{body}",
+        );
+        assert!(
+            body.contains(
+                "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/register/{registration_id}\"} 1\n"
             ),
             "{body}",
         );

@@ -40,9 +40,11 @@ MySQL, and the feature-aware `cargo deny check advisories` gate is clean.
 
 ## Fuzzing
 
-Pull-request CI runs each fuzz target with `-runs=10000`. The scheduled nightly
-workflow runs the same target list with `-max_total_time`, uploads logs, and
-keeps any crash artifacts from `headscale-core/fuzz/artifacts/<target>/`.
+Pull-request CI runs each fuzz target with `-runs=10000`; cargo-fuzz replays
+any checked-in `headscale-core/fuzz/corpus/<target>/` seeds before generated
+inputs. The scheduled nightly workflow runs the same target list with
+`-max_total_time`, uploads logs, and keeps any crash artifacts from
+`headscale-core/fuzz/artifacts/<target>/`.
 
 Current target surfaces:
 
@@ -59,7 +61,9 @@ Crash handling contract:
 
 1. Minimize the artifact with `cargo fuzz tmin`.
 2. Add the minimized input to the target corpus only if it exercises a useful
-   durable edge.
+   durable edge. Corpus directories are ignored for local fuzz output, so use
+   `git add -f headscale-core/fuzz/corpus/<target>/<seed>` for seeds that CI
+   should replay.
 3. Add a normal regression test when the crash maps to a named invariant.
 4. Fix the implementation.
 5. Re-run the target and the affected crate tests.

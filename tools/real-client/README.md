@@ -116,10 +116,20 @@ tools/real-client/web-register-smoke.sh
 tools/real-client/web-register-headscale-go-smoke.sh
 ```
 
+The tagged web-registration variant runs the same no-auth login flow with
+`tailscale up --advertise-tags=tag:server` and asserts that the approved node
+carries the requested ACL tag:
+
+```sh
+tools/real-client/web-register-tags-smoke.sh
+tools/real-client/web-register-tags-headscale-go-smoke.sh
+```
+
 Useful knobs:
 
 - `REAL_CLIENT_LOGIN_MODE=web` can be passed directly to the auth-key smoke
   scripts for custom scenarios.
+- `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server` in the tagged variant.
 - `REAL_CLIENT_TAILSCALE_UP_TIMEOUT` defaults to `45s` for web registration.
 
 ## Tagged Preauth Smoke

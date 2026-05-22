@@ -17,6 +17,9 @@ expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
+preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
+policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -27,6 +30,19 @@ mkdir -p "${work_dir}"
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
   exit 2
+fi
+
+if [[ -n "${preauth_tags}" && -z "${policy_json}" ]]; then
+  policy_json="$(
+    ruby -rjson -e '
+      tags = ARGV.fetch(0).split(",").reject(&:empty?).sort.uniq
+      owners = tags.to_h { |tag| [tag, ["alice@"]] }
+      puts JSON.pretty_generate({
+        tagOwners: owners,
+        acls: [{action: "accept", src: ["*"], dst: ["*:*"]}],
+      })
+    ' "${preauth_tags}"
+  )"
 fi
 
 http_port=""
@@ -146,11 +162,26 @@ echo "harness http=http://127.0.0.1:${http_port}"
 echo "harness login=https://host.docker.internal:${https_port}"
 echo "::endgroup::"
 
+if [[ -n "${policy_json}" ]]; then
+  echo "::group::load policy"
+  curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/policy" \
+    -H 'content-type: application/json' \
+    --data-binary "${policy_json}" \
+    >"${work_dir}/policy-load.txt"
+  echo "::endgroup::"
+fi
+
 echo "::group::mint preauth key"
+preauth_body="$(
+  ruby -rjson -e '
+    tags = ARGV.fetch(0).split(",").reject(&:empty?)
+    puts JSON.generate({user: "alice", reusable: true, tags: tags})
+  ' "${preauth_tags}"
+)"
 preauth_json="$(
   curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
     -H 'content-type: application/json' \
-    -d '{"user":"alice","reusable":true}'
+    -d "${preauth_body}"
 )"
 authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
 echo "minted ${authkey%%-*}-..."
@@ -243,6 +274,7 @@ ruby -rjson -e '
   expected_count = Integer(ARGV.fetch(3))
   expected_primary_route = ARGV.fetch(4)
   debug_routes_path = ARGV.fetch(5)
+  expected_tags = ARGV.fetch(6).split(",").reject(&:empty?).sort
 
   def stable_id_from_key(hex)
     h = 0xcbf29ce484222325
@@ -267,6 +299,10 @@ ruby -rjson -e '
     unless expected_approved.empty? || approved_routes == expected_approved
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
     end
+    forced_tags = Array(machine["forced_tags"]).sort
+    unless expected_tags.empty? || forced_tags == expected_tags
+      abort("expected forced tags #{expected_tags.inspect}, got #{forced_tags.inspect}")
+    end
   end
 
   debug_routes = nil
@@ -288,7 +324,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json"
+' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}"
 echo "::endgroup::"
 
 if [[ -n "${expected_primary_failover_route}" ]]; then

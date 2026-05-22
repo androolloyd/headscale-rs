@@ -18,6 +18,9 @@ expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
+preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
+policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -28,6 +31,19 @@ mkdir -p "${work_dir}/bin"
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
   exit 2
+fi
+
+if [[ -n "${preauth_tags}" && -z "${policy_json}" ]]; then
+  policy_json="$(
+    ruby -rjson -e '
+      tags = ARGV.fetch(0).split(",").reject(&:empty?).sort.uniq
+      owners = tags.to_h { |tag| [tag, ["alice@"]] }
+      puts JSON.pretty_generate({
+        tagOwners: owners,
+        acls: [{action: "accept", src: ["*"], dst: ["*:*"]}],
+      })
+    ' "${preauth_tags}"
+  )"
 fi
 
 http_port=""
@@ -207,6 +223,15 @@ derp:
   auto_update_enabled: false
 EOF
 
+if [[ -n "${policy_json}" ]]; then
+  printf '%s\n' "${policy_json}" >"${work_dir}/policy.hujson"
+  cat >>"${config_path}" <<EOF
+policy:
+  mode: file
+  path: ${work_dir}/policy.hujson
+EOF
+fi
+
 echo "::group::start headscale-go"
 "${headscale_bin}" -c "${config_path}" serve \
   >"${work_dir}/headscale.stdout" \
@@ -224,11 +249,16 @@ echo "::endgroup::"
 echo "::group::mint preauth key"
 "${headscale_bin}" -c "${config_path}" -o json users create alice >"${work_dir}/user.json"
 user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-"${headscale_bin}" -c "${config_path}" -o json preauthkeys create \
+preauth_args=(
+  "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
   --user "${user_id}" \
   --reusable \
-  --expiration 1h \
-  >"${work_dir}/preauth.json"
+  --expiration 1h
+)
+if [[ -n "${preauth_tags}" ]]; then
+  preauth_args+=(--tags "${preauth_tags}")
+fi
+"${preauth_args[@]}" >"${work_dir}/preauth.json"
 authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
 echo "minted ${authkey%%-*}-..."
 echo "::endgroup::"
@@ -311,6 +341,7 @@ ruby -rjson -e '
   expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
   expected_count = Integer(ARGV.fetch(3))
   expected_primary_route = ARGV.fetch(4)
+  expected_tags = ARGV.fetch(5).split(",").reject(&:empty?).sort
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
@@ -321,7 +352,8 @@ ruby -rjson -e '
     addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
     available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
     approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
-    abort("expected user alice, got #{user.inspect}") unless user_name == "alice"
+    expected_user = expected_tags.empty? ? "alice" : "tagged-devices"
+    abort("expected user #{expected_user}, got #{user.inspect}") unless user_name == expected_user
     abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
     abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
     unless expected_routes.empty? || available_routes == expected_routes
@@ -329,6 +361,10 @@ ruby -rjson -e '
     end
     unless expected_approved.empty? || approved_routes == expected_approved
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+    end
+    tags = Array(node["tags"] || node["Tags"]).sort
+    unless expected_tags.empty? || tags == expected_tags
+      abort("expected tags #{expected_tags.inspect}, got #{tags.inspect}")
     end
   end
 
@@ -345,7 +381,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({nodes: nodes, primary_nodes: primary_nodes})
   end
-' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}"
+' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}"
 echo "::endgroup::"
 
 if [[ -n "${expected_primary_failover_route}" ]]; then

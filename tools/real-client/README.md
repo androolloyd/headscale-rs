@@ -101,6 +101,26 @@ Additional knobs:
 - `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 
+## Tagged Preauth Smoke
+
+The tagged-preauth scenario mints a reusable auth key with ACL tags, logs in a
+stock client, and asserts that the registered node carries those tags:
+
+```sh
+tools/real-client/tagged-preauth-smoke.sh
+tools/real-client/tagged-preauth-headscale-go-smoke.sh
+```
+
+Both scripts load a minimal tag-owner policy when tags are requested. The
+headscale-go smoke uses the upstream `headscale preauthkeys create --tags`
+command; the Rust smoke uses the harness-only preauth mint route.
+
+Useful knobs:
+
+- `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server`.
+- `REAL_CLIENT_EXPECT_TAGS` defaults to the requested preauth tags.
+- `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.
+
 ## Advertised Route Smoke
 
 The route-advertisement scenario reuses the auth-key setup and adds

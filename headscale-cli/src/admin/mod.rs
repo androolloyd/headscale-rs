@@ -1,17 +1,18 @@
-//! Operator CLI for the headscale admin HTTP surface.
+//! Operator CLI for the headscale admin surface.
 //!
-//! The admin GUI (#216 / commit `62b956d`) exposes `/api/v1/*` on the
-//! admin listener (default `127.0.0.1:51822`) with bearer-token auth.
-//! This module wraps each of those endpoints in a clap subcommand so
-//! the same actions are available from the shell — matching upstream
-//! `juanfont/headscale`'s CLI surface for `users` / `nodes` /
-//! `preauthkeys` / `apikeys` / `policy` / `tailnet`.
+//! Upstream-compatible command groups use the local Unix-socket gRPC
+//! service by default, matching `headscale`'s operator CLI model. Command
+//! groups that have not been migrated yet still use the legacy admin HTTP
+//! `/api/v1/*` surface exposed for the GUI (#216 / commit `62b956d`).
 //!
 //! ## Wire & auth
 //!
-//! Every command takes a `--server` (`$HEADSCALE_URL`) and `--token`
-//! (`$HEADSCALE_ADMIN_TOKEN`). Errors are mapped onto the fixed
-//! exit-code contract defined by [`ExitCode`]:
+//! gRPC commands use `--unix-socket` (`$HEADSCALE_UNIX_SOCKET`) locally
+//! or `--address` + `--api-key` (`$HEADSCALE_CLI_ADDRESS` /
+//! `$HEADSCALE_CLI_API_KEY`) remotely. Legacy HTTP commands continue to
+//! take `--server` (`$HEADSCALE_URL`) and `--token`
+//! (`$HEADSCALE_ADMIN_TOKEN`). Errors are mapped onto the fixed exit-code
+//! contract defined by [`ExitCode`]:
 //!
 //! | code | meaning                                     |
 //! |------|---------------------------------------------|
@@ -25,6 +26,7 @@
 pub mod apikeys;
 pub mod client;
 pub mod duration;
+pub mod grpc_client;
 pub mod nodes;
 pub mod output;
 pub mod policy;
@@ -37,6 +39,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 pub use client::AdminClient;
+pub use grpc_client::GrpcAdminClient;
 pub use output::OutputFormat;
 
 /// Errors surfaced by the admin client. Variants line up 1-to-1 with
@@ -94,16 +97,29 @@ impl AdminError {
     }
 }
 
-/// Shared connection flags. Hoisted out of each subcommand so the same
-/// `--server` / `--token` / output flags work everywhere.
+/// Shared connection flags. Upstream parity commands prefer gRPC using
+/// the local Unix socket by default; legacy HTTP commands continue to
+/// consume `--server` / `--token` until their command group is ported.
 #[derive(Args, Debug, Clone)]
 pub struct ConnectArgs {
-    /// Admin URL. Falls back to `$HEADSCALE_URL`. Trailing `/` is OK.
+    /// Legacy admin HTTP URL. Falls back to `$HEADSCALE_URL`. Trailing `/` is OK.
     #[arg(long, env = "HEADSCALE_URL", global = true)]
     pub server: Option<String>,
-    /// Bearer token. Falls back to `$HEADSCALE_ADMIN_TOKEN`.
+    /// Legacy admin HTTP bearer token. Falls back to `$HEADSCALE_ADMIN_TOKEN`.
     #[arg(long, env = "HEADSCALE_ADMIN_TOKEN", global = true)]
     pub token: Option<String>,
+    /// Upstream gRPC address. If unset, connect to the local Unix socket.
+    #[arg(long = "address", env = "HEADSCALE_CLI_ADDRESS", global = true)]
+    pub address: Option<String>,
+    /// Upstream gRPC API key for remote addresses.
+    #[arg(long = "api-key", env = "HEADSCALE_CLI_API_KEY", global = true)]
+    pub api_key: Option<String>,
+    /// Local upstream gRPC Unix socket used when `--address` is unset.
+    #[arg(long = "unix-socket", env = "HEADSCALE_UNIX_SOCKET", global = true)]
+    pub unix_socket: Option<PathBuf>,
+    /// Use plaintext for a remote gRPC address.
+    #[arg(long = "insecure", env = "HEADSCALE_CLI_INSECURE", global = true)]
+    pub insecure: bool,
     /// Emit raw JSON instead of the default table view.
     #[arg(long, global = true)]
     pub json: bool,
@@ -128,6 +144,20 @@ impl ConnectArgs {
             .ok_or_else(|| AdminError::Local("--server (or $HEADSCALE_URL) is required".into()))?;
         let token = self.token.clone().unwrap_or_default();
         Ok(AdminClient::new(server, token))
+    }
+
+    pub async fn build_grpc_client(&self) -> Result<GrpcAdminClient, AdminError> {
+        GrpcAdminClient::connect(
+            self.address.as_deref(),
+            self.api_key.as_deref(),
+            self.unix_socket.as_deref(),
+            self.insecure,
+        )
+        .await
+    }
+
+    pub fn has_legacy_http_server(&self) -> bool {
+        self.server.is_some()
     }
 
     pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
@@ -324,12 +354,20 @@ pub enum TailnetCmd {
 // ---------------------------------------------------------------------------
 
 pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminError> {
-    let client = conn.build_client()?;
     let fmt = conn.fmt()?;
+    if conn.has_legacy_http_server() {
+        let client = conn.build_client()?;
+        return match cmd {
+            UsersCmd::Create { name } => users::create(&client, name, fmt).await,
+            UsersCmd::List => users::list(&client, fmt).await,
+            UsersCmd::Delete { name } => users::delete(&client, name).await,
+        };
+    }
+    let mut client = conn.build_grpc_client().await?;
     match cmd {
-        UsersCmd::Create { name } => users::create(&client, name, fmt).await,
-        UsersCmd::List => users::list(&client, fmt).await,
-        UsersCmd::Delete { name } => users::delete(&client, name).await,
+        UsersCmd::Create { name } => users::create_grpc(&mut client, name, fmt).await,
+        UsersCmd::List => users::list_grpc(&mut client, fmt).await,
+        UsersCmd::Delete { name } => users::delete_grpc(&mut client, name).await,
     }
 }
 
@@ -461,6 +499,10 @@ mod tests {
         let conn = ConnectArgs {
             server: None,
             token: Some("t".into()),
+            address: None,
+            api_key: None,
+            unix_socket: None,
+            insecure: false,
             json: false,
             output: None,
         };
@@ -473,6 +515,10 @@ mod tests {
         let conn = ConnectArgs {
             server: Some("http://localhost:51822".into()),
             token: None,
+            address: None,
+            api_key: None,
+            unix_socket: None,
+            insecure: false,
             json: false,
             output: None,
         };
@@ -484,6 +530,10 @@ mod tests {
         let conn = ConnectArgs {
             server: Some("http://localhost:51822".into()),
             token: None,
+            address: None,
+            api_key: None,
+            unix_socket: None,
+            insecure: false,
             json: false,
             output: Some("json-line".into()),
         };

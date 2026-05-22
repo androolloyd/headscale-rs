@@ -2,8 +2,9 @@
 //!
 //! Command-line interface for running headscale mesh nodes and control planes.
 //! The admin subcommands (`users`, `nodes`, `preauthkeys`, `policy`,
-//! `apikeys`, `tailnet`) wrap the `/api/v1/*` surface exposed by the admin GUI
-//! (#216 / commit `62b956d`).
+//! `apikeys`, `tailnet`) are being migrated to the upstream gRPC admin API.
+//! Migrated groups default to the local Unix socket; unmigrated groups still
+//! use the legacy `/api/v1/*` GUI surface.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,7 +80,7 @@ enum Commands {
         action: IdentityAction,
     },
 
-    // ----- Admin surface (wraps `/api/v1/*`) -------------------------------
+    // ----- Admin surface ----------------------------------------------------
     /// Manage users on the admin surface.
     #[command(
         alias = "user",

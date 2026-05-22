@@ -1,6 +1,6 @@
 //! HTTP client wrapper around the admin `/api/v1/*` surface.
 //!
-//! Every admin subcommand routes through [`AdminClient`]. Two things
+//! Legacy admin HTTP command groups route through [`AdminClient`]. Two things
 //! live here that the per-subcommand modules don't want to repeat:
 //!
 //! 1. **URL composition.** All endpoints sit under `/api/v1/...` of a

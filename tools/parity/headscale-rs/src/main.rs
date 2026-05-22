@@ -224,6 +224,16 @@ struct RegisterRequestSummary {
     ephemeral: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     requested_expiry: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    node_key_signature: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    signature_type: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    timestamp: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    device_cert: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +243,8 @@ struct RegisterResponseSummary {
     node_key_expired: bool,
     auth_url: String,
     machine_authorized: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    node_key_signature: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     error: String,
 }
@@ -1450,6 +1462,11 @@ fn summarize_register_request(req: RegisterRequest) -> RegisterRequestSummary {
         tailnet: req.tailnet,
         ephemeral: req.ephemeral,
         requested_expiry: req.expiry.is_some(),
+        node_key_signature: req.node_key_signature.unwrap_or_default(),
+        signature_type: req.signature_type,
+        timestamp: req.timestamp.is_some(),
+        device_cert: req.device_cert.unwrap_or_default(),
+        signature: req.signature.unwrap_or_default(),
     }
 }
 
@@ -1468,6 +1485,7 @@ fn summarize_register_response(resp: RegisterResponse) -> RegisterResponseSummar
         node_key_expired: resp.node_key_expired,
         auth_url: resp.auth_url,
         machine_authorized: resp.machine_authorized,
+        node_key_signature: resp.node_key_signature.unwrap_or_default(),
         error: resp.error,
     }
 }

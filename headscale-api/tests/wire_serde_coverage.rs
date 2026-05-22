@@ -164,11 +164,34 @@ fn register_request_accepts_ephemeral_and_expiry() {
     let j = r#"{
         "NodeKey":"nodekey:cafe",
         "Ephemeral": true,
-        "Expiry": "2026-06-01T00:00:00Z"
+        "Expiry": "2026-06-01T00:00:00Z",
+        "NodeKeySignature": "bm9kZS1zaWduYXR1cmU=",
+        "SignatureType": "signature-v2",
+        "Timestamp": "2026-06-01T00:00:01Z",
+        "DeviceCert": "ZGV2aWNlLWNlcnQ=",
+        "Signature": "cmVnaXN0ZXItc2lnbmF0dXJl"
     }"#;
     let r: RegisterRequest = serde_json::from_str(j).unwrap();
     assert!(r.ephemeral);
     assert!(r.expiry.is_some());
+    assert_eq!(
+        r.node_key_signature.as_deref(),
+        Some("bm9kZS1zaWduYXR1cmU=")
+    );
+    assert_eq!(r.signature_type, "signature-v2");
+    assert!(r.timestamp.is_some());
+    assert_eq!(r.device_cert.as_deref(), Some("ZGV2aWNlLWNlcnQ="));
+    assert_eq!(r.signature.as_deref(), Some("cmVnaXN0ZXItc2lnbmF0dXJl"));
+}
+
+#[test]
+fn register_request_accepts_null_node_key_signature() {
+    let j = r#"{
+        "NodeKey":"nodekey:cafe",
+        "NodeKeySignature": null
+    }"#;
+    let r: RegisterRequest = serde_json::from_str(j).unwrap();
+    assert!(r.node_key_signature.is_none());
 }
 
 #[test]
@@ -197,6 +220,7 @@ fn register_response_emits_auth_url_all_caps() {
         auth_url: String::new(),
         machine_authorized: true,
         error: String::new(),
+        node_key_signature: None,
     };
     let v: Value = serde_json::to_value(&r).unwrap();
     // The all-caps rename is load-bearing — Go's decoder treats

@@ -1,0 +1,48 @@
+{
+  "name": "wire-register-signatures",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "register_request": {
+      "Version": 96,
+      "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "OldNodeKey": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+      "NLKey": "nlpub:3333333333333333333333333333333333333333333333333333333333333333",
+      "Auth": { "AuthKey": "hskey-auth-signature" },
+      "Hostinfo": {
+        "Hostname": "signed-peer",
+        "OS": "linux",
+        "OSVersion": "6.12",
+        "RequestTags": ["tag:server"]
+      },
+      "Followup": "https://headscale.example/register/signed",
+      "Tailnet": "required:tail.example",
+      "Ephemeral": true,
+      "Expiry": "2026-06-01T00:00:00Z",
+      "NodeKeySignature": "bm9kZS1zaWduYXR1cmU=",
+      "SignatureType": "signature-v2",
+      "Timestamp": "2026-06-01T00:00:01Z",
+      "DeviceCert": "ZGV2aWNlLWNlcnQ=",
+      "Signature": "cmVnaXN0ZXItc2lnbmF0dXJl"
+    },
+    "register_response": {
+      "User": {
+        "ID": 42,
+        "LoginName": "alice",
+        "DisplayName": "Alice"
+      },
+      "Login": {
+        "ID": 42,
+        "Provider": "octravpn-preauth",
+        "LoginName": "alice",
+        "DisplayName": "Alice"
+      },
+      "NodeKeyExpired": true,
+      "AuthURL": "https://headscale.example/register/signed",
+      "MachineAuthorized": false,
+      "NodeKeySignature": "cmVzcG9uc2Utc2lnbmF0dXJl",
+      "Error": "signature required"
+    }
+  }
+}

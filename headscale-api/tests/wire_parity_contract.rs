@@ -48,11 +48,13 @@ fn register_response_uses_auth_url_and_id_acronyms() {
         auth_url: String::new(),
         machine_authorized: true,
         error: String::new(),
+        node_key_signature: Some("cmVzcG9uc2Utc2lnbmF0dXJl".into()),
     };
 
     let value = serde_json::to_value(response).unwrap();
     assert_eq!(value["AuthURL"], "");
     assert!(value.get("AuthUrl").is_none());
+    assert_eq!(value["NodeKeySignature"], "cmVzcG9uc2Utc2lnbmF0dXJl");
     assert_eq!(value["User"]["ID"], 42);
     assert!(value["User"].get("Id").is_none());
     assert_eq!(value["Login"]["ID"], 42);

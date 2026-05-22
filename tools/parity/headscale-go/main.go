@@ -150,16 +150,21 @@ type wireOutput struct {
 }
 
 type registerRequestSummary struct {
-	Version         int              `json:"version,omitempty"`
-	NodeKey         string           `json:"node_key"`
-	OldNodeKey      string           `json:"old_node_key,omitempty"`
-	NLKey           string           `json:"nl_key,omitempty"`
-	AuthKey         string           `json:"auth_key,omitempty"`
-	Hostinfo        *hostInfoSummary `json:"hostinfo,omitempty"`
-	Followup        string           `json:"followup,omitempty"`
-	Tailnet         string           `json:"tailnet,omitempty"`
-	Ephemeral       bool             `json:"ephemeral,omitempty"`
-	RequestedExpiry bool             `json:"requested_expiry,omitempty"`
+	Version          int              `json:"version,omitempty"`
+	NodeKey          string           `json:"node_key"`
+	OldNodeKey       string           `json:"old_node_key,omitempty"`
+	NLKey            string           `json:"nl_key,omitempty"`
+	AuthKey          string           `json:"auth_key,omitempty"`
+	Hostinfo         *hostInfoSummary `json:"hostinfo,omitempty"`
+	Followup         string           `json:"followup,omitempty"`
+	Tailnet          string           `json:"tailnet,omitempty"`
+	Ephemeral        bool             `json:"ephemeral,omitempty"`
+	RequestedExpiry  bool             `json:"requested_expiry,omitempty"`
+	NodeKeySignature string           `json:"node_key_signature,omitempty"`
+	SignatureType    string           `json:"signature_type,omitempty"`
+	Timestamp        bool             `json:"timestamp,omitempty"`
+	DeviceCert       string           `json:"device_cert,omitempty"`
+	Signature        string           `json:"signature,omitempty"`
 }
 
 type registerResponseSummary struct {
@@ -168,6 +173,7 @@ type registerResponseSummary struct {
 	NodeKeyExpired    bool         `json:"node_key_expired"`
 	AuthURL           string       `json:"auth_url"`
 	MachineAuthorized bool         `json:"machine_authorized"`
+	NodeKeySignature  string       `json:"node_key_signature,omitempty"`
 	Error             string       `json:"error,omitempty"`
 }
 
@@ -769,12 +775,19 @@ func marshalRaw(v any) (json.RawMessage, error) {
 
 func summarizeRegisterRequest(req *tailcfg.RegisterRequest) *registerRequestSummary {
 	out := &registerRequestSummary{
-		Version:         int(req.Version),
-		NodeKey:         req.NodeKey.String(),
-		Followup:        req.Followup,
-		Tailnet:         req.Tailnet,
-		Ephemeral:       req.Ephemeral,
-		RequestedExpiry: !req.Expiry.IsZero(),
+		Version:          int(req.Version),
+		NodeKey:          req.NodeKey.String(),
+		Followup:         req.Followup,
+		Tailnet:          req.Tailnet,
+		Ephemeral:        req.Ephemeral,
+		RequestedExpiry:  !req.Expiry.IsZero(),
+		NodeKeySignature: base64.StdEncoding.EncodeToString(req.NodeKeySignature),
+		Timestamp:        req.Timestamp != nil,
+		DeviceCert:       base64.StdEncoding.EncodeToString(req.DeviceCert),
+		Signature:        base64.StdEncoding.EncodeToString(req.Signature),
+	}
+	if req.SignatureType != tailcfg.SignatureNone {
+		out.SignatureType = req.SignatureType.String()
 	}
 	if !req.OldNodeKey.IsZero() {
 		out.OldNodeKey = req.OldNodeKey.String()
@@ -809,6 +822,7 @@ func summarizeRegisterResponse(resp *tailcfg.RegisterResponse) *registerResponse
 		NodeKeyExpired:    resp.NodeKeyExpired,
 		AuthURL:           resp.AuthURL,
 		MachineAuthorized: resp.MachineAuthorized,
+		NodeKeySignature:  base64.StdEncoding.EncodeToString(resp.NodeKeySignature),
 		Error:             resp.Error,
 	}
 }

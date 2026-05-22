@@ -278,6 +278,38 @@ pub struct RegisterRequest {
     /// keeps the wire shape aligned with `tailcfg`.
     #[serde(default)]
     pub expiry: Option<DateTime<Utc>>,
+    /// Network-lock signature over the node key. Go encodes this
+    /// `tkatype.MarshaledSignature` byte slice as a base64 JSON string,
+    /// but older/no-signature requests may carry it as JSON null.
+    #[serde(
+        default,
+        rename = "NodeKeySignature",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub node_key_signature: Option<String>,
+    /// Device-signature scheme used by recent Tailscale clients
+    /// (`signature-v1`, `signature-v2`, etc.).
+    #[serde(
+        default,
+        rename = "SignatureType",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub signature_type: String,
+    /// Request creation time used by signed registration requests.
+    #[serde(default, rename = "Timestamp", skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    /// X.509 device certificate. Go encodes the `[]byte` as base64,
+    /// while absent values may be omitted or null.
+    #[serde(
+        default,
+        rename = "DeviceCert",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub device_cert: Option<String>,
+    /// Signature bytes described by `SignatureType`, base64 encoded by
+    /// Go's JSON encoder.
+    #[serde(default, rename = "Signature", skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -355,6 +387,15 @@ pub struct RegisterResponse {
     /// Upstream error string for denied or follow-up register flows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// Current node-key signature that the client must re-sign when
+    /// rotating its node key. Go encodes the byte slice as base64 and
+    /// may emit null for the zero value.
+    #[serde(
+        default,
+        rename = "NodeKeySignature",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub node_key_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1355,6 +1396,11 @@ mod tests {
             tailnet: "required:example.com".into(),
             ephemeral: false,
             expiry: None,
+            node_key_signature: Some("bm9kZS1zaWduYXR1cmU=".into()),
+            signature_type: "signature-v2".into(),
+            timestamp: Some("2026-06-01T00:00:01Z".parse().unwrap()),
+            device_cert: Some("ZGV2aWNlLWNlcnQ=".into()),
+            signature: Some("cmVnaXN0ZXItc2lnbmF0dXJl".into()),
         };
         let j = serde_json::to_string(&r).unwrap();
         // Field names PascalCased on the wire.
@@ -1366,6 +1412,11 @@ mod tests {
         assert!(j.contains("\"AuthKey\""));
         assert!(j.contains("\"OSVersion\""));
         assert!(j.contains("\"Tailnet\""));
+        assert!(j.contains("\"NodeKeySignature\""));
+        assert!(j.contains("\"SignatureType\""));
+        assert!(j.contains("\"Timestamp\""));
+        assert!(j.contains("\"DeviceCert\""));
+        assert!(j.contains("\"Signature\""));
         let back: RegisterRequest = serde_json::from_str(&j).unwrap();
         assert_eq!(back.node_key, "nodekey:deadbeef");
         assert_eq!(back.old_node_key, "nodekey:feedface");
@@ -1374,6 +1425,14 @@ mod tests {
             "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
         assert_eq!(back.tailnet, "required:example.com");
+        assert_eq!(
+            back.node_key_signature.as_deref(),
+            Some("bm9kZS1zaWduYXR1cmU=")
+        );
+        assert_eq!(back.signature_type, "signature-v2");
+        assert!(back.timestamp.is_some());
+        assert_eq!(back.device_cert.as_deref(), Some("ZGV2aWNlLWNlcnQ="));
+        assert_eq!(back.signature.as_deref(), Some("cmVnaXN0ZXItc2lnbmF0dXJl"));
     }
 
     #[test]

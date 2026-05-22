@@ -462,6 +462,7 @@ async fn register_interactive(
         auth_url: auth_url_for_registration(&state, &registration_id),
         machine_authorized: false,
         error: String::new(),
+        node_key_signature: None,
     })
     .into_response()
 }
@@ -645,6 +646,7 @@ fn node_key_expired_response(machine_authorized: bool) -> RegisterResponse {
         auth_url: String::new(),
         machine_authorized,
         error: String::new(),
+        node_key_signature: None,
     }
 }
 
@@ -672,6 +674,7 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
         auth_url: String::new(),
         machine_authorized: true,
         error: String::new(),
+        node_key_signature: None,
     }
 }
 

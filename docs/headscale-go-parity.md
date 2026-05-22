@@ -129,7 +129,7 @@ file ownership narrow when splitting them across agents.
 | Lane | Status | Owner scope | Next handoff |
 | --- | --- | --- | --- |
 | CLI node/debug/health gRPC client plumbing | Done | `headscale-cli/src/admin/grpc_client.rs` | Client helpers exist for node, debug-create-node, backfill, and health RPCs |
-| CI/fuzz/coverage gates | In flight | `.github/workflows/**`, `scripts/**` | Review all-target test coverage, stale fuzz-corpus checks, and coverage floor before enabling heavier real-client gates |
+| CI/fuzz/coverage gates | Done | `.github/workflows/**`, `scripts/**` | CI now runs all-target workspace/standalone tests, checks checked-in fuzz corpus directories, keeps the 10k fuzz lane live, and enforces the coverage floor before heavier real-client gates |
 | CLI nodes command migration | Done | `headscale-cli/src/admin/nodes.rs`, `headscale-cli/src/admin/mod.rs`, focused CLI tests | `headscale nodes` defaults to upstream gRPC with explicit `--server` legacy HTTP fallback where supported |
 | CLI config and snapshots | Ready next | `headscale-cli/src/main.rs`, `headscale-cli/src/config.rs`, CLI snapshot tests | Merge upstream `cli.*` config into gRPC connection args and snapshot help/output/error text |
 | Runtime/auth parity | Ready next | `headscale-api/proto/auth.proto`, `headscale-api/src/grpc.rs`, `headscale-api/src/grpc_gateway.rs`, wire registration tests | Decide baseline before expanding beyond the pinned v0.28 registration cache into current-upstream auth-request semantics |
@@ -159,7 +159,7 @@ file ownership narrow when splitting them across agents.
    real-client coverage.
 5. Tighten lifecycle/runtime edges: ephemeral GC in production, route
    approval preservation on reauth, and explicit map-change batching.
-6. Harden CI so the parity work stays enforced: selected real-client
-   rows on PRs, scheduled full matrix, stale fuzz-corpus checks,
-   coverage thresholds, and an explicit formal-verification gate once
-   the Lean workspace exists again.
+6. Extend CI enforcement beyond the new all-target/fuzz/coverage gates:
+   selected real-client rows on PRs, scheduled full matrix, and an
+   explicit formal-verification gate once the Lean workspace exists
+   again.

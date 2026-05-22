@@ -94,8 +94,8 @@ jobs:
           toolchain: stable
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
-      - run: cargo test --workspace
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace --all-targets
       # These crates are excluded from root workspace membership, so
       # run their unit/property tests explicitly.
       - name: cargo test excluded crates
@@ -106,13 +106,13 @@ jobs:
             headscale-identity/Cargo.toml \
             headscale-resources/Cargo.toml \
             headscale-payments/Cargo.toml; do
-            cargo test --manifest-path "${manifest}"
+            cargo test --manifest-path "${manifest}" --all-targets
           done
       # Wire-only test run — same rationale as the wire-only clippy
       # pass above. Keeps the `default-features = false` path live.
-      - run: cargo test -p headscale-api --no-default-features
+      - run: cargo test -p headscale-api --no-default-features --lib
       # Admin-only test run — admin is not a default feature.
-      - run: cargo test -p headscale-api --no-default-features --features admin
+      - run: cargo test -p headscale-api --no-default-features --features admin --lib
       - run: cargo check --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml
 
   fuzz:
@@ -133,6 +133,8 @@ jobs:
           workspaces: |
             headscale-core/fuzz -> target
       - run: cargo install cargo-fuzz --locked
+      - name: Check fuzz corpus directories
+        run: ./scripts/check_fuzz_corpus.sh
       - name: 10k run all fuzz targets
         run: ./scripts/fuzz_ci.sh
       - name: Upload fuzz failure logs and artifacts

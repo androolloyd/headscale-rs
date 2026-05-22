@@ -3,6 +3,7 @@ set -euo pipefail
 
 mkdir -p target/coverage
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/llvm-cov}"
+coverage_fail_under="${HEADSCALE_COVERAGE_FAIL_UNDER_LINES:-20}"
 
 ignore_regex='(headscale-api/src/generated/.*|.*/target/.*)'
 standalone_manifests=(
@@ -18,11 +19,13 @@ eval "$(cargo llvm-cov show-env --sh)"
 
 cargo test \
   --workspace \
+  --all-targets \
   --all-features
 
 for manifest in "${standalone_manifests[@]}"; do
   cargo test \
     --manifest-path "${manifest}" \
+    --all-targets \
     --all-features
 done
 
@@ -32,5 +35,6 @@ cargo llvm-cov report \
   --ignore-filename-regex "${ignore_regex}"
 
 cargo llvm-cov report \
+  --fail-under-lines "${coverage_fail_under}" \
   --ignore-filename-regex "${ignore_regex}" \
   | tee target/coverage/summary.txt

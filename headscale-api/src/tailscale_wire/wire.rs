@@ -321,7 +321,7 @@ pub struct RegisterAuth {
     pub auth_key: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetInfo {
     /// NAT mappings vary by destination IP.
@@ -371,6 +371,13 @@ pub struct NetInfo {
     /// Current link type, if known (`wired`, `wifi`, `mobile`, ...).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_type: String,
+    /// Recent DERP latency measurements in seconds, keyed by region/probe.
+    #[serde(
+        default,
+        rename = "DERPLatency",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub derp_latency: BTreeMap<String, f64>,
     /// Linux firewall mode/debug reason string.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub firewall_mode: String,

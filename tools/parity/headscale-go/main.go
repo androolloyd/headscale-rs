@@ -290,54 +290,56 @@ type userProfileSummary struct {
 }
 
 type hostInfoSummary struct {
-	IPNVersion      string   `json:"ipn_version,omitempty"`
-	FrontendLogID   string   `json:"frontend_log_id,omitempty"`
-	BackendLogID    string   `json:"backend_log_id,omitempty"`
-	Hostname        string   `json:"hostname,omitempty"`
-	OS              string   `json:"os,omitempty"`
-	OSVersion       string   `json:"os_version,omitempty"`
-	Container       *bool    `json:"container,omitempty"`
-	Env             string   `json:"env,omitempty"`
-	Distro          string   `json:"distro,omitempty"`
-	DistroVersion   string   `json:"distro_version,omitempty"`
-	DistroCodeName  string   `json:"distro_code_name,omitempty"`
-	App             string   `json:"app,omitempty"`
-	Desktop         *bool    `json:"desktop,omitempty"`
-	Package         string   `json:"package,omitempty"`
-	DeviceModel     string   `json:"device_model,omitempty"`
-	PushDeviceToken string   `json:"push_device_token,omitempty"`
-	ShieldsUp       bool     `json:"shields_up,omitempty"`
-	ShareeNode      bool     `json:"sharee_node,omitempty"`
-	NoLogsNoSupport bool     `json:"no_logs_no_support,omitempty"`
-	WireIngress     bool     `json:"wire_ingress,omitempty"`
-	IngressEnabled  bool     `json:"ingress_enabled,omitempty"`
-	AllowsUpdate    bool     `json:"allows_update,omitempty"`
-	Machine         string   `json:"machine,omitempty"`
-	GoArch          string   `json:"go_arch,omitempty"`
-	GoArchVar       string   `json:"go_arch_var,omitempty"`
-	GoVersion       string   `json:"go_version,omitempty"`
-	RequestTags     []string `json:"request_tags,omitempty"`
-	WoLMACs         []string `json:"wol_macs,omitempty"`
-	SSHHostKeys     []string `json:"ssh_host_keys,omitempty"`
-	Cloud           string   `json:"cloud,omitempty"`
-	Userspace       *bool    `json:"userspace,omitempty"`
-	UserspaceRouter *bool    `json:"userspace_router,omitempty"`
-	AppConnector    *bool    `json:"app_connector,omitempty"`
-	ServicesHash    string   `json:"services_hash,omitempty"`
-	ExitNodeID      string   `json:"exit_node_id,omitempty"`
-	StateEncrypted  *bool    `json:"state_encrypted,omitempty"`
-	MappingVaries   *bool    `json:"mapping_varies_by_dest_ip,omitempty"`
-	WorkingIPv6     *bool    `json:"working_ipv6,omitempty"`
-	OSHasIPv6       *bool    `json:"os_has_ipv6,omitempty"`
-	WorkingUDP      *bool    `json:"working_udp,omitempty"`
-	WorkingICMPv4   *bool    `json:"working_icmp_v4,omitempty"`
-	PreferredDERP   int      `json:"preferred_derp,omitempty"`
-	HavePortMap     bool     `json:"have_port_map,omitempty"`
-	UPnP            *bool    `json:"upnp,omitempty"`
-	PMP             *bool    `json:"pmp,omitempty"`
-	PCP             *bool    `json:"pcp,omitempty"`
-	LinkType        string   `json:"link_type,omitempty"`
-	FirewallMode    string   `json:"firewall_mode,omitempty"`
+	IPNVersion      string             `json:"ipn_version,omitempty"`
+	FrontendLogID   string             `json:"frontend_log_id,omitempty"`
+	BackendLogID    string             `json:"backend_log_id,omitempty"`
+	Hostname        string             `json:"hostname,omitempty"`
+	OS              string             `json:"os,omitempty"`
+	OSVersion       string             `json:"os_version,omitempty"`
+	Container       *bool              `json:"container,omitempty"`
+	Env             string             `json:"env,omitempty"`
+	Distro          string             `json:"distro,omitempty"`
+	DistroVersion   string             `json:"distro_version,omitempty"`
+	DistroCodeName  string             `json:"distro_code_name,omitempty"`
+	App             string             `json:"app,omitempty"`
+	Desktop         *bool              `json:"desktop,omitempty"`
+	Package         string             `json:"package,omitempty"`
+	DeviceModel     string             `json:"device_model,omitempty"`
+	PushDeviceToken string             `json:"push_device_token,omitempty"`
+	ShieldsUp       bool               `json:"shields_up,omitempty"`
+	ShareeNode      bool               `json:"sharee_node,omitempty"`
+	NoLogsNoSupport bool               `json:"no_logs_no_support,omitempty"`
+	WireIngress     bool               `json:"wire_ingress,omitempty"`
+	IngressEnabled  bool               `json:"ingress_enabled,omitempty"`
+	AllowsUpdate    bool               `json:"allows_update,omitempty"`
+	Machine         string             `json:"machine,omitempty"`
+	GoArch          string             `json:"go_arch,omitempty"`
+	GoArchVar       string             `json:"go_arch_var,omitempty"`
+	GoVersion       string             `json:"go_version,omitempty"`
+	RoutableIPs     []string           `json:"routable_ips,omitempty"`
+	RequestTags     []string           `json:"request_tags,omitempty"`
+	WoLMACs         []string           `json:"wol_macs,omitempty"`
+	SSHHostKeys     []string           `json:"ssh_host_keys,omitempty"`
+	Cloud           string             `json:"cloud,omitempty"`
+	Userspace       *bool              `json:"userspace,omitempty"`
+	UserspaceRouter *bool              `json:"userspace_router,omitempty"`
+	AppConnector    *bool              `json:"app_connector,omitempty"`
+	ServicesHash    string             `json:"services_hash,omitempty"`
+	ExitNodeID      string             `json:"exit_node_id,omitempty"`
+	StateEncrypted  *bool              `json:"state_encrypted,omitempty"`
+	MappingVaries   *bool              `json:"mapping_varies_by_dest_ip,omitempty"`
+	WorkingIPv6     *bool              `json:"working_ipv6,omitempty"`
+	OSHasIPv6       *bool              `json:"os_has_ipv6,omitempty"`
+	WorkingUDP      *bool              `json:"working_udp,omitempty"`
+	WorkingICMPv4   *bool              `json:"working_icmp_v4,omitempty"`
+	PreferredDERP   int                `json:"preferred_derp,omitempty"`
+	HavePortMap     bool               `json:"have_port_map,omitempty"`
+	UPnP            *bool              `json:"upnp,omitempty"`
+	PMP             *bool              `json:"pmp,omitempty"`
+	PCP             *bool              `json:"pcp,omitempty"`
+	LinkType        string             `json:"link_type,omitempty"`
+	DERPLatency     map[string]float64 `json:"derp_latency,omitempty"`
+	FirewallMode    string             `json:"firewall_mode,omitempty"`
 }
 
 type filterRuleOut struct {
@@ -1164,6 +1166,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 	var upnp *bool
 	var pmp *bool
 	var pcp *bool
+	var derpLatency map[string]float64
 	if netInfo := hostinfo.NetInfo(); netInfo.Valid() {
 		preferredDERP = netInfo.PreferredDERP()
 		havePortMap = netInfo.HavePortMap()
@@ -1177,6 +1180,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		upnp = optBoolPtr(netInfo.UPnP())
 		pmp = optBoolPtr(netInfo.PMP())
 		pcp = optBoolPtr(netInfo.PCP())
+		derpLatency = netInfo.DERPLatency().AsMap()
 	}
 	return &hostInfoSummary{
 		IPNVersion:      hostinfo.IPNVersion(),
@@ -1205,6 +1209,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		GoArch:          hostinfo.GoArch(),
 		GoArchVar:       hostinfo.GoArchVar(),
 		GoVersion:       hostinfo.GoVersion(),
+		RoutableIPs:     prefixStrings(hostinfo.RoutableIPs().AsSlice()),
 		RequestTags:     hostinfo.RequestTags().AsSlice(),
 		WoLMACs:         hostinfo.WoLMACs().AsSlice(),
 		SSHHostKeys:     hostinfo.SSH_HostKeys().AsSlice(),
@@ -1226,6 +1231,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		PMP:             pmp,
 		PCP:             pcp,
 		LinkType:        linkType,
+		DERPLatency:     derpLatency,
 		FirewallMode:    firewallMode,
 	}
 }

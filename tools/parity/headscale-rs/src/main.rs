@@ -509,6 +509,8 @@ struct HostInfoSummary {
     #[serde(skip_serializing_if = "String::is_empty")]
     go_version: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    routable_ips: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     request_tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wol_macs: Vec<String>,
@@ -550,6 +552,8 @@ struct HostInfoSummary {
     pcp: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     link_type: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    derp_latency: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "String::is_empty")]
     firewall_mode: String,
 }
@@ -1784,6 +1788,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         pmp,
         pcp,
         link_type,
+        derp_latency,
         firewall_mode,
     ) = hostinfo.net_info.map_or_else(
         || {
@@ -1799,6 +1804,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
                 None,
                 None,
                 String::new(),
+                BTreeMap::new(),
                 String::new(),
             )
         },
@@ -1815,10 +1821,13 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
                 net_info.pmp,
                 net_info.pcp,
                 net_info.link_type,
+                net_info.derp_latency,
                 net_info.firewall_mode,
             )
         },
     );
+    let mut routable_ips = hostinfo.routable_ips;
+    routable_ips.sort();
     HostInfoSummary {
         ipn_version: hostinfo.ipn_version,
         frontend_log_id: hostinfo.frontend_log_id,
@@ -1846,6 +1855,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         go_arch: hostinfo.go_arch,
         go_arch_var: hostinfo.go_arch_var,
         go_version: hostinfo.go_version,
+        routable_ips,
         request_tags: hostinfo.request_tags,
         wol_macs: hostinfo.wol_macs,
         ssh_host_keys: hostinfo.ssh_host_keys,
@@ -1867,6 +1877,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         pmp,
         pcp,
         link_type,
+        derp_latency,
         firewall_mode,
     }
 }

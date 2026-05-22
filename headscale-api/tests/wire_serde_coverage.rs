@@ -87,6 +87,8 @@ fn stable_id_distinct_for_distinct_inputs() {
 
 #[test]
 fn hostinfo_emits_pascal_case_with_all_caps_os() {
+    let derp_latency =
+        BTreeMap::from([("900-v4".to_string(), 0.012), ("901-v6".to_string(), 0.034)]);
     let h = HostInfo {
         ipn_version: "1.94.1".into(),
         frontend_log_id: "frontend-log-1".into(),
@@ -137,6 +139,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
             pmp: Some(false),
             pcp: Some(true),
             link_type: "wired".into(),
+            derp_latency,
             firewall_mode: "nft-default".into(),
             ..NetInfo::default()
         }),
@@ -177,6 +180,8 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["NetInfo"]["PMP"], false);
     assert_eq!(v["NetInfo"]["PCP"], true);
     assert_eq!(v["NetInfo"]["LinkType"], "wired");
+    assert_eq!(v["NetInfo"]["DERPLatency"]["900-v4"], 0.012);
+    assert_eq!(v["NetInfo"]["DERPLatency"]["901-v6"], 0.034);
     assert_eq!(v["NetInfo"]["FirewallMode"], "nft-default");
     assert!(v.get("OsVersion").is_none());
     let back: HostInfo = serde_json::from_value(v).unwrap();
@@ -206,6 +211,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(net_info.upnp, Some(true));
     assert_eq!(net_info.pmp, Some(false));
     assert_eq!(net_info.pcp, Some(true));
+    assert_eq!(net_info.derp_latency["900-v4"], 0.012);
     assert_eq!(net_info.firewall_mode, "nft-default");
 }
 

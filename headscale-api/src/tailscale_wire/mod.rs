@@ -33,10 +33,14 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::{
     Router,
+    extract::Request,
+    middleware::{self, Next},
+    response::Response as AxumResponse,
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
@@ -331,6 +335,41 @@ struct WireMetrics {
     mapresponse_ended: RwLock<BTreeMap<String, u64>>,
     mapresponse_generated: RwLock<BTreeMap<String, u64>>,
     mapresponse_sent: RwLock<BTreeMap<(String, String), u64>>,
+    http_requests: RwLock<BTreeMap<(String, String, String), u64>>,
+    http_duration: RwLock<BTreeMap<String, HttpDurationMetric>>,
+}
+
+const HTTP_DURATION_BUCKET_COUNT: usize = 11;
+
+pub(crate) const HTTP_DURATION_BUCKETS: [(f64, &str); HTTP_DURATION_BUCKET_COUNT] = [
+    (0.005, "0.005"),
+    (0.01, "0.01"),
+    (0.025, "0.025"),
+    (0.05, "0.05"),
+    (0.1, "0.1"),
+    (0.25, "0.25"),
+    (0.5, "0.5"),
+    (1.0, "1"),
+    (2.5, "2.5"),
+    (5.0, "5"),
+    (10.0, "10"),
+];
+
+#[derive(Debug, Clone)]
+pub(crate) struct HttpDurationMetric {
+    pub buckets: [u64; HTTP_DURATION_BUCKET_COUNT],
+    pub count: u64,
+    pub sum: f64,
+}
+
+impl Default for HttpDurationMetric {
+    fn default() -> Self {
+        Self {
+            buckets: [0; HTTP_DURATION_BUCKET_COUNT],
+            count: 0,
+            sum: 0.0,
+        }
+    }
 }
 
 impl Default for MachineRegistry {
@@ -507,6 +546,32 @@ impl MachineRegistry {
             .or_insert(0) += 1;
     }
 
+    pub(crate) fn record_http_request(
+        &self,
+        code: u16,
+        method: &str,
+        path: &str,
+        duration: Duration,
+    ) {
+        {
+            let mut requests = self.metrics.http_requests.write();
+            *requests
+                .entry((code.to_string(), method.to_string(), path.to_string()))
+                .or_insert(0) += 1;
+        }
+
+        let seconds = duration.as_secs_f64();
+        let mut durations = self.metrics.http_duration.write();
+        let sample = durations.entry(path.to_string()).or_default();
+        sample.count += 1;
+        sample.sum += seconds;
+        for (idx, (upper_bound, _label)) in HTTP_DURATION_BUCKETS.iter().enumerate() {
+            if seconds <= *upper_bound {
+                sample.buckets[idx] += 1;
+            }
+        }
+    }
+
     pub fn mapresponse_endpoint_update_metrics(&self) -> BTreeMap<String, u64> {
         self.metrics.mapresponse_endpoint_updates.read().clone()
     }
@@ -521,6 +586,14 @@ impl MachineRegistry {
 
     pub fn mapresponse_sent_metrics(&self) -> BTreeMap<(String, String), u64> {
         self.metrics.mapresponse_sent.read().clone()
+    }
+
+    pub(crate) fn http_request_metrics(&self) -> BTreeMap<(String, String, String), u64> {
+        self.metrics.http_requests.read().clone()
+    }
+
+    pub(crate) fn http_duration_metrics(&self) -> BTreeMap<String, HttpDurationMetric> {
+        self.metrics.http_duration.read().clone()
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -1097,6 +1170,7 @@ mod registry_tests {
 /// `map`).
 pub fn router(state: WireState) -> Router {
     let knock_cfg = state.knock.clone();
+    let metrics_registry = Arc::clone(&state.machines);
     let inner = Router::new()
         .route("/robots.txt", get(basic_handlers::handle_robots))
         .route("/health", get(basic_handlers::handle_health))
@@ -1155,13 +1229,77 @@ pub fn router(state: WireState) -> Router {
         .route("/machine/register", post(register::handle_register_flat))
         .route("/machine/map", post(map::handle_map_flat))
         .fallback(basic_handlers::handle_fallback)
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let metrics_registry = Arc::clone(&metrics_registry);
+            async move { record_http_metrics(metrics_registry, req, next).await }
+        }));
 
     // PSK-gated handshake — third layer of the active-probe shield.
     // Default-off (KnockConfig::disabled()) → exact pass-through.
     // When enabled, requests must carry a valid knock cookie or get a
     // canonical nginx 404. See `tailscale_wire::knock` for the math.
     knock::wrap_router(inner, knock_cfg)
+}
+
+async fn record_http_metrics(
+    machines: Arc<MachineRegistry>,
+    req: Request,
+    next: Next,
+) -> AxumResponse {
+    let method = req.method().as_str().to_string();
+    let metric_path = prometheus_http_path(req.uri().path()).map(str::to_string);
+
+    let Some(metric_path) = metric_path else {
+        return next.run(req).await;
+    };
+
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let code = response.status().as_u16();
+    machines.record_http_request(code, &method, &metric_path, start.elapsed());
+    response
+}
+
+fn prometheus_http_path(path: &str) -> Option<&'static str> {
+    match path {
+        "/ts2021"
+        | "/machine/map"
+        | "/derp"
+        | "/derp/probe"
+        | "/derp/latency-check"
+        | "/bootstrap-dns"
+        | "/metrics" => None,
+        "/debug" => None,
+        path if path.starts_with("/debug/") => None,
+        "/robots.txt" => Some("/robots.txt"),
+        "/health" => Some("/health"),
+        "/version" => Some("/version"),
+        "/key" => Some("/key"),
+        "/apple" => Some("/apple"),
+        "/windows" => Some("/windows"),
+        "/swagger" => Some("/swagger"),
+        "/swagger/v1/openapiv2.json" => Some("/swagger/v1/openapiv2.json"),
+        "/favicon.ico" => Some("/favicon.ico"),
+        "/machine/register" => Some("/machine/register"),
+        path if is_single_segment_after(path, "/apple/") => Some("/apple/{platform}"),
+        path if is_single_segment_after(path, "/register/") => Some("/register/{registration_id}"),
+        path if is_machine_subpath(path, "register") => Some("/machine/{node_key}/register"),
+        path if is_machine_subpath(path, "map") => None,
+        _ => Some("/"),
+    }
+}
+
+fn is_single_segment_after(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+}
+
+fn is_machine_subpath(path: &str, suffix: &str) -> bool {
+    let suffix = format!("/{suffix}");
+    path.strip_prefix("/machine/")
+        .and_then(|rest| rest.strip_suffix(&suffix))
+        .is_some_and(|node_key| !node_key.is_empty() && !node_key.contains('/'))
 }
 
 #[cfg(test)]

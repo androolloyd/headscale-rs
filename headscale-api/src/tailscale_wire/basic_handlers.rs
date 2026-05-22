@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
-    DerpMap, MachineRecord, WireState,
+    DerpMap, HTTP_DURATION_BUCKETS, HttpDurationMetric, MachineRecord, WireState,
     wire::{SshPolicy, stable_id_from_key},
 };
 
@@ -1128,6 +1128,20 @@ fn metrics_text(state: &WireState) -> String {
         ("status", "type"),
         state.machines.mapresponse_sent_metrics(),
     );
+    append_counter_family_3(
+        &mut out,
+        "headscale_http_requests_total",
+        "Total number of http requests processed",
+        ("code", "method", "path"),
+        state.machines.http_request_metrics(),
+    );
+    append_histogram_family(
+        &mut out,
+        "headscale_http_duration_seconds",
+        "Duration of HTTP requests.",
+        "path",
+        state.machines.http_duration_metrics(),
+    );
 
     out
 }
@@ -1209,6 +1223,110 @@ fn append_counter_family_2(
         out.push_str("\"} ");
         out.push_str(&value.to_string());
         out.push('\n');
+    }
+}
+
+fn append_counter_family_3(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label_names: (&str, &str, &str),
+    samples: BTreeMap<(String, String, String), u64>,
+) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" counter\n");
+    for ((label_value_1, label_value_2, label_value_3), value) in samples {
+        out.push_str(name);
+        out.push('{');
+        out.push_str(label_names.0);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value_1));
+        out.push_str("\",");
+        out.push_str(label_names.1);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value_2));
+        out.push_str("\",");
+        out.push_str(label_names.2);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value_3));
+        out.push_str("\"} ");
+        out.push_str(&value.to_string());
+        out.push('\n');
+    }
+}
+
+fn append_histogram_family(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label_name: &str,
+    samples: BTreeMap<String, HttpDurationMetric>,
+) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" histogram\n");
+    for (label_value, sample) in samples {
+        for (idx, (_upper_bound, le)) in HTTP_DURATION_BUCKETS.iter().enumerate() {
+            append_histogram_bucket(out, name, label_name, &label_value, le, sample.buckets[idx]);
+        }
+        append_histogram_bucket(out, name, label_name, &label_value, "+Inf", sample.count);
+        out.push_str(name);
+        out.push_str("_sum{");
+        out.push_str(label_name);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value));
+        out.push_str("\"} ");
+        out.push_str(&prometheus_float(sample.sum));
+        out.push('\n');
+        out.push_str(name);
+        out.push_str("_count{");
+        out.push_str(label_name);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value));
+        out.push_str("\"} ");
+        out.push_str(&sample.count.to_string());
+        out.push('\n');
+    }
+}
+
+fn append_histogram_bucket(
+    out: &mut String,
+    name: &str,
+    label_name: &str,
+    label_value: &str,
+    le: &str,
+    value: u64,
+) {
+    out.push_str(name);
+    out.push_str("_bucket{");
+    out.push_str(label_name);
+    out.push_str("=\"");
+    out.push_str(&prometheus_label_value(label_value));
+    out.push_str("\",le=\"");
+    out.push_str(le);
+    out.push_str("\"} ");
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn prometheus_float(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else if value.is_sign_positive() {
+        "+Inf".to_string()
+    } else {
+        "-Inf".to_string()
     }
 }
 
@@ -2163,10 +2281,80 @@ mod tests {
         assert!(body.contains("# TYPE headscale_mapresponse_ended_total counter"));
         assert!(body.contains("# TYPE headscale_mapresponse_generated_total counter"));
         assert!(body.contains("# TYPE headscale_mapresponse_sent_total counter"));
+        assert!(body.contains("# TYPE headscale_http_requests_total counter"));
+        assert!(body.contains("# TYPE headscale_http_duration_seconds histogram"));
         assert!(body.contains("headscale_nodes_registered 0\n"));
         assert!(body.contains("headscale_nodes_online 0\n"));
         assert!(body.contains("headscale_policy_loaded 0\n"));
         assert!(body.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_http_request_metrics() {
+        let (state, _dir) = fixture_state();
+        let app = router(state);
+
+        let health_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health_resp.status(), StatusCode::OK);
+
+        let apple_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/apple/macos-app-store")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(apple_resp.status(), StatusCode::OK);
+
+        let metrics_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics_resp.status(), StatusCode::OK);
+
+        let body = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains(
+                "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/health\"} 1\n"
+            ),
+            "{body}",
+        );
+        assert!(
+            body.contains(
+                "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/apple/{platform}\"} 1\n"
+            ),
+            "{body}",
+        );
+        assert!(
+            body.contains(
+                "headscale_http_duration_seconds_bucket{path=\"/health\",le=\"+Inf\"} 1\n"
+            ),
+            "{body}",
+        );
+        assert!(
+            body.contains("headscale_http_duration_seconds_count{path=\"/health\"} 1\n"),
+            "{body}",
+        );
+        assert!(!body.contains("path=\"/metrics\""), "{body}");
     }
 
     #[tokio::test]

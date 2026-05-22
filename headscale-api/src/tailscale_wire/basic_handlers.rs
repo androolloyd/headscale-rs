@@ -44,6 +44,8 @@ const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
     ("/debug/policy-manager", "Policy manager state"),
     ("/debug/mapresponses", "Map responses for all nodes"),
     ("/debug/batcher", "Batcher connected nodes"),
+    ("/debug/varz", "Metrics (Prometheus)"),
+    ("/debug/gc", "force GC"),
     ("/metrics", "Prometheus metrics"),
 ];
 
@@ -263,6 +265,15 @@ pub async fn handle_debug_index() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         debug_index_html(),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_gc() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "running GC...\nDone.\n",
     )
         .into_response()
 }
@@ -2785,6 +2796,60 @@ mod tests {
             );
             assert!(body.contains(description), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn debug_varz_alias_serves_prometheus_metrics_like_tsweb() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/varz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some(PROMETHEUS_TEXT_CONTENT_TYPE)
+        );
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("# TYPE headscale_nodes_registered gauge"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_gc_endpoint_matches_tsweb_text_shape() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/gc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"running GC...\nDone.\n");
     }
 
     #[tokio::test]

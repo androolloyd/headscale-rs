@@ -1313,6 +1313,8 @@ pub fn router(state: WireState) -> Router {
         )
         .route("/debug", get(basic_handlers::handle_debug_redirect))
         .route("/debug/", get(basic_handlers::handle_debug_index))
+        .route("/debug/varz", get(basic_handlers::handle_metrics))
+        .route("/debug/gc", get(basic_handlers::handle_debug_gc))
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),

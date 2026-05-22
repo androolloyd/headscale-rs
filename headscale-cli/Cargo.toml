@@ -48,6 +48,7 @@ headscale-db = { workspace = true }
 
 # CLI argument parsing
 clap = { workspace = true }
+clap_complete = { workspace = true }
 
 # Config file support
 toml = { workspace = true }

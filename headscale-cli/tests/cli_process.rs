@@ -43,6 +43,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "generate",
         "health",
         "version",
+        "completion",
         "configtest",
     ] {
         assert!(out.contains(command), "missing {command} in help:\n{out}");
@@ -90,6 +91,19 @@ fn version_json_line_is_machine_readable() {
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     assert!(value["rust"]["os"].is_string());
     assert!(value["rust"]["arch"].is_string());
+}
+
+#[test]
+fn completion_bash_does_not_load_config() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+    let output = headscale_in(&["completion", "bash"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("_headscale"), "stdout: {out}");
+    assert!(out.contains("complete"), "stdout: {out}");
 }
 
 #[test]

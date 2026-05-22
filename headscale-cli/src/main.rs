@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -141,6 +141,12 @@ enum Commands {
     /// Print the version.
     Version,
 
+    /// Generate the autocompletion script for the specified shell.
+    Completion {
+        #[command(subcommand)]
+        shell: CompletionShell,
+    },
+
     /// Test the configuration.
     Configtest,
 
@@ -184,6 +190,34 @@ enum IdentityAction {
 enum GenerateCmd {
     /// Generate a private key for the headscale server.
     PrivateKey,
+}
+
+#[derive(Subcommand)]
+enum CompletionShell {
+    /// Generate the autocompletion script for bash.
+    Bash {
+        /// Disable completion descriptions.
+        #[arg(long)]
+        no_descriptions: bool,
+    },
+    /// Generate the autocompletion script for fish.
+    Fish {
+        /// Disable completion descriptions.
+        #[arg(long)]
+        no_descriptions: bool,
+    },
+    /// Generate the autocompletion script for powershell.
+    Powershell {
+        /// Disable completion descriptions.
+        #[arg(long)]
+        no_descriptions: bool,
+    },
+    /// Generate the autocompletion script for zsh.
+    Zsh {
+        /// Disable completion descriptions.
+        #[arg(long)]
+        no_descriptions: bool,
+    },
 }
 
 #[tokio::main]
@@ -235,7 +269,7 @@ impl From<anyhow::Error> for MainError {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), MainError> {
-    let skip_config_load = matches!(cli.command, Commands::Version);
+    let skip_config_load = matches!(cli.command, Commands::Version | Commands::Completion { .. });
     let config = if skip_config_load {
         None
     } else if let Some(config_path) = &cli.config {
@@ -348,6 +382,10 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
         Commands::Version => {
             print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)
         }
+        Commands::Completion { shell } => {
+            generate_completion(&shell);
+            Ok(())
+        }
         Commands::Configtest => configtest(config.as_ref()).map_err(MainError::Other),
         Commands::DumpConfig => dump_config(config.as_ref()).map_err(MainError::Other),
 
@@ -408,6 +446,37 @@ fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
     config.validate_for_configtest()?;
     Ok(())
+}
+
+fn generate_completion(shell: &CompletionShell) {
+    let _no_descriptions = shell.no_descriptions();
+    let mut command = Cli::command();
+    clap_complete::generate(
+        shell.clap_shell(),
+        &mut command,
+        "headscale",
+        &mut std::io::stdout(),
+    );
+}
+
+impl CompletionShell {
+    fn clap_shell(&self) -> clap_complete::Shell {
+        match self {
+            Self::Bash { .. } => clap_complete::Shell::Bash,
+            Self::Fish { .. } => clap_complete::Shell::Fish,
+            Self::Powershell { .. } => clap_complete::Shell::PowerShell,
+            Self::Zsh { .. } => clap_complete::Shell::Zsh,
+        }
+    }
+
+    fn no_descriptions(&self) -> bool {
+        match self {
+            Self::Bash { no_descriptions }
+            | Self::Fish { no_descriptions }
+            | Self::Powershell { no_descriptions }
+            | Self::Zsh { no_descriptions } => *no_descriptions,
+        }
+    }
 }
 
 fn print_version(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
@@ -816,6 +885,38 @@ mod tests {
 
         let parsed = Cli::try_parse_from(["headscale", "dumpConfig"]).unwrap();
         assert!(matches!(parsed.command, Commands::DumpConfig));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_completion_commands() {
+        let parsed = Cli::try_parse_from(["headscale", "completion", "bash"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Completion {
+                shell: CompletionShell::Bash {
+                    no_descriptions: false
+                }
+            }
+        ));
+
+        let parsed =
+            Cli::try_parse_from(["headscale", "completion", "zsh", "--no-descriptions"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Completion {
+                shell: CompletionShell::Zsh {
+                    no_descriptions: true
+                }
+            }
+        ));
+
+        let parsed = Cli::try_parse_from(["headscale", "completion", "powershell"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Completion {
+                shell: CompletionShell::Powershell { .. }
+            }
+        ));
     }
 
     #[test]

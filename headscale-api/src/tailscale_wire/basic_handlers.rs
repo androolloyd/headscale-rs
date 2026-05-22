@@ -3,7 +3,10 @@
 //! These live next to `/key` in the wire router because upstream serves
 //! them from the same public control listener, before API bearer auth.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env, thread,
+};
 
 use axum::{
     Json,
@@ -30,6 +33,11 @@ const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=u
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
+    ("/debug/vars", "Metrics (Go)"),
+    ("/debug/varz", "Metrics (Prometheus)"),
+    ("/debug/pprof/", "pprof (index)"),
+    ("/debug/pprof/goroutine?debug=1", "Goroutines (collapsed)"),
+    ("/debug/pprof/goroutine?debug=2", "Goroutines (full)"),
     ("/debug/overview", "State overview"),
     ("/debug/config", "Current configuration"),
     ("/debug/policy", "Current policy"),
@@ -45,9 +53,17 @@ const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
     ("/debug/policy-manager", "Policy manager state"),
     ("/debug/mapresponses", "Map responses for all nodes"),
     ("/debug/batcher", "Batcher connected nodes"),
-    ("/debug/varz", "Metrics (Prometheus)"),
     ("/debug/gc", "force GC"),
+    ("/debug/statsviz", "Statsviz (visualise go metrics)"),
     ("/metrics", "Prometheus metrics"),
+];
+const PPROF_PROFILE_NAMES: &[&str] = &[
+    "allocs",
+    "block",
+    "goroutine",
+    "heap",
+    "mutex",
+    "threadcreate",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,6 +304,136 @@ pub async fn handle_debug_gc() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         "running GC...\nDone.\n",
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
+    let snapshot = state.machines.snapshot();
+    let dns_spec = state.dns.spec();
+    let payload = serde_json::json!({
+        "cmdline": env::args().collect::<Vec<_>>(),
+        "rust": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": env::consts::OS,
+            "arch": env::consts::ARCH,
+            "available_parallelism": thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        },
+        "headscale": {
+            "nodes_registered": snapshot.len(),
+            "dns_base_domain": dns_spec.base_domain,
+            "derp_regions": state.derp_map.regions.len(),
+        }
+    });
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+pub async fn handle_debug_pprof_redirect() -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/debug/pprof/")],
+        "",
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_index() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        debug_pprof_index_html(),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_cmdline() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        env::args().collect::<Vec<_>>().join("\0"),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_profile(Path(profile): Path<String>) -> Response {
+    if !PPROF_PROFILE_NAMES.contains(&profile.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("Unknown profile: {profile}\n"),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        rust_pprof_profile_text(&profile),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_cpu_profile() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        rust_pprof_profile_text("profile"),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_symbol() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "num_symbols: 0\n",
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_pprof_trace() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        rust_pprof_profile_text("trace"),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_statsviz_redirect() -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/debug/statsviz/")],
+        "",
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_statsviz_index() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        debug_statsviz_html(),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_statsviz_ws() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "websocket runtime metrics stream is not available in this Rust build\n",
     )
         .into_response()
 }
@@ -2316,6 +2462,52 @@ fn debug_index_html() -> String {
     out
 }
 
+fn debug_pprof_index_html() -> String {
+    let mut out = String::from(
+        r#"<html><head><title>/debug/pprof/</title></head><body><h1>/debug/pprof/</h1><p>Types of profiles available:</p><table>"#,
+    );
+    for profile in PPROF_PROFILE_NAMES {
+        out.push_str(r#"<tr><td><a href=""#);
+        out.push_str(&html_escape(profile));
+        out.push_str(r#"?debug=1">"#);
+        out.push_str(&html_escape(profile));
+        out.push_str("</a></td></tr>");
+    }
+    out.push_str(
+        r#"</table><p><a href="cmdline">cmdline</a></p><p><a href="profile">profile</a></p><p><a href="trace">trace</a></p></body></html>"#,
+    );
+    out
+}
+
+fn rust_pprof_profile_text(profile: &str) -> String {
+    format!(
+        "profile: {profile}\nruntime: rust\nos: {}\narch: {}\navailable_parallelism: {}\n",
+        env::consts::OS,
+        env::consts::ARCH,
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    )
+}
+
+fn debug_statsviz_html() -> &'static str {
+    r#"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Statsviz</title>
+  </head>
+  <body>
+    <h1>Statsviz</h1>
+    <p>Rust runtime metrics are exposed through /metrics and /debug/vars.</p>
+    <script>
+      window.__STATSVIZ_WS__ = "/debug/statsviz/ws";
+    </script>
+  </body>
+</html>"#
+}
+
 fn register_web_html(registration_id: &str) -> String {
     let escaped_registration_id = html_escape(registration_id);
     format!(
@@ -2940,6 +3132,151 @@ mod tests {
             body.contains("# TYPE headscale_nodes_registered gauge"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn debug_vars_serves_expvar_style_runtime_json() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/vars")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["cmdline"].is_array(), "{parsed}");
+        assert_eq!(parsed["rust"]["os"], env::consts::OS);
+        assert_eq!(parsed["rust"]["arch"], env::consts::ARCH);
+        assert_eq!(parsed["headscale"]["nodes_registered"], 0);
+    }
+
+    #[tokio::test]
+    async fn debug_pprof_surface_matches_tsweb_routes() {
+        let (state, _dir) = fixture_state();
+        let app = router(state);
+
+        let redirect = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/pprof")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirect.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            redirect
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/debug/pprof/")
+        );
+
+        let index = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/pprof/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(index.status(), StatusCode::OK);
+        let body = to_bytes(index.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Types of profiles available"), "{body}");
+        assert!(body.contains("goroutine"), "{body}");
+        assert!(body.contains("cmdline"), "{body}");
+
+        let goroutine = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/pprof/goroutine?debug=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(goroutine.status(), StatusCode::OK);
+        let body = to_bytes(goroutine.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("profile: goroutine"), "{body}");
+        assert!(body.contains("runtime: rust"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn debug_statsviz_surface_matches_upstream_paths() {
+        let (state, _dir) = fixture_state();
+        let app = router(state);
+
+        let redirect = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/statsviz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirect.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            redirect
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/debug/statsviz/")
+        );
+
+        let index = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/statsviz/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_eq!(
+            index
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = to_bytes(index.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("<title>Statsviz</title>"), "{body}");
+        assert!(body.contains("/debug/statsviz/ws"), "{body}");
+
+        let ws = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/statsviz/ws")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

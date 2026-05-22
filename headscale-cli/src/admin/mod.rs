@@ -134,16 +134,20 @@ impl ConnectArgs {
 #[derive(Subcommand, Debug)]
 pub enum UsersCmd {
     /// Create a new user.
+    #[command(alias = "c", alias = "new")]
     Create { name: String },
     /// List all users.
+    #[command(alias = "ls", alias = "show")]
     List,
     /// Delete a user by name.
+    #[command(alias = "destroy")]
     Delete { name: String },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum NodesCmd {
     /// List registered nodes (optionally filter by user).
+    #[command(alias = "ls")]
     List {
         #[arg(long)]
         user: Option<String>,
@@ -186,6 +190,7 @@ pub enum NodesCmd {
     },
     /// Replace the node's forced-tags list. Empty list clears the
     /// override; tags are matched by exact string against the policy.
+    #[command(alias = "tag", alias = "t")]
     Tags {
         #[arg(value_name = "ID")]
         id: String,
@@ -204,6 +209,7 @@ pub enum NodesCmd {
         routes: Vec<String>,
     },
     /// Delete a node.
+    #[command(alias = "del")]
     Delete {
         #[arg(value_name = "ID")]
         id: String,
@@ -213,6 +219,7 @@ pub enum NodesCmd {
 #[derive(Subcommand, Debug)]
 pub enum PreauthKeysCmd {
     /// Mint a fresh preauth key.
+    #[command(alias = "c", alias = "new")]
     Create {
         /// User the key belongs to.
         #[arg(long)]
@@ -232,12 +239,14 @@ pub enum PreauthKeysCmd {
         expires_in: String,
     },
     /// List all known preauth keys.
+    #[command(alias = "ls", alias = "show")]
     List {
         /// Restrict to a single user.
         #[arg(long)]
         user: Option<String>,
     },
     /// Expire a key identified by its visible prefix.
+    #[command(alias = "revoke", alias = "exp", alias = "e")]
     Expire {
         #[arg(value_name = "PREFIX")]
         prefix: String,
@@ -247,6 +256,7 @@ pub enum PreauthKeysCmd {
 #[derive(Subcommand, Debug)]
 pub enum ApiKeysCmd {
     /// Mint a fresh API key. The full secret is only shown once.
+    #[command(alias = "c", alias = "new")]
     Create {
         /// Duration the key is valid (e.g. `30m`, `24h`, `90d`).
         #[arg(short = 'e', long = "expiration", default_value = "90d")]
@@ -280,8 +290,10 @@ pub enum ApiKeysCmd {
 #[derive(Subcommand, Debug)]
 pub enum PolicyCmd {
     /// Fetch the policy currently loaded on the server.
+    #[command(alias = "show", alias = "view", alias = "fetch")]
     Get,
     /// Push a policy file to the server.
+    #[command(alias = "put", alias = "update")]
     Set {
         #[arg(value_name = "FILE")]
         path: PathBuf,

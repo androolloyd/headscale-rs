@@ -87,16 +87,24 @@ enum Commands {
 
     // ----- Admin surface (wraps `/api/v1/*`) -------------------------------
     /// Manage users on the admin surface.
+    #[command(
+        alias = "user",
+        alias = "namespace",
+        alias = "namespaces",
+        alias = "ns"
+    )]
     Users {
         #[command(subcommand)]
         action: UsersCmd,
     },
     /// Manage registered nodes.
+    #[command(alias = "machine", alias = "machines")]
     Nodes {
         #[command(subcommand)]
         action: NodesCmd,
     },
     /// Manage pre-auth keys.
+    #[command(alias = "preauthkey", alias = "authkey", alias = "pre")]
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
@@ -429,4 +437,60 @@ format = "pretty"  # pretty, json, compact
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn standalone_cli_accepts_user_aliases_from_upstream() {
+        let parsed = Cli::try_parse_from(["headscale", "ns", "show"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Users {
+                action: UsersCmd::List
+            }
+        ));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_machine_alias_without_conflicting_with_node_mode() {
+        let parsed = Cli::try_parse_from(["headscale", "machine", "ls"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Nodes {
+                action: NodesCmd::List { .. }
+            }
+        ));
+
+        let parsed =
+            Cli::try_parse_from(["headscale", "node", "--server", "http://127.0.0.1"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Node { .. }));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_preauthkey_aliases_from_upstream() {
+        let parsed =
+            Cli::try_parse_from(["headscale", "authkey", "new", "--user", "alice"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Preauthkeys {
+                action: PreauthKeysCmd::Create { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_policy_aliases_from_upstream() {
+        let parsed = Cli::try_parse_from(["headscale", "policy", "view"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Policy {
+                action: PolicyCmd::Get
+            }
+        ));
+    }
 }

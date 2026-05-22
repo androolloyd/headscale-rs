@@ -273,6 +273,37 @@ async fn grpc_gateway_path_parameter_type_mismatch_is_status_json() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_path_uint64_accepts_go_base0_literals() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"hex-path-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["user"]["id"], "1");
+
+    let resp = app
+        .oneshot(req(
+            Method::DELETE,
+            "/api/v1/user/0x1",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+}
+
+#[tokio::test]
 async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     let (app, token) = fixture().await;
     let registration_key = "abcdefghijklmnopqrstuvwx";

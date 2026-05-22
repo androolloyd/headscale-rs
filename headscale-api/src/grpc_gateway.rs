@@ -768,9 +768,137 @@ where
 }
 
 fn parse_path_u64(name: &str, value: &str) -> Result<u64, Status> {
-    value.parse::<u64>().map_err(|e| {
+    parse_go_uint64_base0(value).map_err(|e| {
         Status::invalid_argument(format!("type mismatch, parameter: {name}, error: {e}"))
     })
+}
+
+fn parse_go_uint64_base0(value: &str) -> Result<u64, String> {
+    let (digits, radix, allow_prefix_underscore) = go_uint64_digits_and_radix(value)?;
+    let digits = normalize_go_uint64_digits(value, digits, radix, allow_prefix_underscore)?;
+    u64::from_str_radix(&digits, radix).map_err(|e| {
+        let reason = match e.kind() {
+            std::num::IntErrorKind::PosOverflow => "value out of range",
+            _ => "invalid syntax",
+        };
+        go_parse_uint_error(value, reason)
+    })
+}
+
+fn go_uint64_digits_and_radix(value: &str) -> Result<(&str, u32, bool), String> {
+    if value.is_empty() || value.starts_with(['+', '-']) {
+        return Err(go_parse_uint_error(value, "invalid syntax"));
+    }
+    if let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return Ok((digits, 16, true));
+    }
+    if let Some(digits) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        return Ok((digits, 2, true));
+    }
+    if let Some(digits) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        return Ok((digits, 8, true));
+    }
+    if value.starts_with('0') && value.len() > 1 {
+        return Ok((&value[1..], 8, true));
+    }
+    Ok((value, 10, false))
+}
+
+fn normalize_go_uint64_digits(
+    original: &str,
+    digits: &str,
+    radix: u32,
+    allow_prefix_underscore: bool,
+) -> Result<String, String> {
+    let mut normalized = String::with_capacity(digits.len());
+    let mut previous_was_digit = false;
+    let mut seen_digit = false;
+
+    for (idx, ch) in digits.chars().enumerate() {
+        if ch == '_' {
+            if !(previous_was_digit || (idx == 0 && allow_prefix_underscore)) {
+                return Err(go_parse_uint_error(original, "invalid syntax"));
+            }
+            previous_was_digit = false;
+            continue;
+        }
+
+        let valid_digit = match radix {
+            2 => matches!(ch, '0' | '1'),
+            8 => matches!(ch, '0'..='7'),
+            10 => ch.is_ascii_digit(),
+            16 => ch.is_ascii_hexdigit(),
+            _ => false,
+        };
+        if !valid_digit {
+            return Err(go_parse_uint_error(original, "invalid syntax"));
+        }
+        normalized.push(ch);
+        previous_was_digit = true;
+        seen_digit = true;
+    }
+
+    if !seen_digit || !previous_was_digit {
+        return Err(go_parse_uint_error(original, "invalid syntax"));
+    }
+
+    Ok(normalized)
+}
+
+fn go_parse_uint_error(value: &str, reason: &str) -> String {
+    format!("strconv.ParseUint: parsing {value:?}: {reason}")
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn parse_go_uint64_base0_matches_grpc_gateway_literals() {
+        for (input, expected) in [
+            ("0", 0),
+            ("42", 42),
+            ("1_000", 1000),
+            ("0x2a", 42),
+            ("0X2A", 42),
+            ("0x_2a", 42),
+            ("0b101010", 42),
+            ("0B10_1010", 42),
+            ("0o52", 42),
+            ("052", 42),
+            ("0_52", 42),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            assert_eq!(parse_go_uint64_base0(input), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn parse_go_uint64_base0_reports_go_style_errors() {
+        for input in [
+            "", "+1", "-1", "_1", "1_", "1__0", "0x", "0x_", "08", "１２",
+        ] {
+            let err = parse_go_uint64_base0(input).unwrap_err();
+            assert_eq!(
+                err,
+                format!("strconv.ParseUint: parsing {input:?}: invalid syntax")
+            );
+        }
+
+        assert_eq!(
+            parse_go_uint64_base0("18446744073709551616").unwrap_err(),
+            "strconv.ParseUint: parsing \"18446744073709551616\": value out of range"
+        );
+    }
 }
 
 fn optional_user_json(user: Option<&User>) -> Value {

@@ -50,16 +50,24 @@ pub use admin::{
 #[derive(Subcommand, Debug)]
 pub enum AdminCmd {
     /// Manage users on the admin surface.
+    #[command(
+        alias = "user",
+        alias = "namespace",
+        alias = "namespaces",
+        alias = "ns"
+    )]
     Users {
         #[command(subcommand)]
         action: UsersCmd,
     },
     /// Manage registered nodes.
+    #[command(alias = "node", alias = "machine", alias = "machines")]
     Nodes {
         #[command(subcommand)]
         action: NodesCmd,
     },
     /// Manage pre-auth keys.
+    #[command(alias = "preauthkey", alias = "authkey", alias = "pre")]
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
@@ -115,5 +123,88 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
             eprintln!("error: {e}");
             e.exit_code() as i32
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser, Debug)]
+    struct AdminHarness {
+        #[command(flatten)]
+        connect: ConnectArgs,
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    }
+
+    #[test]
+    fn embedded_admin_accepts_user_aliases_from_upstream() {
+        let parsed = AdminHarness::try_parse_from(["headscale", "namespace", "ls"]).unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Users {
+                action: UsersCmd::List
+            }
+        ));
+    }
+
+    #[test]
+    fn embedded_admin_accepts_node_aliases_from_upstream() {
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "node", "tag", "abc123", "tag:web"])
+                .unwrap();
+        match parsed.cmd {
+            AdminCmd::Nodes {
+                action: NodesCmd::Tags { id, tags },
+            } => {
+                assert_eq!(id, "abc123");
+                assert_eq!(tags, vec!["tag:web"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedded_admin_accepts_preauthkey_and_apikey_aliases_from_upstream() {
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "pre", "new", "--user", "alice"]).unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Preauthkeys {
+                action: PreauthKeysCmd::Create { .. }
+            }
+        ));
+
+        let parsed = AdminHarness::try_parse_from(["headscale", "api", "new"]).unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Apikeys {
+                action: ApiKeysCmd::Create { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn embedded_admin_accepts_policy_aliases_from_upstream() {
+        let parsed = AdminHarness::try_parse_from(["headscale", "policy", "fetch"]).unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Policy {
+                action: PolicyCmd::Get
+            }
+        ));
+
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "policy", "update", "policy.hujson"])
+                .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Policy {
+                action: PolicyCmd::Set { .. }
+            }
+        ));
     }
 }

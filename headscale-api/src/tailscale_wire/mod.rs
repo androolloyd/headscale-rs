@@ -1757,8 +1757,49 @@ pub fn router(state: WireState) -> Router {
         )
         .route("/debug", get(basic_handlers::handle_debug_redirect))
         .route("/debug/", get(basic_handlers::handle_debug_index))
+        .route("/debug/vars", get(basic_handlers::handle_debug_vars))
         .route("/debug/varz", get(basic_handlers::handle_metrics))
+        .route(
+            "/debug/pprof",
+            get(basic_handlers::handle_debug_pprof_redirect),
+        )
+        .route(
+            "/debug/pprof/",
+            get(basic_handlers::handle_debug_pprof_index),
+        )
+        .route(
+            "/debug/pprof/cmdline",
+            any(basic_handlers::handle_debug_pprof_cmdline),
+        )
+        .route(
+            "/debug/pprof/profile",
+            any(basic_handlers::handle_debug_pprof_cpu_profile),
+        )
+        .route(
+            "/debug/pprof/symbol",
+            any(basic_handlers::handle_debug_pprof_symbol),
+        )
+        .route(
+            "/debug/pprof/trace",
+            any(basic_handlers::handle_debug_pprof_trace),
+        )
+        .route(
+            "/debug/pprof/:profile",
+            any(basic_handlers::handle_debug_pprof_profile),
+        )
         .route("/debug/gc", get(basic_handlers::handle_debug_gc))
+        .route(
+            "/debug/statsviz",
+            get(basic_handlers::handle_debug_statsviz_redirect),
+        )
+        .route(
+            "/debug/statsviz/",
+            get(basic_handlers::handle_debug_statsviz_index),
+        )
+        .route(
+            "/debug/statsviz/ws",
+            any(basic_handlers::handle_debug_statsviz_ws),
+        )
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),

@@ -6,11 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    ApiKey, CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
-    DeleteApiKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest,
-    GetPolicyRequest, GetPolicyResponse, ListApiKeysRequest, ListPreAuthKeysRequest,
-    ListUsersRequest, PreAuthKey, RenameUserRequest, SetPolicyRequest, SetPolicyResponse, User,
-    headscale_service_client::HeadscaleServiceClient,
+    ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CheckPolicyRequest,
+    CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DebugCreateNodeRequest,
+    DeleteApiKeyRequest, DeleteNodeRequest, DeleteUserRequest, ExpireApiKeyRequest,
+    ExpireNodeRequest, ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest,
+    GetPolicyResponse, HealthRequest, HealthResponse, ListApiKeysRequest, ListNodesRequest,
+    ListPreAuthKeysRequest, ListUsersRequest, Node, PreAuthKey, RegisterNodeRequest,
+    RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
+    SetPolicyResponse, SetTagsRequest, User, headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpStream, UnixStream};
@@ -188,6 +191,158 @@ impl GrpcAdminClient {
         Ok(())
     }
 
+    pub async fn list_nodes(&mut self, user: Option<&str>) -> Result<Vec<Node>, AdminError> {
+        let request = self.request(ListNodesRequest {
+            user: user.unwrap_or_default().to_string(),
+        })?;
+        Ok(self
+            .client
+            .list_nodes(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner()
+            .nodes)
+    }
+
+    pub async fn get_node(&mut self, node_id: u64) -> Result<Node, AdminError> {
+        let request = self.request(GetNodeRequest { node_id })?;
+        let response = self
+            .client
+            .get_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "GetNode")
+    }
+
+    pub async fn register_node(&mut self, user: &str, key: &str) -> Result<Node, AdminError> {
+        let request = self.request(RegisterNodeRequest {
+            user: user.to_string(),
+            key: key.to_string(),
+        })?;
+        let response = self
+            .client
+            .register_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "RegisterNode")
+    }
+
+    pub async fn debug_create_node(
+        &mut self,
+        user: &str,
+        key: &str,
+        name: &str,
+        routes: Vec<String>,
+    ) -> Result<Node, AdminError> {
+        let request = self.request(DebugCreateNodeRequest {
+            user: user.to_string(),
+            key: key.to_string(),
+            name: name.to_string(),
+            routes,
+        })?;
+        let response = self
+            .client
+            .debug_create_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "DebugCreateNode")
+    }
+
+    pub async fn set_tags(&mut self, node_id: u64, tags: Vec<String>) -> Result<Node, AdminError> {
+        let request = self.request(SetTagsRequest { node_id, tags })?;
+        let response = self
+            .client
+            .set_tags(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "SetTags")
+    }
+
+    pub async fn set_approved_routes(
+        &mut self,
+        node_id: u64,
+        routes: Vec<String>,
+    ) -> Result<Node, AdminError> {
+        let request = self.request(SetApprovedRoutesRequest { node_id, routes })?;
+        let response = self
+            .client
+            .set_approved_routes(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "SetApprovedRoutes")
+    }
+
+    pub async fn expire_node(
+        &mut self,
+        node_id: u64,
+        expiry: Option<i64>,
+        disable_expiry: bool,
+    ) -> Result<Node, AdminError> {
+        let request = self.request(ExpireNodeRequest {
+            node_id,
+            expiry: expiry.map(unix_to_timestamp),
+            disable_expiry,
+        })?;
+        let response = self
+            .client
+            .expire_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "ExpireNode")
+    }
+
+    pub async fn rename_node(&mut self, node_id: u64, new_name: &str) -> Result<Node, AdminError> {
+        let request = self.request(RenameNodeRequest {
+            node_id,
+            new_name: new_name.to_string(),
+        })?;
+        let response = self
+            .client
+            .rename_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "RenameNode")
+    }
+
+    pub async fn delete_node(&mut self, node_id: u64) -> Result<(), AdminError> {
+        let request = self.request(DeleteNodeRequest { node_id })?;
+        self.client
+            .delete_node(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
+    pub async fn backfill_node_ips(
+        &mut self,
+        confirmed: bool,
+    ) -> Result<BackfillNodeIPsResponse, AdminError> {
+        let request = self.request(BackfillNodeIPsRequest { confirmed })?;
+        Ok(self
+            .client
+            .backfill_node_i_ps(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner())
+    }
+
+    pub async fn health(&mut self) -> Result<HealthResponse, AdminError> {
+        let request = self.request(HealthRequest {})?;
+        Ok(self
+            .client
+            .health(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner())
+    }
+
     pub async fn expire_api_key(
         &mut self,
         prefix: Option<&str>,
@@ -276,6 +431,10 @@ impl GrpcAdminClient {
 
 fn unix_to_timestamp(seconds: i64) -> prost_types::Timestamp {
     prost_types::Timestamp { seconds, nanos: 0 }
+}
+
+fn required_node(node: Option<Node>, rpc: &str) -> Result<Node, AdminError> {
+    node.ok_or_else(|| AdminError::Decode(format!("{rpc} response omitted node")))
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -730,6 +889,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_client_uses_local_unix_socket_for_node_commands() {
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            Arc::new(UserRegistry::new()),
+            Arc::new(NoopApiKeyAdmin),
+            Arc::new(InMemoryPreauthAdmin::new()),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let (_dir, socket, handle) = spawn_unix_service(service);
+
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+            .await
+            .unwrap();
+        client.create_user("alice", "", "", "").await.unwrap();
+        let registration_id = "abcdefghijklmnopqrstuvwx";
+        let pending = client
+            .debug_create_node(
+                "alice",
+                registration_id,
+                "node-one",
+                vec!["10.10.0.0/24".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(pending.name, "node-one");
+        assert_eq!(pending.available_routes, vec!["10.10.0.0/24".to_string()]);
+
+        let registered = client
+            .register_node("alice", registration_id)
+            .await
+            .unwrap();
+        assert_eq!(registered.name, "node-one");
+        assert_eq!(registered.user.as_ref().unwrap().name, "alice");
+        assert_eq!(
+            registered.available_routes,
+            vec!["10.10.0.0/24".to_string()]
+        );
+
+        let listed = client.list_nodes(None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, registered.id);
+        let filtered = client.list_nodes(Some("alice")).await.unwrap();
+        assert_eq!(filtered.len(), 1);
+        let fetched = client.get_node(registered.id).await.unwrap();
+        assert_eq!(fetched.id, registered.id);
+
+        client
+            .set_policy(r#"{"tagOwners":{"tag:server":["alice@"]}}"#.into())
+            .await
+            .unwrap();
+        let tagged = client
+            .set_tags(registered.id, vec!["tag:server".into()])
+            .await
+            .unwrap();
+        assert_eq!(tagged.tags, vec!["tag:server".to_string()]);
+
+        let routed = client
+            .set_approved_routes(registered.id, vec!["10.10.0.0/24".into()])
+            .await
+            .unwrap();
+        assert_eq!(routed.approved_routes, vec!["10.10.0.0/24".to_string()]);
+
+        let expired = client
+            .expire_node(registered.id, Some(current_unix_i64() + 3600), false)
+            .await
+            .unwrap();
+        assert!(expired.expiry.is_some());
+        let unexpired = client.expire_node(registered.id, None, true).await.unwrap();
+        assert!(unexpired.expiry.is_none());
+
+        let renamed = client
+            .rename_node(registered.id, "node-renamed")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "node-renamed");
+
+        client.delete_node(registered.id).await.unwrap();
+        assert!(client.list_nodes(None).await.unwrap().is_empty());
+        assert!(matches!(
+            client.get_node(registered.id).await,
+            Err(AdminError::NotFound(_))
+        ));
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn grpc_client_uses_local_unix_socket_for_health_and_backfillips() {
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            Arc::new(UserRegistry::new()),
+            Arc::new(NoopApiKeyAdmin),
+            Arc::new(InMemoryPreauthAdmin::new()),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let (_dir, socket, handle) = spawn_unix_service(service);
+
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+            .await
+            .unwrap();
+        let health = client.health().await.unwrap();
+        assert!(health.database_connectivity);
+        assert!(client.backfill_node_ips(false).await.is_err());
+        let backfilled = client.backfill_node_ips(true).await.unwrap();
+        assert!(backfilled.changes.is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
     async fn grpc_client_insecure_remote_uses_tls_without_verifying_certificate() {
         let dir = tempfile::tempdir().unwrap();
         let material =
@@ -819,5 +1092,24 @@ mod tests {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs() as i64)
+    }
+
+    fn spawn_unix_service(
+        service: HeadscaleAdminService,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("headscale.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await
+        });
+        (dir, socket, handle)
     }
 }

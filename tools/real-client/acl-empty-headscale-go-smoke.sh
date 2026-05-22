@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
+policy_json="${REAL_CLIENT_POLICY_JSON:-$(ruby -rjson -e 'puts JSON.pretty_generate({acls: []})')}"
+
+REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/acl-empty-headscale-go-smoke}" \
+REAL_CLIENT_CLIENT_COUNT="${REAL_CLIENT_CLIENT_COUNT:-2}" \
+REAL_CLIENT_POLICY_JSON="${policy_json}" \
+REAL_CLIENT_EXPECT_PEER_COUNTS="${REAL_CLIENT_EXPECT_PEER_COUNTS:-1,0}" \
+  tools/real-client/authkey-headscale-go-smoke.sh

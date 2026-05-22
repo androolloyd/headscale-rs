@@ -117,6 +117,17 @@ impl PolicyStore {
         self.inner.state.read().doc.is_some()
     }
 
+    /// Number of ACL rules in the loaded policy, or `None` when no
+    /// policy is loaded.
+    pub fn acl_rule_count(&self) -> Option<usize> {
+        self.inner
+            .state
+            .read()
+            .doc
+            .as_ref()
+            .map(|doc| doc.rules.len())
+    }
+
     /// Snapshot the cached `FilterRule` list. Returns an empty vec if
     /// no policy has been pushed (callers decide whether to fall back
     /// to `allow_all_packet_filter`).

@@ -23,6 +23,7 @@ expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
+expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -38,6 +39,21 @@ fi
 if [[ -n "${expected_peer_count}" ]] && ! [[ "${expected_peer_count}" =~ ^[0-9]+$ ]]; then
   echo "REAL_CLIENT_EXPECT_PEER_COUNT must be a non-negative integer, got ${expected_peer_count}" >&2
   exit 2
+fi
+
+expected_peer_counts_values=()
+if [[ -n "${expected_peer_counts}" ]]; then
+  IFS=',' read -r -a expected_peer_counts_values <<<"${expected_peer_counts}"
+  if ((${#expected_peer_counts_values[@]} != client_count)); then
+    echo "REAL_CLIENT_EXPECT_PEER_COUNTS must contain ${client_count} comma-separated counts, got ${expected_peer_counts}" >&2
+    exit 2
+  fi
+  for count in "${expected_peer_counts_values[@]}"; do
+    if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+      echo "REAL_CLIENT_EXPECT_PEER_COUNTS must contain non-negative integers, got ${expected_peer_counts}" >&2
+      exit 2
+    fi
+  done
 fi
 
 if [[ -n "${preauth_tags}" && -z "${policy_json}" ]]; then
@@ -440,23 +456,32 @@ if [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "::endgroup::"
 fi
 
-if [[ -n "${expected_peer_count}" ]]; then
+if [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]]; then
   echo "::group::assert client peer visibility"
   peer_status_paths=()
-  for client_name in "${client_names[@]}"; do
-    if ! wait_for "tailscale peer count ${expected_peer_count} for ${client_name}" \
-      "tailscale_peer_count_matches '${client_name}' '${expected_peer_count}'"; then
+  peer_expected_counts=()
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
+    expected_count="${expected_peer_count}"
+    if [[ -n "${expected_peer_counts}" ]]; then
+      expected_count="${expected_peer_counts_values[$idx]}"
+    fi
+    if ! wait_for "tailscale peer count ${expected_count} for ${client_name}" \
+      "tailscale_peer_count_matches '${client_name}' '${expected_count}'"; then
       dump_client_debug "${client_name}"
       exit 1
     fi
     status_path="${work_dir}/${client_name}.peer-status.json"
-    docker exec "${client_name}" tailscale status --json >"${status_path}"
+    docker exec "${client_name}" tailscale status --json >"${status_path}" || true
     peer_status_paths+=("${status_path}")
+    peer_expected_counts+=("${expected_count}")
   done
+  peer_expected_counts_csv="$(IFS=,; echo "${peer_expected_counts[*]}")"
   ruby -rjson -e '
-    expected_count = Integer(ARGV.fetch(0))
+    expected_counts = ARGV.fetch(0).split(",").map { |value| Integer(value) }
     status_paths = ARGV.drop(1)
-    status_paths.each do |path|
+    status_paths.each_with_index do |path, idx|
+      expected_count = expected_counts.fetch(idx)
       status = JSON.parse(File.read(path))
       self_host = status.fetch("Self").fetch("HostName")
       peers = status["Peer"] || {}
@@ -464,7 +489,7 @@ if [[ -n "${expected_peer_count}" ]]; then
       peer_hosts = peers.each_value.map { |peer| peer.fetch("HostName") }.sort
       puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
     end
-  ' "${expected_peer_count}" "${peer_status_paths[@]}"
+  ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
   echo "::endgroup::"
 fi
 

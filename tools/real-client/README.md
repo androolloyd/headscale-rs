@@ -152,6 +152,20 @@ Useful knobs:
 
 - `REAL_CLIENT_POLICY_JSON` can override the generated allow policy.
 - `REAL_CLIENT_EXPECT_PEER_COUNT` defaults to `1`.
+- `REAL_CLIENT_EXPECT_PEER_COUNTS` can assert comma-separated per-client counts.
+
+The empty-ACL scenario covers the headscale-go streaming edge where the first
+client receives the later node through an incremental peer delta while the
+second client's initial full map remains empty:
+
+```sh
+tools/real-client/acl-empty-smoke.sh
+tools/real-client/acl-empty-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_EXPECT_PEER_COUNTS` defaults to `1,0`.
 
 ## Advertised Route Smoke
 

@@ -184,6 +184,17 @@ fn peer_state_from_nodes(peers: &[MapNode]) -> BTreeMap<u64, MapNode> {
     peers.iter().map(|peer| (peer.id, peer.clone())).collect()
 }
 
+fn peer_ids_from_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+) -> BTreeSet<u64> {
+    snapshot
+        .keys()
+        .filter(|node_key| node_key.as_str() != self_node_key)
+        .map(|node_key| stable_id_from_key(node_key))
+        .collect()
+}
+
 fn visible_peer_state_for_registry(
     machines: &crate::tailscale_wire::MachineRegistry,
     policy: &PolicyStore,
@@ -209,6 +220,27 @@ fn visible_peer_state_for_registry(
         cap_version,
     );
     peer_state_from_nodes(&peers)
+}
+
+fn incremental_allowed_peer_ids_for_snapshot(
+    policy: &PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    active_routes: &HashMap<String, Vec<String>>,
+    initial_peer_ids: &BTreeSet<u64>,
+    last_peer_state: &BTreeMap<u64, MapNode>,
+) -> Option<BTreeSet<u64>> {
+    if policy.acl_rule_count() == Some(0) {
+        let current_peer_ids = peer_ids_from_snapshot(snapshot, self_node_key);
+        let mut surfaced_peer_ids = last_peer_state
+            .keys()
+            .filter(|id| current_peer_ids.contains(id))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        surfaced_peer_ids.extend(current_peer_ids.difference(initial_peer_ids).copied());
+        return Some(surfaced_peer_ids);
+    }
+    allowed_peer_ids_for_snapshot(policy, snapshot, self_node_key, active_routes)
 }
 
 fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
@@ -731,6 +763,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // the body must NOT terminate naturally — the client expects
         // to long-poll until it closes the connection itself.
         let initial_peer_state = peer_state_from_nodes(&resp.peers);
+        let initial_peer_ids = peer_ids_from_snapshot(&snapshot, &node_key_hex);
         let first = match build_framed_chunk(&resp) {
             Ok(v) => v,
             Err(e) => {
@@ -782,6 +815,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 derp_map_for_stream,
                 dns_for_stream,
                 initial_peer_state,
+                initial_peer_ids,
                 connection_guard,
                 cap_version,
             ),
@@ -794,6 +828,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 machines_derp_map,
                 dns,
                 last_peer_state,
+                initial_peer_ids,
                 connection_guard,
                 cap_version,
             )| async move {
@@ -809,6 +844,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             machines_derp_map,
                             dns,
                             last_peer_state,
+                            initial_peer_ids,
                             connection_guard,
                             cap_version,
                         ),
@@ -842,7 +878,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         if res.is_err() {
                             (build_keepalive_chunk(), last_peer_state)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_peer_state)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_peer_state, &initial_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
@@ -884,6 +920,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         machines_derp_map,
                         dns,
                         next_peer_state,
+                        initial_peer_ids,
                         connection_guard,
                         cap_version,
                     ),
@@ -918,6 +955,7 @@ fn rebuild_peer_delta_chunk(
     dns: &Arc<DnsStore>,
     cap_version: u32,
     last_peer_state: &BTreeMap<u64, MapNode>,
+    initial_peer_ids: &BTreeSet<u64>,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>) {
     if machines.get(self_node_key).is_none() {
         return (build_keepalive_chunk(), last_peer_state.clone());
@@ -928,8 +966,14 @@ fn rebuild_peer_delta_chunk(
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
-    let allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+    let allowed_peer_ids = incremental_allowed_peer_ids_for_snapshot(
+        policy,
+        &snapshot,
+        self_node_key,
+        &active_routes,
+        initial_peer_ids,
+        last_peer_state,
+    );
     let self_node_id = stable_id_from_key(self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let peers_changed = visible_peer_map_nodes(
@@ -2221,6 +2265,80 @@ mod tests {
              got keepalive instead, indicating the lost-wake race regressed"
         );
         assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_empty_acl_registry_delta_matches_headscale_go() {
+        let (state, _dir) = fixture();
+        let policy = r#"{"acls":[]}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 112 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(
+            first_mr.peers.is_empty(),
+            "full map still uses the empty ACL peer map"
+        );
+        assert!(
+            first_mr
+                .packet_filters
+                .get("base")
+                .and_then(|rules| rules.as_ref())
+                .map_or(true, Vec::is_empty),
+            "empty ACL still sends an empty packet filter"
+        );
+
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&b));
+        assert_eq!(mr.peers_changed[0].name, "peer-b");
+        assert!(
+            mr.packet_filters
+                .get("base")
+                .and_then(|rules| rules.as_ref())
+                .map_or(true, Vec::is_empty),
+            "incremental empty-ACL updates must not loosen packet filters"
+        );
     }
 
     #[tokio::test(start_paused = true)]

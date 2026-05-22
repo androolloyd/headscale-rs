@@ -1,6 +1,8 @@
 //! gRPC client transport for upstream-compatible admin commands.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
@@ -8,7 +10,15 @@ use headscale_api::generated::{
     headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
-use tokio::net::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme,
+};
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Request, Status};
@@ -35,11 +45,7 @@ impl GrpcAdminClient {
             let api_key = api_key
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AdminError::Local("--api-key is required for remote gRPC".into()))?;
-            let endpoint = remote_endpoint(address, insecure)?;
-            let channel = endpoint
-                .connect()
-                .await
-                .map_err(|e| AdminError::Connection(e.to_string()))?;
+            let channel = remote_channel(address, insecure).await?;
             Ok(Self::from_channel(channel, Some(api_key.to_string())))
         } else {
             let socket =
@@ -124,17 +130,141 @@ async fn unix_channel(path: PathBuf) -> Result<Channel, AdminError> {
         .map_err(|e| AdminError::Connection(e.to_string()))
 }
 
-fn remote_endpoint(address: &str, insecure: bool) -> Result<Endpoint, AdminError> {
+fn remote_endpoint(uri: Uri) -> Result<Endpoint, AdminError> {
+    ensure_rustls_provider();
+    Endpoint::new(uri)
+        .map(|endpoint| endpoint.timeout(Duration::from_secs(10)))
+        .map_err(|e| AdminError::Connection(e.to_string()))
+}
+
+async fn remote_channel(address: &str, insecure: bool) -> Result<Channel, AdminError> {
+    let uri = remote_uri(address)?;
+    if insecure && uri.scheme_str() == Some("https") {
+        return insecure_tls_channel(uri).await;
+    }
+
+    remote_endpoint(uri)?
+        .connect()
+        .await
+        .map_err(|e| AdminError::Connection(e.to_string()))
+}
+
+fn remote_uri(address: &str) -> Result<Uri, AdminError> {
     let uri = if address.contains("://") {
         address.to_string()
-    } else if insecure {
-        format!("http://{address}")
     } else {
         format!("https://{address}")
     };
-    Endpoint::from_shared(uri)
-        .map(|endpoint| endpoint.timeout(Duration::from_secs(10)))
+    let uri = uri
+        .parse::<Uri>()
+        .map_err(|e| AdminError::Connection(e.to_string()))?;
+    if uri.host().is_none() {
+        return Err(AdminError::Connection(format!(
+            "remote gRPC address {address:?} does not include a host"
+        )));
+    }
+    Ok(uri)
+}
+
+async fn insecure_tls_channel(origin: Uri) -> Result<Channel, AdminError> {
+    let connector_uri = connector_uri_for_tls_origin(&origin)?;
+    Endpoint::from(connector_uri)
+        .origin(origin)
+        .timeout(Duration::from_secs(10))
+        .connect_with_connector(service_fn(insecure_tls_stream))
+        .await
         .map_err(|e| AdminError::Connection(e.to_string()))
+}
+
+fn connector_uri_for_tls_origin(origin: &Uri) -> Result<Uri, AdminError> {
+    let authority = origin
+        .authority()
+        .ok_or_else(|| AdminError::Connection("remote gRPC address missing authority".into()))?;
+    format!("http://{authority}")
+        .parse::<Uri>()
+        .map_err(|e| AdminError::Connection(e.to_string()))
+}
+
+async fn insecure_tls_stream(
+    uri: Uri,
+) -> Result<TokioIo<tokio_rustls::client::TlsStream<TcpStream>>, io::Error> {
+    ensure_rustls_provider();
+    let host = uri
+        .host()
+        .ok_or_else(|| io::Error::other("remote gRPC address missing host"))?
+        .to_string();
+    let port = uri.port_u16().unwrap_or(443);
+    let stream = TcpStream::connect((host.as_str(), port)).await?;
+    let server_name = ServerName::try_from(host)
+        .map_err(|e| io::Error::other(format!("invalid TLS server name: {e}")))?;
+
+    let mut config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
+    config.alpn_protocols.push(b"h2".to_vec());
+
+    TlsConnector::from(Arc::new(config))
+        .connect(server_name, stream)
+        .await
+        .map(TokioIo::new)
+        .map_err(io::Error::other)
+}
+
+fn ensure_rustls_provider() {
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
 }
 
 fn status_to_admin_error(status: &Status) -> AdminError {
@@ -166,23 +296,41 @@ mod tests {
     use headscale_api::grpc::upstream::HeadscaleAdminService;
     use headscale_api::policy::PolicyStore;
     use headscale_api::tailscale_wire::MachineRegistry;
-    use tokio::net::UnixListener;
-    use tokio_stream::wrappers::UnixListenerStream;
+    use headscale_api::tailscale_wire::tls::{self, SanConfig};
+    use std::pin::Pin;
+    use std::task::{Context as TaskContext, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::net::{TcpListener, UnixListener};
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::server::TlsStream;
+    use tokio_stream::{StreamExt, wrappers::UnixListenerStream};
     use tonic::transport::Server;
+    use tonic::transport::server::Connected;
 
     #[test]
-    fn remote_endpoint_defaults_to_https_unless_insecure() {
+    fn remote_addresses_default_to_https() {
         assert_eq!(
-            remote_endpoint("127.0.0.1:50443", false)
+            remote_endpoint(remote_uri("127.0.0.1:50443").unwrap())
                 .unwrap()
                 .uri()
                 .scheme_str(),
             Some("https")
         );
         assert_eq!(
-            remote_endpoint("127.0.0.1:50443", true)
+            remote_uri("127.0.0.1:50443").unwrap().scheme_str(),
+            Some("https")
+        );
+        assert_eq!(
+            remote_uri("http://127.0.0.1:50443").unwrap().scheme_str(),
+            Some("http")
+        );
+    }
+
+    #[test]
+    fn insecure_does_not_downgrade_remote_endpoint_to_plaintext() {
+        assert_eq!(
+            connector_uri_for_tls_origin(&remote_uri("127.0.0.1:50443").unwrap())
                 .unwrap()
-                .uri()
                 .scheme_str(),
             Some("http")
         );
@@ -239,5 +387,91 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn grpc_client_insecure_remote_uses_tls_without_verifying_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let material =
+            tls::load_or_generate(dir.path(), &SanConfig::with_hostname("localhost")).unwrap();
+        let server_config =
+            tls::build_grpc_server_config(&material.cert_pem, &material.key_pem).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            Arc::new(UserRegistry::new()),
+            Arc::new(NoopApiKeyAdmin),
+            Arc::new(InMemoryPreauthAdmin::new()),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).then({
+            let acceptor = acceptor.clone();
+            move |accepted| {
+                let acceptor = acceptor.clone();
+                async move {
+                    let stream = accepted?;
+                    acceptor
+                        .accept(stream)
+                        .await
+                        .map(ConnectedTlsStream)
+                        .map_err(io::Error::other)
+                }
+            }
+        });
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming(incoming)
+                .await
+        });
+
+        let mut client =
+            GrpcAdminClient::connect(Some(&addr.to_string()), Some("test-api-key"), None, true)
+                .await
+                .unwrap();
+        let created = client.create_user("remote").await.unwrap();
+        assert_eq!(created.name, "remote");
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    struct ConnectedTlsStream(TlsStream<TcpStream>);
+
+    impl Connected for ConnectedTlsStream {
+        type ConnectInfo = ();
+
+        fn connect_info(&self) -> Self::ConnectInfo {}
+    }
+
+    impl AsyncRead for ConnectedTlsStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for ConnectedTlsStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+        }
     }
 }

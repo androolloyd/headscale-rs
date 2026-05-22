@@ -9,8 +9,9 @@
 //!
 //! gRPC commands use `--unix-socket` (`$HEADSCALE_UNIX_SOCKET`) locally
 //! or `--address` + `--api-key` (`$HEADSCALE_CLI_ADDRESS` /
-//! `$HEADSCALE_CLI_API_KEY`) remotely. Legacy HTTP commands continue to
-//! take `--server` (`$HEADSCALE_URL`) and `--token`
+//! `$HEADSCALE_CLI_API_KEY`) remotely; `--insecure` only disables TLS
+//! certificate verification. Legacy HTTP commands continue to take
+//! `--server` (`$HEADSCALE_URL`) and `--token`
 //! (`$HEADSCALE_ADMIN_TOKEN`). Errors are mapped onto the fixed exit-code
 //! contract defined by [`ExitCode`]:
 //!
@@ -117,7 +118,7 @@ pub struct ConnectArgs {
     /// Local upstream gRPC Unix socket used when `--address` is unset.
     #[arg(long = "unix-socket", env = "HEADSCALE_UNIX_SOCKET", global = true)]
     pub unix_socket: Option<PathBuf>,
-    /// Use plaintext for a remote gRPC address.
+    /// Disable TLS certificate verification for a remote gRPC address.
     #[arg(long = "insecure", env = "HEADSCALE_CLI_INSECURE", global = true)]
     pub insecure: bool,
     /// Emit raw JSON instead of the default table view.
@@ -156,8 +157,15 @@ impl ConnectArgs {
         .await
     }
 
-    pub fn has_legacy_http_server(&self) -> bool {
-        self.server.is_some()
+    pub fn should_use_legacy_http_for_migrated_commands(&self) -> bool {
+        self.server.is_some() && !self.has_explicit_grpc_endpoint()
+    }
+
+    fn has_explicit_grpc_endpoint(&self) -> bool {
+        self.address
+            .as_deref()
+            .is_some_and(|address| !address.trim().is_empty())
+            || self.unix_socket.is_some()
     }
 
     pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
@@ -355,7 +363,7 @@ pub enum TailnetCmd {
 
 pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
-    if conn.has_legacy_http_server() {
+    if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
         return match cmd {
             UsersCmd::Create { name } => users::create(&client, name, fmt).await,
@@ -538,5 +546,20 @@ mod tests {
             output: Some("json-line".into()),
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
+    }
+
+    #[test]
+    fn migrated_commands_prefer_explicit_grpc_endpoint_over_legacy_server_env() {
+        let conn = ConnectArgs {
+            server: Some("http://localhost:51822".into()),
+            token: Some("legacy-token".into()),
+            address: Some("headscale.example:50443".into()),
+            api_key: Some("grpc-token".into()),
+            unix_socket: None,
+            insecure: false,
+            json: false,
+            output: None,
+        };
+        assert!(!conn.should_use_legacy_http_for_migrated_commands());
     }
 }

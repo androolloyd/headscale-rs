@@ -202,9 +202,9 @@ impl From<anyhow::Error> for MainError {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), MainError> {
-    // Load config file if provided (only the legacy `server`/`node`
-    // commands consume it; admin commands take their URL via
-    // `--server`/`HEADSCALE_URL`).
+    // Load config file if provided. Server/node consume it today; admin
+    // parity still uses flags/env until the upstream `cli` config section is
+    // wired into ConnectArgs.
     let config = if let Some(config_path) = &cli.config {
         Some(
             CliConfig::load(config_path)

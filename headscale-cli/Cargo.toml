@@ -24,7 +24,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 axum = "0.7"
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls-native-roots"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

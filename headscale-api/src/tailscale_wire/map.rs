@@ -684,7 +684,11 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "config")
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
-                        machines.record_mapresponse_sent("ok", "keepalive");
+                        machines.record_mapresponse_sent_for_node(
+                            "ok",
+                            "keepalive",
+                            stable_id_from_key(&self_node_key),
+                        );
                         build_keepalive_chunk()
                     }
                     }

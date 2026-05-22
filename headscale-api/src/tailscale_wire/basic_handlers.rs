@@ -1129,6 +1129,15 @@ fn metrics_text(state: &WireState) -> String {
         ("status", "type"),
         state.machines.mapresponse_sent_metrics(),
     );
+    if super::debug_high_cardinality_metrics_enabled() {
+        append_gauge_family_2(
+            &mut out,
+            "headscale_mapresponse_last_sent_seconds",
+            "last sent metric to node.id",
+            ("type", "id"),
+            state.machines.mapresponse_last_sent_metrics(),
+        );
+    }
     append_counter_family_3(
         &mut out,
         "headscale_http_requests_total",
@@ -1316,6 +1325,37 @@ fn append_counter_family_3(
         out.push_str(&prometheus_label_value(&label_value_3));
         out.push_str("\"} ");
         out.push_str(&value.to_string());
+        out.push('\n');
+    }
+}
+
+fn append_gauge_family_2(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label_names: (&str, &str),
+    samples: BTreeMap<(String, String), f64>,
+) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" gauge\n");
+    for ((label_value_1, label_value_2), value) in samples {
+        out.push_str(name);
+        out.push('{');
+        out.push_str(label_names.0);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value_1));
+        out.push_str("\",");
+        out.push_str(label_names.1);
+        out.push_str("=\"");
+        out.push_str(&prometheus_label_value(&label_value_2));
+        out.push_str("\"} ");
+        out.push_str(&prometheus_float(value));
         out.push('\n');
     }
 }
@@ -2126,6 +2166,21 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
+    struct HighCardinalityMetricsGuard;
+
+    impl HighCardinalityMetricsGuard {
+        fn enable() -> Self {
+            crate::tailscale_wire::set_debug_high_cardinality_metrics_for_tests(true);
+            Self
+        }
+    }
+
+    impl Drop for HighCardinalityMetricsGuard {
+        fn drop(&mut self) {
+            crate::tailscale_wire::set_debug_high_cardinality_metrics_for_tests(false);
+        }
+    }
+
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let server = Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap());
@@ -2511,6 +2566,43 @@ mod tests {
         ] {
             assert!(body.contains(sample), "missing sample {sample:?}\n{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_high_cardinality_mapresponse_gauge_when_enabled() {
+        let _metrics_guard = HighCardinalityMetricsGuard::enable();
+
+        let (state, _dir) = fixture_state();
+        let node_id = stable_id_from_key("metrics-high-cardinality");
+        state
+            .machines
+            .record_mapresponse_sent_for_node("ok", "keepalive", node_id);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("# TYPE headscale_mapresponse_last_sent_seconds gauge"));
+        assert!(
+            body.contains(&format!(
+                "headscale_mapresponse_last_sent_seconds{{type=\"keepalive\",id=\"{node_id}\"}} "
+            )),
+            "{body}",
+        );
+        assert!(
+            body.contains("headscale_mapresponse_sent_total{status=\"ok\",type=\"keepalive\"} 1\n"),
+            "{body}",
+        );
     }
 
     #[tokio::test]

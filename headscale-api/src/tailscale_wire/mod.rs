@@ -335,6 +335,7 @@ struct WireMetrics {
     mapresponse_ended: RwLock<BTreeMap<String, u64>>,
     mapresponse_generated: RwLock<BTreeMap<String, u64>>,
     mapresponse_sent: RwLock<BTreeMap<(String, String), u64>>,
+    mapresponse_last_sent: RwLock<BTreeMap<(String, String), f64>>,
     http_requests: RwLock<BTreeMap<(String, String, String), u64>>,
     http_duration: RwLock<BTreeMap<String, HistogramMetric>>,
     nodestore_operations: RwLock<BTreeMap<String, u64>>,
@@ -570,6 +571,22 @@ impl MachineRegistry {
             .or_insert(0) += 1;
     }
 
+    pub(crate) fn record_mapresponse_sent_for_node(
+        &self,
+        status: &str,
+        response_type: &str,
+        node_id: u64,
+    ) {
+        self.record_mapresponse_sent(status, response_type);
+        if debug_high_cardinality_metrics_enabled() {
+            let mut last_sent = self.metrics.mapresponse_last_sent.write();
+            last_sent.insert(
+                (response_type.to_string(), node_id.to_string()),
+                chrono::Utc::now().timestamp() as f64,
+            );
+        }
+    }
+
     pub(crate) fn record_http_request(
         &self,
         code: u16,
@@ -634,6 +651,10 @@ impl MachineRegistry {
 
     pub fn mapresponse_sent_metrics(&self) -> BTreeMap<(String, String), u64> {
         self.metrics.mapresponse_sent.read().clone()
+    }
+
+    pub(crate) fn mapresponse_last_sent_metrics(&self) -> BTreeMap<(String, String), f64> {
+        self.metrics.mapresponse_last_sent.read().clone()
     }
 
     pub(crate) fn http_request_metrics(&self) -> BTreeMap<(String, String, String), u64> {
@@ -1381,6 +1402,31 @@ fn prometheus_http_path(path: &str) -> Option<&'static str> {
         path if is_machine_subpath(path, "map") => None,
         _ => Some("/"),
     }
+}
+
+pub(crate) fn debug_high_cardinality_metrics_enabled() -> bool {
+    #[cfg(test)]
+    if DEBUG_HIGH_CARDINALITY_METRICS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+
+    std::env::var("HEADSCALE_DEBUG_HIGH_CARDINALITY_METRICS")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "t" | "true" | "y" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+static DEBUG_HIGH_CARDINALITY_METRICS_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn set_debug_high_cardinality_metrics_for_tests(enabled: bool) {
+    DEBUG_HIGH_CARDINALITY_METRICS_FOR_TESTS.store(enabled, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn is_single_segment_after(path: &str, prefix: &str) -> bool {

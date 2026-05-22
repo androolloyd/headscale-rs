@@ -316,14 +316,50 @@ pub async fn touch_by_name(pool: &SqlitePool, name: &str) -> Result<()> {
 }
 
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    let user_exists: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if user_exists.is_none() {
+        return Err(DbError::NotFound(format!("user id={id}")));
+    }
+
+    let owned_nodes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE user_id = ? AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if owned_nodes > 0 {
+        return Err(DbError::Constraint("user not empty: node(s) found".into()));
+    }
+
+    let key_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM pre_auth_keys WHERE user_id = ?")
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+    for key_id in key_ids {
+        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = ?")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
     let affected = sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     if affected == 0 {
         return Err(DbError::NotFound(format!("user id={id}")));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -346,7 +382,12 @@ fn map_sqlx_err(e: sqlx::Error) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Database;
+    use crate::{
+        Database,
+        headscale_nodes::{self, CreateParams as NodeCreateParams},
+        preauth_keys::{self, CreateParams as PreauthCreateParams},
+    };
+    use serde_json::json;
 
     async fn fresh_db() -> Database {
         let db = Database::in_memory().await.expect("open in-memory");
@@ -428,6 +469,139 @@ mod tests {
 
         destroy(db.pool(), user.id).await.unwrap();
         assert!(list(db.pool()).await.unwrap().is_empty());
+    }
+
+    async fn preauth_key_id(db: &Database, user_id: i64) -> i64 {
+        preauth_keys::create_for_test(
+            db.pool(),
+            PreauthCreateParams {
+                user_id: user_id.to_string(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap()
+        .row
+        .id
+    }
+
+    fn node_params(user_id: Option<i64>, auth_key_id: Option<i64>, name: &str) -> NodeCreateParams {
+        NodeCreateParams {
+            machine_key: format!("mkey:{name}"),
+            node_key: format!("nodekey:{name}"),
+            disco_key: format!("discokey:{name}"),
+            endpoints: Vec::new(),
+            host_info: json!({ "Hostname": name }),
+            ipv4: None,
+            ipv6: None,
+            hostname: name.into(),
+            given_name: name.into(),
+            user_id,
+            register_method: headscale_nodes::REGISTER_METHOD_AUTH_KEY.into(),
+            tags: Vec::new(),
+            auth_key_id,
+            expiry: None,
+            last_seen: None,
+            approved_routes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_refuses_user_with_owned_nodes() {
+        let db = fresh_db().await;
+        let user = create(db.pool(), alice()).await.unwrap();
+        let key_id = preauth_key_id(&db, user.id).await;
+        headscale_nodes::create(
+            db.pool(),
+            node_params(Some(user.id), Some(key_id), "owned-node"),
+        )
+        .await
+        .unwrap();
+
+        let err = destroy(db.pool(), user.id).await.unwrap_err();
+        assert!(matches!(err, DbError::Constraint(_)));
+        assert_eq!(get_by_id(db.pool(), user.id).await.unwrap().id, user.id);
+        assert_eq!(
+            preauth_keys::get_by_id(db.pool(), key_id).await.unwrap().id,
+            key_id
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_cleans_preauth_keys_and_clears_tagged_node_auth_key_id() {
+        let db = fresh_db().await;
+        let user = create(db.pool(), alice()).await.unwrap();
+        let key_id = preauth_key_id(&db, user.id).await;
+        let tagged = headscale_nodes::create(
+            db.pool(),
+            NodeCreateParams {
+                tags: vec!["tag:server".into()],
+                ..node_params(None, Some(key_id), "tagged-node")
+            },
+        )
+        .await
+        .unwrap();
+
+        destroy(db.pool(), user.id).await.unwrap();
+
+        assert!(matches!(
+            preauth_keys::get_by_id(db.pool(), key_id)
+                .await
+                .unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert_eq!(
+            headscale_nodes::get_by_id(db.pool(), tagged.id)
+                .await
+                .unwrap()
+                .auth_key_id,
+            None
+        );
+        assert!(matches!(
+            get_by_id(db.pool(), user.id).await.unwrap_err(),
+            DbError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn destroy_deletes_only_target_users_preauth_keys() {
+        let db = fresh_db().await;
+        let alice = create(db.pool(), alice()).await.unwrap();
+        let bob = create(
+            db.pool(),
+            CreateParams {
+                name: "bob".into(),
+                display_name: "Bob".into(),
+                email: "bob@example.com".into(),
+                provider_identifier: None,
+                provider: headscale_nodes::REGISTER_METHOD_CLI.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let alice_key = preauth_key_id(&db, alice.id).await;
+        let bob_key = preauth_key_id(&db, bob.id).await;
+
+        destroy(db.pool(), bob.id).await.unwrap();
+
+        assert!(matches!(
+            preauth_keys::get_by_id(db.pool(), bob_key)
+                .await
+                .unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert_eq!(
+            preauth_keys::get_by_id(db.pool(), alice_key)
+                .await
+                .unwrap()
+                .id,
+            alice_key
+        );
+        assert_eq!(get_by_id(db.pool(), alice.id).await.unwrap().id, alice.id);
     }
 
     #[tokio::test]

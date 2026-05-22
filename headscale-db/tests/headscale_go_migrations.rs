@@ -402,7 +402,7 @@ async fn rejects_unversioned_go_history_before_v028_schema_marker() {
 }
 
 #[tokio::test]
-async fn documents_preauth_user_id_fk_on_delete_set_null_schema_gap() {
+async fn destroy_user_removes_target_users_preauth_keys() {
     let db = Database::in_memory().await.expect("open db");
     db.migrate().await.expect("migrate");
 
@@ -457,13 +457,12 @@ async fn documents_preauth_user_id_fk_on_delete_set_null_schema_gap() {
     let stale_user_id: Option<i64> =
         sqlx::query_scalar("SELECT user_id FROM pre_auth_keys WHERE id = ?")
             .bind(auth_key_id)
-            .fetch_one(db.pool())
+            .fetch_optional(db.pool())
             .await
             .expect("query preauth key after user delete");
     assert_eq!(
-        stale_user_id,
-        Some(user_id),
-        "upstream would keep the preauth key row but SET NULL on user deletion"
+        stale_user_id, None,
+        "DestroyUser deletes the target user's pre-auth keys before deleting the user"
     );
 }
 

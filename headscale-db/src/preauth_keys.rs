@@ -7,7 +7,7 @@
 //! * [`get_by_token`] — parse the modern key prefix or legacy
 //!   plaintext, bcrypt-verify the secret, and return the row.
 //! * [`expire`] — set `expiration` to now, leaving the row in place.
-//! * [`destroy`] — delete the row outright.
+//! * [`destroy`] — clear assigned nodes, then delete the row outright.
 //! * [`list_by_user`] — admin listing per user (newest first).
 //! * [`try_use`] — atomic single-use redemption: if `reusable=0` and
 //!   `used_at IS NULL`, flip `used_at` to now in one statement and
@@ -371,16 +371,28 @@ pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
 }
 
 /// Destroy a key by id outright.
+///
+/// Mirrors headscale-go: assigned nodes keep existing registration
+/// state, but their `auth_key_id` is cleared before the key row is
+/// removed so the FK does not block the admin destroy operation.
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
     let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_destroy_err)?
         .rows_affected();
     if n == 0 {
         return Err(DbError::NotFound(format!("preauth_key id={id}")));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -756,9 +768,9 @@ mod tests {
         assert!(matches!(e2, DbError::NotFound(_)));
     }
 
-    /// Go: TestCannotDeleteAssignedPreAuthKey.
+    /// Go: DestroyPreAuthKey clears assigned nodes before deleting.
     #[tokio::test]
-    async fn destroy_assigned_key_fails_like_headscale_go() {
+    async fn destroy_assigned_key_clears_node_auth_key_id() {
         let db = fresh_db().await;
         let user = users::create(
             db.pool(),
@@ -809,19 +821,18 @@ mod tests {
         .await
         .unwrap();
 
-        let err = destroy(db.pool(), created.row.id).await.unwrap_err();
-        assert!(matches!(err, DbError::Constraint(_)));
+        destroy(db.pool(), created.row.id).await.unwrap();
         assert_eq!(
             headscale_nodes::get_by_id(db.pool(), node.id)
                 .await
                 .unwrap()
                 .auth_key_id,
-            Some(created.row.id)
+            None
         );
-        assert_eq!(
-            get_by_id(db.pool(), created.row.id).await.unwrap().id,
-            created.row.id
-        );
+        assert!(matches!(
+            get_by_id(db.pool(), created.row.id).await.unwrap_err(),
+            DbError::NotFound(_)
+        ));
     }
 
     #[tokio::test]

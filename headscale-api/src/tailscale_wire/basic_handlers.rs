@@ -175,6 +175,46 @@ pub async fn handle_derp_probe(method: Method) -> Response {
     }
 }
 
+pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Response {
+    let mut dns_entries: BTreeMap<String, Vec<IpAddr>> = BTreeMap::new();
+
+    for region in state.derp_map.regions.values() {
+        for node in &region.nodes {
+            let resolved = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::net::lookup_host((node.host_name.as_str(), 0)),
+            )
+            .await;
+
+            let Ok(Ok(addrs)) = resolved else {
+                continue;
+            };
+
+            let ips = addrs
+                .map(|addr| addr.ip())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if !ips.is_empty() {
+                dns_entries.insert(node.host_name.clone(), ips);
+            }
+        }
+    }
+
+    let body = format!(
+        "{}\n",
+        serde_json::to_string(&dns_entries)
+            .expect("DERP bootstrap DNS response serialization is infallible")
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 pub async fn handle_fallback(uri: Uri) -> Response {
     if uri.path() == "/k" || uri.path().starts_with(super::knock::KNOCK_PATH_PREFIX) {
         return StatusCode::NOT_FOUND.into_response();
@@ -2558,6 +2598,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn derp_bootstrap_dns_empty_map_matches_headscale_go_shape() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/bootstrap-dns")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"{}\n");
+    }
+
+    #[tokio::test]
+    async fn derp_bootstrap_dns_resolves_derp_node_hosts_like_headscale_go() {
+        let (mut state, _dir) = fixture_state();
+        let mut derp_map = derp_fixture();
+        derp_map
+            .regions
+            .get_mut(&1)
+            .unwrap()
+            .nodes
+            .get_mut(0)
+            .unwrap()
+            .host_name = "192.0.2.10".to_string();
+        state.derp_map = Arc::new(derp_map);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/bootstrap-dns")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: BTreeMap<String, Vec<std::net::IpAddr>> =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            parsed.get("192.0.2.10"),
+            Some(&vec![std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))])
+        );
+    }
+
+    #[tokio::test]
     async fn swagger_ui_matches_headscale_go_public_path() {
         let (state, _dir) = fixture_state();
         let resp = router(state)
@@ -2901,7 +3001,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
 
         for sample in [

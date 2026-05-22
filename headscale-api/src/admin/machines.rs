@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::policy::PolicyStore;
+use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
     MachineRecord, MachineRegistry, RegistrationCache, routes::auto_approved_routes_for_node,
 };
@@ -371,6 +371,16 @@ impl PersistentMachineAdmin {
             .parse::<Ipv4Addr>()
             .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
         let user_id = self.user_id_for_record(&record).await?;
+        if validate_requested_tags_for_node(
+            policy,
+            record.ipv4.as_str(),
+            record.user.as_str(),
+            &mut record.tags,
+        )
+        .map_err(MachineAdminError::BadRequest)?
+        {
+            record.expiry = None;
+        }
         let node_key = key_with_prefix("nodekey:", record.id.trim());
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
 
@@ -1062,6 +1072,7 @@ mod tests {
     use super::super::users::PersistentUserAdmin;
     use super::*;
     use crate::oidc::OidcRegistrationHandler;
+    use crate::policy::parse_hujson_policy;
     use crate::tailscale_wire::{MachineRecord, MachineRegistry};
     use chrono::TimeZone;
     use headscale_db::Database;
@@ -1534,6 +1545,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_validates_requested_tags() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let policy = Arc::new(PolicyStore::new());
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "99".repeat(32),
+            "98".repeat(32),
+            String::new(),
+            "alice-tagged".into(),
+            Ipv4Addr::new(100, 64, 0, 77),
+            false,
+        );
+        pending.forced_tags = vec!["tag:server".into(), "tag:server".into()];
+        let registration_id = "r".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy)
+            .with_wire_registry(registry.clone());
+        let result = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 1,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.tags, vec!["tag:server"]);
+        assert_eq!(
+            stored.expiry, None,
+            "tagged OIDC registrations disable node-key expiry"
+        );
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.forced_tags, vec!["tag:server"]);
+        assert_eq!(wire.expiry, None);
+        let raw = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{}", pending.node_key_hex),
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.tag_list(), vec!["tag:server"]);
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_rejects_unowned_requested_tags() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let policy = Arc::new(PolicyStore::new());
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "88".repeat(32),
+            "87".repeat(32),
+            String::new(),
+            "alice-bad-tag".into(),
+            Ipv4Addr::new(100, 64, 0, 78),
+            false,
+        );
+        pending.forced_tags = vec!["tag:db".into()];
+        let registration_id = "s".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy)
+            .with_wire_registry(registry.clone());
+        let err = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 1,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, crate::oidc::OidcRegistrationError::Store(_)));
+        assert!(err.to_string().contains("requested tags [tag:db]"));
+        assert!(cache.get(&registration_id).is_some());
+        assert!(registry.get(&pending.node_key_hex).is_none());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

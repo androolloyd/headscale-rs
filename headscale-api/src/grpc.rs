@@ -177,7 +177,7 @@ pub mod upstream {
         RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
-    use crate::policy::{NodeView, PolicyStore, parse_hujson_policy};
+    use crate::policy::{PolicyStore, parse_hujson_policy, validate_requested_tags_for_node};
     use crate::tailscale_wire::MachineRecord;
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
@@ -1429,27 +1429,17 @@ pub mod upstream {
             return Ok(());
         }
 
-        record.tags.sort();
-        record.tags.dedup();
-        let node = NodeView {
-            addr: Some(record.ipv4.as_str()),
-            user: Some(record.user.as_str()),
-            tags: &[],
-        };
-        let invalid_tags = record
-            .tags
-            .iter()
-            .filter(|tag| validate_tag(tag).is_err() || !policy.node_can_have_tag(&node, tag))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !invalid_tags.is_empty() {
-            return Err(Status::invalid_argument(format!(
-                "requested tags [{}] are invalid or not permitted",
-                invalid_tags.join(" ")
-            )));
+        if validate_requested_tags_for_node(
+            policy,
+            record.ipv4.as_str(),
+            record.user.as_str(),
+            &mut record.tags,
+        )
+        .map_err(Status::invalid_argument)?
+        {
+            record.expiry = None;
         }
 
-        record.expiry = None;
         Ok(())
     }
 

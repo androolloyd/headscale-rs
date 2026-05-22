@@ -276,6 +276,47 @@ impl PolicyStore {
     }
 }
 
+/// Sort, dedupe, and validate client-requested ACL tags for a node.
+///
+/// Returns `Ok(true)` when at least one valid requested tag remains.
+/// Callers should clear node-key expiry in that case, matching
+/// headscale-go's tagged-node registration semantics.
+pub fn validate_requested_tags_for_node(
+    policy: &PolicyStore,
+    ipv4: &str,
+    user: &str,
+    tags: &mut Vec<String>,
+) -> Result<bool, String> {
+    if tags.is_empty() {
+        return Ok(false);
+    }
+
+    tags.sort();
+    tags.dedup();
+    let node = NodeView {
+        addr: Some(ipv4),
+        user: Some(user),
+        tags: &[],
+    };
+    let invalid_tags = tags
+        .iter()
+        .filter(|tag| !requested_tag_is_well_formed(tag) || !policy.node_can_have_tag(&node, tag))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid_tags.is_empty() {
+        return Err(format!(
+            "requested tags [{}] are invalid or not permitted",
+            invalid_tags.join(" ")
+        ));
+    }
+
+    Ok(true)
+}
+
+fn requested_tag_is_well_formed(tag: &str) -> bool {
+    tag.starts_with("tag:") && tag.to_lowercase() == tag && tag.split_whitespace().count() <= 1
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -149,10 +149,14 @@ type wireOutput struct {
 }
 
 type registerRequestSummary struct {
+	Version         int              `json:"version,omitempty"`
 	NodeKey         string           `json:"node_key"`
+	OldNodeKey      string           `json:"old_node_key,omitempty"`
+	NLKey           string           `json:"nl_key,omitempty"`
 	AuthKey         string           `json:"auth_key,omitempty"`
 	Hostinfo        *hostInfoSummary `json:"hostinfo,omitempty"`
 	Followup        string           `json:"followup,omitempty"`
+	Tailnet         string           `json:"tailnet,omitempty"`
 	Ephemeral       bool             `json:"ephemeral,omitempty"`
 	RequestedExpiry bool             `json:"requested_expiry,omitempty"`
 }
@@ -758,10 +762,21 @@ func marshalRaw(v any) (json.RawMessage, error) {
 
 func summarizeRegisterRequest(req *tailcfg.RegisterRequest) *registerRequestSummary {
 	out := &registerRequestSummary{
+		Version:         int(req.Version),
 		NodeKey:         req.NodeKey.String(),
 		Followup:        req.Followup,
+		Tailnet:         req.Tailnet,
 		Ephemeral:       req.Ephemeral,
 		RequestedExpiry: !req.Expiry.IsZero(),
+	}
+	if !req.OldNodeKey.IsZero() {
+		out.OldNodeKey = req.OldNodeKey.String()
+	}
+	if !req.NLKey.IsZero() {
+		nlKey, err := req.NLKey.MarshalText()
+		if err == nil {
+			out.NLKey = string(nlKey)
+		}
 	}
 	if req.Auth != nil {
 		out.AuthKey = req.Auth.AuthKey

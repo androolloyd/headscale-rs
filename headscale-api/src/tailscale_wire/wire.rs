@@ -180,10 +180,20 @@ impl MachineRecord {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct RegisterRequest {
+    /// Client capability version when using the Noise transport.
+    #[serde(default)]
+    pub version: u32,
     /// `nodekey:` prefixed hex string. The path parameter and this
     /// field both carry the same value in upstream Tailscale; we
     /// trust the body's copy.
     pub node_key: String,
+    /// Previous node key during node-key rotation.
+    #[serde(default)]
+    pub old_node_key: String,
+    /// Network-lock public key. Upstream's JSON field is `NLKey`, not
+    /// `NlKey`, so it needs an explicit serde spelling.
+    #[serde(default, rename = "NLKey")]
+    pub nl_key: String,
     /// Preauth token the client presents (`Auth.AuthKey` in the
     /// upstream `tailcfg.RegisterRequest`). Tailscale models this as
     /// a nested `Auth { AuthKey, ... }`; we flatten it because the
@@ -200,6 +210,9 @@ pub struct RegisterRequest {
     /// silence "missing field" deserialise errors on edge cases.
     #[serde(default)]
     pub followup: Option<String>,
+    /// Optional tailnet recommendation or requirement string.
+    #[serde(default)]
+    pub tailnet: String,
     /// Whether the client requests ephemeral registration. Upstream
     /// `tailcfg.RegisterRequest.Ephemeral` is a plain bool.
     #[serde(default)]
@@ -1205,7 +1218,10 @@ mod tests {
     #[test]
     fn register_request_round_trip() {
         let r = RegisterRequest {
+            version: 96,
             node_key: "nodekey:deadbeef".into(),
+            old_node_key: "nodekey:feedface".into(),
+            nl_key: "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             auth: Some(RegisterAuth {
                 auth_key: "hskey-auth-abc".into(),
             }),
@@ -1216,17 +1232,28 @@ mod tests {
                 routable_ips: Vec::new(),
             }),
             followup: None,
+            tailnet: "required:example.com".into(),
             ephemeral: false,
             expiry: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         // Field names PascalCased on the wire.
+        assert!(j.contains("\"Version\""));
         assert!(j.contains("\"NodeKey\""));
+        assert!(j.contains("\"OldNodeKey\""));
+        assert!(j.contains("\"NLKey\""));
         assert!(j.contains("\"Auth\""));
         assert!(j.contains("\"AuthKey\""));
         assert!(j.contains("\"OSVersion\""));
+        assert!(j.contains("\"Tailnet\""));
         let back: RegisterRequest = serde_json::from_str(&j).unwrap();
         assert_eq!(back.node_key, "nodekey:deadbeef");
+        assert_eq!(back.old_node_key, "nodekey:feedface");
+        assert_eq!(
+            back.nl_key,
+            "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(back.tailnet, "required:example.com");
     }
 
     #[test]

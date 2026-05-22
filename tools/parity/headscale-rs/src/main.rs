@@ -205,13 +205,21 @@ struct WireOutput {
 
 #[derive(Debug, Serialize)]
 struct RegisterRequestSummary {
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    version: u32,
     node_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    old_node_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    nl_key: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     auth_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     hostinfo: Option<HostInfoSummary>,
     #[serde(skip_serializing_if = "String::is_empty")]
     followup: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tailnet: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     ephemeral: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -1445,10 +1453,14 @@ fn normalize_wire(wire: Option<WireScenario>) -> Result<Option<WireOutput>> {
 
 fn summarize_register_request(req: RegisterRequest) -> RegisterRequestSummary {
     RegisterRequestSummary {
+        version: req.version,
         node_key: req.node_key,
+        old_node_key: req.old_node_key,
+        nl_key: req.nl_key,
         auth_key: req.auth.map(|auth| auth.auth_key).unwrap_or_default(),
         hostinfo: req.hostinfo.map(summarize_hostinfo),
         followup: req.followup.unwrap_or_default(),
+        tailnet: req.tailnet,
         ephemeral: req.ephemeral,
         requested_expiry: req.expiry.is_some(),
     }

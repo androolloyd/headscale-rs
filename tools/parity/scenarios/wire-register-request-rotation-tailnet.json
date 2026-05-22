@@ -1,0 +1,20 @@
+{
+  "name": "wire-register-request-rotation-tailnet",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "register_request": {
+      "Version": 96,
+      "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "OldNodeKey": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+      "NLKey": "nlpub:3333333333333333333333333333333333333333333333333333333333333333",
+      "Auth": { "AuthKey": "hskey-auth-rotation" },
+      "Hostinfo": { "Hostname": "rotation-peer", "OS": "linux", "OSVersion": "6.10" },
+      "Followup": "https://headscale.example/register/3oYCOZYA2zZmGB4PQ7aHBaMi",
+      "Tailnet": "required:tail.example",
+      "Ephemeral": true,
+      "Expiry": "2026-06-01T00:00:00Z"
+    }
+  }
+}

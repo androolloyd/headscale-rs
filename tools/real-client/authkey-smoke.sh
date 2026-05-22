@@ -15,6 +15,7 @@ approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
+expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -288,5 +289,96 @@ ruby -rjson -e '
   end
 ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json"
 echo "::endgroup::"
+
+if [[ -n "${expected_primary_failover_route}" ]]; then
+  echo "::group::assert primary route failover"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-failover.json"
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes-before-failover.json"
+  failover_node_key="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(2)
+
+      def stable_id_from_key(hex)
+        h = 0xcbf29ce484222325
+        hex.each_byte do |byte|
+          h ^= byte
+          h = (h * 0x100000001b3) & 0xffffffffffffffff
+        end
+        h & 0x7fffffffffffffff
+      end
+
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      debug_routes = JSON.parse(File.read(ARGV.fetch(1)))
+      primary_owner = debug_routes.fetch("primary_routes").fetch(route) {
+        abort("missing primary route #{route.inspect} before failover")
+      }
+      machine = machines.find do |candidate|
+        stable_id_from_key(candidate.fetch("node_key").sub(/\Anodekey:/, "")) == primary_owner
+      end
+      abort("primary owner #{primary_owner.inspect} did not match a registered machine") unless machine
+      puts machine.fetch("node_key")
+    ' "${work_dir}/machines-before-failover.json" "${work_dir}/debug-routes-before-failover.json" "${expected_primary_failover_route}"
+  )"
+  curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${failover_node_key}/routes" \
+    -H 'content-type: application/json' \
+    -d '{"routes":[]}' \
+    >"${work_dir}/failover-clear-primary.json"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-failover.json"
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes-after-failover.json"
+  ruby -rjson -e '
+    route = ARGV.fetch(4)
+    cleared_node_key = ARGV.fetch(5)
+    expected_count = Integer(ARGV.fetch(6))
+
+    def stable_id_from_key(hex)
+      h = 0xcbf29ce484222325
+      hex.each_byte do |byte|
+        h ^= byte
+        h = (h * 0x100000001b3) & 0xffffffffffffffff
+      end
+      h & 0x7fffffffffffffff
+    end
+
+    before_machines = JSON.parse(File.read(ARGV.fetch(0)))
+    before_debug = JSON.parse(File.read(ARGV.fetch(1)))
+    after_machines = JSON.parse(File.read(ARGV.fetch(2)))
+    after_debug = JSON.parse(File.read(ARGV.fetch(3)))
+    abort("expected #{expected_count} machines before failover, got #{before_machines.length}") unless before_machines.length == expected_count
+    abort("expected #{expected_count} machines after failover, got #{after_machines.length}") unless after_machines.length == expected_count
+
+    before_owner = before_debug.fetch("primary_routes").fetch(route)
+    after_owner = after_debug.fetch("primary_routes").fetch(route) {
+      abort("missing primary route #{route.inspect} after failover")
+    }
+    abort("expected primary owner to change, still #{after_owner.inspect}") if after_owner == before_owner
+
+    cleared = after_machines.find { |machine| machine.fetch("node_key") == cleared_node_key }
+    abort("missing cleared machine #{cleared_node_key}") unless cleared
+    abort("cleared machine still has approved route #{route}") if Array(cleared["approved_routes"]).include?(route)
+
+    remaining_ids = after_machines
+      .reject { |machine| machine.fetch("node_key") == cleared_node_key }
+      .select { |machine| Array(machine["approved_routes"]).include?(route) }
+      .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+    abort("new primary owner #{after_owner.inspect} not among remaining approved routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+    active_candidates = after_debug.fetch("available_routes").select do |_node_id, routes|
+      Array(routes).include?(route)
+    end
+    abort("expected #{expected_count - 1} active candidates after failover, got #{active_candidates.length}") unless active_candidates.length == expected_count - 1
+
+    puts JSON.pretty_generate({
+      cleared_node_key: cleared_node_key,
+      before_owner: before_owner,
+      after_owner: after_owner,
+      debug_routes: after_debug,
+    })
+  ' "${work_dir}/machines-before-failover.json" "${work_dir}/debug-routes-before-failover.json" "${work_dir}/machines-after-failover.json" "${work_dir}/debug-routes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_key}" "${expected_machine_count}"
+  echo "::endgroup::"
+fi
 
 echo "auth-key real-client smoke passed"

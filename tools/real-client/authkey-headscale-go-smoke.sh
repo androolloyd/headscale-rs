@@ -16,6 +16,7 @@ approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
+expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -345,5 +346,70 @@ ruby -rjson -e '
   end
 ' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}"
 echo "::endgroup::"
+
+if [[ -n "${expected_primary_failover_route}" ]]; then
+  echo "::group::assert primary route failover"
+  cp "${work_dir}/nodes.json" "${work_dir}/nodes-before-failover.json"
+  failover_node_id="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(1)
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      primary_nodes = nodes.select do |node|
+        Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+      end
+      abort("expected exactly one primary node before failover, got #{primary_nodes.length}") unless primary_nodes.length == 1
+      puts primary_nodes.fetch(0).fetch("id")
+    ' "${work_dir}/nodes-before-failover.json" "${expected_primary_failover_route}"
+  )"
+  "${headscale_bin}" -c "${config_path}" -o json nodes approve-routes \
+    --identifier "${failover_node_id}" \
+    --routes "" \
+    >"${work_dir}/failover-clear-primary.json"
+  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-after-failover.json"
+  ruby -rjson -e '
+    route = ARGV.fetch(2)
+    cleared_node_id = Integer(ARGV.fetch(3))
+    expected_count = Integer(ARGV.fetch(4))
+
+    before_payload = JSON.parse(File.read(ARGV.fetch(0)))
+    before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
+    after_payload = JSON.parse(File.read(ARGV.fetch(1)))
+    after_nodes = after_payload.is_a?(Array) ? after_payload : after_payload.fetch("nodes")
+    abort("expected #{expected_count} nodes before failover, got #{before_nodes.length}") unless before_nodes.length == expected_count
+    abort("expected #{expected_count} nodes after failover, got #{after_nodes.length}") unless after_nodes.length == expected_count
+
+    before_primary = before_nodes.select do |node|
+      Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+    end
+    after_primary = after_nodes.select do |node|
+      Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+    end
+    abort("expected exactly one primary node before failover, got #{before_primary.length}") unless before_primary.length == 1
+    abort("expected exactly one primary node after failover, got #{after_primary.length}") unless after_primary.length == 1
+    before_owner = Integer(before_primary.fetch(0).fetch("id"))
+    after_owner = Integer(after_primary.fetch(0).fetch("id"))
+    abort("cleared node #{cleared_node_id} was not the initial primary #{before_owner}") unless before_owner == cleared_node_id
+    abort("expected primary owner to change, still #{after_owner}") if after_owner == before_owner
+
+    cleared = after_nodes.find { |node| Integer(node.fetch("id")) == cleared_node_id }
+    abort("missing cleared node #{cleared_node_id}") unless cleared
+    abort("cleared node still has approved route #{route}") if Array(cleared["approvedRoutes"] || cleared["approved_routes"]).include?(route)
+
+    remaining_ids = after_nodes
+      .reject { |node| Integer(node.fetch("id")) == cleared_node_id }
+      .select { |node| Array(node["approvedRoutes"] || node["approved_routes"]).include?(route) }
+      .map { |node| Integer(node.fetch("id")) }
+    abort("new primary owner #{after_owner} not among remaining approved routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+    puts JSON.pretty_generate({
+      cleared_node_id: cleared_node_id,
+      before_owner: before_owner,
+      after_owner: after_owner,
+      nodes: after_nodes,
+    })
+  ' "${work_dir}/nodes-before-failover.json" "${work_dir}/nodes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_id}" "${expected_machine_count}"
+  echo "::endgroup::"
+fi
 
 echo "headscale-go auth-key real-client smoke passed"

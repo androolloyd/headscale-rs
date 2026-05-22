@@ -150,10 +150,20 @@ tools/real-client/route-primary-smoke.sh
 tools/real-client/route-primary-headscale-go-smoke.sh
 ```
 
+The primary-route failover scenario then removes approval from the current
+primary owner and asserts that another approved router takes over:
+
+```sh
+tools/real-client/route-primary-failover-smoke.sh
+tools/real-client/route-primary-failover-headscale-go-smoke.sh
+```
+
 Additional knobs:
 
 - `REAL_CLIENT_CLIENT_COUNT` defaults to `2` in the primary-route wrappers.
 - `REAL_CLIENT_EXPECT_PRIMARY_ROUTE` defaults to `REAL_CLIENT_ROUTE`.
+- `REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE` defaults to `REAL_CLIENT_ROUTE`
+  in the failover wrappers.
 
 The exit-node scenario advertises the default-route pair with
 `tailscale up --advertise-exit-node`, approves both routes, and checks that

@@ -22,11 +22,7 @@ expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
-expected_tags_default="${preauth_tags}"
-if [[ -n "${set_tags_after_login}" ]]; then
-  expected_tags_default="${set_tags_after_login}"
-fi
-expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
+expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -54,6 +50,27 @@ if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
   echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
   exit 2
 fi
+case "${expected_set_tags_failure}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_set_tags_failure=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_set_tags_failure=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE must be true or false, got ${expected_set_tags_failure}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_set_tags_failure)) && [[ -z "${set_tags_after_login}" ]]; then
+  echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE requires REAL_CLIENT_SET_TAGS_AFTER_LOGIN" >&2
+  exit 2
+fi
+expected_tags_default="${preauth_tags}"
+if [[ -n "${set_tags_after_login}" ]] && ((expect_set_tags_failure == 0)); then
+  expected_tags_default="${set_tags_after_login}"
+fi
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -518,10 +535,24 @@ if [[ -n "${set_tags_after_login}" ]]; then
     ' "${work_dir}/nodes-before-tags.json" "${expected_machine_count}"
   )"
   while IFS= read -r node_id; do
+    tag_status=0
     "${headscale_bin}" -c "${config_path}" -o json nodes tag \
       --identifier "${node_id}" \
       --tags "${set_tags_after_login}" \
-      >"${work_dir}/set-tags-${node_id}.json"
+      >"${work_dir}/set-tags-${node_id}.json" \
+      2>"${work_dir}/set-tags-${node_id}.err" ||
+      tag_status="$?"
+    if ((expect_set_tags_failure)); then
+      if ((tag_status == 0)); then
+        echo "expected tag update to fail for node ${node_id}" >&2
+        exit 1
+      fi
+      continue
+    fi
+    if ((tag_status != 0)); then
+      cat "${work_dir}/set-tags-${node_id}.err" >&2 || true
+      exit "${tag_status}"
+    fi
   done <<<"${node_id}"
   echo "::endgroup::"
 fi

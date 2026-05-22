@@ -170,11 +170,15 @@ Useful knobs:
 The tag-update scenario logs in a stock client with `tag:server`, replaces the
 node's forced tags with `tag:prod` through the Rust harness or upstream
 `headscale nodes tag`, and asserts that the final node state carries only the
-updated tag:
+updated tag. The invalid-tag variant requests `tag:blocked` while the loaded
+policy only defines `tag:server`, then asserts that the update is rejected and
+the original tag remains:
 
 ```sh
 tools/real-client/tag-update-smoke.sh
 tools/real-client/tag-update-headscale-go-smoke.sh
+tools/real-client/tag-update-invalid-smoke.sh
+tools/real-client/tag-update-invalid-headscale-go-smoke.sh
 ```
 
 Useful knobs:
@@ -182,6 +186,8 @@ Useful knobs:
 - `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server`.
 - `REAL_CLIENT_SET_TAGS_AFTER_LOGIN` defaults to `tag:prod`.
 - `REAL_CLIENT_EXPECT_TAGS` defaults to the post-update tags.
+- `REAL_CLIENT_EXPECT_SET_TAGS_FAILURE=true` asserts rejection for custom
+  negative tag-update cases.
 - `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.
 
 ## MagicDNS Smoke

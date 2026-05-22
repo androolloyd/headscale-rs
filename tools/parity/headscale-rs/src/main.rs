@@ -296,6 +296,10 @@ struct UserSummary {
     id: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     display_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    profile_pic_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    created: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,6 +311,8 @@ struct LoginSummary {
     login_name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     display_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    profile_pic_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1617,12 +1623,15 @@ fn summarize_register_response(resp: RegisterResponse) -> RegisterResponseSummar
         user: UserSummary {
             id: resp.user.id,
             display_name: resp.user.display_name,
+            profile_pic_url: resp.user.profile_pic_url,
+            created: json_string(resp.user.created),
         },
         login: LoginSummary {
             id: resp.login.id,
             provider: resp.login.provider,
             login_name: resp.login.login_name,
             display_name: resp.login.display_name,
+            profile_pic_url: resp.login.profile_pic_url,
         },
         node_key_expired: resp.node_key_expired,
         auth_url: resp.auth_url,

@@ -370,14 +370,16 @@ fn register_response_emits_auth_url_all_caps() {
     let r = RegisterResponse {
         user: SimpleUser {
             id: 1,
-            login_name: "alice".into(),
             display_name: "Alice".into(),
+            profile_pic_url: "https://example.com/alice.png".into(),
+            created: Some("2026-05-22T12:00:00Z".parse().unwrap()),
         },
         login: SimpleLogin {
             id: 1,
             provider: "preauth".into(),
             login_name: "alice".into(),
             display_name: "Alice".into(),
+            profile_pic_url: "https://example.com/login.png".into(),
         },
         node_key_expired: false,
         auth_url: String::new(),
@@ -394,8 +396,12 @@ fn register_response_emits_auth_url_all_caps() {
     // SimpleUser.ID — single-letter all-caps.
     assert_eq!(v["User"]["ID"], 1);
     assert!(v["User"].get("Id").is_none());
+    assert!(v["User"].get("LoginName").is_none());
+    assert_eq!(v["User"]["ProfilePicURL"], "https://example.com/alice.png");
+    assert_eq!(v["User"]["Created"], "2026-05-22T12:00:00Z");
     assert_eq!(v["Login"]["ID"], 1);
-    assert!(v.get("Error").is_none());
+    assert_eq!(v["Login"]["ProfilePicURL"], "https://example.com/login.png");
+    assert_eq!(v["Error"], "");
 }
 
 // ---------------------------------------------------------------------------

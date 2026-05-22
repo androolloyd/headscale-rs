@@ -200,15 +200,18 @@ type mapRequestSummary struct {
 }
 
 type userSummary struct {
-	ID          uint64 `json:"id"`
-	DisplayName string `json:"display_name,omitempty"`
+	ID            uint64 `json:"id"`
+	DisplayName   string `json:"display_name,omitempty"`
+	ProfilePicURL string `json:"profile_pic_url,omitempty"`
+	Created       string `json:"created,omitempty"`
 }
 
 type loginSummary struct {
-	ID          uint64 `json:"id"`
-	Provider    string `json:"provider,omitempty"`
-	LoginName   string `json:"login_name,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
+	ID            uint64 `json:"id"`
+	Provider      string `json:"provider,omitempty"`
+	LoginName     string `json:"login_name,omitempty"`
+	DisplayName   string `json:"display_name,omitempty"`
+	ProfilePicURL string `json:"profile_pic_url,omitempty"`
 }
 
 type mapResponseSummary struct {
@@ -882,16 +885,23 @@ func summarizeRegisterRequest(req *tailcfg.RegisterRequest) *registerRequestSumm
 }
 
 func summarizeRegisterResponse(resp *tailcfg.RegisterResponse) *registerResponseSummary {
+	var userCreated string
+	if !resp.User.Created.IsZero() {
+		userCreated = resp.User.Created.UTC().Format(time.RFC3339Nano)
+	}
 	return &registerResponseSummary{
 		User: userSummary{
-			ID:          uint64(resp.User.ID),
-			DisplayName: resp.User.DisplayName,
+			ID:            uint64(resp.User.ID),
+			DisplayName:   resp.User.DisplayName,
+			ProfilePicURL: resp.User.ProfilePicURL,
+			Created:       userCreated,
 		},
 		Login: loginSummary{
-			ID:          uint64(resp.Login.ID),
-			Provider:    resp.Login.Provider,
-			LoginName:   resp.Login.LoginName,
-			DisplayName: resp.Login.DisplayName,
+			ID:            uint64(resp.Login.ID),
+			Provider:      resp.Login.Provider,
+			LoginName:     resp.Login.LoginName,
+			DisplayName:   resp.Login.DisplayName,
+			ProfilePicURL: resp.Login.ProfilePicURL,
 		},
 		NodeKeyExpired:    resp.NodeKeyExpired,
 		AuthURL:           resp.AuthURL,

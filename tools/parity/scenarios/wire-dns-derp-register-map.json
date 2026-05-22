@@ -57,14 +57,16 @@
     "register_response": {
       "User": {
         "ID": 42,
-        "LoginName": "alice",
-        "DisplayName": "Alice"
+        "DisplayName": "Alice",
+        "ProfilePicURL": "https://example.com/alice.png",
+        "Created": "2026-05-22T12:00:00Z"
       },
       "Login": {
         "ID": 42,
         "Provider": "octravpn-preauth",
         "LoginName": "alice",
-        "DisplayName": "Alice"
+        "DisplayName": "Alice",
+        "ProfilePicURL": "https://example.com/alice-login.png"
       },
       "NodeKeyExpired": false,
       "AuthURL": "",

@@ -624,8 +624,9 @@ fn allocate_register_ip(
 fn empty_simple_user() -> SimpleUser {
     SimpleUser {
         id: 0,
-        login_name: String::new(),
         display_name: String::new(),
+        profile_pic_url: String::new(),
+        created: None,
     }
 }
 
@@ -635,6 +636,7 @@ fn empty_simple_login() -> SimpleLogin {
         provider: String::new(),
         login_name: String::new(),
         display_name: String::new(),
+        profile_pic_url: String::new(),
     }
 }
 
@@ -655,8 +657,9 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
     RegisterResponse {
         user: SimpleUser {
             id: profile.id,
-            login_name: profile.login_name.clone(),
             display_name: profile.display_name.clone(),
+            profile_pic_url: profile.profile_pic_url.clone(),
+            created: None,
         },
         login: SimpleLogin {
             id: profile.id,
@@ -669,6 +672,7 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
             },
             login_name: profile.login_name,
             display_name: profile.display_name,
+            profile_pic_url: profile.profile_pic_url,
         },
         node_key_expired: record.is_expired_at(chrono::Utc::now()),
         auth_url: String::new(),
@@ -936,7 +940,7 @@ mod tests {
         );
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
-        assert_eq!(rr.user.login_name, "alice");
+        assert_eq!(rr.login.login_name, "alice");
         // Mock redeemer is single-use — second redeem fails.
         assert!(!redeemer.contains(authkey));
         // Machine registry remembers the registration.
@@ -982,7 +986,6 @@ mod tests {
             rr.user.id,
             crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
         );
-        assert_eq!(rr.user.login_name, "tagged-devices");
         assert_eq!(rr.user.display_name, "Tagged Devices");
         assert_eq!(rr.login.provider, "");
         assert_eq!(rr.login.login_name, "tagged-devices");
@@ -1536,7 +1539,7 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
         assert!(!rr.node_key_expired);
-        assert_eq!(rr.user.login_name, "alice");
+        assert_eq!(rr.login.login_name, "alice");
         assert!(rr.auth_url.is_empty());
         assert_eq!(state.machines.len(), 1);
         assert!(state.registration_cache.is_empty());
@@ -1627,7 +1630,7 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.node_key_expired);
         assert!(rr.machine_authorized);
-        assert_eq!(rr.user.login_name, "alice");
+        assert_eq!(rr.login.login_name, "alice");
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert!(rec.is_expired_at(chrono::Utc::now()));
     }
@@ -1865,7 +1868,7 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
-        assert_eq!(rr.user.login_name, "alice");
+        assert_eq!(rr.login.login_name, "alice");
         // Machine registry remembers the registration under the
         // body-supplied NodeKey hex.
         let rec = state.machines.get(&node_key_hex).unwrap();

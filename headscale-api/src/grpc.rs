@@ -2042,7 +2042,7 @@ mod upstream_tests {
         let followup_response: crate::tailscale_wire::RegisterResponse =
             serde_json::from_slice(&raw).unwrap();
         assert!(followup_response.machine_authorized);
-        assert_eq!(followup_response.user.login_name, "tagged-devices");
+        assert_eq!(followup_response.user.display_name, "Tagged Devices");
         assert_eq!(followup_response.login.login_name, "tagged-devices");
         assert!(followup_response.auth_url.is_empty());
     }

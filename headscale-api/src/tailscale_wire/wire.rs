@@ -591,7 +591,7 @@ pub struct RegisterResponse {
     /// calls. True ⇒ "you're admitted into the tailnet."
     pub machine_authorized: bool,
     /// Upstream error string for denied or follow-up register flows.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub error: String,
     /// Current node-key signature that the client must re-sign when
     /// rotating its node key. Go encodes the byte slice as base64 and
@@ -612,8 +612,15 @@ pub struct SimpleUser {
     /// reconciliation) but is a known weak link for production use.
     #[serde(rename = "ID")]
     pub id: u64,
-    pub login_name: String,
     pub display_name: String,
+    #[serde(
+        default,
+        rename = "ProfilePicURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub profile_pic_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -624,6 +631,12 @@ pub struct SimpleLogin {
     pub provider: String,
     pub login_name: String,
     pub display_name: String,
+    #[serde(
+        default,
+        rename = "ProfilePicURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub profile_pic_url: String,
 }
 
 /// Body of `POST /machine/{node_key}/map`.

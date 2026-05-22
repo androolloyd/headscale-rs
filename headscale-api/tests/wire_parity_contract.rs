@@ -35,14 +35,16 @@ fn register_response_uses_auth_url_and_id_acronyms() {
     let response = RegisterResponse {
         user: SimpleUser {
             id: 42,
-            login_name: "alice@example.com".into(),
             display_name: "Alice".into(),
+            profile_pic_url: String::new(),
+            created: None,
         },
         login: SimpleLogin {
             id: 42,
             provider: "preauth".into(),
             login_name: "alice@example.com".into(),
             display_name: "Alice".into(),
+            profile_pic_url: String::new(),
         },
         node_key_expired: false,
         auth_url: String::new(),

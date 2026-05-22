@@ -1263,9 +1263,13 @@ fn debug_config_info(state: &WireState) -> DebugConfigInfo {
                     .collect(),
             },
             search_domains: dns_spec.search_domains.clone(),
-            extra_records: Vec::new(),
-            extra_records_path: dns_spec
+            extra_records: dns_spec
                 .extra_records
+                .iter()
+                .filter_map(|record| serde_json::to_value(record).ok())
+                .collect(),
+            extra_records_path: dns_spec
+                .extra_records_path
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),

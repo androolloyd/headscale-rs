@@ -58,7 +58,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Notify;
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
@@ -76,54 +76,56 @@ pub const EXTRA_RECORDS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Defaults follow headscale-go v0.28: MagicDNS defaults on, but the
 /// base domain defaults empty and must be supplied by the operator
 /// before MagicDNS can be used.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DnsConfigSpec {
     /// Enable MagicDNS. Matches headscale-go's default of `true`; call
     /// [`Self::validate`] or [`DnsStore::try_from_spec`] before runtime
     /// use so an empty `base_domain` is rejected.
-    #[serde(default = "default_true")]
     pub magic_dns: bool,
     /// MagicDNS root domain. Hostnames are emitted as
     /// `<hostname>.<base_domain>` → tailnet IP. Operators typically
     /// pick a sub-domain of an org-owned name (e.g.
     /// `tailnet.example.org`). Defaults to empty, matching
     /// headscale-go config defaults.
-    #[serde(default = "default_base_domain")]
     pub base_domain: String,
     /// Default resolver(s) — DNS-over-UDP `IP[:port]` literals or
     /// DNS-over-HTTPS URLs. Empty ⇒ no `Resolvers` field on the wire,
-    /// the client falls back to system DNS.
-    #[serde(default)]
+    /// the client falls back to system DNS. The deserializer accepts
+    /// both the older flat list and upstream headscale's
+    /// `nameservers.global` shape.
     pub nameservers: Vec<String>,
     /// Per-suffix restricted resolvers (split DNS). Key is a DNS
     /// suffix (e.g. `"corp.internal"`), value is the resolver list to
     /// use for that suffix. Empty ⇒ no `Routes` field on the wire.
-    #[serde(default)]
+    /// The deserializer accepts both this historical field and
+    /// upstream headscale's `nameservers.split` table.
     pub restricted_nameservers: HashMap<String, Vec<String>>,
-    /// Path to a JSON file of `[{name, type, value}]` records that
-    /// land in `DNSConfig.ExtraRecords`. The file is hot-reloaded
-    /// (mtime poll, see [`EXTRA_RECORDS_POLL_INTERVAL`]); changes
-    /// wake every parked `/map` long-poller.
-    #[serde(default)]
-    pub extra_records: Option<PathBuf>,
+    /// Inline operator records that land in
+    /// `DNSConfig.ExtraRecords`. Upstream headscale names this field
+    /// `extra_records` and uses a top-level array of
+    /// `{name, type, value}` objects.
+    pub extra_records: Vec<DnsRecord>,
+    /// Optional path to a JSON file of `[{name, type, value}]`
+    /// records. The file is hot-reloaded (mtime poll, see
+    /// [`EXTRA_RECORDS_POLL_INTERVAL`]); changes wake every parked
+    /// `/map` long-poller. For compatibility with the previous
+    /// headscale-rs shape, `extra_records = "/path/to/file.json"`
+    /// also deserializes into this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_records_path: Option<PathBuf>,
     /// Search-domain list emitted in `DNSConfig.Domains`. The base
     /// domain is always prepended at build time; this list extends
     /// it.
-    #[serde(default)]
     pub search_domains: Vec<String>,
     /// Last-resort resolvers (`FallbackResolvers`).
-    #[serde(default)]
     pub fallback_nameservers: Vec<String>,
     /// `ExitNodeFilteredSet` — suffixes the client should not flow
     /// through an exit node.
-    #[serde(default)]
     pub exit_node_filtered_set: Vec<String>,
     /// Override the `AuthoritativeSuffixes` list. When `None`
     /// (default), the store derives it from `[base_domain]` plus the
     /// keys of `restricted_nameservers`. Set to `Some(vec![])` to
     /// emit an empty list.
-    #[serde(default)]
     pub authoritative_suffixes: Option<Vec<String>>,
 }
 
@@ -146,11 +148,135 @@ impl Default for DnsConfigSpec {
             base_domain: default_base_domain(),
             nameservers: Vec::new(),
             restricted_nameservers: HashMap::new(),
-            extra_records: None,
+            extra_records: Vec::new(),
+            extra_records_path: None,
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DnsConfigSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawDnsConfigSpec::deserialize(deserializer)?;
+        let (nameservers, mut restricted_nameservers) = raw.nameservers.into_parts();
+        restricted_nameservers.extend(raw.restricted_nameservers);
+
+        let (extra_records, extra_records_path_from_legacy_key) = match raw.extra_records {
+            Some(RawExtraRecords::Records(records)) => {
+                (records.into_iter().map(Into::into).collect(), None)
+            }
+            Some(RawExtraRecords::Path(path)) => (Vec::new(), Some(path)),
+            None => (Vec::new(), None),
+        };
+
+        Ok(Self {
+            magic_dns: raw.magic_dns,
+            base_domain: raw.base_domain,
+            nameservers,
+            restricted_nameservers,
+            extra_records,
+            extra_records_path: raw
+                .extra_records_path
+                .or(extra_records_path_from_legacy_key),
+            search_domains: raw.search_domains,
+            fallback_nameservers: raw.fallback_nameservers,
+            exit_node_filtered_set: raw.exit_node_filtered_set,
+            authoritative_suffixes: raw.authoritative_suffixes,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawDnsConfigSpec {
+    magic_dns: bool,
+    base_domain: String,
+    nameservers: RawNameservers,
+    restricted_nameservers: HashMap<String, Vec<String>>,
+    extra_records: Option<RawExtraRecords>,
+    extra_records_path: Option<PathBuf>,
+    search_domains: Vec<String>,
+    fallback_nameservers: Vec<String>,
+    exit_node_filtered_set: Vec<String>,
+    authoritative_suffixes: Option<Vec<String>>,
+}
+
+impl Default for RawDnsConfigSpec {
+    fn default() -> Self {
+        Self {
+            magic_dns: default_true(),
+            base_domain: default_base_domain(),
+            nameservers: RawNameservers::default(),
+            restricted_nameservers: HashMap::new(),
+            extra_records: None,
+            extra_records_path: None,
+            search_domains: Vec::new(),
+            fallback_nameservers: Vec::new(),
+            exit_node_filtered_set: Vec::new(),
+            authoritative_suffixes: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawNameservers {
+    Flat(Vec<String>),
+    Upstream {
+        #[serde(default)]
+        global: Vec<String>,
+        #[serde(default)]
+        split: HashMap<String, Vec<String>>,
+    },
+}
+
+impl RawNameservers {
+    fn into_parts(self) -> (Vec<String>, HashMap<String, Vec<String>>) {
+        match self {
+            Self::Flat(global) => (global, HashMap::new()),
+            Self::Upstream { global, split } => (global, split),
+        }
+    }
+}
+
+impl Default for RawNameservers {
+    fn default() -> Self {
+        Self::Upstream {
+            global: Vec::new(),
+            split: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawExtraRecords {
+    Path(PathBuf),
+    Records(Vec<LooseDnsRecord>),
+}
+
+#[derive(Deserialize)]
+struct LooseDnsRecord {
+    #[serde(alias = "Name")]
+    name: String,
+    #[serde(rename = "type", alias = "Type", default)]
+    record_type: Option<String>,
+    #[serde(alias = "Value")]
+    value: String,
+}
+
+impl From<LooseDnsRecord> for DnsRecord {
+    fn from(record: LooseDnsRecord) -> Self {
+        Self {
+            name: record.name,
+            record_type: record.record_type.unwrap_or_default(),
+            value: record.value,
         }
     }
 }
@@ -234,7 +360,8 @@ impl DnsStore {
             base_domain: String::new(),
             nameservers: Vec::new(),
             restricted_nameservers: HashMap::new(),
-            extra_records: None,
+            extra_records: Vec::new(),
+            extra_records_path: None,
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
             exit_node_filtered_set: Vec::new(),
@@ -243,13 +370,16 @@ impl DnsStore {
     }
 
     /// Construct from a parsed [`DnsConfigSpec`]. ExtraRecords start
-    /// empty; the caller can either `set_extra_records` synchronously
-    /// or `spawn_extra_records_watcher` to start the mtime poller.
+    /// with the spec's inline records; the caller can either
+    /// `set_extra_records` synchronously or
+    /// `spawn_extra_records_watcher` to start the mtime poller for an
+    /// external records file.
     pub fn from_spec(spec: DnsConfigSpec) -> Self {
+        let extra_records = Arc::new(spec.extra_records.clone());
         Self {
             inner: Arc::new(Inner {
                 spec: RwLock::new(Arc::new(spec)),
-                extra_records: RwLock::new(Arc::new(Vec::new())),
+                extra_records: RwLock::new(extra_records),
                 notify: Notify::new(),
             }),
         }
@@ -270,7 +400,9 @@ impl DnsStore {
     /// Replace the spec at runtime (e.g. on a `SIGHUP`-driven config
     /// reload). Wakes every parked `/map` long-poller.
     pub fn set_spec(&self, spec: DnsConfigSpec) {
+        let extra_records = Arc::new(spec.extra_records.clone());
         *self.inner.spec.write() = Arc::new(spec);
+        *self.inner.extra_records.write() = extra_records;
         self.inner.notify.notify_waiters();
     }
 
@@ -559,26 +691,10 @@ pub fn parse_extra_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, serde_json::E
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    // Accept both lowercase and PascalCase keys via a permissive
-    // wrapper struct.
-    #[derive(Deserialize)]
-    struct Loose {
-        #[serde(alias = "Name")]
-        name: String,
-        #[serde(alias = "Type", default)]
-        r#type: Option<String>,
-        #[serde(alias = "Value")]
-        value: String,
-    }
-    let loose: Vec<Loose> = serde_json::from_slice(bytes)?;
-    Ok(loose
-        .into_iter()
-        .map(|l| DnsRecord {
-            name: l.name,
-            record_type: l.r#type.unwrap_or_default(),
-            value: l.value,
-        })
-        .collect())
+    // Accept both lowercase and PascalCase keys via the same
+    // permissive wrapper used for config-file inline extra records.
+    let loose: Vec<LooseDnsRecord> = serde_json::from_slice(bytes)?;
+    Ok(loose.into_iter().map(Into::into).collect())
 }
 
 /// Spawn a background task that polls the extra-records file's
@@ -897,6 +1013,24 @@ mod tests {
     }
 
     #[test]
+    fn inline_extra_records_seed_dnsstore() {
+        let spec = DnsConfigSpec {
+            extra_records: vec![DnsRecord {
+                name: "inline.example.org".into(),
+                record_type: "A".into(),
+                value: "100.64.0.99".into(),
+            }],
+            ..magic_spec()
+        };
+        let cfg = DnsStore::from_spec(spec).build(&[]);
+        assert!(
+            cfg.extra_records
+                .iter()
+                .any(|r| r.name == "inline.example.org" && r.value == "100.64.0.99")
+        );
+    }
+
+    #[test]
     fn nameservers_become_resolvers_in_wire_shape() {
         let spec = DnsConfigSpec {
             nameservers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
@@ -1048,15 +1182,21 @@ mod tests {
     }
 
     #[test]
-    fn config_spec_round_trips_toml() {
+    fn config_spec_accepts_upstream_toml_shape() {
         let toml_src = r#"
 magic_dns = true
 base_domain = "test.example.org"
-nameservers = ["1.1.1.1", "8.8.8.8"]
 search_domains = ["aux.example.org"]
 exit_node_filtered_set = ["bank.example"]
+extra_records = [
+  { name = "ops.test.example.org", type = "A", value = "100.64.0.50" },
+  { Name = "alias.test.example.org", Type = "CNAME", Value = "ops.test.example.org" },
+]
 
-[restricted_nameservers]
+[nameservers]
+global = ["1.1.1.1", "8.8.8.8"]
+
+[nameservers.split]
 "corp.internal" = ["10.0.0.1", "10.0.0.2"]
 "#;
         let spec: DnsConfigSpec = toml::from_str(toml_src).expect("toml parse");
@@ -1067,6 +1207,34 @@ exit_node_filtered_set = ["bank.example"]
             spec.restricted_nameservers.get("corp.internal").unwrap(),
             &vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()]
         );
+        assert_eq!(spec.search_domains, vec!["aux.example.org"]);
         assert_eq!(spec.exit_node_filtered_set, vec!["bank.example"]);
+        assert_eq!(spec.extra_records.len(), 2);
+        assert_eq!(spec.extra_records[0].name, "ops.test.example.org");
+        assert_eq!(spec.extra_records[1].record_type, "CNAME");
+    }
+
+    #[test]
+    fn config_spec_accepts_legacy_flat_resolvers_and_extra_records_path() {
+        let toml_src = r#"
+magic_dns = false
+nameservers = ["1.1.1.1"]
+extra_records = "/etc/headscale/extra-records.json"
+
+[restricted_nameservers]
+"corp.internal" = ["10.0.0.1"]
+"#;
+        let spec: DnsConfigSpec = toml::from_str(toml_src).expect("toml parse");
+        assert!(!spec.magic_dns);
+        assert_eq!(spec.nameservers, vec!["1.1.1.1"]);
+        assert_eq!(
+            spec.restricted_nameservers.get("corp.internal").unwrap(),
+            &vec!["10.0.0.1".to_string()]
+        );
+        assert!(spec.extra_records.is_empty());
+        assert_eq!(
+            spec.extra_records_path.as_deref(),
+            Some(Path::new("/etc/headscale/extra-records.json"))
+        );
     }
 }

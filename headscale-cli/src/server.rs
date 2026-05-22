@@ -23,7 +23,7 @@ use headscale_api::admin::{
     PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
     PersistentPreauthAdmin, PersistentUserAdmin,
 };
-use headscale_api::dns::DnsStore;
+use headscale_api::dns::{DnsConfigSpec, DnsStore, spawn_extra_records_watcher};
 use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
@@ -53,6 +53,7 @@ pub(crate) struct RunServerConfig {
     pub grpc_allow_insecure: bool,
     pub oidc: OidcConfig,
     pub embedded_derp: EmbeddedDerpConfig,
+    pub dns: Option<DnsConfigSpec>,
 }
 
 /// Run the control plane server.
@@ -101,13 +102,16 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         tracing::info!(?status, "embedded DERP sidecar ready");
     }
     let derp_map = derp_map_from_embedded_config(embedded_derp_runtime.config());
-    let runtime = build_persistent_wire_runtime(
+    let (dns_store, dns_extra_records_path) =
+        dns_store_from_config(cfg.dns.clone()).context("load DNS runtime config")?;
+    let runtime = build_persistent_wire_runtime_with_dns(
         db.pool(),
         &cfg.state_dir,
         server_url,
         &cfg.mesh_cidr,
         oidc,
         derp_map,
+        dns_store.clone(),
     )
     .await?;
 
@@ -146,6 +150,10 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
+    let dns_extra_records_watcher = dns_extra_records_path.map(|path| {
+        tracing::info!(path = %path.display(), "watching DNS extra-records file");
+        spawn_extra_records_watcher((*dns_store).clone(), path, None)
+    });
     let local_grpc = spawn_local_grpc_listener(
         local_grpc_listener,
         cfg.unix_socket.clone(),
@@ -156,6 +164,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     });
     tracing::info!("Headscale-compatible Tailscale control plane ready");
     let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    if let Some(handle) = dns_extra_records_watcher {
+        handle.abort();
+    }
     drop(embedded_derp_runtime);
     serve_result
 }
@@ -166,6 +177,16 @@ struct PersistentWireRuntime {
     admin_service: HeadscaleAdminService,
 }
 
+fn dns_store_from_config(spec: Option<DnsConfigSpec>) -> Result<(Arc<DnsStore>, Option<PathBuf>)> {
+    let Some(spec) = spec else {
+        return Ok((Arc::new(DnsStore::new()), None));
+    };
+    let extra_records_path = spec.extra_records_path.clone();
+    let store = DnsStore::try_from_spec(spec).context("invalid [dns] config")?;
+    Ok((Arc::new(store), extra_records_path))
+}
+
+#[cfg(test)]
 async fn build_persistent_wire_runtime(
     pool: &sqlx::SqlitePool,
     state_dir: &Path,
@@ -173,6 +194,27 @@ async fn build_persistent_wire_runtime(
     mesh_cidr: &str,
     oidc: Option<OidcAuthRuntime>,
     derp_map: DerpMap,
+) -> Result<PersistentWireRuntime> {
+    build_persistent_wire_runtime_with_dns(
+        pool,
+        state_dir,
+        server_url,
+        mesh_cidr,
+        oidc,
+        derp_map,
+        Arc::new(DnsStore::new()),
+    )
+    .await
+}
+
+async fn build_persistent_wire_runtime_with_dns(
+    pool: &sqlx::SqlitePool,
+    state_dir: &Path,
+    server_url: &str,
+    mesh_cidr: &str,
+    oidc: Option<OidcAuthRuntime>,
+    derp_map: DerpMap,
+    dns: Arc<DnsStore>,
 ) -> Result<PersistentWireRuntime> {
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
     let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
@@ -228,7 +270,7 @@ async fn build_persistent_wire_runtime(
         derp_map: Arc::new(derp_map),
         policy,
         knock: KnockConfig::disabled(),
-        dns: Arc::new(DnsStore::new()),
+        dns,
         public_control_url: Some(server_url.to_string()),
         registration_cache,
     };
@@ -724,6 +766,15 @@ mod tests {
         assert_eq!(node.stun_port, -1);
     }
 
+    #[test]
+    fn dns_store_from_config_validates_magic_dns_base_domain() {
+        let err = dns_store_from_config(Some(DnsConfigSpec::default())).unwrap_err();
+        assert!(format!("{err:#}").contains("dns.base_domain must be set"));
+        let (store, path) = dns_store_from_config(None).unwrap();
+        assert!(path.is_none());
+        assert_eq!(serde_json::to_string(&store.build(&[])).unwrap(), "{}");
+    }
+
     #[tokio::test]
     async fn persistent_wire_runtime_wires_shared_persistent_oidc_state() {
         let db = Database::in_memory().await.unwrap();
@@ -776,6 +827,133 @@ mod tests {
         );
         assert!(runtime.state.registration_store.is_some());
         assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_uses_configured_dns_in_map_response() {
+        use headscale_api::tailscale_wire::{
+            router,
+            wire::{DnsRecord, MapResponse},
+        };
+
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let user = headscale_db::users::create(
+            db.pool(),
+            headscale_db::users::CreateParams {
+                name: "alice".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let a = "2a".repeat(32);
+        let b = "2b".repeat(32);
+        for (node_key, machine_key, host, ip) in [
+            (&a, "3a".repeat(32), "peer-a", "100.64.0.20"),
+            (&b, "3b".repeat(32), "peer-b", "100.64.0.21"),
+        ] {
+            headscale_db::headscale_nodes::create(
+                db.pool(),
+                headscale_db::headscale_nodes::CreateParams {
+                    machine_key: format!("mkey:{machine_key}"),
+                    node_key: format!("nodekey:{node_key}"),
+                    host_info: serde_json::json!({
+                        "Hostname": host,
+                        "OS": "linux",
+                        "App": "1.80.0",
+                    }),
+                    ipv4: Some(ip.to_string()),
+                    hostname: host.to_string(),
+                    given_name: host.to_string(),
+                    user_id: Some(user.id),
+                    register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut split = std::collections::HashMap::new();
+        split.insert(
+            "corp.example.org".to_string(),
+            vec!["10.0.0.53".to_string()],
+        );
+        let dns_spec = DnsConfigSpec {
+            base_domain: "tail.example.org".to_string(),
+            nameservers: vec!["1.1.1.1".to_string()],
+            restricted_nameservers: split,
+            search_domains: vec!["corp.example.org".to_string()],
+            extra_records: vec![DnsRecord {
+                name: "ops.tail.example.org".to_string(),
+                record_type: "A".to_string(),
+                value: "100.64.0.50".to_string(),
+            }],
+            ..DnsConfigSpec::default()
+        };
+        let (dns_store, extra_records_path) = dns_store_from_config(Some(dns_spec)).unwrap();
+        assert!(extra_records_path.is_none());
+        let runtime = build_persistent_wire_runtime_with_dns(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+            dns_store,
+        )
+        .await
+        .unwrap();
+        assert!(runtime.state.machines.get(&a).is_some());
+        assert!(runtime.state.machines.get(&b).is_some());
+
+        let app = router(runtime.state);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let map: MapResponse = serde_json::from_slice(&body).unwrap();
+        let dns = map.dns_config.expect("DNSConfig");
+
+        assert_eq!(map.domain, "tail.example.org");
+        assert!(
+            map.peers
+                .iter()
+                .any(|peer| peer.name == "peer-b.tail.example.org")
+        );
+        assert!(dns.proxied);
+        assert_eq!(
+            dns.domains,
+            vec![
+                "tail.example.org".to_string(),
+                "corp.example.org".to_string()
+            ]
+        );
+        assert_eq!(dns.resolvers[0].addr, "1.1.1.1");
+        assert_eq!(
+            dns.routes["corp.example.org"][0].addr,
+            "10.0.0.53".to_string()
+        );
+        assert!(
+            dns.extra_records
+                .iter()
+                .any(|record| record.name == "ops.tail.example.org")
+        );
+        assert!(
+            dns.extra_records
+                .iter()
+                .any(|record| record.name == "peer-b.tail.example.org")
+        );
     }
 
     #[tokio::test]
@@ -995,6 +1173,7 @@ mod tests {
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
+            dns: None,
         };
         let sans = SanConfig::with_hostname("headscale.example");
 
@@ -1037,6 +1216,7 @@ mod tests {
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
+            dns: None,
         })
         .await
         .unwrap_err();

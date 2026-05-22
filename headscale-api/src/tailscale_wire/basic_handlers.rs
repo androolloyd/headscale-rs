@@ -4362,7 +4362,7 @@ mod tests {
             .body(axum::body::Body::from(
                 serde_json::to_vec(&serde_json::json!({
                     "Stream": true,
-                    "Version": 39
+                    "Version": 113
                 }))
                 .unwrap(),
             ))

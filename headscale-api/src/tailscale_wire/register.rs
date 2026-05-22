@@ -11,9 +11,9 @@
 //!   Tailscale carries the same value in both places; if they
 //!   disagree we reject as `InvalidBody`.
 //! - **Error envelope:** matches Tailscale's documented
-//!   `{"error": "..."}` body for 4xx. The HTTP status is 400 for
-//!   malformed input and 401 for an unknown / expired preauth key.
-//!   Upstream uses 401 for "no authorization", which we mirror.
+//!   `RegisterResponse{Error: ...}` body for registration auth
+//!   failures over Noise. Unsupported client capability versions stay
+//!   HTTP 400, matching upstream `rejectUnsupported`.
 //! - **User ID derivation:** the upstream uses a database primary
 //!   key. We don't have a DB, so we FNV-hash the user label. This is
 //!   stable across requests for the same user but doesn't survive a
@@ -55,7 +55,8 @@ use super::noise::NoisePeerMachineKey;
 use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
-    stable_id_from_key, strip_key_prefix,
+    is_supported_capability_version, stable_id_from_key, strip_key_prefix,
+    unsupported_client_error,
 };
 use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
@@ -85,6 +86,9 @@ pub async fn handle_register(
         Ok(b) => b,
         Err(resp) => return resp,
     };
+    if let Err(resp) = reject_unsupported_capability(body.version) {
+        return resp;
+    }
     // Resolve hex form of the node key.
     let body_node_key_hex = match strip_key_prefix(&body.node_key) {
         Some(h) => h.to_string(),
@@ -126,6 +130,9 @@ pub async fn handle_register_flat(
         Ok(b) => b,
         Err(resp) => return resp,
     };
+    if let Err(resp) = reject_unsupported_capability(body.version) {
+        return resp;
+    }
     let body_node_key_hex = match strip_key_prefix(&body.node_key) {
         Some(h) => h.to_string(),
         None => body.node_key.clone(),
@@ -204,13 +211,7 @@ async fn register_inner(
             ) {
                 Ok(registration_id) => registration_id,
                 Err(error) => {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(ErrorBody {
-                            error: error.to_string(),
-                        }),
-                    )
-                        .into_response();
+                    return register_error_response(error.to_string());
                 }
             };
 
@@ -228,8 +229,7 @@ async fn register_inner(
                     return register_interactive(state, node_key_hex, machine_key_hex, body).await;
                 }
                 RegistrationWaitOutcome::Rejected(reason) => {
-                    return (StatusCode::UNAUTHORIZED, Json(ErrorBody { error: reason }))
-                        .into_response();
+                    return register_error_response(reason);
                 }
             }
         }
@@ -605,13 +605,7 @@ fn preauth_error_response(err: RedeemError) -> axum::response::Response {
         RedeemError::Expired => "preauth key expired",
         RedeemError::AlreadyUsed => "preauth key already used",
     };
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorBody {
-            error: error.into(),
-        }),
-    )
-        .into_response()
+    register_error_response(error)
 }
 
 fn logout_existing_node(
@@ -666,13 +660,35 @@ fn validate_existing_machine_key(
         return Ok(());
     }
 
+    Err(register_error_response(
+        "node exist with different machine key",
+    ))
+}
+
+fn reject_unsupported_capability(version: u32) -> Result<(), axum::response::Response> {
+    if is_supported_capability_version(version) {
+        return Ok(());
+    }
     Err((
-        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
         Json(ErrorBody {
-            error: "node exist with different machine key".into(),
+            error: unsupported_client_error(version),
         }),
     )
         .into_response())
+}
+
+fn register_error_response(error: impl Into<String>) -> axum::response::Response {
+    Json(RegisterResponse {
+        user: empty_simple_user(),
+        login: empty_simple_login(),
+        node_key_expired: false,
+        auth_url: String::new(),
+        machine_authorized: false,
+        error: error.into(),
+        node_key_signature: None,
+    })
+    .into_response()
 }
 
 fn allocate_register_ip(
@@ -933,6 +949,7 @@ mod tests {
 
     fn req_body(node_key_hex: &str, authkey: &str) -> serde_json::Value {
         serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Auth": { "AuthKey": authkey },
             "Hostinfo": { "Hostname": "peer-a", "OS": "linux", "OSVersion": "6.6" },
@@ -1120,6 +1137,36 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert!(state.machines.get(&node_key_hex).is_none());
+    }
+
+    #[tokio::test]
+    async fn register_rejects_unsupported_capability_version() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-unsupported-capver";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "a2".repeat(32);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Version"] = serde_json::json!(112);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "unsupported client version:  (112)");
+        assert!(state.machines.get(&node_key_hex).is_none());
+        assert!(redeemer.contains(authkey));
     }
 
     #[tokio::test]
@@ -1768,10 +1815,10 @@ mod tests {
         req.extensions_mut()
             .insert(NoisePeerMachineKey("8d".repeat(32)));
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "preauth key already used");
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rr.error, "preauth key already used");
         assert_eq!(state.machines.len(), 1);
     }
 
@@ -1827,10 +1874,10 @@ mod tests {
         req.extensions_mut()
             .insert(NoisePeerMachineKey("8f".repeat(32)));
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "preauth key expired");
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rr.error, "preauth key expired");
     }
 
     #[tokio::test]
@@ -1841,6 +1888,7 @@ mod tests {
         let node_key_hex = "36".repeat(32);
         let machine_key_hex = "55".repeat(32);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Hostinfo": { "Hostname": "pending-machine-key" },
         });
@@ -1888,6 +1936,7 @@ mod tests {
         );
 
         let restart_body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
         });
         let mut restart = axum::http::Request::builder()
@@ -1901,10 +1950,10 @@ mod tests {
             .extensions_mut()
             .insert(NoisePeerMachineKey("77".repeat(32)));
         let resp = app.oneshot(restart).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "node exist with different machine key");
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rr.error, "node exist with different machine key");
     }
 
     #[tokio::test]
@@ -1929,6 +1978,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let restart_body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
         });
         let restart_resp = app
@@ -1977,6 +2027,7 @@ mod tests {
 
         let future = chrono::Utc::now() + chrono::Duration::hours(1);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Expiry": future,
         });
@@ -2021,6 +2072,7 @@ mod tests {
 
         let past = chrono::Utc::now() - chrono::Duration::minutes(1);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Expiry": past,
         });
@@ -2068,6 +2120,7 @@ mod tests {
 
         let past = chrono::Utc::now() - chrono::Duration::minutes(1);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Expiry": past,
         });
@@ -2144,10 +2197,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert!(ev["error"].as_str().unwrap().contains("not recognised"));
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.error.contains("not recognised"));
     }
 
     #[tokio::test]
@@ -2157,6 +2210,7 @@ mod tests {
         let app = router(state.clone());
         let node_key_hex = "cc".repeat(32);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Hostinfo": { "Hostname": "pending-peer", "RoutableIPs": ["10.44.0.0/24"] },
             "Expiry": "0001-01-01T00:00:00Z",
@@ -2205,6 +2259,7 @@ mod tests {
         let app = router(state.clone());
         let node_key_hex = "dd".repeat(32);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Hostinfo": { "Hostname": "pending-peer" },
         });
@@ -2223,6 +2278,7 @@ mod tests {
         let first: RegisterResponse = serde_json::from_slice(&raw).unwrap();
 
         let followup_body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Followup": first.auth_url,
             "Hostinfo": { "Hostname": "pending-peer" },
@@ -2313,6 +2369,7 @@ mod tests {
         let (state, _redeemer, _dir) = fixture();
         let app = router(state);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": "",
             "Auth": { "AuthKey": "anything" },
         });

@@ -922,7 +922,7 @@ mod tests {
             .method("POST")
             .uri(format!("/machine/nodekey:{a}/map"))
             .header("content-type", "application/json")
-            .body(Body::from(b"{}".to_vec()))
+            .body(Body::from(br#"{"Version":113}"#.to_vec()))
             .unwrap();
         req.extensions_mut()
             .insert(headscale_api::tailscale_wire::noise::NoisePeerMachineKey(

@@ -24,6 +24,7 @@
         "Tags": ["tag:router"],
         "Online": true,
         "MachineAuthorized": true,
+        "Cap": 112,
         "Capabilities": ["https://tailscale.com/cap/ssh"],
         "CapMap": {
           "funnel": []

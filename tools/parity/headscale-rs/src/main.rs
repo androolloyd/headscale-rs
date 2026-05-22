@@ -393,6 +393,8 @@ struct MapNodeSummary {
     online: Option<bool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     machine_authorized: bool,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    cap: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1650,6 +1652,7 @@ fn summarize_map_node(node: MapNode) -> MapNodeSummary {
         tags,
         online: node.online,
         machine_authorized: node.machine_authorized,
+        cap: node.cap,
         capabilities,
         cap_map,
         expired: node.expired,

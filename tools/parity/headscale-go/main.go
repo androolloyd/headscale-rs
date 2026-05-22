@@ -255,6 +255,7 @@ type mapNodeSummary struct {
 	Tags                          []string         `json:"tags,omitempty"`
 	Online                        *bool            `json:"online,omitempty"`
 	MachineAuthorized             bool             `json:"machine_authorized,omitempty"`
+	Cap                           int              `json:"cap,omitempty"`
 	Capabilities                  []string         `json:"capabilities,omitempty"`
 	CapMap                        json.RawMessage  `json:"cap_map,omitempty"`
 	Expired                       bool             `json:"expired,omitempty"`
@@ -1036,6 +1037,7 @@ func summarizeMapNode(node *tailcfg.Node) *mapNodeSummary {
 		Tags:                          tags,
 		Online:                        online,
 		MachineAuthorized:             node.MachineAuthorized,
+		Cap:                           int(node.Cap),
 		Capabilities:                  capabilities,
 		CapMap:                        capMap,
 		Expired:                       node.Expired,

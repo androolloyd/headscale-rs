@@ -189,6 +189,7 @@ fn visible_peer_state_for_registry(
     policy: &PolicyStore,
     dns: &DnsStore,
     self_node_key: &str,
+    cap_version: u32,
 ) -> BTreeMap<u64, MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -205,6 +206,7 @@ fn visible_peer_state_for_registry(
         &primary_routes,
         &exit_routes,
         policy,
+        cap_version,
     );
     peer_state_from_nodes(&peers)
 }
@@ -260,6 +262,7 @@ fn visible_peer_map_nodes(
     primary_routes: &HashMap<String, Vec<String>>,
     exit_routes: &HashMap<String, Vec<String>>,
     policy: &PolicyStore,
+    cap_version: u32,
 ) -> Vec<MapNode> {
     let mut peers: Vec<MapNode> = snapshot
         .iter()
@@ -267,6 +270,7 @@ fn visible_peer_map_nodes(
         .filter(|(node_key, _)| peer_allowed(allowed_ids, node_key))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, tailnet_domain);
+            node.cap = cap_version;
             apply_routes_to_map_node(
                 &mut node,
                 primary_routes
@@ -510,7 +514,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // fields a fresh map would have, sans peers) tells stock
     // `tailscale` to fall back to its login flow.
     if own.is_expired_at(chrono::Utc::now()) {
-        return logout_map_response(&own, &node_key_hex, &state.dns);
+        return logout_map_response(&own, &node_key_hex, &state.dns, req.version);
     }
 
     // Wall 7: persist client-provided DiscoKey, Endpoints, and
@@ -650,6 +654,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     let self_node_id = stable_id_from_key(&node_key_hex);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
+    own_node.cap = req.version;
     apply_routes_to_map_node(
         &mut own_node,
         primary_routes
@@ -674,6 +679,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         &primary_routes,
         &exit_routes,
         &state.policy,
+        req.version,
     );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
@@ -759,6 +765,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         let gen_rx = state.machines.subscribe_gen();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
+        let cap_version = req.version;
         let derp_map_for_stream = state.derp_map.clone();
         let dns_for_stream = state.dns.clone();
         let connection_guard = super::MachineRegistry::track_stream_connection(
@@ -776,6 +783,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 dns_for_stream,
                 initial_peer_state,
                 connection_guard,
+                cap_version,
             ),
             move |(
                 first_opt,
@@ -787,6 +795,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 dns,
                 last_peer_state,
                 connection_guard,
+                cap_version,
             )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
@@ -801,6 +810,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             dns,
                             last_peer_state,
                             connection_guard,
+                            cap_version,
                         ),
                     ));
                 }
@@ -832,7 +842,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         if res.is_err() {
                             (build_keepalive_chunk(), last_peer_state)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, &last_peer_state)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_peer_state)
                         }
                     }
                     () = &mut policy_changed => {
@@ -840,8 +850,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "policy"),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "policy"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
                     () = &mut dns_changed => {
@@ -849,8 +859,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "config"),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "config"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
@@ -875,6 +885,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         dns,
                         next_peer_state,
                         connection_guard,
+                        cap_version,
                     ),
                 ))
             },
@@ -905,6 +916,7 @@ fn rebuild_peer_delta_chunk(
     policy: &Arc<crate::policy::PolicyStore>,
     self_node_key: &str,
     dns: &Arc<DnsStore>,
+    cap_version: u32,
     last_peer_state: &BTreeMap<u64, MapNode>,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>) {
     if machines.get(self_node_key).is_none() {
@@ -928,6 +940,7 @@ fn rebuild_peer_delta_chunk(
         &primary_routes,
         &exit_routes,
         policy,
+        cap_version,
     );
     let current_peer_state = peer_state_from_nodes(&peers_changed);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
@@ -983,6 +996,7 @@ fn rebuild_map_chunk(
     self_node_key: &str,
     derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
     dns: &Arc<DnsStore>,
+    cap_version: u32,
     response_type: &str,
 ) -> Vec<u8> {
     let Some(own) = machines.get(self_node_key) else {
@@ -999,6 +1013,7 @@ fn rebuild_map_chunk(
     let self_node_id = stable_id_from_key(self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
+    own_node.cap = cap_version;
     apply_routes_to_map_node(
         &mut own_node,
         primary_routes
@@ -1019,6 +1034,7 @@ fn rebuild_map_chunk(
         &primary_routes,
         &exit_routes,
         policy,
+        cap_version,
     );
     let dns_config = build_dns_for_snapshot(dns, &snapshot);
     let user_profiles =
@@ -1053,10 +1069,13 @@ fn logout_map_response(
     rec: &crate::tailscale_wire::MachineRecord,
     node_key_hex: &str,
     dns: &DnsStore,
+    cap_version: u32,
 ) -> Response {
     let tailnet_domain = tailnet_domain(dns);
+    let mut node = super::register::record_to_map_node(rec, &tailnet_domain);
+    node.cap = cap_version;
     let mr = MapResponse {
-        node: Some(super::register::record_to_map_node(rec, &tailnet_domain)),
+        node: Some(node),
         peers: Vec::new(),
         user_profiles: Vec::new(),
         dns_config: Some(DnsConfig::default()),
@@ -1231,7 +1250,7 @@ mod tests {
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "Version": 112 })).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -1250,9 +1269,11 @@ mod tests {
         // own node has the requester's IP
         let node = mr.node.as_ref().expect("own node present");
         assert_eq!(node.addresses[0], "100.64.0.10/32");
+        assert_eq!(node.cap, 112);
         assert_eq!(mr.peers.len(), 1);
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
         assert_eq!(mr.peers[0].name, "peer-b");
+        assert_eq!(mr.peers[0].cap, 112);
         assert_eq!(mr.domain, "");
         assert_eq!(mr.collect_services, Some(false));
         assert!(mr.control_time.is_some());
@@ -2280,7 +2301,7 @@ mod tests {
         );
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 112 });
         let resp = app
             .clone()
             .oneshot(
@@ -2351,6 +2372,7 @@ mod tests {
         let peer = &mr.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&router_key));
         assert_eq!(peer.name, "router");
+        assert_eq!(peer.cap, 112);
         assert!(
             peer.hostinfo
                 .routable_ips

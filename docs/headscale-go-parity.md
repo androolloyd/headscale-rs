@@ -7,6 +7,29 @@ Do not mix the `v0.29.0-beta.1` command/config/auth changes into this
 ledger until stable v0.28 parity lands or the baseline is deliberately
 bumped. Treat that beta as a separate upgrade track.
 
+Current-head audit overlay, refreshed 2026-05-22:
+
+- Current upstream `juanfont/headscale` HEAD used for the live parity
+  audit is `4483fd0cad38717913e7509fc50f9d48c691b02b`.
+- The checked-in differential harness remains pinned to v0.28.0 until
+  `tools/parity/headscale-go` is deliberately rebased. Treat rows below
+  as v0.28 executable coverage plus explicit current-head deltas.
+- Integrated current-head fixes: `/key?v=` capability-version behavior
+  and Noise placeholder route/body-limit parity in `c002804`, `/verify`
+  4 KiB request-body limit in `72bb5f8`, and DB user/preauth delete
+  semantics in `d076c8e`; CLI `auth` plus `preauthkeys delete`
+  command parity in `56d4de6`.
+- Active P0 implementation lanes: unsupported client capability
+  rejection and Noise register error-envelope parity.
+- Remaining P1 current-head gaps from the audit: Hostinfo/NetInfo
+  preservation, IPv6 node identities, online/LastSeen poll lifecycle,
+  map compression/framing negotiation, config schema drift, semantic
+  `CheckPolicy`, and real `BackfillNodeIPs`.
+- Remaining P2 current-head gaps from the audit: ping lifecycle,
+  `mockoidc`, exact CLI/help/error snapshots, broader gateway auth
+  error text, and Octra-side documentation cleanup for the now-direct
+  headscale-rs API coupling.
+
 This ledger tracks observable behavior that must match before
 `headscale-rs` can claim full parity with headscale-go. Rows marked
 `Done` have differential tests or direct Rust tests in this repo.

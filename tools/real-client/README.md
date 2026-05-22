@@ -216,6 +216,14 @@ tools/real-client/magicdns-smoke.sh
 tools/real-client/magicdns-headscale-go-smoke.sh
 ```
 
+The custom-domain variant runs the same stock-client assertions with a
+non-default DNS base domain:
+
+```sh
+tools/real-client/magicdns-custom-domain-smoke.sh
+tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
+```
+
 The disabled-DNS scenario starts two stock clients with MagicDNS off and
 asserts that client DNS names fall back to bare hostnames while peer visibility
 is unchanged:
@@ -231,6 +239,9 @@ Useful knobs:
 - `REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX` defaults to `tail.test`.
 - `REAL_CLIENT_BASE_DOMAIN` defaults to `tail.test`; set it to an empty string
   to disable MagicDNS in the Rust harness.
+- `tools/real-client/magicdns-custom-domain-*.sh` default
+  `REAL_CLIENT_BASE_DOMAIN` and `REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX` to
+  `tail.custom.test`.
 - `REAL_CLIENT_MAGIC_DNS=false` disables MagicDNS in the headscale-go smoke.
 - `REAL_CLIENT_EXPECT_NO_MAGIC_DNS=true` asserts the disabled-DNS client
   status shape.

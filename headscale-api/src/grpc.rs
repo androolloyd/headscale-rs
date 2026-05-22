@@ -178,11 +178,11 @@ pub mod upstream {
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy, validate_requested_tags_for_node};
-    use crate::tailscale_wire::MachineRecord;
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
     };
     use crate::tailscale_wire::wire::stable_id_from_key;
+    use crate::tailscale_wire::{MachineRecord, MachineRegistry};
 
     const AUTH_PREFIX: &str = "Bearer ";
 
@@ -197,6 +197,7 @@ pub mod upstream {
         policy_persistence: Option<Arc<dyn PolicyPersistence>>,
         policy_mode: PolicyMode,
         registration_cache: Arc<crate::tailscale_wire::RegistrationCache>,
+        wire_registry: Option<Arc<MachineRegistry>>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
     }
@@ -291,6 +292,7 @@ pub mod upstream {
                 policy_persistence: None,
                 policy_mode: PolicyMode::Memory,
                 registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
+                wire_registry: None,
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
             }
@@ -371,6 +373,11 @@ pub mod upstream {
             registration_cache: Arc<crate::tailscale_wire::RegistrationCache>,
         ) -> Self {
             self.registration_cache = registration_cache;
+            self
+        }
+
+        pub fn with_wire_registry(mut self, wire_registry: Arc<MachineRegistry>) -> Self {
+            self.wire_registry = Some(wire_registry);
             self
         }
 
@@ -753,13 +760,25 @@ pub mod upstream {
             record.register_method = RegisterMethod::Cli as i32;
             apply_requested_tags(&self.policy, &mut record)?;
 
-            let node = self
+            let result = self
                 .machines
-                .create(record)
+                .complete_registration(record, &self.policy)
                 .await
                 .map_err(machine_error_to_status)?;
-            self.registration_cache
-                .complete(&body.key, machine_admin_to_wire_record(&node));
+            let node = result.record;
+            let wire_record = machine_admin_to_wire_record(&node);
+            if let Some(registry) = &self.wire_registry {
+                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                    registry.replace_node_key(
+                        old_node_key_hex,
+                        wire_record.node_key_hex.clone(),
+                        wire_record.clone(),
+                    );
+                } else {
+                    registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+                }
+            }
+            self.registration_cache.complete(&body.key, wire_record);
             Ok(Response::new(RegisterNodeResponse {
                 node: Some(machine_to_node(&node, &self.users).await?),
             }))
@@ -2150,6 +2169,138 @@ mod upstream_tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_persistent_register_rekeys_and_projects_live_registry() {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                    .with_user_admin(users.clone()),
+            ),
+            policy,
+            machines,
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone())
+        .with_registration_cache(registration_cache.clone())
+        .with_wire_registry(wire_registry.clone());
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let machine_key_hex = "d1".repeat(32);
+        let first_node_key = "d2".repeat(32);
+        let second_node_key = "d3".repeat(32);
+        let first_id = "w".repeat(24);
+        let second_id = "x".repeat(24);
+        let mut first = MachineRecord::new_at(
+            Utc::now(),
+            first_node_key.clone(),
+            machine_key_hex.clone(),
+            String::new(),
+            "cli-first".into(),
+            Ipv4Addr::new(100, 64, 0, 50),
+            false,
+        );
+        first.forced_tags = vec!["tag:server".into()];
+        first.available_routes = vec!["10.50.0.0/24".into()];
+        first.expiry = Some(Utc::now() + chrono::Duration::days(30));
+        registration_cache.insert(first_id.clone(), first);
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: first_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.id, 1);
+        assert_eq!(registered.node_key, format!("nodekey:{first_node_key}"));
+        assert_eq!(registered.tags, vec!["tag:server"]);
+        assert!(registered.expiry.is_none());
+        assert!(wire_registry.get(&first_node_key).is_some());
+
+        let mut second = MachineRecord::new_at(
+            Utc::now(),
+            second_node_key.clone(),
+            machine_key_hex.clone(),
+            String::new(),
+            "cli-second".into(),
+            Ipv4Addr::new(100, 64, 99, 99),
+            false,
+        );
+        second.available_routes = vec!["10.60.0.0/24".into()];
+        registration_cache.insert(second_id.clone(), second);
+
+        let reauth = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: second_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("reauth node");
+
+        assert_eq!(reauth.id, 1);
+        assert_eq!(reauth.node_key, format!("nodekey:{second_node_key}"));
+        assert!(
+            reauth.tags.is_empty(),
+            "empty requested tags clear old tags"
+        );
+        assert_eq!(reauth.ip_addresses, vec!["100.64.0.50"]);
+        assert_eq!(reauth.available_routes, vec!["10.60.0.0/24"]);
+        assert!(wire_registry.get(&first_node_key).is_none());
+        let live = wire_registry.get(&second_node_key).unwrap();
+        assert_eq!(live.machine_key_hex, machine_key_hex);
+        assert_eq!(live.ipv4, Ipv4Addr::new(100, 64, 0, 50));
+        assert!(live.forced_tags.is_empty());
+        assert_eq!(live.available_routes, vec!["10.60.0.0/24"]);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), 1)
+            .await
+            .unwrap();
+        assert_eq!(row.node_key, format!("nodekey:{second_node_key}"));
+        assert_eq!(
+            row.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_CLI
+        );
+        assert_eq!(row.ipv4.as_deref(), Some("100.64.0.50"));
+        assert_eq!(row.tag_list(), Vec::<String>::new());
+        assert_eq!(row.host_info_value()["RoutableIPs"][0], "10.60.0.0/24");
+        assert!(registration_cache.is_empty());
     }
 
     #[tokio::test]

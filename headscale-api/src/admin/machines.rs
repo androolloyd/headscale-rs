@@ -144,6 +144,24 @@ pub trait MachineAdmin: Send + Sync {
         &self,
         record: MachineAdminRecord,
     ) -> Result<MachineAdminRecord, MachineAdminError>;
+    /// Complete a web/CLI/OIDC-style registration record.
+    ///
+    /// The default is a straight create for simple admin backends.
+    /// Stores with headscale-go auth-path semantics override this to
+    /// rekey an existing same-machine node and preserve upstream node
+    /// identity.
+    async fn complete_registration(
+        &self,
+        record: MachineAdminRecord,
+        _policy: &PolicyStore,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let record = self.create(record).await?;
+        Ok(AuthPathRegistrationResult {
+            record,
+            new_node: true,
+            replaced_node_key_hex: None,
+        })
+    }
     /// Mark a machine expired. `expiry = None` ⇒ expire immediately
     /// (`Utc::now()`); `Some(t)` ⇒ schedule expiry for `t`. Mirrors
     /// upstream `db.SetExpiry`.
@@ -846,6 +864,14 @@ impl MachineAdmin for PersistentMachineAdmin {
         Ok(self.row_to_record(row).await)
     }
 
+    async fn complete_registration(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path(record, policy).await
+    }
+
     async fn expire_at(
         &self,
         id: &str,
@@ -990,6 +1016,31 @@ impl MachineAdmin for WireMachineAdmin {
         self.get(&record.id)
             .await
             .ok_or(MachineAdminError::NotFound(record.id))
+    }
+
+    async fn complete_registration(
+        &self,
+        record: MachineAdminRecord,
+        _policy: &PolicyStore,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let wire = machine_admin_record_to_wire(&record)?;
+        let old_node_key_hex = self
+            .registry
+            .get_by_machine_key_for_user(&wire.machine_key_hex, &record.user)
+            .map(|(node_key, _)| node_key);
+        let registered =
+            self.registry
+                .complete_web_registration(wire, &record.user, record.register_method);
+        let replaced_node_key_hex = old_node_key_hex
+            .as_ref()
+            .filter(|old_node_key_hex| *old_node_key_hex != &registered.node_key_hex)
+            .cloned();
+        let record = machine_admin_record_from_wire(&registered);
+        Ok(AuthPathRegistrationResult {
+            new_node: old_node_key_hex.is_none(),
+            replaced_node_key_hex,
+            record,
+        })
     }
 
     async fn expire_at(

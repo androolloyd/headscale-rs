@@ -52,6 +52,7 @@ use std::{
 use axum::{
     Router,
     body::Body,
+    extract::DefaultBodyLimit,
     extract::{Request, State},
     http::{HeaderValue, Response, StatusCode, header},
     response::IntoResponse,
@@ -77,6 +78,10 @@ pub struct NoisePeerMachineKey(pub String);
 /// (138 as of 2026-05), but the prologue version is a property of *our*
 /// implementation, not the client's.
 pub const NOISE_CAPABILITY_VERSION: u16 = 39;
+
+/// Maximum request body size accepted by handlers inside the Noise
+/// HTTP/2 tunnel. Mirrors upstream headscale's `noiseBodyLimit`.
+pub const NOISE_BODY_LIMIT: usize = 1024 * 1024;
 
 /// Noise pattern string. `Noise_IK_25519_ChaChaPoly_BLAKE2s` is the
 /// exact instantiation TS2021 uses. Sourced from
@@ -627,6 +632,21 @@ async fn dispatch_h2_request(
     while let Some(chunk) = body.data().await {
         let chunk = chunk.map_err(|e| WireError::Noise(format!("h2 body read: {e}")))?;
         let n = chunk.len();
+        if body_bytes.len().saturating_add(n) > NOISE_BODY_LIMIT {
+            let _ = body.flow_control().release_capacity(n);
+            send_plain_h2_response(
+                respond,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large\n",
+            )?;
+            tracing::warn!(
+                target = "tailscale_wire::noise",
+                uri = %req_uri,
+                limit = NOISE_BODY_LIMIT,
+                "h2 dispatch request body exceeded limit"
+            );
+            return Ok(());
+        }
         body_bytes.extend_from_slice(&chunk);
         let _ = body.flow_control().release_capacity(n);
     }
@@ -731,11 +751,37 @@ async fn dispatch_h2_request(
     Ok(())
 }
 
+fn send_plain_h2_response(
+    respond: &mut h2::server::SendResponse<bytes::Bytes>,
+    status: StatusCode,
+    body: &'static str,
+) -> Result<(), WireError> {
+    let head = http::Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(())
+        .expect("plain h2 response builder is valid");
+    let mut send = respond
+        .send_response(head, false)
+        .map_err(|e| WireError::Noise(format!("h2 send_response error: {e}")))?;
+    send.send_data(bytes::Bytes::from_static(body.as_bytes()), true)
+        .map_err(|e| WireError::Noise(format!("h2 send_data error: {e}")))?;
+    Ok(())
+}
+
+async fn not_implemented_handler() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "Not implemented yet\n",
+    )
+}
+
 /// Construct an inner router that maps just the per-machine endpoints
 /// served behind /ts2021. The `/key` and `/ts2021` routes deliberately
 /// aren't mounted here — they live on the outer public router.
 pub(crate) fn inner_router(state: WireState) -> Router {
-    use axum::routing::post;
+    use axum::routing::{get, patch, post};
     Router::new()
         // Keyed variants — kept for legacy / direct-test paths.
         .route(
@@ -751,6 +797,15 @@ pub(crate) fn inner_router(state: WireState) -> Router {
             post(super::register::handle_register_flat),
         )
         .route("/machine/map", post(super::map::handle_map_flat))
+        .route("/machine/whoami", get(not_implemented_handler))
+        .route("/machine/set-dns", post(not_implemented_handler))
+        .route("/machine/set-device-attr", patch(not_implemented_handler))
+        .route("/machine/audit-log", post(not_implemented_handler))
+        .route("/machine/id-token", post(not_implemented_handler))
+        .route("/machine/feature/query", post(not_implemented_handler))
+        .route("/machine/update-health", post(not_implemented_handler))
+        .route("/machine/c2n", post(not_implemented_handler))
+        .layer(DefaultBodyLimit::max(NOISE_BODY_LIMIT))
         .with_state(state)
 }
 
@@ -981,8 +1036,33 @@ pub async fn handle_ts2021_stub(State(_s): State<WireState>) -> impl IntoRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tailscale_wire::{
+        MachineRegistry, WireState,
+        test_support::{MockIpAllocator, MockRedeemer},
+    };
+    use axum::body::to_bytes;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    fn fixture_state() -> (WireState, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let server = Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap());
+        let state = WireState {
+            server_noise_key: server,
+            preauth: Arc::new(MockRedeemer::new()),
+            ip_allocator: Arc::new(MockIpAllocator),
+            machines: Arc::new(MachineRegistry::new()),
+            registration_store: None,
+            derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
+            knock: crate::tailscale_wire::KnockConfig::disabled(),
+            dns: Arc::new(crate::dns::DnsStore::new()),
+            public_control_url: None,
+            registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
+        };
+        (state, dir)
+    }
 
     #[test]
     fn server_key_persists_across_loads() {
@@ -1059,5 +1139,70 @@ mod tests {
         // sourced in the module doc.
         let p = prologue_bytes(39);
         assert_eq!(p, b"Tailscale Control Protocol v39".to_vec());
+    }
+
+    #[tokio::test]
+    async fn inner_router_exposes_upstream_not_implemented_control_routes() {
+        let (state, _dir) = fixture_state();
+        let cases = [
+            ("GET", "/machine/whoami"),
+            ("POST", "/machine/set-dns"),
+            ("PATCH", "/machine/set-device-attr"),
+            ("POST", "/machine/audit-log"),
+            ("POST", "/machine/id-token"),
+            ("POST", "/machine/feature/query"),
+            ("POST", "/machine/update-health"),
+            ("POST", "/machine/c2n"),
+        ];
+
+        for (method, uri) in cases {
+            let app = inner_router(state.clone());
+            let resp = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {uri}");
+            let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert_eq!(body.as_ref(), b"Not implemented yet\n", "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inner_router_keeps_webclient_unimplemented_as_404() {
+        let (state, _dir) = fixture_state();
+        let resp = inner_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/machine/webclient")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn inner_router_rejects_oversized_noise_bodies() {
+        let (state, _dir) = fixture_state();
+        let oversized = vec![b'x'; NOISE_BODY_LIMIT + 1];
+        let resp = inner_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/map")
+                    .body(axum::body::Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

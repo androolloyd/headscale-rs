@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn rejects_non_ts2021_path() {
-        let req = b"GET /key HTTP/1.1\r\n\
+        let req = b"GET /key?v=39 HTTP/1.1\r\n\
             Host: tsi-mesh-control\r\n\
             \r\n";
         assert!(!is_ts2021_upgrade(req));

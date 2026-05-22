@@ -7,11 +7,10 @@
 //! because we have no legacy bridge.
 //!
 //! Stock `tailscale up` appends a `?v=<capver>` query parameter
-//! advertising the client's capability version. We ignore it: the
-//! key we return is identical regardless of the requested version,
-//! and dispatching on the client's `v` is the responder's concern
-//! (matters only for selecting the legacy vs new key, and we have
-//! only one).
+//! advertising the client's capability version. Upstream headscale
+//! rejects requests without a parsable `v`, returns the Noise public
+//! key for TS2021-capable clients (`v >= 39`), and otherwise writes an
+//! empty 200 response because there is no legacy bridge.
 //!
 //! ## Decision log
 //!
@@ -23,12 +22,13 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
-    response::IntoResponse,
+    extract::{RawQuery, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
-use super::WireState;
+use super::{WireState, noise::NOISE_CAPABILITY_VERSION};
 
 /// `GET /key` response.
 ///
@@ -43,24 +43,51 @@ pub struct OverTLSPublicKeyResponse {
     pub public_key: String,
 }
 
-/// Optional `?v=<capver>` query parameter. We accept and discard it;
-/// kept here so the handler signature is stable when we eventually
-/// need to dispatch on it.
-#[derive(Debug, Deserialize)]
-pub struct KeyQuery {
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub v: Option<u32>,
-}
+pub async fn handle_key(State(state): State<WireState>, RawQuery(raw_query): RawQuery) -> Response {
+    let cap_ver = match parse_capability_version(raw_query.as_deref()) {
+        Ok(cap_ver) => cap_ver,
+        Err(resp) => return resp,
+    };
+    if cap_ver < u32::from(NOISE_CAPABILITY_VERSION) {
+        return StatusCode::OK.into_response();
+    }
 
-pub async fn handle_key(
-    State(state): State<WireState>,
-    Query(_q): Query<KeyQuery>,
-) -> impl IntoResponse {
     let body = OverTLSPublicKeyResponse {
         public_key: format!("mkey:{}", state.server_noise_key.public_hex()),
     };
-    Json(body)
+    Json(body).into_response()
+}
+
+fn parse_capability_version(raw_query: Option<&str>) -> Result<u32, Response> {
+    let Some(raw_query) = raw_query else {
+        return Err(text_error(
+            StatusCode::BAD_REQUEST,
+            "capability version must be set",
+        ));
+    };
+
+    let Some(raw_v) = raw_query.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (key == "v").then_some(value)
+    }) else {
+        return Err(text_error(
+            StatusCode::BAD_REQUEST,
+            "capability version must be set",
+        ));
+    };
+
+    raw_v
+        .parse::<u32>()
+        .map_err(|_| text_error(StatusCode::BAD_REQUEST, "invalid capability version"))
+}
+
+fn text_error(status: StatusCode, msg: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!("{msg}\n"),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -117,7 +144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_endpoint_accepts_no_query_param() {
+    async fn key_endpoint_rejects_missing_query_param() {
         let (state, _dir) = fixture_state();
         let app = router(state);
         let resp = app
@@ -129,6 +156,44 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), b"capability version must be set\n");
+    }
+
+    #[tokio::test]
+    async fn key_endpoint_rejects_invalid_query_param() {
+        let (state, _dir) = fixture_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/key?v=nope")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), b"invalid capability version\n");
+    }
+
+    #[tokio::test]
+    async fn key_endpoint_returns_empty_200_for_legacy_capability() {
+        let (state, _dir) = fixture_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/key?v=38")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(body.is_empty());
     }
 }

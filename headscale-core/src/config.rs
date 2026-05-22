@@ -31,6 +31,9 @@ pub struct Config {
     pub wg_port: u16,
     /// DERP server URL for NAT traversal
     pub derp_url: Option<String>,
+    /// Embedded DERP/STUN runtime configuration.
+    #[serde(default)]
+    pub embedded_derp: EmbeddedDerpConfig,
     /// OpenID Connect authentication configuration
     #[serde(default)]
     pub oidc: OidcConfig,
@@ -48,10 +51,105 @@ impl Default for Config {
             wg_interface: "wg0".to_string(),
             wg_port: 51820,
             derp_url: None,
+            embedded_derp: EmbeddedDerpConfig::default(),
             oidc: OidcConfig::default(),
             ipv6: true,
             mesh_cidr: "100.64.0.0/10".to_string(),
         }
+    }
+}
+
+/// Embedded DERP/STUN runtime configuration.
+///
+/// This mirrors the operator-facing slice that headscale-go exposes for its
+/// embedded DERP server, while leaving the actual DERP relay protocol to the
+/// upstream `derper` binary. Native Rust owns the STUN responder and the DERP
+/// map shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EmbeddedDerpConfig {
+    /// Master switch. Disabled by default so existing deployments keep using
+    /// the empty DERP map unless explicitly configured.
+    pub enabled: bool,
+    /// Public DERP hostname advertised in the DERP map.
+    pub host_name: String,
+    /// Public DERP HTTPS port. `443` is omitted on the wire.
+    pub derp_port: u16,
+    /// UDP STUN bind address. `None` disables the embedded STUN listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_addr: Option<SocketAddr>,
+    /// Run a STUN-only DERP-map node without spawning a DERP relay process.
+    pub stun_only: bool,
+    /// Numeric DERP region ID advertised to clients.
+    pub region_id: u16,
+    /// Short region code advertised to clients.
+    pub region_code: String,
+    /// Human-readable region name advertised to clients.
+    pub region_name: String,
+    /// Whether clients should omit the public Tailscale DERP fleet.
+    pub omit_default_regions: bool,
+    /// Test-only DERP map escape hatch for self-signed sidecar TLS.
+    pub insecure_for_tests: bool,
+    /// Path to the upstream `derper` binary. Required unless `stun_only = true`.
+    pub derper_binary: PathBuf,
+    /// TCP bind address passed to `derper -a`.
+    pub derper_listen_addr: SocketAddr,
+    /// Path passed to `derper -c`. If empty, the CLI server resolves it under
+    /// the server state directory before starting the runtime.
+    pub derper_config_path: PathBuf,
+    /// Certificate mode passed to `derper -certmode`.
+    pub derper_cert_mode: String,
+    /// Optional certificate directory passed to `derper -certdir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derper_cert_dir: Option<PathBuf>,
+    /// Optional DERP admission-controller callback URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_client_url: Option<String>,
+    /// Ask `derper` to verify clients through a local tailscaled instance.
+    pub verify_clients: bool,
+}
+
+impl Default for EmbeddedDerpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host_name: String::new(),
+            derp_port: 443,
+            stun_addr: None,
+            stun_only: false,
+            region_id: 900,
+            region_code: "embedded".to_string(),
+            region_name: "Embedded headscale-rs DERP".to_string(),
+            omit_default_regions: false,
+            insecure_for_tests: false,
+            derper_binary: PathBuf::new(),
+            derper_listen_addr: "127.0.0.1:8443".parse().unwrap(),
+            derper_config_path: PathBuf::new(),
+            derper_cert_mode: "letsencrypt".to_string(),
+            derper_cert_dir: None,
+            verify_client_url: None,
+            verify_clients: false,
+        }
+    }
+}
+
+impl EmbeddedDerpConfig {
+    /// Disabled config helper for call sites that want an explicit value.
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Whether this config should spawn a DERP relay process.
+    pub fn relay_enabled(&self) -> bool {
+        self.enabled && !self.stun_only
+    }
+
+    /// Resolve the `derper -c` config path against the server state directory.
+    pub fn with_default_derper_config_path(mut self, state_dir: &std::path::Path) -> Self {
+        if self.derper_config_path.as_os_str().is_empty() {
+            self.derper_config_path = state_dir.join("derper.key");
+        }
+        self
     }
 }
 
@@ -575,6 +673,18 @@ mod tests {
         assert!(!oidc.use_expiry_from_token);
         assert!(!oidc.pkce.enabled);
         assert_eq!(oidc.pkce.method, PKCE_METHOD_S256);
+    }
+
+    #[test]
+    fn embedded_derp_defaults_are_disabled_and_non_destructive() {
+        let cfg = EmbeddedDerpConfig::default();
+
+        assert!(!cfg.enabled);
+        assert!(!cfg.relay_enabled());
+        assert_eq!(cfg.derp_port, 443);
+        assert_eq!(cfg.region_id, 900);
+        assert!(cfg.derper_binary.as_os_str().is_empty());
+        assert!(cfg.derper_config_path.as_os_str().is_empty());
     }
 
     #[test]

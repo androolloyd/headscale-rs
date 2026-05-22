@@ -3,9 +3,12 @@
 //! Implements a minimal STUN client (RFC 5389) to discover the public
 //! IP address and port mappings for NAT traversal.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 /// Default STUN server port.
@@ -15,15 +18,21 @@ pub const STUN_PORT: u16 = 3478;
 pub const STUN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// STUN message types.
-const STUN_BINDING_REQUEST: u16 = 0x0001;
-const STUN_BINDING_RESPONSE: u16 = 0x0101;
+pub const STUN_BINDING_REQUEST: u16 = 0x0001;
+pub const STUN_BINDING_RESPONSE: u16 = 0x0101;
 
 /// STUN attribute types.
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
-const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+pub const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+
+/// IPv4 family constant inside MAPPED-ADDRESS/XOR-MAPPED-ADDRESS.
+pub const STUN_FAMILY_IPV4: u8 = 0x01;
+
+/// IPv6 family constant inside MAPPED-ADDRESS/XOR-MAPPED-ADDRESS.
+pub const STUN_FAMILY_IPV6: u8 = 0x02;
 
 /// STUN magic cookie (RFC 5389).
-const MAGIC_COOKIE: u32 = 0x2112_A442;
+pub const MAGIC_COOKIE: u32 = 0x2112_A442;
 
 /// Well-known public STUN servers.
 pub static DEFAULT_STUN_SERVERS: &[&str] = &[
@@ -166,6 +175,140 @@ pub fn build_binding_request(transaction_id: &[u8; 12]) -> Vec<u8> {
     msg.extend_from_slice(transaction_id);
 
     msg
+}
+
+/// Parse a STUN binding request and return its transaction ID.
+pub fn decode_binding_request(data: &[u8]) -> Result<[u8; 12], StunRequestError> {
+    if data.len() < 20 {
+        return Err(StunRequestError::Truncated);
+    }
+
+    let msg_type = u16::from_be_bytes([data[0], data[1]]);
+    if msg_type != STUN_BINDING_REQUEST {
+        return Err(StunRequestError::UnsupportedType(msg_type));
+    }
+
+    let msg_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if data.len() < 20 + msg_len {
+        return Err(StunRequestError::Truncated);
+    }
+
+    let cookie = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    if cookie != MAGIC_COOKIE {
+        return Err(StunRequestError::BadMagic);
+    }
+
+    let mut transaction_id = [0u8; 12];
+    transaction_id.copy_from_slice(&data[8..20]);
+    Ok(transaction_id)
+}
+
+/// Encode a STUN binding response with one XOR-MAPPED-ADDRESS attribute.
+pub fn encode_binding_response(transaction_id: &[u8; 12], addr: SocketAddr) -> Vec<u8> {
+    let attr_body = encode_xor_mapped_address(transaction_id, addr);
+    let attr_len = attr_body.len() as u16;
+    let msg_len = 4 + attr_body.len() as u16;
+
+    let mut msg = Vec::with_capacity(20 + msg_len as usize);
+    msg.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
+    msg.extend_from_slice(&msg_len.to_be_bytes());
+    msg.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
+    msg.extend_from_slice(transaction_id);
+    msg.extend_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
+    msg.extend_from_slice(&attr_len.to_be_bytes());
+    msg.extend_from_slice(&attr_body);
+    msg
+}
+
+fn encode_xor_mapped_address(transaction_id: &[u8; 12], addr: SocketAddr) -> Vec<u8> {
+    let mut data = Vec::with_capacity(20);
+    data.push(0);
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            data.push(STUN_FAMILY_IPV4);
+            let port = addr.port() ^ ((MAGIC_COOKIE >> 16) as u16);
+            data.extend_from_slice(&port.to_be_bytes());
+            let ip = u32::from(ip) ^ MAGIC_COOKIE;
+            data.extend_from_slice(&ip.to_be_bytes());
+        }
+        IpAddr::V6(ip) => {
+            data.push(STUN_FAMILY_IPV6);
+            let port = addr.port() ^ ((MAGIC_COOKIE >> 16) as u16);
+            data.extend_from_slice(&port.to_be_bytes());
+
+            let mut mask = [0u8; 16];
+            mask[0..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
+            mask[4..16].copy_from_slice(transaction_id);
+
+            let raw = ip.octets();
+            let mut xored = [0u8; 16];
+            for i in 0..16 {
+                xored[i] = raw[i] ^ mask[i];
+            }
+            data.extend_from_slice(&xored);
+        }
+    }
+    data
+}
+
+/// UDP STUN binding responder. Drop it to abort the background task.
+pub struct StunListener {
+    socket: Arc<UdpSocket>,
+    handle: JoinHandle<()>,
+}
+
+impl StunListener {
+    /// Bind a UDP socket and start serving STUN binding requests.
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let socket = Arc::new(UdpSocket::bind(addr).await?);
+        let task_socket = Arc::clone(&socket);
+        let handle = tokio::spawn(async move {
+            serve_stun(task_socket).await;
+        });
+
+        Ok(Self { socket, handle })
+    }
+
+    /// Return the local bound UDP address.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Handle one packet. Well-formed binding requests return a response;
+    /// non-STUN probe traffic is silently dropped.
+    pub fn handle_packet(
+        data: &[u8],
+        remote: SocketAddr,
+    ) -> Result<Option<Vec<u8>>, StunRequestError> {
+        match decode_binding_request(data) {
+            Ok(transaction_id) => Ok(Some(encode_binding_response(&transaction_id, remote))),
+            Err(StunRequestError::Truncated | StunRequestError::BadMagic) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl Drop for StunListener {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn serve_stun(socket: Arc<UdpSocket>) {
+    let mut buf = vec![0u8; 1500];
+    loop {
+        match socket.recv_from(&mut buf).await {
+            Ok((len, remote)) => {
+                if let Ok(Some(response)) = StunListener::handle_packet(&buf[..len], remote) {
+                    let _ = socket.send_to(&response, remote).await;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "STUN listener recv_from failed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 /// Parse a STUN binding response and extract the mapped address.
@@ -330,6 +473,19 @@ pub fn parse_xor_mapped_address(
     }
 }
 
+/// STUN binding-request decode errors for the embedded responder.
+#[derive(Debug, thiserror::Error)]
+pub enum StunRequestError {
+    #[error("packet shorter than a 20-byte STUN header")]
+    Truncated,
+
+    #[error("not a STUN message: invalid magic cookie")]
+    BadMagic,
+
+    #[error("unsupported STUN message type 0x{0:04x}")]
+    UnsupportedType(u16),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StunError {
     #[error("No STUN servers configured")]
@@ -362,6 +518,26 @@ mod tests {
         assert_eq!(request[2..4], [0, 0]); // Length = 0
         assert_eq!(request[4..8], MAGIC_COOKIE.to_be_bytes());
         assert_eq!(request[8..20], txn_id);
+    }
+
+    #[test]
+    fn test_decode_binding_request_extracts_transaction_id() {
+        let txn_id = *b"abcdefghijkl";
+        let request = build_binding_request(&txn_id);
+
+        assert_eq!(decode_binding_request(&request).unwrap(), txn_id);
+    }
+
+    #[test]
+    fn test_decode_binding_request_rejects_bad_magic() {
+        let txn_id = [0u8; 12];
+        let mut request = build_binding_request(&txn_id);
+        request[4] = 0xff;
+
+        assert!(matches!(
+            decode_binding_request(&request),
+            Err(StunRequestError::BadMagic)
+        ));
     }
 
     #[test]
@@ -466,5 +642,51 @@ mod tests {
 
         let addr = parse_binding_response(&response, &txn_id).unwrap();
         assert_eq!(addr, SocketAddr::new(IpAddr::V4(ip), port));
+    }
+
+    #[test]
+    fn test_encode_binding_response_round_trips_v4() {
+        let txn_id = *b"txid12345678";
+        let remote: SocketAddr = "198.51.100.42:54321".parse().unwrap();
+
+        let response = encode_binding_response(&txn_id, remote);
+        let parsed = parse_binding_response(&response, &txn_id).unwrap();
+
+        assert_eq!(parsed, remote);
+        assert_eq!(response[25], STUN_FAMILY_IPV4);
+    }
+
+    #[test]
+    fn test_stun_listener_handle_packet_drops_non_stun_probe() {
+        let response =
+            StunListener::handle_packet(b"GET / HTTP/1.1\r\n\r\n", "127.0.0.1:1".parse().unwrap())
+                .unwrap();
+
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stun_listener_round_trip_over_udp() {
+        let listener = StunListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let txn_id = *b"udp123456789";
+        let request = build_binding_request(&txn_id);
+
+        client.send_to(&request, server_addr).await.unwrap();
+        let mut buf = [0u8; 1500];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = &buf[..len];
+
+        assert_eq!(
+            parse_binding_response(response, &txn_id).unwrap(),
+            client_addr
+        );
     }
 }

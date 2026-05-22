@@ -6,10 +6,16 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{RwLock, broadcast, mpsc};
+
+use crate::config::EmbeddedDerpConfig;
+use crate::stun::StunListener;
 
 /// Default DERP port (HTTPS).
 pub const DERP_PORT: u16 = 443;
@@ -454,6 +460,230 @@ pub enum DerpError {
     Io(#[from] std::io::Error),
 }
 
+/// Embedded DERP/STUN runtime.
+///
+/// The Rust runtime owns the lightweight STUN responder. DERP relay traffic is
+/// delegated to the upstream `derper` binary because DERP's relay protocol has
+/// no maintained Rust implementation in this repository.
+pub struct EmbeddedDerpRuntime {
+    cfg: EmbeddedDerpConfig,
+    stun: Option<StunListener>,
+    sidecar: Option<DerperSidecar>,
+}
+
+impl EmbeddedDerpRuntime {
+    /// Start with a config whose `derper_config_path` is already resolved.
+    pub async fn start(cfg: EmbeddedDerpConfig) -> Result<Self, EmbeddedDerpError> {
+        validate_embedded_derp_config(&cfg)?;
+
+        if !cfg.enabled {
+            return Ok(Self {
+                cfg,
+                stun: None,
+                sidecar: None,
+            });
+        }
+
+        let stun = match cfg.stun_addr {
+            Some(addr) => Some(StunListener::bind(addr).await?),
+            None => None,
+        };
+        let sidecar = if cfg.relay_enabled() {
+            Some(DerperSidecar::spawn(&cfg)?)
+        } else {
+            None
+        };
+
+        Ok(Self { cfg, stun, sidecar })
+    }
+
+    /// Resolve the `derper -c` config path under `state_dir` before starting.
+    pub async fn start_with_state_dir(
+        cfg: EmbeddedDerpConfig,
+        state_dir: impl AsRef<Path>,
+    ) -> Result<Self, EmbeddedDerpError> {
+        Self::start(cfg.with_default_derper_config_path(state_dir.as_ref())).await
+    }
+
+    /// Runtime config after default path resolution.
+    pub fn config(&self) -> &EmbeddedDerpConfig {
+        &self.cfg
+    }
+
+    /// Local STUN bind address when the embedded STUN listener is active.
+    pub fn stun_local_addr(&self) -> Option<SocketAddr> {
+        self.stun.as_ref().and_then(|stun| stun.local_addr().ok())
+    }
+
+    /// Sidecar process status when a DERP relay sidecar was started.
+    pub fn sidecar_status(&self) -> Option<SidecarStatus> {
+        self.sidecar.as_ref().map(DerperSidecar::status)
+    }
+}
+
+fn validate_embedded_derp_config(cfg: &EmbeddedDerpConfig) -> Result<(), EmbeddedDerpError> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    if cfg.host_name.trim().is_empty() {
+        return Err(EmbeddedDerpError::MissingHostName);
+    }
+    if cfg.stun_only && cfg.stun_addr.is_none() {
+        return Err(EmbeddedDerpError::MissingStunAddress);
+    }
+    if cfg.relay_enabled() {
+        if cfg.derper_binary.as_os_str().is_empty() {
+            return Err(EmbeddedDerpError::MissingDerperBinary(PathBuf::new()));
+        }
+        if !cfg.derper_binary.is_file() {
+            return Err(EmbeddedDerpError::MissingDerperBinary(
+                cfg.derper_binary.clone(),
+            ));
+        }
+        if cfg.derper_config_path.as_os_str().is_empty() {
+            return Err(EmbeddedDerpError::MissingDerperConfigPath);
+        }
+    }
+    Ok(())
+}
+
+/// Embedded DERP runtime errors.
+#[derive(Debug, thiserror::Error)]
+pub enum EmbeddedDerpError {
+    #[error("embedded DERP host_name is required when enabled")]
+    MissingHostName,
+
+    #[error("embedded DERP stun_addr is required when stun_only is true")]
+    MissingStunAddress,
+
+    #[error("embedded DERP derper_binary is missing or not a file: {0:?}")]
+    MissingDerperBinary(PathBuf),
+
+    #[error("embedded DERP derper_config_path is required when the relay sidecar is enabled")]
+    MissingDerperConfigPath,
+
+    #[error("embedded DERP/STUN I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Current status of the upstream `derper` sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarStatus {
+    Running { pid: u32 },
+    Exited { code: Option<i32> },
+    NotStarted,
+}
+
+/// `derper` subprocess lifecycle.
+pub struct DerperSidecar {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    status: Arc<Mutex<SidecarStatus>>,
+}
+
+impl DerperSidecar {
+    /// Spawn the configured upstream `derper` binary.
+    pub fn spawn(cfg: &EmbeddedDerpConfig) -> Result<Self, EmbeddedDerpError> {
+        validate_embedded_derp_config(cfg)?;
+
+        let mut command = Command::new(&cfg.derper_binary);
+        command
+            .arg("-a")
+            .arg(cfg.derper_listen_addr.to_string())
+            .arg("-hostname")
+            .arg(&cfg.host_name)
+            .arg("-stun=false")
+            .arg("-http-port=-1")
+            .arg("-c")
+            .arg(&cfg.derper_config_path)
+            .arg("-certmode")
+            .arg(&cfg.derper_cert_mode)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        if let Some(cert_dir) = &cfg.derper_cert_dir {
+            command.arg("-certdir").arg(cert_dir);
+        }
+        if cfg.verify_clients {
+            command.arg("-verify-clients");
+        }
+        if let Some(url) = &cfg.verify_client_url {
+            command.arg("-verify-client-url").arg(url);
+        }
+
+        let child = command.spawn()?;
+        let pid = child.id();
+        let child = Arc::new(Mutex::new(Some(child)));
+        let status = Arc::new(Mutex::new(SidecarStatus::Running { pid }));
+
+        watch_sidecar(Arc::clone(&child), Arc::clone(&status));
+
+        Ok(Self { child, status })
+    }
+
+    /// Return the latest observed process status.
+    pub fn status(&self) -> SidecarStatus {
+        lock_or_recover(&self.status).clone()
+    }
+
+    /// Stop the sidecar process. Idempotent.
+    pub fn terminate(&self) {
+        let mut guard = lock_or_recover(&self.child);
+        let Some(child) = guard.as_mut() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        *guard = None;
+        *lock_or_recover(&self.status) = SidecarStatus::NotStarted;
+    }
+}
+
+impl Drop for DerperSidecar {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+fn watch_sidecar(
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    status: Arc<Mutex<SidecarStatus>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let exit_code = {
+                let mut guard = lock_or_recover(&child);
+                let Some(child) = guard.as_mut() else {
+                    return;
+                };
+                match child.try_wait() {
+                    Ok(Some(exit)) => {
+                        *guard = None;
+                        Some(exit.code())
+                    }
+                    Ok(None) => None,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "derper sidecar try_wait failed");
+                        None
+                    }
+                }
+            };
+
+            if let Some(code) = exit_code {
+                *lock_or_recover(&status) = SidecarStatus::Exited { code };
+                return;
+            }
+        }
+    });
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +739,75 @@ mod tests {
 
         assert_eq!(server.name, "nyc1");
         assert!(server.stun_enabled);
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_disabled_starts_no_listeners() {
+        let runtime = EmbeddedDerpRuntime::start(EmbeddedDerpConfig::default())
+            .await
+            .unwrap();
+
+        assert!(runtime.stun_local_addr().is_none());
+        assert!(runtime.sidecar_status().is_none());
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_stun_only_binds_udp_listener() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.local".to_string(),
+            stun_addr: Some("127.0.0.1:0".parse().unwrap()),
+            stun_only: true,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let runtime = EmbeddedDerpRuntime::start(cfg).await.unwrap();
+        let addr = runtime.stun_local_addr().unwrap();
+
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(addr.port(), 0);
+        assert!(runtime.sidecar_status().is_none());
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_requires_derper_binary_for_relay() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.local".to_string(),
+            derper_config_path: "/tmp/headscale-rs-test-derper.key".into(),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let result = EmbeddedDerpRuntime::start(cfg).await;
+
+        assert!(matches!(
+            result,
+            Err(EmbeddedDerpError::MissingDerperBinary(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_requires_stun_addr_for_stun_only_mode() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.local".to_string(),
+            stun_only: true,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let result = EmbeddedDerpRuntime::start(cfg).await;
+
+        assert!(matches!(result, Err(EmbeddedDerpError::MissingStunAddress)));
+    }
+
+    #[test]
+    fn embedded_derp_config_resolves_default_sidecar_config_path() {
+        let cfg = EmbeddedDerpConfig::default()
+            .with_default_derper_config_path(std::path::Path::new("/var/lib/headscale"));
+
+        assert_eq!(
+            cfg.derper_config_path,
+            std::path::PathBuf::from("/var/lib/headscale/derper.key")
+        );
     }
 }

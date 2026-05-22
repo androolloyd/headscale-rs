@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use headscale_core::config::OidcConfig;
+use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use serde::{Deserialize, Serialize};
 
 /// Top-level CLI configuration.
@@ -59,6 +59,9 @@ pub(crate) struct ServerConfig {
     /// DERP relay servers
     #[serde(default)]
     pub derp_servers: Vec<DerpServerConfig>,
+    /// Embedded DERP/STUN runtime.
+    #[serde(default, skip_serializing_if = "embedded_derp_config_is_default")]
+    pub embedded_derp: EmbeddedDerpConfig,
 }
 
 /// DERP server configuration.
@@ -191,6 +194,10 @@ fn oidc_config_is_default(config: &OidcConfig) -> bool {
     config == &OidcConfig::default()
 }
 
+fn embedded_derp_config_is_default(config: &EmbeddedDerpConfig) -> bool {
+    config == &EmbeddedDerpConfig::default()
+}
+
 // Default value functions for serde
 fn default_listen() -> String {
     "0.0.0.0:8080".to_string()
@@ -259,6 +266,7 @@ impl Default for ServerConfig {
             grpc_listen_addr: default_grpc_listen_addr(),
             grpc_allow_insecure: false,
             derp_servers: Vec::new(),
+            embedded_derp: EmbeddedDerpConfig::default(),
         }
     }
 }
@@ -382,6 +390,69 @@ grpc_allow_insecure = true
         assert_eq!(server.unix_socket_permission, 0o700);
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
+    }
+
+    #[test]
+    fn loads_embedded_derp_runtime_fields() {
+        let source = r#"
+[server]
+server_url = "https://headscale.example"
+
+[server.embedded_derp]
+enabled = true
+host_name = "derp.example.com"
+region_id = 901
+region_code = "test"
+region_name = "Test DERP"
+derp_port = 8443
+stun_addr = "0.0.0.0:3478"
+stun_only = true
+omit_default_regions = true
+insecure_for_tests = true
+derper_binary = "/usr/local/bin/derper"
+derper_listen_addr = "127.0.0.1:8443"
+derper_config_path = "/var/lib/headscale/derper.key"
+derper_cert_mode = "manual"
+derper_cert_dir = "/var/lib/headscale/certs"
+verify_client_url = "https://headscale.example/verify"
+verify_clients = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert!(embedded.enabled);
+        assert_eq!(embedded.host_name, "derp.example.com");
+        assert_eq!(embedded.region_id, 901);
+        assert_eq!(embedded.region_code, "test");
+        assert_eq!(embedded.region_name, "Test DERP");
+        assert_eq!(embedded.derp_port, 8443);
+        assert_eq!(embedded.stun_addr, Some("0.0.0.0:3478".parse().unwrap()));
+        assert!(embedded.stun_only);
+        assert!(embedded.omit_default_regions);
+        assert!(embedded.insecure_for_tests);
+        assert_eq!(
+            embedded.derper_binary,
+            PathBuf::from("/usr/local/bin/derper")
+        );
+        assert_eq!(
+            embedded.derper_listen_addr,
+            "127.0.0.1:8443".parse().unwrap()
+        );
+        assert_eq!(
+            embedded.derper_config_path,
+            PathBuf::from("/var/lib/headscale/derper.key")
+        );
+        assert_eq!(embedded.derper_cert_mode, "manual");
+        assert_eq!(
+            embedded.derper_cert_dir,
+            Some(PathBuf::from("/var/lib/headscale/certs"))
+        );
+        assert_eq!(
+            embedded.verify_client_url.as_deref(),
+            Some("https://headscale.example/verify")
+        );
+        assert!(embedded.verify_clients);
     }
 
     #[test]

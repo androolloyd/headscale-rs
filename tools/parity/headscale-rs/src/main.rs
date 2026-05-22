@@ -455,6 +455,50 @@ struct UserProfileSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct ServiceSummary {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    proto: String,
+    #[serde(skip_serializing_if = "is_zero_u16")]
+    port: u16,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocationSummary {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    country: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    country_code: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    city: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    city_code: String,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    latitude: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    longitude: f64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    priority: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct TpmInfoSummary {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    manufacturer: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    vendor: String,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    model: i32,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    firmware_version: u64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    spec_revision: i32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    family_indicator: String,
+}
+
+#[derive(Debug, Serialize)]
 struct HostInfoSummary {
     #[serde(skip_serializing_if = "String::is_empty")]
     ipn_version: String,
@@ -515,6 +559,8 @@ struct HostInfoSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     wol_macs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    services: Vec<ServiceSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     ssh_host_keys: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     cloud: String,
@@ -528,6 +574,10 @@ struct HostInfoSummary {
     services_hash: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     exit_node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<LocationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tpm: Option<TpmInfoSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state_encrypted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1828,6 +1878,38 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
     );
     let mut routable_ips = hostinfo.routable_ips;
     routable_ips.sort();
+    let mut services: Vec<ServiceSummary> = hostinfo
+        .services
+        .into_iter()
+        .map(|service| ServiceSummary {
+            proto: service.proto,
+            port: service.port,
+            description: service.description,
+        })
+        .collect();
+    services.sort_by(|a, b| {
+        a.proto
+            .cmp(&b.proto)
+            .then(a.port.cmp(&b.port))
+            .then(a.description.cmp(&b.description))
+    });
+    let location = hostinfo.location.map(|location| LocationSummary {
+        country: location.country,
+        country_code: location.country_code,
+        city: location.city,
+        city_code: location.city_code,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        priority: location.priority,
+    });
+    let tpm = hostinfo.tpm.map(|tpm| TpmInfoSummary {
+        manufacturer: tpm.manufacturer,
+        vendor: tpm.vendor,
+        model: tpm.model,
+        firmware_version: tpm.firmware_version,
+        spec_revision: tpm.spec_revision,
+        family_indicator: tpm.family_indicator,
+    });
     HostInfoSummary {
         ipn_version: hostinfo.ipn_version,
         frontend_log_id: hostinfo.frontend_log_id,
@@ -1858,6 +1940,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         routable_ips,
         request_tags: hostinfo.request_tags,
         wol_macs: hostinfo.wol_macs,
+        services,
         ssh_host_keys: hostinfo.ssh_host_keys,
         cloud: hostinfo.cloud,
         userspace: hostinfo.userspace,
@@ -1865,6 +1948,8 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         app_connector: hostinfo.app_connector,
         services_hash: hostinfo.services_hash,
         exit_node_id: hostinfo.exit_node_id,
+        location,
+        tpm,
         state_encrypted: hostinfo.state_encrypted,
         mapping_varies_by_dest_ip,
         working_ipv6,
@@ -1886,6 +1971,10 @@ fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
@@ -1896,6 +1985,10 @@ fn is_zero_i64(v: &i64) -> bool {
 
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn filter_rule_out(rule: headscale_api::tailscale_wire::wire::FilterRule) -> FilterRuleOut {

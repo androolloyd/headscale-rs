@@ -38,6 +38,10 @@
         "RoutableIPs": ["10.10.0.0/24", "fd7a:115c:a1e0::/48"],
         "RequestTags": ["tag:server"],
         "WoLMACs": ["00:11:22:33:44:55"],
+        "Services": [
+          { "Proto": "tcp", "Port": 443, "Description": "https" },
+          { "Proto": "peerapi4", "Port": 5252 }
+        ],
         "sshHostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"],
         "Cloud": "aws",
         "Userspace": false,
@@ -45,6 +49,23 @@
         "AppConnector": false,
         "ServicesHash": "services-hash-1",
         "ExitNodeID": "n99",
+        "Location": {
+          "Country": "Canada",
+          "CountryCode": "CA",
+          "City": "Halifax",
+          "CityCode": "YHZ",
+          "Latitude": 44.6488,
+          "Longitude": -63.5752,
+          "Priority": 7
+        },
+        "TPM": {
+          "Manufacturer": "MSFT",
+          "Vendor": "Microsoft",
+          "Model": 42,
+          "FirmwareVersion": 65538,
+          "SpecRevision": 184,
+          "FamilyIndicator": "2.0"
+        },
         "StateEncrypted": true,
         "NetInfo": {
           "MappingVariesByDestIP": true,
@@ -77,6 +98,19 @@
         "Container": true,
         "RoutableIPs": ["10.10.0.0/24"],
         "RequestTags": ["tag:server"],
+        "Services": [{ "Proto": "udp", "Port": 53, "Description": "dns" }],
+        "Location": {
+          "Country": "Canada",
+          "CountryCode": "CA",
+          "City": "Halifax",
+          "Latitude": 44.6488,
+          "Longitude": -63.5752
+        },
+        "TPM": {
+          "Manufacturer": "MSFT",
+          "FirmwareVersion": 65538,
+          "FamilyIndicator": "2.0"
+        },
         "NetInfo": {
           "WorkingUDP": false,
           "PreferredDERP": 900,

@@ -16,10 +16,10 @@ use headscale_api::tailscale_wire::MachineRecord;
 use headscale_api::tailscale_wire::wire::{
     ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams, DerpMap,
     DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig, DnsResolver,
-    FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetInfo, NetPortRange, PeerChange,
-    PingRequest, PortRange, RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin,
-    SimpleUser, SshAction, SshPolicy, SshPrincipal, SshRule, TkaInfo, UserProfile,
-    stable_id_from_key, strip_key_prefix,
+    FilterRule, HostInfo, HostInfoLocation, HostInfoService, MapNode, MapRequest, MapResponse,
+    NetInfo, NetPortRange, PeerChange, PingRequest, PortRange, RegisterAuth, RegisterRequest,
+    RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy, SshPrincipal, SshRule,
+    TkaInfo, TpmInfo, UserProfile, stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -119,6 +119,18 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         routable_ips: vec!["10.0.0.0/24".into()],
         request_tags: vec!["tag:server".into()],
         wol_macs: vec!["00:11:22:33:44:55".into()],
+        services: vec![
+            HostInfoService {
+                proto: "tcp".into(),
+                port: 443,
+                description: "https".into(),
+            },
+            HostInfoService {
+                proto: "peerapi4".into(),
+                port: 5252,
+                description: String::new(),
+            },
+        ],
         ssh_host_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey".into()],
         cloud: "aws".into(),
         userspace: Some(false),
@@ -126,6 +138,23 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         app_connector: Some(false),
         services_hash: "services-hash-1".into(),
         exit_node_id: "n99".into(),
+        location: Some(HostInfoLocation {
+            country: "Canada".into(),
+            country_code: "CA".into(),
+            city: "Halifax".into(),
+            city_code: "YHZ".into(),
+            latitude: 44.6488,
+            longitude: -63.5752,
+            priority: 7,
+        }),
+        tpm: Some(TpmInfo {
+            manufacturer: "MSFT".into(),
+            vendor: "Microsoft".into(),
+            model: 42,
+            firmware_version: 65_538,
+            spec_revision: 184,
+            family_indicator: "2.0".into(),
+        }),
         state_encrypted: Some(true),
         net_info: Some(NetInfo {
             mapping_varies_by_dest_ip: Some(true),
@@ -161,6 +190,11 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["Container"], true);
     assert_eq!(v["Desktop"], false);
     assert_eq!(v["WoLMACs"], serde_json::json!(["00:11:22:33:44:55"]));
+    assert_eq!(v["Services"][0]["Proto"], "tcp");
+    assert_eq!(v["Services"][0]["Port"], 443);
+    assert_eq!(v["Services"][0]["Description"], "https");
+    assert_eq!(v["Services"][1]["Proto"], "peerapi4");
+    assert_eq!(v["Services"][1]["Port"], 5252);
     assert_eq!(
         v["sshHostKeys"],
         serde_json::json!(["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"])
@@ -169,6 +203,19 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["Userspace"], false);
     assert_eq!(v["UserspaceRouter"], true);
     assert_eq!(v["AppConnector"], false);
+    assert_eq!(v["Location"]["Country"], "Canada");
+    assert_eq!(v["Location"]["CountryCode"], "CA");
+    assert_eq!(v["Location"]["City"], "Halifax");
+    assert_eq!(v["Location"]["CityCode"], "YHZ");
+    assert_eq!(v["Location"]["Latitude"], 44.6488);
+    assert_eq!(v["Location"]["Longitude"], -63.5752);
+    assert_eq!(v["Location"]["Priority"], 7);
+    assert_eq!(v["TPM"]["Manufacturer"], "MSFT");
+    assert_eq!(v["TPM"]["Vendor"], "Microsoft");
+    assert_eq!(v["TPM"]["Model"], 42);
+    assert_eq!(v["TPM"]["FirmwareVersion"], 65_538);
+    assert_eq!(v["TPM"]["SpecRevision"], 184);
+    assert_eq!(v["TPM"]["FamilyIndicator"], "2.0");
     assert_eq!(v["StateEncrypted"], true);
     assert_eq!(v["NetInfo"]["MappingVariesByDestIP"], true);
     assert_eq!(v["NetInfo"]["WorkingIPv6"], false);
@@ -201,6 +248,15 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(back.userspace_router, Some(true));
     assert_eq!(back.app_connector, Some(false));
     assert_eq!(back.state_encrypted, Some(true));
+    assert_eq!(back.services.len(), 2);
+    assert_eq!(back.services[0].proto, "tcp");
+    assert_eq!(back.services[0].port, 443);
+    let location = back.location.unwrap();
+    assert_eq!(location.country_code, "CA");
+    assert_eq!(location.priority, 7);
+    let tpm = back.tpm.unwrap();
+    assert_eq!(tpm.manufacturer, "MSFT");
+    assert_eq!(tpm.firmware_version, 65_538);
     assert_eq!(back.ssh_host_keys.len(), 1);
     let net_info = back.net_info.unwrap();
     assert_eq!(net_info.mapping_varies_by_dest_ip, Some(true));

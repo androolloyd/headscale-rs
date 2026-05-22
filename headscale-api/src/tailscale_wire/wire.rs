@@ -383,6 +383,59 @@ pub struct NetInfo {
     pub firewall_mode: String,
 }
 
+/// `tailcfg.Service`, the legacy per-node service advertisement list in
+/// `Hostinfo.Services`.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HostInfoService {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proto: String,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// `tailcfg.Location`, optional geolocation metadata advertised in
+/// `Hostinfo.Location`.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HostInfoLocation {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub country: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub country_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub city: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub city_code: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub latitude: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub longitude: f64,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
+}
+
+/// `tailcfg.TPMInfo`, optional TPM 2.0 metadata advertised in
+/// `Hostinfo.TPM`.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct TpmInfo {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manufacturer: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vendor: String,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub model: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub firmware_version: u64,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub spec_revision: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family_indicator: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct HostInfo {
@@ -466,7 +519,7 @@ pub struct HostInfo {
     )]
     pub go_version: String,
     /// Subnet routes advertised by the client.
-    #[serde(default, rename = "RoutableIPs")]
+    #[serde(default, rename = "RoutableIPs", skip_serializing_if = "Vec::is_empty")]
     pub routable_ips: Vec<String>,
     /// ACL tags requested by the client, e.g. `tailscale up
     /// --advertise-tags=tag:server`.
@@ -475,6 +528,9 @@ pub struct HostInfo {
     /// Wake-on-LAN MAC addresses.
     #[serde(default, rename = "WoLMACs", skip_serializing_if = "Vec::is_empty")]
     pub wol_macs: Vec<String>,
+    /// Legacy services advertised by this machine.
+    #[serde(default, rename = "Services", skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<HostInfoService>,
     /// Tailscale SSH host keys. Upstream uses a lower-camel legacy JSON name.
     #[serde(default, rename = "sshHostKeys", skip_serializing_if = "Vec::is_empty")]
     pub ssh_host_keys: Vec<String>,
@@ -494,6 +550,10 @@ pub struct HostInfo {
         skip_serializing_if = "String::is_empty"
     )]
     pub exit_node_id: String,
+    #[serde(default, rename = "Location", skip_serializing_if = "Option::is_none")]
+    pub location: Option<HostInfoLocation>,
+    #[serde(default, rename = "TPM", skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<TpmInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_encrypted: Option<bool>,
     /// NAT/check results advertised by the client. We currently persist

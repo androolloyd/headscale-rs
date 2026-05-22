@@ -289,6 +289,31 @@ type userProfileSummary struct {
 	ProfilePicURL string `json:"profile_pic_url,omitempty"`
 }
 
+type serviceSummary struct {
+	Proto       string `json:"proto,omitempty"`
+	Port        uint16 `json:"port,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type locationSummary struct {
+	Country     string  `json:"country,omitempty"`
+	CountryCode string  `json:"country_code,omitempty"`
+	City        string  `json:"city,omitempty"`
+	CityCode    string  `json:"city_code,omitempty"`
+	Latitude    float64 `json:"latitude,omitempty"`
+	Longitude   float64 `json:"longitude,omitempty"`
+	Priority    int     `json:"priority,omitempty"`
+}
+
+type tpmInfoSummary struct {
+	Manufacturer    string `json:"manufacturer,omitempty"`
+	Vendor          string `json:"vendor,omitempty"`
+	Model           int    `json:"model,omitempty"`
+	FirmwareVersion uint64 `json:"firmware_version,omitempty"`
+	SpecRevision    int    `json:"spec_revision,omitempty"`
+	FamilyIndicator string `json:"family_indicator,omitempty"`
+}
+
 type hostInfoSummary struct {
 	IPNVersion      string             `json:"ipn_version,omitempty"`
 	FrontendLogID   string             `json:"frontend_log_id,omitempty"`
@@ -319,6 +344,7 @@ type hostInfoSummary struct {
 	RoutableIPs     []string           `json:"routable_ips,omitempty"`
 	RequestTags     []string           `json:"request_tags,omitempty"`
 	WoLMACs         []string           `json:"wol_macs,omitempty"`
+	Services        []serviceSummary   `json:"services,omitempty"`
 	SSHHostKeys     []string           `json:"ssh_host_keys,omitempty"`
 	Cloud           string             `json:"cloud,omitempty"`
 	Userspace       *bool              `json:"userspace,omitempty"`
@@ -326,6 +352,8 @@ type hostInfoSummary struct {
 	AppConnector    *bool              `json:"app_connector,omitempty"`
 	ServicesHash    string             `json:"services_hash,omitempty"`
 	ExitNodeID      string             `json:"exit_node_id,omitempty"`
+	Location        *locationSummary   `json:"location,omitempty"`
+	TPM             *tpmInfoSummary    `json:"tpm,omitempty"`
 	StateEncrypted  *bool              `json:"state_encrypted,omitempty"`
 	MappingVaries   *bool              `json:"mapping_varies_by_dest_ip,omitempty"`
 	WorkingIPv6     *bool              `json:"working_ipv6,omitempty"`
@@ -1150,6 +1178,56 @@ func stringSlicePtr(in []string) *[]string {
 	return &out
 }
 
+func summarizeServices(in []tailcfg.Service) []serviceSummary {
+	out := make([]serviceSummary, 0, len(in))
+	for _, service := range in {
+		out = append(out, serviceSummary{
+			Proto:       string(service.Proto),
+			Port:        service.Port,
+			Description: service.Description,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Proto != out[j].Proto {
+			return out[i].Proto < out[j].Proto
+		}
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].Description < out[j].Description
+	})
+	return out
+}
+
+func summarizeLocation(location *tailcfg.Location) *locationSummary {
+	if location == nil {
+		return nil
+	}
+	return &locationSummary{
+		Country:     location.Country,
+		CountryCode: location.CountryCode,
+		City:        location.City,
+		CityCode:    location.CityCode,
+		Latitude:    location.Latitude,
+		Longitude:   location.Longitude,
+		Priority:    location.Priority,
+	}
+}
+
+func summarizeTPM(tpm tailcfg.TPMInfo, ok bool) *tpmInfoSummary {
+	if !ok {
+		return nil
+	}
+	return &tpmInfoSummary{
+		Manufacturer:    tpm.Manufacturer,
+		Vendor:          tpm.Vendor,
+		Model:           tpm.Model,
+		FirmwareVersion: tpm.FirmwareVersion,
+		SpecRevision:    tpm.SpecRevision,
+		FamilyIndicator: tpm.FamilyIndicator,
+	}
+}
+
 func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 	if !hostinfo.Valid() {
 		return nil
@@ -1182,6 +1260,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		pcp = optBoolPtr(netInfo.PCP())
 		derpLatency = netInfo.DERPLatency().AsMap()
 	}
+	tpm, tpmOK := hostinfo.TPM().GetOk()
 	return &hostInfoSummary{
 		IPNVersion:      hostinfo.IPNVersion(),
 		FrontendLogID:   hostinfo.FrontendLogID(),
@@ -1212,6 +1291,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		RoutableIPs:     prefixStrings(hostinfo.RoutableIPs().AsSlice()),
 		RequestTags:     hostinfo.RequestTags().AsSlice(),
 		WoLMACs:         hostinfo.WoLMACs().AsSlice(),
+		Services:        summarizeServices(hostinfo.Services().AsSlice()),
 		SSHHostKeys:     hostinfo.SSH_HostKeys().AsSlice(),
 		Cloud:           hostinfo.Cloud(),
 		Userspace:       optBoolPtr(hostinfo.Userspace()),
@@ -1219,6 +1299,8 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		AppConnector:    optBoolPtr(hostinfo.AppConnector()),
 		ServicesHash:    hostinfo.ServicesHash(),
 		ExitNodeID:      string(hostinfo.ExitNodeID()),
+		Location:        summarizeLocation(hostinfo.Location().AsStruct()),
+		TPM:             summarizeTPM(tpm, tpmOK),
 		StateEncrypted:  optBoolPtr(hostinfo.StateEncrypted()),
 		MappingVaries:   mappingVaries,
 		WorkingIPv6:     workingIPv6,

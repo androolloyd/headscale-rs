@@ -1311,6 +1311,8 @@ pub fn router(state: WireState) -> Router {
             "/bootstrap-dns",
             any(basic_handlers::handle_derp_bootstrap_dns),
         )
+        .route("/debug", get(basic_handlers::handle_debug_redirect))
+        .route("/debug/", get(basic_handlers::handle_debug_index))
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),

@@ -28,6 +28,24 @@ const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE
 const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
+const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
+    ("/debug/overview", "State overview"),
+    ("/debug/config", "Current configuration"),
+    ("/debug/policy", "Current policy"),
+    ("/debug/filter", "Current filter rules"),
+    ("/debug/ssh", "SSH policies per node"),
+    ("/debug/derp", "DERP map configuration"),
+    ("/debug/nodestore", "NodeStore information"),
+    (
+        "/debug/registration-cache",
+        "Registration cache information",
+    ),
+    ("/debug/routes", "Primary routes"),
+    ("/debug/policy-manager", "Policy manager state"),
+    ("/debug/mapresponses", "Map responses for all nodes"),
+    ("/debug/batcher", "Batcher connected nodes"),
+    ("/metrics", "Prometheus metrics"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -227,6 +245,24 @@ pub async fn handle_blank() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         blank_html(),
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_redirect() -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/debug/")],
+        "",
+    )
+        .into_response()
+}
+
+pub async fn handle_debug_index() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        debug_index_html(),
     )
         .into_response()
 }
@@ -2219,6 +2255,42 @@ fn blank_html() -> &'static str {
     r#"<html lang="en"><head><meta charset="UTF-8"><link rel="icon" href="/favicon.ico"></head><body></body></html>"#
 }
 
+fn debug_index_html() -> String {
+    let version = version_info();
+    let mut out = String::from("<html><body><h1>headscale debug</h1><ul>");
+    out.push_str("<li><b>Version:</b> ");
+    out.push_str(&html_escape(&version.version));
+    out.push_str("</li>");
+
+    for (href, description) in DEBUG_INDEX_LINKS {
+        out.push_str(r#"<li><a href=""#);
+        out.push_str(&html_escape(href));
+        out.push_str(r#"">"#);
+        out.push_str(&html_escape(href));
+        out.push_str("</a> (");
+        out.push_str(&html_escape(description));
+        out.push_str(")</li>");
+    }
+
+    out.push_str("</ul></body></html>");
+    out
+}
+
+fn html_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn apple_mobileconfig(url: &str, payload_type: &str, platform: &str) -> String {
     let payload_uuid = match platform {
         "ios" => "00000000-0000-4000-8000-000000000001",
@@ -2655,6 +2727,64 @@ mod tests {
             parsed.get("192.0.2.10"),
             Some(&vec![std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))])
         );
+    }
+
+    #[tokio::test]
+    async fn debug_root_redirects_to_slash_like_headscale_go_servemux() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/debug/")
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_index_lists_headscale_go_debug_links() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("<h1>headscale debug</h1>"), "{body}");
+        assert!(body.contains("<li><b>Version:</b> "), "{body}");
+        for (href, description) in DEBUG_INDEX_LINKS {
+            assert!(
+                body.contains(&format!(r#"<a href="{href}">{href}</a>"#)),
+                "{body}"
+            );
+            assert!(body.contains(description), "{body}");
+        }
     }
 
     #[tokio::test]

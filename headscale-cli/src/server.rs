@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use headscale_api::Server;
 use headscale_api::admin::{
     PersistentMachineAdmin, PersistentOidcRegistrationHandler, PersistentPreauthAdmin,
     PersistentUserAdmin,
@@ -19,11 +18,8 @@ use headscale_api::tailscale_wire::{
     AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, RegistrationCache,
     ServerNoiseKey, WireState, serve,
 };
-use headscale_core::MeshCoordinator;
 use headscale_core::config::OidcConfig;
 use headscale_db::Database;
-use headscale_payments::Ledger;
-use headscale_resources::ResourceRegistry;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunServerConfig {
@@ -39,45 +35,7 @@ pub(crate) struct RunServerConfig {
 
 /// Run the control plane server.
 pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
-    if oidc_is_configured(&cfg.oidc) {
-        return run_tailscale_wire_server(cfg).await;
-    }
-
-    run_legacy_server(&cfg.listen, &cfg.db_path, &cfg.mesh_cidr).await
-}
-
-async fn run_legacy_server(listen: &str, db_path: &Path, mesh_cidr: &str) -> Result<()> {
-    tracing::info!("Starting headscale control plane");
-    tracing::info!("  Listen: {}", listen);
-    tracing::info!("  Database: {}", db_path.display());
-    tracing::info!("  Mesh CIDR: {}", mesh_cidr);
-
-    // Ensure database directory exists
-    if let Some(parent) = db_path.parent()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create database directory: {}", parent.display())
-        })?;
-    }
-
-    // Create core components
-    let mesh = Arc::new(MeshCoordinator::new(mesh_cidr));
-    let ledger = Arc::new(Ledger::new());
-    let resources = Arc::new(ResourceRegistry::new());
-
-    // Parse listen address
-    let listen_addr = listen
-        .parse()
-        .with_context(|| format!("Invalid listen address: {listen}"))?;
-
-    // Create and run server
-    let server = Server::new(mesh, ledger, resources, listen_addr);
-
-    tracing::info!("Control plane ready");
-    server.run().await.context("Server error")?;
-
-    Ok(())
+    run_tailscale_wire_server(cfg).await
 }
 
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
@@ -89,10 +47,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     );
     tracing::info!("  Database: {}", cfg.db_path.display());
     tracing::info!("  State dir: {}", cfg.state_dir.display());
+    tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
 
     let server_url = cfg.server_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
-            "server.server_url is required when OIDC is configured so /oidc/callback can be advertised"
+            "server.server_url is required so clients receive absolute registration URLs"
         )
     })?;
     ensure_parent_dir(&cfg.db_path)?;
@@ -104,15 +63,12 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     })?;
 
     let db = open_sqlite_database(&cfg.db_path).await?;
-    let runtime = build_persistent_wire_runtime(
-        db.pool(),
-        &cfg.state_dir,
-        server_url,
-        runtime_from_core_oidc(&cfg.oidc, server_url)
-            .await
-            .context("build OIDC runtime")?,
-    )
-    .await?;
+    let oidc = runtime_from_core_oidc(&cfg.oidc, server_url)
+        .await
+        .context("build OIDC runtime")?;
+    let runtime =
+        build_persistent_wire_runtime(db.pool(), &cfg.state_dir, server_url, &cfg.mesh_cidr, oidc)
+            .await?;
 
     let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let https_addr = cfg
@@ -147,6 +103,7 @@ async fn build_persistent_wire_runtime(
     pool: &sqlx::SqlitePool,
     state_dir: &Path,
     server_url: &str,
+    mesh_cidr: &str,
     oidc: Option<OidcAuthRuntime>,
 ) -> Result<PersistentWireRuntime> {
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
@@ -185,7 +142,7 @@ async fn build_persistent_wire_runtime(
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
         preauth,
-        ip_allocator: Arc::new(CgnatIpAllocator),
+        ip_allocator: Arc::new(CidrIpAllocator::from_cidr(mesh_cidr)?),
         machines: wire_registry,
         registration_store: Some(machines),
         derp_map: Arc::new(DerpMap::default()),
@@ -267,10 +224,6 @@ fn flatten_listener_result(
     }
 }
 
-fn oidc_is_configured(oidc: &OidcConfig) -> bool {
-    !oidc.issuer.trim().is_empty()
-}
-
 fn hostname_from_server_url(server_url: &str) -> String {
     server_url
         .trim()
@@ -283,18 +236,61 @@ fn hostname_from_server_url(server_url: &str) -> String {
         .to_string()
 }
 
-struct CgnatIpAllocator;
+#[derive(Debug, Clone)]
+struct CidrIpAllocator {
+    network: u32,
+    usable_hosts: u64,
+}
 
-impl IpAllocator for CgnatIpAllocator {
+impl CidrIpAllocator {
+    fn from_cidr(cidr: &str) -> Result<Self> {
+        let (addr, prefix) = cidr
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
+        let addr: Ipv4Addr = addr
+            .parse()
+            .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid IPv4 address"))?;
+        let prefix: u8 = prefix
+            .parse()
+            .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid prefix length"))?;
+        if prefix > 32 {
+            anyhow::bail!("invalid server.mesh_cidr {cidr:?}: prefix length must be <= 32");
+        }
+
+        let host_bits = 32u32 - u32::from(prefix);
+        let total_hosts = if host_bits == 32 {
+            1u64 << 32
+        } else {
+            1u64 << host_bits
+        };
+        let usable_hosts = total_hosts.saturating_sub(3);
+        if usable_hosts == 0 {
+            anyhow::bail!(
+                "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
+            );
+        }
+
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << host_bits
+        };
+        Ok(Self {
+            network: u32::from(addr) & mask,
+            usable_hosts,
+        })
+    }
+}
+
+impl IpAllocator for CidrIpAllocator {
     fn allocate(&self, node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in node_key_hex.as_bytes() {
             h ^= u64::from(*b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        let host = ((h as u32) % ((1u32 << 22) - 3)) + 2;
-        const CGNAT_BASE: u32 = 0x6440_0000;
-        Ok(Ipv4Addr::from((CGNAT_BASE | host).to_be_bytes()))
+        let host = (h % self.usable_hosts) + 2;
+        Ok(Ipv4Addr::from(self.network + host as u32))
     }
 }
 
@@ -331,6 +327,7 @@ mod tests {
             db.pool(),
             dir.path(),
             "https://headscale.example",
+            "100.64.0.0/10",
             Some(oidc_runtime()),
         )
         .await
@@ -345,6 +342,55 @@ mod tests {
             Some("https://headscale.example")
         );
         assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_without_oidc_keeps_web_registration_mode() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(runtime.oidc.is_none());
+        assert_eq!(
+            runtime.state.public_control_url.as_deref(),
+            Some("https://headscale.example")
+        );
+        assert!(runtime.state.registration_store.is_some());
+        assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_oidc_server_requires_public_server_url_before_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_server(RunServerConfig {
+            listen: "127.0.0.1:0".into(),
+            db_path: dir.path().join("db.sqlite"),
+            mesh_cidr: "100.64.0.0/10".into(),
+            server_url: None,
+            state_dir: dir.path().join("state"),
+            https_listen: None,
+            tls_hostname: None,
+            oidc: OidcConfig::default(),
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains(
+                "server.server_url is required so clients receive absolute registration URLs"
+            ),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]
@@ -388,6 +434,7 @@ mod tests {
             db.pool(),
             dir.path(),
             "https://headscale.example",
+            "100.64.0.0/10",
             Some(oidc_runtime()),
         )
         .await
@@ -421,6 +468,7 @@ mod tests {
             db.pool(),
             dir.path(),
             "https://headscale.example",
+            "100.64.0.0/10",
             Some(oidc_runtime()),
         )
         .await
@@ -457,11 +505,16 @@ mod tests {
     }
 
     #[test]
-    fn oidc_config_detection_uses_issuer() {
-        assert!(!oidc_is_configured(&OidcConfig::default()));
-        assert!(oidc_is_configured(&OidcConfig {
-            issuer: "https://issuer.example".into(),
-            ..OidcConfig::default()
-        }));
+    fn cidr_allocator_uses_configured_ipv4_prefix() {
+        let allocator = CidrIpAllocator::from_cidr("10.44.0.0/16").unwrap();
+        let ip = allocator.allocate("node-key").unwrap();
+
+        assert!(ip.to_string().starts_with("10.44."));
+    }
+
+    #[test]
+    fn cidr_allocator_rejects_invalid_or_tiny_prefixes() {
+        assert!(CidrIpAllocator::from_cidr("not-a-cidr").is_err());
+        assert!(CidrIpAllocator::from_cidr("100.64.0.0/32").is_err());
     }
 }

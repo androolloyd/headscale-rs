@@ -76,8 +76,8 @@ pub mod wire;
 pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
-    DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, RegisterRequest,
-    RegisterResponse,
+    DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, NetInfo,
+    RegisterRequest, RegisterResponse,
 };
 
 // Re-export the lifecycle helper so downstream crates can spawn the GC
@@ -1278,6 +1278,7 @@ mod registry_tests {
             ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
             disco_key: Some(format!("disco-{host:08x}")),
             endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],
+            home_derp: 0,
             expiry: None,
             last_seen: now,
             ephemeral: false,

@@ -76,6 +76,7 @@ fn map_response_emits_required_stock_client_fields() {
                 os: "linux".into(),
                 os_version: "6.8".into(),
                 routable_ips: Vec::new(),
+                net_info: None,
             },
             created: None,
             key_expiry: None,

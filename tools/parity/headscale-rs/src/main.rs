@@ -440,6 +440,8 @@ struct HostInfoSummary {
     os: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     os_version: String,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    preferred_derp: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1671,6 +1673,10 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         hostname: hostinfo.hostname,
         os: hostinfo.os,
         os_version: hostinfo.os_version,
+        preferred_derp: hostinfo
+            .net_info
+            .map(|net_info| net_info.preferred_derp)
+            .unwrap_or_default(),
     }
 }
 

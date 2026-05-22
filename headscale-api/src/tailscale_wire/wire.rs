@@ -97,6 +97,11 @@ pub struct MachineRecord {
     ///
     /// Upstream JSON tag is `Endpoints` (`tailcfg.Node.Endpoints`).
     pub endpoints: Vec<String>,
+    /// Client's preferred DERP/home region from
+    /// `Hostinfo.NetInfo.PreferredDERP`. Kept separately from the reduced
+    /// `HostInfo` model so map responses can emit `MapNode.HomeDERP`
+    /// and `PeerChange.DERPRegion` like headscale-go.
+    pub home_derp: i32,
     /// P1 (lifecycle): node-key expiry. When `Some(t)` and `t <=
     /// now()`, the `/map` handler MUST return a logout response
     /// (mirrors upstream `Node.IsExpired()` semantics). `None` means
@@ -201,6 +206,7 @@ impl MachineRecord {
             ipv4,
             disco_key: None,
             endpoints: Vec::new(),
+            home_derp: 0,
             expiry: None,
             last_seen: now,
             ephemeral,
@@ -276,6 +282,15 @@ pub struct RegisterAuth {
     pub auth_key: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct NetInfo {
+    /// `tailcfg.NetInfo.PreferredDERP`; zero means disconnected or
+    /// unknown and is omitted by tailcfg.
+    #[serde(default, rename = "PreferredDERP", skip_serializing_if = "is_zero_i32")]
+    pub preferred_derp: i32,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct HostInfo {
@@ -292,6 +307,10 @@ pub struct HostInfo {
     /// Subnet routes advertised by the client.
     #[serde(default, rename = "RoutableIPs")]
     pub routable_ips: Vec<String>,
+    /// NAT/check results advertised by the client. We currently persist
+    /// the preferred DERP field for map-node and stream-patch parity.
+    #[serde(default, rename = "NetInfo", skip_serializing_if = "Option::is_none")]
+    pub net_info: Option<NetInfo>,
 }
 
 /// Response to a successful `register`.
@@ -1273,6 +1292,7 @@ mod tests {
                 os: "linux".into(),
                 os_version: "6.6".into(),
                 routable_ips: Vec::new(),
+                net_info: None,
             }),
             followup: None,
             tailnet: "required:example.com".into(),

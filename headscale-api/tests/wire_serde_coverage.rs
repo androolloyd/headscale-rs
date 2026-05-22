@@ -16,9 +16,9 @@ use headscale_api::tailscale_wire::MachineRecord;
 use headscale_api::tailscale_wire::wire::{
     ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpMap, DerpRegion,
     DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig, DnsResolver, FilterRule,
-    HostInfo, MapNode, MapRequest, MapResponse, NetPortRange, PeerChange, PingRequest, PortRange,
-    RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy,
-    SshPrincipal, SshRule, TkaInfo, UserProfile, stable_id_from_key, strip_key_prefix,
+    HostInfo, MapNode, MapRequest, MapResponse, NetInfo, NetPortRange, PeerChange, PingRequest,
+    PortRange, RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction,
+    SshPolicy, SshPrincipal, SshRule, TkaInfo, UserProfile, stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -91,6 +91,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         os: "linux".into(),
         os_version: "6.6".into(),
         routable_ips: vec!["10.0.0.0/24".into()],
+        net_info: Some(NetInfo { preferred_derp: 7 }),
     };
     let v: Value = serde_json::to_value(&h).unwrap();
     assert_eq!(v["Hostname"], "h1");
@@ -100,6 +101,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     // `OSVersion` not `OsVersion`.
     assert_eq!(v["OSVersion"], "6.6");
     assert_eq!(v["RoutableIPs"], serde_json::json!(["10.0.0.0/24"]));
+    assert_eq!(v["NetInfo"]["PreferredDERP"], 7);
     assert!(v.get("OsVersion").is_none());
 }
 
@@ -110,6 +112,19 @@ fn hostinfo_round_trip_preserves_unset_fields_as_empty_strings() {
     assert_eq!(h.hostname, "");
     assert_eq!(h.os, "");
     assert_eq!(h.os_version, "");
+    assert!(h.net_info.is_none());
+}
+
+#[test]
+fn hostinfo_round_trips_net_info_preferred_derp() {
+    let h: HostInfo = serde_json::from_str(r#"{"NetInfo":{"PreferredDERP":901}}"#).unwrap();
+    assert_eq!(
+        h.net_info.as_ref().map(|net_info| net_info.preferred_derp),
+        Some(901)
+    );
+
+    let v: Value = serde_json::to_value(&h).unwrap();
+    assert_eq!(v["NetInfo"]["PreferredDERP"], 901);
 }
 
 // ---------------------------------------------------------------------------
@@ -797,9 +812,11 @@ fn machine_record_clone_preserves_wall7_fields() {
     );
     rec.disco_key = Some("dk".into());
     rec.endpoints = vec!["1.2.3.4:5".into(), "5.6.7.8:9".into()];
+    rec.home_derp = 901;
     let cloned = rec.clone();
     assert_eq!(cloned.disco_key, rec.disco_key);
     assert_eq!(cloned.endpoints, rec.endpoints);
+    assert_eq!(cloned.home_derp, rec.home_derp);
     assert_eq!(cloned.ipv4, rec.ipv4);
     assert_eq!(cloned.created_at, rec.created_at);
     assert_eq!(cloned.last_seen, rec.last_seen);

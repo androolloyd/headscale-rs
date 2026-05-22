@@ -328,10 +328,16 @@ async fn register_inner(
         .as_ref()
         .map(|(_, existing)| existing.ephemeral)
         .unwrap_or(redeemed.ephemeral);
-    let (disco_key, endpoints) = existing_machine
+    let (disco_key, endpoints, home_derp) = existing_machine
         .as_ref()
-        .map(|(_, existing)| (existing.disco_key.clone(), existing.endpoints.clone()))
-        .unwrap_or((None, Vec::new()));
+        .map(|(_, existing)| {
+            (
+                existing.disco_key.clone(),
+                existing.endpoints.clone(),
+                existing.home_derp,
+            )
+        })
+        .unwrap_or((None, Vec::new(), 0));
     let expiry = if forced_tags.is_empty() {
         body.expiry
     } else {
@@ -350,6 +356,7 @@ async fn register_inner(
         // reauth preserves the last map-provided values.
         disco_key,
         endpoints,
+        home_derp,
         expiry,
         last_seen: now,
         ephemeral,
@@ -398,6 +405,7 @@ async fn register_interactive(
         ipv4,
         disco_key: None,
         endpoints: Vec::new(),
+        home_derp: 0,
         expiry: body.expiry,
         last_seen: now,
         ephemeral: body.ephemeral,
@@ -671,6 +679,9 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             os: String::new(),
             os_version: String::new(),
             routable_ips: rec.available_routes.clone(),
+            net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
+                preferred_derp: rec.home_derp,
+            }),
         },
         created: Some(rec.created_at),
         key_expiry: rec.expiry,
@@ -685,7 +696,12 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         capabilities: Vec::new(),
         cap_map: std::collections::BTreeMap::new(),
         expired,
-        home_derp: 0,
+        home_derp: rec.home_derp,
+        legacy_derp_string: if rec.home_derp == 0 {
+            String::new()
+        } else {
+            format!("127.3.3.40:{}", rec.home_derp)
+        },
         // Wall 7: fan the client-provided DiscoKey + Endpoints back
         // out so `wgengine.Reconfig` materialises this peer. Empty /
         // None ⇒ omitted on the wire (see `skip_serializing_if` on

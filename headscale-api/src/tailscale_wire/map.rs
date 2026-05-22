@@ -213,17 +213,27 @@ fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
     serde_json::to_value(node).ok()
 }
 
-fn endpoint_patch_if_only_endpoints_changed(
+fn peer_patch_if_only_endpoint_or_derp_changed(
     previous: &MapNode,
     current: &MapNode,
 ) -> Option<PeerChange> {
-    if previous.endpoints == current.endpoints {
+    let endpoints_changed = previous.endpoints != current.endpoints;
+    let derp_changed = previous.home_derp != current.home_derp;
+    if !endpoints_changed && !derp_changed {
+        return None;
+    }
+    // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
+    // back to a full node update for clears instead of an empty patch.
+    if derp_changed && current.home_derp == 0 {
         return None;
     }
 
     let previous_normalized = previous.clone();
     let mut current_normalized = current.clone();
     current_normalized.endpoints = previous.endpoints.clone();
+    current_normalized.home_derp = previous.home_derp;
+    current_normalized.legacy_derp_string = previous.legacy_derp_string.clone();
+    current_normalized.hostinfo.net_info = previous.hostinfo.net_info.clone();
     current_normalized.last_seen = previous.last_seen;
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
@@ -232,7 +242,12 @@ fn endpoint_patch_if_only_endpoints_changed(
 
     Some(PeerChange {
         node_id: current.id,
-        endpoints: current.endpoints.clone(),
+        endpoints: if endpoints_changed {
+            current.endpoints.clone()
+        } else {
+            Vec::new()
+        },
+        derp_region: if derp_changed { current.home_derp } else { 0 },
         ..PeerChange::default()
     })
 }
@@ -498,14 +513,15 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         return logout_map_response(&own, &node_key_hex, &state.dns);
     }
 
-    // Wall 7: persist client-provided DiscoKey + Endpoints from
-    // `MapRequest` into the `MachineRecord` so subsequent map calls
-    // for OTHER peers see them on this peer's `MapNode`. Stock
-    // `tailscale` v1.78+ sends these on every map call (initial +
-    // refresh); we treat any non-empty value as a fresh overwrite, and
-    // `None` / empty as "keep what was there." This means a client
-    // that omits the fields on one call doesn't accidentally clear
-    // what previous calls established.
+    // Wall 7: persist client-provided DiscoKey, Endpoints, and
+    // Hostinfo.NetInfo.PreferredDERP from `MapRequest` into the
+    // `MachineRecord` so subsequent map calls for OTHER peers see them
+    // on this peer's `MapNode`. Stock `tailscale` v1.78+ sends the
+    // disco/endpoint values on every map call (initial + refresh); we
+    // treat any non-empty value as a fresh overwrite, and `None` /
+    // empty as "keep what was there." This means a client that omits
+    // the fields on one call doesn't accidentally clear what previous
+    // calls established.
     //
     // `upsert` on the registry notifies waiters, which wakes any
     // peer's streaming `/map` so they pick up the new disco/endpoint
@@ -524,6 +540,13 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         record_changed = true;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
+        if let Some(net_info) = hostinfo.net_info.as_ref()
+            && own.home_derp != net_info.preferred_derp
+        {
+            own.home_derp = net_info.preferred_derp;
+            record_changed = true;
+        }
+
         let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
             Ok(routes) => routes,
             Err(e) => {
@@ -907,7 +930,7 @@ fn rebuild_peer_delta_chunk(
         match last_peer_state.get(&peer.id) {
             None => full_peers_changed.push(peer),
             Some(previous) if map_node_json_value(previous) == map_node_json_value(&peer) => {}
-            Some(previous) => match endpoint_patch_if_only_endpoints_changed(previous, &peer) {
+            Some(previous) => match peer_patch_if_only_endpoint_or_derp_changed(previous, &peer) {
                 Some(patch) => peer_patches.push(patch),
                 None => full_peers_changed.push(peer),
             },
@@ -2259,6 +2282,111 @@ mod tests {
         assert!(patch.disco_key.is_none());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_derp_update_uses_peer_changed_patch() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let mut peer_a = MachineRecord::new_at(
+            chrono::Utc::now(),
+            a.clone(),
+            String::new(),
+            "u".into(),
+            "peer-a".into(),
+            Ipv4Addr::new(100, 64, 0, 10),
+            false,
+        );
+        peer_a.home_derp = 1;
+        state.machines.upsert(a.clone(), peer_a);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{b}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&stream_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].home_derp, 1);
+        assert_eq!(
+            first_mr.peers[0]
+                .hostinfo
+                .net_info
+                .as_ref()
+                .map(|net_info| net_info.preferred_derp),
+            Some(1)
+        );
+
+        let update_req = serde_json::json!({
+            "Version": 39,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "NetInfo": {
+                    "PreferredDERP": 7
+                }
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .machines
+                .get(&a)
+                .expect("peer-a still registered")
+                .home_derp,
+            7
+        );
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed_patch.len(), 1);
+        let patch = &mr.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.derp_region, 7);
+        assert!(patch.disco_key.is_none());
+    }
+
     /// Stream:true: the response body emits the first framed
     /// MapResponse chunk immediately, then a keepalive frame
     /// (`zstd({"KeepAlive":true})`) after [`MAP_KEEPALIVE_INTERVAL`].
@@ -2380,12 +2508,13 @@ mod tests {
         assert!(node.get("Name").is_some());
     }
 
-    /// Wall 7 round-trip: a MapRequest carrying `DiscoKey` +
-    /// `Endpoints` for peer-a must persist into `MachineRecord` and
-    /// then fan back out on peer-b's view of peer-a in the
-    /// MapResponse.Peers list. Without this, `wgengine.Reconfig` on
-    /// peer-b runs at `0/0 peers` and `tailscale ping` returns
-    /// `unknown peer`.
+    /// Wall 7 round-trip: a MapRequest carrying `DiscoKey`,
+    /// `Endpoints`, and `Hostinfo.NetInfo.PreferredDERP` for peer-a
+    /// must persist into `MachineRecord` and then fan back out on
+    /// peer-b's view of peer-a in the MapResponse.Peers list. Without
+    /// the disco/endpoint fields, `wgengine.Reconfig` on peer-b runs at
+    /// `0/0 peers`; without HomeDERP/NetInfo the peer lacks a DERP home
+    /// region for relay contact.
     #[tokio::test]
     async fn map_response_round_trips_disco_key_and_endpoints() {
         let (state, _dir) = fixture();
@@ -2397,12 +2526,18 @@ mod tests {
         let app = router(state.clone());
         let disco_a = format!("discokey:{}", "1a".repeat(32));
         let endpoints_a = vec!["10.0.0.10:41641".to_string(), "[fe80::1]:41641".to_string()];
+        let home_derp_a = 901;
 
-        // Peer-a posts a /map call with DiscoKey + Endpoints set.
+        // Peer-a posts a /map call with DiscoKey + Endpoints + NetInfo set.
         let req_a = serde_json::json!({
             "Version": 39,
             "DiscoKey": &disco_a,
             "Endpoints": &endpoints_a,
+            "Hostinfo": {
+                "NetInfo": {
+                    "PreferredDERP": home_derp_a
+                }
+            },
         });
         let resp = app
             .clone()
@@ -2422,10 +2557,11 @@ mod tests {
         let rec_a = state.machines.get(&a).expect("peer-a still registered");
         assert_eq!(rec_a.disco_key.as_deref(), Some(disco_a.as_str()));
         assert_eq!(rec_a.endpoints, endpoints_a);
+        assert_eq!(rec_a.home_derp, home_derp_a);
 
-        // Peer-b polls /map and must see peer-a's DiscoKey + Endpoints
-        // on its MapNode entry. Pins both the wire-tag spelling and
-        // the payload value.
+        // Peer-b polls /map and must see peer-a's DiscoKey, Endpoints,
+        // HomeDERP, and Hostinfo.NetInfo on its MapNode entry. Pins both
+        // the wire-tag spelling and the payload value.
         let req_b = serde_json::json!({ "Version": 39 });
         let resp = app
             .oneshot(
@@ -2449,11 +2585,32 @@ mod tests {
             raw_str.contains("\"Endpoints\""),
             "Endpoints tag present on the wire: {raw_str}"
         );
+        assert!(
+            raw_str.contains("\"HomeDERP\""),
+            "HomeDERP tag present on the wire: {raw_str}"
+        );
+        assert!(
+            raw_str.contains("\"PreferredDERP\""),
+            "PreferredDERP tag present on the wire: {raw_str}"
+        );
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers.len(), 1);
         let peer_a = &mr.peers[0];
         assert_eq!(peer_a.disco_key.as_deref(), Some(disco_a.as_str()));
         assert_eq!(peer_a.endpoints, endpoints_a);
+        assert_eq!(peer_a.home_derp, home_derp_a);
+        assert_eq!(
+            peer_a.legacy_derp_string,
+            format!("127.3.3.40:{home_derp_a}")
+        );
+        assert_eq!(
+            peer_a
+                .hostinfo
+                .net_info
+                .as_ref()
+                .map(|net_info| net_info.preferred_derp),
+            Some(home_derp_a)
+        );
     }
 
     #[tokio::test]

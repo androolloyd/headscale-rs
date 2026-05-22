@@ -46,7 +46,12 @@
     "register_request": {
       "NodeKey": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
       "Auth": { "AuthKey": "hskey-auth-test" },
-      "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+      "Hostinfo": {
+        "Hostname": "peer",
+        "OS": "linux",
+        "OSVersion": "6.8",
+        "NetInfo": { "PreferredDERP": 900 }
+      },
       "Followup": "auth"
     },
     "register_response": {
@@ -76,7 +81,14 @@
         "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
         "Addresses": ["100.64.0.7/32"],
         "AllowedIPs": ["100.64.0.7/32"],
-        "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+        "Hostinfo": {
+          "Hostname": "peer",
+          "OS": "linux",
+          "OSVersion": "6.8",
+          "NetInfo": { "PreferredDERP": 900 }
+        },
+        "HomeDERP": 900,
+        "DERP": "127.3.3.40:900",
         "MachineAuthorized": true,
         "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
         "Endpoints": ["198.51.100.7:41641"]

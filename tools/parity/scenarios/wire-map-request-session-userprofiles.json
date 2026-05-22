@@ -17,7 +17,12 @@
       "Endpoints": ["198.51.100.7:41641"],
       "EndpointTypes": [1],
       "ReadOnly": true,
-      "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" }
+      "Hostinfo": {
+        "Hostname": "peer",
+        "OS": "linux",
+        "OSVersion": "6.8",
+        "NetInfo": { "PreferredDERP": 901 }
+      }
     },
     "map_response": {
       "KeyExpiryExtension": 0,
@@ -30,7 +35,14 @@
         "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
         "Addresses": ["100.64.0.7/32"],
         "AllowedIPs": ["100.64.0.7/32"],
-        "Hostinfo": { "Hostname": "peer", "OS": "linux", "OSVersion": "6.8" },
+        "Hostinfo": {
+          "Hostname": "peer",
+          "OS": "linux",
+          "OSVersion": "6.8",
+          "NetInfo": { "PreferredDERP": 901 }
+        },
+        "HomeDERP": 901,
+        "DERP": "127.3.3.40:901",
         "MachineAuthorized": true,
         "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
         "Endpoints": ["198.51.100.7:41641"]

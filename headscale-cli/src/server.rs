@@ -1,5 +1,6 @@
 //! Server mode - runs the control plane.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -30,10 +31,11 @@ use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::SanConfig;
 use headscale_api::tailscale_wire::{
-    AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, RegistrationCache,
-    ServerNoiseKey, WireState, serve,
+    AllocError, DerpMap, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
+    RegistrationCache, ServerNoiseKey, WireState, serve,
 };
-use headscale_core::config::OidcConfig;
+use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
+use headscale_core::derp::EmbeddedDerpRuntime;
 use headscale_db::Database;
 
 #[derive(Debug, Clone)]
@@ -50,6 +52,7 @@ pub(crate) struct RunServerConfig {
     pub grpc_listen_addr: String,
     pub grpc_allow_insecure: bool,
     pub oidc: OidcConfig,
+    pub embedded_derp: EmbeddedDerpConfig,
 }
 
 /// Run the control plane server.
@@ -87,9 +90,26 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let oidc = runtime_from_core_oidc(&cfg.oidc, server_url)
         .await
         .context("build OIDC runtime")?;
-    let runtime =
-        build_persistent_wire_runtime(db.pool(), &cfg.state_dir, server_url, &cfg.mesh_cidr, oidc)
-            .await?;
+    let embedded_derp_runtime =
+        EmbeddedDerpRuntime::start_with_state_dir(cfg.embedded_derp.clone(), &cfg.state_dir)
+            .await
+            .context("start embedded DERP/STUN runtime")?;
+    if let Some(addr) = embedded_derp_runtime.stun_local_addr() {
+        tracing::info!(%addr, "embedded STUN listener ready");
+    }
+    if let Some(status) = embedded_derp_runtime.sidecar_status() {
+        tracing::info!(?status, "embedded DERP sidecar ready");
+    }
+    let derp_map = derp_map_from_embedded_config(embedded_derp_runtime.config());
+    let runtime = build_persistent_wire_runtime(
+        db.pool(),
+        &cfg.state_dir,
+        server_url,
+        &cfg.mesh_cidr,
+        oidc,
+        derp_map,
+    )
+    .await?;
 
     let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let https_addr = cfg
@@ -135,7 +155,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         spawn_remote_grpc_listener(listener, addr, runtime.admin_service.clone(), security)
     });
     tracing::info!("Headscale-compatible Tailscale control plane ready");
-    await_serve_handle(handle, local_grpc, remote_grpc).await
+    let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    drop(embedded_derp_runtime);
+    serve_result
 }
 
 struct PersistentWireRuntime {
@@ -150,6 +172,7 @@ async fn build_persistent_wire_runtime(
     server_url: &str,
     mesh_cidr: &str,
     oidc: Option<OidcAuthRuntime>,
+    derp_map: DerpMap,
 ) -> Result<PersistentWireRuntime> {
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
     let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
@@ -202,7 +225,7 @@ async fn build_persistent_wire_runtime(
         ip_allocator: Arc::new(CidrIpAllocator::from_cidr(mesh_cidr)?),
         machines: wire_registry,
         registration_store: Some(machines),
-        derp_map: Arc::new(DerpMap::default()),
+        derp_map: Arc::new(derp_map),
         policy,
         knock: KnockConfig::disabled(),
         dns: Arc::new(DnsStore::new()),
@@ -215,6 +238,48 @@ async fn build_persistent_wire_runtime(
         oidc,
         admin_service,
     })
+}
+
+fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
+    if !cfg.enabled {
+        return DerpMap::default();
+    }
+
+    let stun_port = cfg.stun_addr.map_or(-1, |addr| i32::from(addr.port()));
+    let node = DerpRegionNode {
+        name: cfg.region_id.to_string(),
+        region_id: cfg.region_id,
+        host_name: cfg.host_name.clone(),
+        cert_name: String::new(),
+        ipv4: String::new(),
+        ipv6: String::new(),
+        derp_port: if cfg.derp_port == 443 {
+            0
+        } else {
+            cfg.derp_port
+        },
+        stun_port,
+        stun_only: cfg.stun_only,
+        insecure_for_tests: cfg.insecure_for_tests,
+        stun_test_ip: String::new(),
+        can_port80: false,
+    };
+    let region = DerpRegion {
+        region_id: cfg.region_id,
+        region_code: cfg.region_code.clone(),
+        region_name: cfg.region_name.clone(),
+        latitude: 0.0,
+        longitude: 0.0,
+        avoid: false,
+        no_measure_no_home: false,
+        nodes: vec![node],
+    };
+
+    DerpMap {
+        home_params: None,
+        regions: HashMap::from([(cfg.region_id, region)]),
+        omit_default_regions: cfg.omit_default_regions,
+    }
 }
 
 fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
@@ -607,6 +672,58 @@ mod tests {
         })
     }
 
+    #[test]
+    fn embedded_derp_config_builds_wire_derp_map() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.example.com".into(),
+            derp_port: 8443,
+            stun_addr: Some("0.0.0.0:3478".parse().unwrap()),
+            stun_only: true,
+            region_id: 901,
+            region_code: "test".into(),
+            region_name: "Test DERP".into(),
+            omit_default_regions: true,
+            insecure_for_tests: true,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let map = derp_map_from_embedded_config(&cfg);
+        assert!(map.omit_default_regions);
+        let region = map.regions.get(&901).unwrap();
+        assert_eq!(region.region_code, "test");
+        assert_eq!(region.region_name, "Test DERP");
+        let node = &region.nodes[0];
+        assert_eq!(node.name, "901");
+        assert_eq!(node.host_name, "derp.example.com");
+        assert_eq!(node.derp_port, 8443);
+        assert_eq!(node.stun_port, 3478);
+        assert!(node.stun_only);
+        assert!(node.insecure_for_tests);
+    }
+
+    #[test]
+    fn disabled_embedded_derp_keeps_empty_wire_derp_map() {
+        let map = derp_map_from_embedded_config(&EmbeddedDerpConfig::default());
+        assert!(map.regions.is_empty());
+        assert!(!map.omit_default_regions);
+    }
+
+    #[test]
+    fn embedded_derp_map_disables_stun_when_no_listener_is_configured() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.example.com".into(),
+            derper_binary: "/usr/local/bin/derper".into(),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let map = derp_map_from_embedded_config(&cfg);
+        let node = &map.regions.get(&900).unwrap().nodes[0];
+
+        assert_eq!(node.stun_port, -1);
+    }
+
     #[tokio::test]
     async fn persistent_wire_runtime_wires_shared_persistent_oidc_state() {
         let db = Database::in_memory().await.unwrap();
@@ -619,6 +736,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             Some(oidc_runtime()),
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -646,6 +764,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             None,
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -671,6 +790,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             None,
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -739,6 +859,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             None,
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -808,6 +929,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             None,
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -872,6 +994,7 @@ mod tests {
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
+            embedded_derp: EmbeddedDerpConfig::default(),
         };
         let sans = SanConfig::with_hostname("headscale.example");
 
@@ -913,6 +1036,7 @@ mod tests {
             grpc_listen_addr: "127.0.0.1:0".into(),
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
+            embedded_derp: EmbeddedDerpConfig::default(),
         })
         .await
         .unwrap_err();
@@ -968,6 +1092,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             Some(oidc_runtime()),
+            DerpMap::default(),
         )
         .await
         .unwrap();
@@ -1002,6 +1127,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             Some(oidc_runtime()),
+            DerpMap::default(),
         )
         .await
         .unwrap();

@@ -244,6 +244,8 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     .map_or_else(headscale_core::config::OidcConfig::default, |c| {
                         c.oidc.clone()
                     }),
+                embedded_derp: server_config
+                    .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
             };
             server::run_server(run_config)
                 .await
@@ -415,6 +417,22 @@ mesh_cidr = "100.64.0.0/10"
 # unix_socket_permission = 504
 # grpc_listen_addr = ":50443"
 # grpc_allow_insecure = false
+
+# Embedded DERP/STUN runtime. This starts a native STUN listener and can
+# supervise an upstream tailscale derper binary for DERP relay traffic.
+#[server.embedded_derp]
+#enabled = false
+#host_name = "derp.example.com"
+#region_id = 900
+#region_code = "embedded"
+#region_name = "Embedded DERP"
+#derp_port = 443
+#stun_addr = "0.0.0.0:3478"
+#stun_only = false
+#derper_binary = "/usr/local/bin/derper"
+#derper_listen_addr = "0.0.0.0:443"
+#derper_cert_mode = "letsencrypt"
+#omit_default_regions = false
 
 # DERP relay servers for NAT traversal
 [[server.derp_servers]]

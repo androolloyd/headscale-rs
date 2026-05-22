@@ -8,13 +8,14 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use headscale_api_acl::{
-    AclAction, AclDoc as PolicyDoc, NodeView, PolicyTest, PortRef, parse_cidr,
+    AclAction, AclDoc as PolicyDoc, NodeView, PolicyTest, PortRef, SshPolicyTest, parse_cidr,
 };
 use ipnet::IpNet;
 
 /// Live node facts needed to evaluate policy tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyCheckNode {
+    pub id: u64,
     pub name: String,
     pub user: Option<String>,
     pub addrs: Vec<String>,
@@ -23,6 +24,7 @@ pub struct PolicyCheckNode {
 
 #[derive(Clone, Debug)]
 struct Endpoint {
+    id: Option<u64>,
     label: String,
     addr: String,
     user: Option<String>,
@@ -44,15 +46,7 @@ impl Endpoint {
 pub fn check_policy_semantics(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Result<(), String> {
     let mut errors = Vec::new();
     errors.extend(run_policy_tests(doc, nodes));
-
-    if !doc.ssh_tests.is_empty() {
-        errors.push(
-            "sshTests semantic evaluation is not implemented yet; TODO: compile candidate SSH \
-             policy per destination and evaluate accept, deny, and check assertions against live \
-             source nodes"
-                .to_string(),
-        );
-    }
+    errors.extend(run_ssh_policy_tests(doc, nodes));
 
     if errors.is_empty() {
         Ok(())
@@ -109,6 +103,106 @@ fn run_policy_test(
     errors
 }
 
+fn run_ssh_policy_tests(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, test) in doc.ssh_tests.iter().enumerate() {
+        errors.extend(run_ssh_policy_test(index, test, doc, nodes));
+    }
+    errors
+}
+
+fn run_ssh_policy_test(
+    index: usize,
+    test: &SshPolicyTest,
+    doc: &PolicyDoc,
+    nodes: &[PolicyCheckNode],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let srcs = resolve_alias(doc, nodes, &test.src, None);
+    if srcs.is_empty() {
+        return vec![format!(
+            "sshTest {index}: source {:?} resolved to no live node addresses",
+            test.src
+        )];
+    }
+    if test.accept.is_empty() && test.deny.is_empty() && test.check.is_empty() {
+        errors.push(format!(
+            "sshTest {index}: no accept, deny, or check assertions specified"
+        ));
+    }
+
+    let mut dst_nodes = Vec::new();
+    for dst in &test.dst {
+        let resolved = resolve_ssh_test_dst_nodes(doc, nodes, test, &srcs, dst);
+        if resolved.is_empty() {
+            errors.push(format!(
+                "sshTest {index}: dst alias {dst:?} resolved to no live nodes"
+            ));
+            continue;
+        }
+        for node in resolved {
+            if !dst_nodes
+                .iter()
+                .any(|existing: &&PolicyCheckNode| existing.id == node.id)
+            {
+                dst_nodes.push(node);
+            }
+        }
+    }
+
+    for user in &test.accept {
+        for dst in &dst_nodes {
+            if !srcs
+                .iter()
+                .all(|src| ssh_reachability(doc, nodes, src, dst, user).0)
+            {
+                errors.push(format!(
+                    "sshTest {index}: source {:?} cannot SSH to destination {:?} as accepted user {:?}",
+                    test.src, dst.name, user
+                ));
+            }
+        }
+    }
+
+    for user in &test.deny {
+        for dst in &dst_nodes {
+            if srcs
+                .iter()
+                .any(|src| ssh_reachability(doc, nodes, src, dst, user).0)
+            {
+                errors.push(format!(
+                    "sshTest {index}: source {:?} can SSH to destination {:?} as denied user {:?}",
+                    test.src, dst.name, user
+                ));
+            }
+        }
+    }
+
+    for user in &test.check {
+        for dst in &dst_nodes {
+            if !srcs
+                .iter()
+                .all(|src| ssh_reachability(doc, nodes, src, dst, user).1)
+            {
+                let accept_only = srcs
+                    .iter()
+                    .all(|src| ssh_reachability(doc, nodes, src, dst, user).0);
+                let reason = if accept_only {
+                    "allowed by accept but not check"
+                } else {
+                    "not allowed by check"
+                };
+                errors.push(format!(
+                    "sshTest {index}: source {:?} cannot SSH-check destination {:?} as user {:?}: {reason}",
+                    test.src, dst.name, user
+                ));
+            }
+        }
+    }
+
+    errors
+}
+
 fn test_allows(
     doc: &PolicyDoc,
     nodes: &[PolicyCheckNode],
@@ -139,6 +233,135 @@ fn test_allows(
     }
 
     Ok(true)
+}
+
+fn resolve_ssh_test_dst_nodes<'a>(
+    doc: &PolicyDoc,
+    nodes: &'a [PolicyCheckNode],
+    test: &SshPolicyTest,
+    srcs: &[Endpoint],
+    dst: &str,
+) -> Vec<&'a PolicyCheckNode> {
+    if dst == "autogroup:self" && !test.src.contains('@') {
+        return Vec::new();
+    }
+    let src = srcs.first();
+    let endpoints = resolve_alias(doc, nodes, dst, src);
+    let mut out = Vec::new();
+    for endpoint in endpoints {
+        for node in nodes
+            .iter()
+            .filter(|node| endpoint_matches_node(&endpoint, node))
+        {
+            if !out
+                .iter()
+                .any(|existing: &&PolicyCheckNode| existing.id == node.id)
+            {
+                out.push(node);
+            }
+        }
+    }
+    out
+}
+
+fn ssh_reachability(
+    doc: &PolicyDoc,
+    nodes: &[PolicyCheckNode],
+    src: &Endpoint,
+    dst: &PolicyCheckNode,
+    user: &str,
+) -> (bool, bool) {
+    if user.is_empty() {
+        return (false, false);
+    }
+
+    let mut accept = false;
+    let mut check = false;
+    for rule in &doc.ssh {
+        if !rule
+            .src
+            .iter()
+            .any(|token| ssh_source_matches(doc, nodes, token, src))
+        {
+            continue;
+        }
+        if !rule
+            .dst
+            .iter()
+            .any(|token| ssh_destination_matches(doc, nodes, token, src, dst))
+        {
+            continue;
+        }
+        if !ssh_users_allow(&rule.users, user) {
+            continue;
+        }
+
+        accept = true;
+        if rule.action == "check" {
+            check = true;
+        }
+        if accept && check {
+            break;
+        }
+    }
+    (accept, check)
+}
+
+fn ssh_source_matches(
+    doc: &PolicyDoc,
+    nodes: &[PolicyCheckNode],
+    token: &str,
+    src: &Endpoint,
+) -> bool {
+    resolve_alias(doc, nodes, token, None)
+        .iter()
+        .any(|candidate| endpoint_matches_endpoint(candidate, src))
+}
+
+fn ssh_destination_matches(
+    doc: &PolicyDoc,
+    nodes: &[PolicyCheckNode],
+    token: &str,
+    src: &Endpoint,
+    dst: &PolicyCheckNode,
+) -> bool {
+    resolve_alias(doc, nodes, token, Some(src))
+        .iter()
+        .any(|candidate| endpoint_matches_node(candidate, dst))
+}
+
+fn ssh_users_allow(users: &[String], user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    if users.iter().any(|candidate| candidate == user) {
+        return true;
+    }
+    if user != "root" && users.iter().any(|candidate| candidate == "*") {
+        return true;
+    }
+    if user != "root"
+        && users
+            .iter()
+            .any(|candidate| candidate == "autogroup:nonroot")
+    {
+        return true;
+    }
+    false
+}
+
+fn endpoint_matches_endpoint(candidate: &Endpoint, expected: &Endpoint) -> bool {
+    if candidate.id.is_some() && candidate.id == expected.id {
+        return true;
+    }
+    candidate.addr == expected.addr
+}
+
+fn endpoint_matches_node(candidate: &Endpoint, node: &PolicyCheckNode) -> bool {
+    if candidate.id == Some(node.id) {
+        return true;
+    }
+    node.addrs.iter().any(|addr| addr == &candidate.addr)
 }
 
 fn test_protocols(proto: &str) -> Vec<&'static str> {
@@ -294,6 +517,7 @@ fn push_all_node_addrs(nodes: &[PolicyCheckNode], out: &mut Vec<Endpoint>) {
 fn push_node_addrs(node: &PolicyCheckNode, out: &mut Vec<Endpoint>) {
     for addr in &node.addrs {
         out.push(Endpoint {
+            id: Some(node.id),
             label: node.name.clone(),
             addr: addr.clone(),
             user: node.user.clone(),
@@ -307,6 +531,7 @@ fn push_synthetic_prefix(label: &str, prefix: &str, out: &mut Vec<Endpoint>) {
         return;
     };
     out.push(Endpoint {
+        id: None,
         label: label.to_string(),
         addr: net.addr().to_string(),
         user: None,
@@ -370,8 +595,9 @@ mod tests {
     use super::*;
     use crate::policy::parse_hujson_policy;
 
-    fn node(name: &str, user: &str, addr: &str, tags: &[&str]) -> PolicyCheckNode {
+    fn node(id: u64, name: &str, user: &str, addr: &str, tags: &[&str]) -> PolicyCheckNode {
         PolicyCheckNode {
+            id,
             name: name.to_string(),
             user: Some(user.to_string()),
             addrs: vec![addr.to_string()],
@@ -393,8 +619,8 @@ mod tests {
         )
         .unwrap();
         let nodes = vec![
-            node("alice", "alice", "100.64.0.1", &[]),
-            node("server", "bob", "100.64.0.2", &[]),
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &[]),
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();
@@ -412,8 +638,8 @@ mod tests {
         )
         .unwrap();
         let nodes = vec![
-            node("alice", "alice", "100.64.0.1", &[]),
-            node("server", "bob", "100.64.0.2", &[]),
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &[]),
         ];
 
         let err = check_policy_semantics(&doc, &nodes).unwrap_err();
@@ -421,17 +647,51 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_ssh_tests_are_explicit_gap() {
+    fn ssh_tests_accept_deny_and_check_pass_against_live_nodes() {
         let doc = parse_hujson_policy(
             r#"{
-                "ssh": [{"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]}],
-                "sshTests": [{"src": "alice@", "dst": ["autogroup:self"], "accept": ["root"]}]
+                "tagOwners": {"tag:server": ["alice@"], "tag:db": ["alice@"]},
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]},
+                    {"action": "check", "checkPeriod": "12h", "src": ["alice@"], "dst": ["tag:db"], "users": ["admin"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["root"], "deny": ["ubuntu"]},
+                    {"src": "alice@", "dst": ["tag:db"], "check": ["admin"]}
+                ]
             }"#,
         )
         .unwrap();
-        let nodes = vec![node("alice", "alice", "100.64.0.1", &[])];
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+            node(3, "db", "bob", "100.64.0.3", &["tag:db"]),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_report_failed_accept_and_check_assertions() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["ubuntu"], "check": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+        ];
 
         let err = check_policy_semantics(&doc, &nodes).unwrap_err();
-        assert!(err.contains("sshTests semantic evaluation is not implemented yet"));
+        assert!(err.contains("cannot SSH to destination"));
+        assert!(err.contains("allowed by accept but not check"));
     }
 }

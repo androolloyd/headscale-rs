@@ -1429,6 +1429,7 @@ pub mod upstream {
 
     fn policy_check_node_from_machine(machine: &MachineAdminRecord) -> PolicyCheckNode {
         PolicyCheckNode {
+            id: machine_numeric_id(machine),
             name: machine.name.clone(),
             user: (!machine.user.is_empty()).then(|| machine.user.clone()),
             addrs: node_ip_addresses(machine),
@@ -3776,7 +3777,7 @@ mod upstream_tests {
     }
 
     #[tokio::test]
-    async fn upstream_policy_grpc_rejects_ssh_tests_semantic_gap_explicitly() {
+    async fn upstream_policy_grpc_evaluates_ssh_tests_before_success() {
         let (service, machines) = admin_service_with_machines().await;
         let node_key = "95".repeat(32);
         machines.upsert(
@@ -3791,7 +3792,7 @@ mod upstream_tests {
                 false,
             ),
         );
-        let raw = r#"{
+        let passing = r#"{
           "ssh": [
             {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]}
           ],
@@ -3800,15 +3801,51 @@ mod upstream_tests {
           ]
         }"#;
 
+        service
+            .check_policy(Request::new(CheckPolicyRequest {
+                policy: passing.into(),
+            }))
+            .await
+            .unwrap();
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: passing.into(),
+            }))
+            .await
+            .unwrap();
+
+        let failing = r#"{
+          "ssh": [
+            {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]}
+          ],
+          "sshTests": [
+            {"src": "alice@", "dst": ["autogroup:self"], "accept": ["ubuntu"]}
+          ]
+        }"#;
         let err = service
-            .check_policy(Request::new(CheckPolicyRequest { policy: raw.into() }))
+            .check_policy(Request::new(CheckPolicyRequest {
+                policy: failing.into(),
+            }))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(
-            err.message()
-                .contains("sshTests semantic evaluation is not implemented yet")
-        );
+        assert!(err.message().contains("cannot SSH to destination"));
+
+        let err = service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: failing.into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("cannot SSH to destination"));
+
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, passing);
     }
 
     #[tokio::test]

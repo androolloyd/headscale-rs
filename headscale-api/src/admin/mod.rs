@@ -42,6 +42,7 @@
 //!     # knock: tailscale_wire::KnockConfig::disabled(),
 //!     # dns: Arc::new(Default::default()),
 //!     # public_control_url: Some("https://headscale.example".into()),
+//!     # registration_cache: Arc::new(tailscale_wire::RegistrationCache::new()),
 //! };
 //! let admin_state = admin::AdminState::builder()
 //!     .bearer_token("op-secret-token")

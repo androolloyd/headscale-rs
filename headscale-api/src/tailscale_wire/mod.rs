@@ -266,6 +266,53 @@ pub struct WireState {
     /// fall back to request host/proto so older embedders keep working
     /// until full config loading is wired through.
     pub public_control_url: Option<String>,
+    /// Pending web/CLI registration cache. Headscale-go stores nodes
+    /// that reached the interactive registration flow here, keyed by
+    /// the 24-byte registration ID shown in `/register/{id}`. The
+    /// gRPC `RegisterNode` RPC consumes the same entry, which lets a
+    /// browser/CLI approval complete the wire client's follow-up
+    /// registration.
+    pub registration_cache: Arc<RegistrationCache>,
+}
+
+/// Shared pending registration cache keyed by headscale-go's
+/// 24-character registration ID.
+#[derive(Default)]
+pub struct RegistrationCache {
+    inner: RwLock<BTreeMap<String, MachineRecord>>,
+}
+
+impl RegistrationCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, registration_id: String, record: MachineRecord) {
+        self.inner.write().insert(registration_id, record);
+    }
+
+    pub fn get(&self, registration_id: &str) -> Option<MachineRecord> {
+        self.inner.read().get(registration_id).cloned()
+    }
+
+    pub fn remove(&self, registration_id: &str) -> Option<MachineRecord> {
+        self.inner.write().remove(registration_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    pub fn contains_node_key(&self, node_key_hex: &str) -> bool {
+        self.inner
+            .read()
+            .values()
+            .any(|record| record.node_key_hex == node_key_hex)
+    }
 }
 
 /// In-memory machine registry.

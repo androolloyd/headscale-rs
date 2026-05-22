@@ -26,6 +26,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand_core::RngCore;
 use serde::Serialize;
 use std::net::Ipv4Addr;
 
@@ -54,6 +56,8 @@ use super::wire::{
     stable_id_from_key, strip_key_prefix,
 };
 use super::{MachineRecord, RedeemError, WireState};
+
+const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -133,17 +137,18 @@ async fn register_inner(
     node_key_hex: String,
     body: RegisterRequest,
 ) -> axum::response::Response {
-    // Redeem the presented preauth token. Absence of an `Auth.AuthKey`
-    // is treated as "no authkey presented" which is a 401.
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     if authkey.is_empty() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "no preauth key presented".into(),
-            }),
-        )
-            .into_response();
+        if body
+            .followup
+            .as_deref()
+            .is_some_and(|followup| !followup.is_empty())
+        {
+            if let Some(record) = state.machines.get(&node_key_hex) {
+                return Json(register_response_for_record(&record)).into_response();
+            }
+        }
+        return register_interactive(state, node_key_hex, body).await;
     }
 
     let redeemed = match state.preauth.redeem(authkey).await {
@@ -169,46 +174,13 @@ async fn register_inner(
     };
     let user = redeemed.user.clone();
 
-    // Allocate a tailnet IPv4. The allocator is deterministic given
-    // the user label, so a repeated register with the same user keeps
-    // the same IP — handy for tests, but the `MachineRegistry` itself
-    // keys on the node key so duplicate registers under different
-    // node keys do get separate records.
-    let alloc_input = format!("{user}:{node_key_hex}");
-    let ipv4: Ipv4Addr = match state.ip_allocator.allocate(&alloc_input) {
-        Ok(ip) => ip,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: format!("ip allocation failed: {e}"),
-                }),
-            )
-                .into_response();
-        }
+    let (hostname, available_routes) = match hostname_and_routes(&body) {
+        Ok(parts) => parts,
+        Err(resp) => return resp,
     };
-
-    let hostname = body
-        .hostinfo
-        .as_ref()
-        .map(|h| h.hostname.clone())
-        .unwrap_or_default();
-    let available_routes = match body
-        .hostinfo
-        .as_ref()
-        .map(|h| normalize_routes(&h.routable_ips))
-        .transpose()
-    {
-        Ok(routes) => routes.unwrap_or_default(),
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("invalid Hostinfo.RoutableIPs: {e}"),
-                }),
-            )
-                .into_response();
-        }
+    let ipv4 = match allocate_register_ip(&state, &format!("{user}:{node_key_hex}")) {
+        Ok(ip) => ip,
+        Err(resp) => return resp,
     };
     let addr = ipv4.to_string();
     let approved_routes = match auto_approved_routes_for_node(
@@ -247,7 +219,7 @@ async fn register_inner(
         // with the populated fields on the client's first map request.
         disco_key: None,
         endpoints: Vec::new(),
-        expiry: None,
+        expiry: body.expiry,
         last_seen: now,
         ephemeral: redeemed.ephemeral,
         created_at: now,
@@ -256,27 +228,150 @@ async fn register_inner(
         approved_routes,
         register_method: 1,
     };
-    state.machines.upsert(node_key_hex, rec);
+    state.machines.upsert(node_key_hex.clone(), rec);
 
-    let user_id = stable_id_from_key(&user);
-    let resp = RegisterResponse {
+    let rec = state
+        .machines
+        .get(&node_key_hex)
+        .expect("record was just inserted");
+    Json(register_response_for_record(&rec)).into_response()
+}
+
+async fn register_interactive(
+    state: WireState,
+    node_key_hex: String,
+    body: RegisterRequest,
+) -> axum::response::Response {
+    let (hostname, available_routes) = match hostname_and_routes(&body) {
+        Ok(parts) => parts,
+        Err(resp) => return resp,
+    };
+    let ipv4 = match allocate_register_ip(&state, &format!("pending:{node_key_hex}")) {
+        Ok(ip) => ip,
+        Err(resp) => return resp,
+    };
+    let now = chrono::Utc::now();
+    let registration_id = new_registration_id();
+    let record = MachineRecord {
+        node_key_hex,
+        machine_key_hex: String::new(),
+        user: String::new(),
+        hostname,
+        ipv4,
+        disco_key: None,
+        endpoints: Vec::new(),
+        expiry: body.expiry,
+        last_seen: now,
+        ephemeral: body.ephemeral,
+        created_at: now,
+        forced_tags: Vec::new(),
+        available_routes,
+        approved_routes: Vec::new(),
+        register_method: 0,
+    };
+    state
+        .registration_cache
+        .insert(registration_id.clone(), record);
+
+    Json(RegisterResponse {
+        user: SimpleUser {
+            id: 0,
+            login_name: String::new(),
+            display_name: String::new(),
+        },
+        login: SimpleLogin {
+            id: 0,
+            provider: String::new(),
+            login_name: String::new(),
+            display_name: String::new(),
+        },
+        node_key_expired: false,
+        auth_url: auth_url_for_registration(&state, &registration_id),
+        machine_authorized: false,
+        error: String::new(),
+    })
+    .into_response()
+}
+
+fn hostname_and_routes(
+    body: &RegisterRequest,
+) -> Result<(String, Vec<String>), axum::response::Response> {
+    let hostname = body
+        .hostinfo
+        .as_ref()
+        .map(|h| h.hostname.clone())
+        .unwrap_or_default();
+    let available_routes = body
+        .hostinfo
+        .as_ref()
+        .map(|h| normalize_routes(&h.routable_ips))
+        .transpose()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("invalid Hostinfo.RoutableIPs: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .unwrap_or_default();
+    Ok((hostname, available_routes))
+}
+
+fn allocate_register_ip(
+    state: &WireState,
+    alloc_input: &str,
+) -> Result<Ipv4Addr, axum::response::Response> {
+    state.ip_allocator.allocate(alloc_input).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("ip allocation failed: {e}"),
+            }),
+        )
+            .into_response()
+    })
+}
+
+fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
+    let user_id = stable_id_from_key(&record.user);
+    RegisterResponse {
         user: SimpleUser {
             id: user_id,
-            login_name: user.clone(),
-            display_name: user.clone(),
+            login_name: record.user.clone(),
+            display_name: record.user.clone(),
         },
         login: SimpleLogin {
             id: user_id,
-            provider: "octravpn-preauth".into(),
-            login_name: user.clone(),
-            display_name: user,
+            provider: if record.register_method == 2 {
+                "cli".into()
+            } else {
+                "octravpn-preauth".into()
+            },
+            login_name: record.user.clone(),
+            display_name: record.user.clone(),
         },
-        node_key_expired: false,
+        node_key_expired: record.is_expired_at(chrono::Utc::now()),
         auth_url: String::new(),
         machine_authorized: true,
         error: String::new(),
-    };
-    Json(resp).into_response()
+    }
+}
+
+fn auth_url_for_registration(state: &WireState, registration_id: &str) -> String {
+    match state.public_control_url.as_deref() {
+        Some(url) if !url.is_empty() => {
+            format!("{}/register/{registration_id}", url.trim_end_matches('/'))
+        }
+        _ => format!("/register/{registration_id}"),
+    }
+}
+
+fn new_registration_id() -> String {
+    let mut raw = [0u8; REGISTRATION_ID_RANDOM_BYTES];
+    rand_core::OsRng.fill_bytes(&mut raw);
+    URL_SAFE_NO_PAD.encode(raw)
 }
 
 /// Helper exposed for tests + `/map`: turn a `MachineRecord` into the
@@ -384,6 +479,7 @@ mod tests {
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
+            registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
         };
         (state, redeemer, dir)
     }
@@ -528,12 +624,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_authkey() {
-        let (state, _redeemer, _dir) = fixture();
-        let app = router(state);
+    async fn missing_authkey_starts_web_registration_flow() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        let app = router(state.clone());
         let node_key_hex = "cc".repeat(32);
         let body = serde_json::json!({
             "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending-peer", "RoutableIPs": ["10.44.0.0/24"] },
+            "Ephemeral": true,
         });
         let resp = app
             .oneshot(
@@ -546,7 +645,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!rr.machine_authorized);
+        let registration_id = rr
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .expect("configured web registration AuthURL");
+        assert_eq!(registration_id.len(), 24);
+        assert!(state.machines.get(&node_key_hex).is_none());
+        let pending = state
+            .registration_cache
+            .get(registration_id)
+            .expect("pending registration cached");
+        assert_eq!(pending.node_key_hex, node_key_hex);
+        assert_eq!(pending.hostname, "pending-peer");
+        assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
+        assert!(pending.ephemeral);
     }
 
     /// Flat v1.78+ path: NodeKey lives in the body, not the URL.

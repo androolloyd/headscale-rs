@@ -151,7 +151,8 @@ pub mod upstream {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use parking_lot::{Mutex, RwLock};
+    use chrono::Utc;
+    use parking_lot::Mutex;
     use rand_core::RngCore;
     use tonic::{Request, Response, Status, metadata::MetadataMap};
 
@@ -177,6 +178,7 @@ pub mod upstream {
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy};
+    use crate::tailscale_wire::MachineRecord;
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
     };
@@ -194,7 +196,7 @@ pub mod upstream {
         database_health: Option<Arc<dyn DatabaseHealthCheck>>,
         policy_persistence: Option<Arc<dyn PolicyPersistence>>,
         policy_mode: PolicyMode,
-        pending_nodes: Arc<RwLock<BTreeMap<String, MachineAdminRecord>>>,
+        registration_cache: Arc<crate::tailscale_wire::RegistrationCache>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
     }
@@ -288,7 +290,7 @@ pub mod upstream {
                 database_health: None,
                 policy_persistence: None,
                 policy_mode: PolicyMode::Memory,
-                pending_nodes: Arc::new(RwLock::new(BTreeMap::new())),
+                registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
             }
@@ -346,6 +348,14 @@ pub mod upstream {
 
         pub fn require_api_key_auth(mut self) -> Self {
             self.require_api_key_auth = true;
+            self
+        }
+
+        pub fn with_registration_cache(
+            mut self,
+            registration_cache: Arc<crate::tailscale_wire::RegistrationCache>,
+        ) -> Self {
+            self.registration_cache = registration_cache;
             self
         }
 
@@ -411,11 +421,7 @@ pub mod upstream {
             loop {
                 let node_key = random_key_hex();
                 if self.machines.get(&node_key).await.is_none()
-                    && !self
-                        .pending_nodes
-                        .read()
-                        .values()
-                        .any(|record| record.id == node_key)
+                    && !self.registration_cache.contains_node_key(&node_key)
                 {
                     return node_key;
                 }
@@ -622,7 +628,8 @@ pub mod upstream {
             let record = self
                 .debug_machine_record(&user.name, &body.name, routes)
                 .await;
-            self.pending_nodes.write().insert(body.key, record.clone());
+            self.registration_cache
+                .insert(body.key, machine_admin_to_wire_record(&record));
             Ok(Response::new(DebugCreateNodeResponse {
                 node: Some(machine_to_node(&record, &self.users).await?),
             }))
@@ -708,9 +715,9 @@ pub mod upstream {
                 .map_err(user_error_to_status)?
                 .ok_or_else(|| Status::not_found("user not found"))?;
             let mut record = self
-                .pending_nodes
-                .write()
+                .registration_cache
                 .remove(&body.key)
+                .map(wire_record_to_machine_admin)
                 .ok_or_else(|| Status::not_found("registration not found"))?;
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
@@ -1117,6 +1124,58 @@ pub mod upstream {
         machine_to_node_with_routes(machine, users, &[]).await
     }
 
+    fn machine_admin_to_wire_record(machine: &MachineAdminRecord) -> MachineRecord {
+        let created_at =
+            chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now);
+        let last_seen =
+            chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at);
+        let ipv4 = machine
+            .ipv4
+            .parse()
+            .unwrap_or_else(|_| cgnat_ip_from_key(&machine.id));
+        let mut record = MachineRecord::new_at(
+            created_at,
+            machine.id.clone(),
+            machine.machine_key_hex.clone(),
+            machine.user.clone(),
+            machine.name.clone(),
+            ipv4,
+            false,
+        );
+        record.expiry = machine
+            .expiry
+            .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
+        record.last_seen = last_seen;
+        record.forced_tags = machine.tags.clone();
+        record.available_routes = machine.routes.clone();
+        record.approved_routes = machine.approved_routes.clone();
+        record.register_method = machine.register_method;
+        record
+    }
+
+    fn wire_record_to_machine_admin(record: MachineRecord) -> MachineAdminRecord {
+        let expired = record.is_expired_at(Utc::now());
+        MachineAdminRecord {
+            node_id: 0,
+            id: record.node_key_hex,
+            name: record.hostname,
+            user: record.user,
+            ipv4: record.ipv4.to_string(),
+            online: !expired,
+            last_seen: record.last_seen.timestamp().max(0) as u64,
+            created_at: record.created_at.timestamp().max(0) as u64,
+            expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
+            machine_key_hex: record.machine_key_hex,
+            os: "unknown".into(),
+            version: "unknown".into(),
+            tags: record.forced_tags,
+            routes: record.available_routes,
+            approved_routes: record.approved_routes,
+            register_method: record.register_method,
+            expired,
+        }
+    }
+
     async fn machine_to_node_with_routes(
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
@@ -1347,8 +1406,10 @@ mod upstream_tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
+    use axum::body::to_bytes;
     use chrono::Utc;
     use tonic::Request;
+    use tower::ServiceExt;
 
     use super::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
     use crate::admin::{
@@ -1366,8 +1427,13 @@ mod upstream_tests {
         SetTagsRequest,
     };
     use crate::policy::PolicyStore;
-    use crate::tailscale_wire::MachineRegistry;
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
+    use crate::tailscale_wire::{
+        MachineRegistry, RegistrationCache, WireState,
+        noise::ServerNoiseKey,
+        router,
+        test_support::{MockIpAllocator, MockRedeemer},
+    };
 
     struct FailingDatabaseHealth;
 
@@ -1734,6 +1800,121 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_register_consumes_wire_web_registration_cache() {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let machines = Arc::new(MachineRegistry::new());
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                    .with_user_admin(users.clone()),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines.clone())),
+        )
+        .with_registration_cache(registration_cache.clone());
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = WireState {
+            server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap()),
+            preauth: Arc::new(MockRedeemer::new()),
+            ip_allocator: Arc::new(MockIpAllocator),
+            machines: machines.clone(),
+            derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
+            knock: crate::tailscale_wire::KnockConfig::disabled(),
+            dns: Arc::new(crate::dns::DnsStore::new()),
+            public_control_url: Some("https://headscale.example".into()),
+            registration_cache: registration_cache.clone(),
+        };
+        let app = router(state.clone());
+        let node_key_hex = "77".repeat(32);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "wire-pending", "RoutableIPs": ["10.77.0.0/24"] }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let pending_response: crate::tailscale_wire::RegisterResponse =
+            serde_json::from_slice(&raw).unwrap();
+        assert!(!pending_response.machine_authorized);
+        let registration_id = pending_response
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .expect("web AuthURL prefix");
+        assert_eq!(registration_id.len(), 24);
+        assert_eq!(registration_cache.len(), 1);
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: registration_id.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
+        assert_eq!(registered.name, "wire-pending");
+        assert_eq!(registered.available_routes, vec!["10.77.0.0/24"]);
+        assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
+        assert!(registration_cache.is_empty());
+        assert_eq!(machines.get(&node_key_hex).unwrap().user, "alice");
+
+        let followup_body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": pending_response.auth_url,
+        });
+        let followup_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&followup_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(followup_resp.status(), axum::http::StatusCode::OK);
+        let raw = to_bytes(followup_resp.into_body(), 8192).await.unwrap();
+        let followup_response: crate::tailscale_wire::RegisterResponse =
+            serde_json::from_slice(&raw).unwrap();
+        assert!(followup_response.machine_authorized);
+        assert_eq!(followup_response.user.login_name, "alice");
+        assert!(followup_response.auth_url.is_empty());
     }
 
     #[tokio::test]

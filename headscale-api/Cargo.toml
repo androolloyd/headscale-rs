@@ -36,7 +36,6 @@ admin = [
     # outside the admin gate); admin shares the same crates without a
     # separate dep activation.
     "dep:serde_urlencoded",
-    "dep:rand_core",
     "dep:headscale-db",
     "dep:sqlx",
 ]
@@ -171,17 +170,15 @@ zstd = { version = "0.13", default-features = false }
 # Admin GUI v0 deps — only pulled in when the `admin` feature is on.
 # `maud` is the type-safe HTML template engine; `hmac` +
 # `sha2` back the session-cookie + CSRF tokens; `serde_urlencoded`
-# parses `application/x-www-form-urlencoded` POST bodies; `rand_core`
-# (with the `getrandom` feature, set at workspace level) seeds the
-# per-process HMAC secret + the preauth token raw bytes. All four
-# already live in the transitive dep tree, so this adds zero net
-# crates to the build graph — only their `dep:` activation.
+# parses `application/x-www-form-urlencoded` POST bodies.
 maud = { version = "0.27", features = ["axum"], optional = true }
 # `hmac` + `sha2` are now non-optional (declared above) because the
 # knock layer (`tailscale_wire::knock`) needs them in the wire-default
 # feature set. Listing them here would shadow that.
 serde_urlencoded = { version = "0.7", optional = true }
-rand_core = { workspace = true, optional = true }
+# Used by wire web-registration IDs, admin session/preauth secrets,
+# and gRPC debug node keys.
+rand_core = { workspace = true }
 
 # TLS termination on :443 — required by stock `tailscale up` v1.78+
 # which forces an HTTPS-on-443 dial after the initial /key probe.

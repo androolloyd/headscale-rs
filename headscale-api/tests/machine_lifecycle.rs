@@ -102,6 +102,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
         public_control_url: None,
+        registration_cache: Arc::new(headscale_api::tailscale_wire::RegistrationCache::new()),
     };
     // tempdir held only inside this fn; the wire layer never reads
     // from it after construction, so leaking is fine for the test.

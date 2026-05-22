@@ -2417,6 +2417,7 @@ mod tests {
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
+            registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
         };
         (state, dir)
     }

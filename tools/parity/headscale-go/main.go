@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -253,6 +254,9 @@ type mapNodeSummary struct {
 	LegacyDERPString              string           `json:"legacy_derp_string,omitempty"`
 	Hostinfo                      *hostInfoSummary `json:"hostinfo,omitempty"`
 	Tags                          []string         `json:"tags,omitempty"`
+	Created                       string           `json:"created,omitempty"`
+	KeyExpiry                     string           `json:"key_expiry,omitempty"`
+	LastSeen                      string           `json:"last_seen,omitempty"`
 	Online                        *bool            `json:"online,omitempty"`
 	MachineAuthorized             bool             `json:"machine_authorized,omitempty"`
 	Cap                           int              `json:"cap,omitempty"`
@@ -1011,6 +1015,18 @@ func summarizeMapNode(node *tailcfg.Node) *mapNodeSummary {
 	if node.SelfNodeV6MasqAddrForThisPeer != nil {
 		selfNodeV6MasqAddrForThisPeer = node.SelfNodeV6MasqAddrForThisPeer.String()
 	}
+	var created string
+	if !node.Created.IsZero() {
+		created = node.Created.UTC().Format(time.RFC3339Nano)
+	}
+	var keyExpiry string
+	if !node.KeyExpiry.IsZero() {
+		keyExpiry = node.KeyExpiry.UTC().Format(time.RFC3339Nano)
+	}
+	var lastSeen string
+	if node.LastSeen != nil {
+		lastSeen = node.LastSeen.UTC().Format(time.RFC3339Nano)
+	}
 	capabilities := make([]string, 0, len(node.Capabilities))
 	for _, capability := range node.Capabilities {
 		capabilities = append(capabilities, string(capability))
@@ -1035,6 +1051,9 @@ func summarizeMapNode(node *tailcfg.Node) *mapNodeSummary {
 		LegacyDERPString:              node.LegacyDERPString,
 		Hostinfo:                      summarizeHostInfo(node.Hostinfo),
 		Tags:                          tags,
+		Created:                       created,
+		KeyExpiry:                     keyExpiry,
+		LastSeen:                      lastSeen,
 		Online:                        online,
 		MachineAuthorized:             node.MachineAuthorized,
 		Cap:                           int(node.Cap),

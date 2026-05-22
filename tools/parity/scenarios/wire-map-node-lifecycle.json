@@ -1,0 +1,76 @@
+{
+  "name": "wire-map-node-lifecycle",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "map_response": {
+      "Node": {
+        "ID": 7,
+        "StableID": "n7",
+        "Name": "peer.tail.example",
+        "User": 42,
+        "Key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "Machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+        "DiscoKey": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+        "Addresses": ["100.64.0.7/32"],
+        "AllowedIPs": ["100.64.0.7/32"],
+        "Hostinfo": {
+          "Hostname": "peer",
+          "OS": "linux"
+        },
+        "Created": "2026-05-21T12:00:00.123456789Z",
+        "KeyExpiry": "2026-06-21T12:00:00.123456789Z",
+        "LastSeen": "2026-05-21T12:30:00.123456789Z",
+        "Online": true
+      },
+      "Peers": [
+        {
+          "ID": 8,
+          "StableID": "n8",
+          "Name": "router.tail.example",
+          "User": 42,
+          "Key": "nodekey:0800000000000000000000000000000000000000000000000000000000000000",
+          "Machine": "mkey:0900000000000000000000000000000000000000000000000000000000000000",
+          "DiscoKey": "discokey:0b00000000000000000000000000000000000000000000000000000000000000",
+          "Addresses": ["100.64.0.8/32"],
+          "AllowedIPs": ["100.64.0.8/32", "10.0.0.0/24"],
+          "Hostinfo": {
+            "Hostname": "router",
+            "OS": "linux"
+          },
+          "Created": "2026-05-20T09:00:00Z",
+          "KeyExpiry": "2026-06-20T09:00:00Z",
+          "LastSeen": "2026-05-21T11:59:00Z",
+          "Online": false
+        }
+      ],
+      "PeersChanged": [
+        {
+          "ID": 9,
+          "StableID": "n9",
+          "Name": "changed.tail.example",
+          "User": 42,
+          "Key": "nodekey:0900000000000000000000000000000000000000000000000000000000000000",
+          "Machine": "mkey:0a00000000000000000000000000000000000000000000000000000000000000",
+          "DiscoKey": "discokey:0c00000000000000000000000000000000000000000000000000000000000000",
+          "Addresses": ["100.64.0.9/32"],
+          "AllowedIPs": ["100.64.0.9/32"],
+          "Hostinfo": {
+            "Hostname": "changed",
+            "OS": "linux"
+          },
+          "Created": "2026-05-19T08:00:00Z",
+          "KeyExpiry": "2026-06-19T08:00:00Z",
+          "LastSeen": "2026-05-21T10:00:00Z"
+        }
+      ],
+      "DNSConfig": {},
+      "DERPMap": {
+        "Regions": {},
+        "omitDefaultRegions": true
+      },
+      "Domain": "tail.example"
+    }
+  }
+}

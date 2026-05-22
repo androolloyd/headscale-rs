@@ -389,6 +389,12 @@ struct MapNodeSummary {
     hostinfo: Option<HostInfoSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    created: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    key_expiry: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_seen: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     online: Option<bool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -1650,6 +1656,9 @@ fn summarize_map_node(node: MapNode) -> MapNodeSummary {
         legacy_derp_string: node.legacy_derp_string,
         hostinfo: Some(summarize_hostinfo(node.hostinfo)),
         tags,
+        created: json_string(node.created),
+        key_expiry: json_string(node.key_expiry),
+        last_seen: json_string(node.last_seen),
         online: node.online,
         machine_authorized: node.machine_authorized,
         cap: node.cap,
@@ -1671,6 +1680,13 @@ fn summarize_map_node(node: MapNode) -> MapNodeSummary {
         is_jailed: node.is_jailed,
         exit_node_dns_resolvers,
     }
+}
+
+fn json_string<T: Serialize>(value: Option<T>) -> String {
+    value
+        .and_then(|ts| serde_json::to_value(ts).ok())
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default()
 }
 
 fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {

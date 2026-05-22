@@ -35,6 +35,7 @@ expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
+client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 case "${login_mode}" in
   authkey | web) ;;
   *)
@@ -242,6 +243,25 @@ for ((idx = 1; idx <= client_count; idx++)); do
     client_names+=("${run_id}-client-${idx}")
   fi
 done
+
+client_users=()
+if [[ -n "${client_users_csv}" ]]; then
+  IFS=',' read -r -a client_users <<<"${client_users_csv}"
+  if ((${#client_users[@]} != client_count)); then
+    echo "REAL_CLIENT_CLIENT_USERS must contain ${client_count} comma-separated users, got ${client_users_csv}" >&2
+    exit 2
+  fi
+  for user in "${client_users[@]}"; do
+    if [[ -z "${user}" ]]; then
+      echo "REAL_CLIENT_CLIENT_USERS must not contain empty users, got ${client_users_csv}" >&2
+      exit 2
+    fi
+  done
+else
+  for ((idx = 0; idx < client_count; idx++)); do
+    client_users+=("alice")
+  done
+fi
 config_path="${work_dir}/config.yaml"
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 socket_path="/tmp/${run_id}.sock"
@@ -501,27 +521,81 @@ echo "headscale-go control=${local_control_url}"
 echo "headscale-go login=${control_url}"
 echo "::endgroup::"
 
-echo "::group::create user"
-"${headscale_bin}" -c "${config_path}" -o json users create alice >"${work_dir}/user.json"
-user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-echo "created user ${user_id}"
+user_names=()
+user_ids=()
+
+lookup_user_id() {
+  local target="$1"
+  local idx
+  for idx in "${!user_names[@]}"; do
+    if [[ "${user_names[$idx]}" == "${target}" ]]; then
+      printf '%s\n' "${user_ids[$idx]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+echo "::group::create users"
+for user in "${client_users[@]}"; do
+  already_created=0
+  for existing in "${user_names[@]}"; do
+    if [[ "${existing}" == "${user}" ]]; then
+      already_created=1
+      break
+    fi
+  done
+  if ((already_created)); then
+    continue
+  fi
+  user_path="${work_dir}/user-${user}.json"
+  "${headscale_bin}" -c "${config_path}" -o json users create "${user}" >"${user_path}"
+  user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${user_path}")"
+  user_names+=("${user}")
+  user_ids+=("${user_id}")
+  echo "created user ${user} ${user_id}"
+done
 echo "::endgroup::"
 
 authkey=""
+authkeys=()
 if [[ "${login_mode}" == "authkey" ]]; then
   echo "::group::mint preauth key"
-  preauth_args=(
-    "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
-    --user "${user_id}" \
-    --reusable \
-    --expiration 1h
-  )
-  if [[ -n "${preauth_tags}" ]]; then
-    preauth_args+=(--tags "${preauth_tags}")
+  if [[ -n "${client_users_csv}" ]]; then
+    for idx in "${!client_names[@]}"; do
+      user_id="$(lookup_user_id "${client_users[$idx]}")"
+      preauth_args=(
+        "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
+        --user "${user_id}" \
+        --reusable \
+        --expiration 1h
+      )
+      if [[ -n "${preauth_tags}" ]]; then
+        preauth_args+=(--tags "${preauth_tags}")
+      fi
+      "${preauth_args[@]}" >"${work_dir}/preauth-${idx}.json"
+      authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth-${idx}.json")"
+      authkeys+=("${authkey}")
+    done
+    echo "minted ${#authkeys[@]} per-client keys"
+  else
+    user_id="$(lookup_user_id alice)"
+    preauth_args=(
+      "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
+      --user "${user_id}" \
+      --reusable \
+      --expiration 1h
+    )
+    if [[ -n "${preauth_tags}" ]]; then
+      preauth_args+=(--tags "${preauth_tags}")
+    fi
+    "${preauth_args[@]}" >"${work_dir}/preauth.json"
+    authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
+    for _client_name in "${client_names[@]}"; do
+      authkeys+=("${authkey}")
+    done
+    echo "minted ${authkey%%-*}-..."
   fi
-  "${preauth_args[@]}" >"${work_dir}/preauth.json"
-  authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
-  echo "minted ${authkey%%-*}-..."
   echo "::endgroup::"
 fi
 
@@ -550,7 +624,8 @@ done
 echo "::endgroup::"
 
 echo "::group::tailscale up"
-for client_name in "${client_names[@]}"; do
+for idx in "${!client_names[@]}"; do
+  client_name="${client_names[$idx]}"
   up_args=(
     tailscale up
     "--login-server=${control_url}"
@@ -560,7 +635,7 @@ for client_name in "${client_names[@]}"; do
     --accept-dns=false
   )
   if [[ "${login_mode}" == "authkey" ]]; then
-    up_args+=("--authkey=${authkey}")
+    up_args+=("--authkey=${authkeys[$idx]}")
   fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
@@ -587,8 +662,9 @@ for client_name in "${client_names[@]}"; do
     fi
     registration_id="$(cat "${registration_id_path}")"
     register_status=0
+    register_user="${client_users[$idx]}"
     "${headscale_bin}" -c "${config_path}" -o json nodes register \
-      --user alice \
+      --user "${register_user}" \
       --key "${registration_id}" \
       >"${work_dir}/${client_name}.registered.json" \
       2>"${work_dir}/${client_name}.registered.err" ||
@@ -630,7 +706,8 @@ echo "::endgroup::"
 
 if ((do_reauth_after_login)); then
   echo "::group::force headscale-go web reauth"
-  for client_name in "${client_names[@]}"; do
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
     reauth_args=(
       tailscale up
       "--login-server=${control_url}"
@@ -657,8 +734,9 @@ if ((do_reauth_after_login)); then
     fi
     registration_id="$(cat "${registration_id_path}")"
     register_status=0
+    register_user="${client_users[$idx]}"
     "${headscale_bin}" -c "${config_path}" -o json nodes register \
-      --user alice \
+      --user "${register_user}" \
       --key "${registration_id}" \
       >"${work_dir}/${client_name}.reauth-registered.json" \
       2>"${work_dir}/${client_name}.reauth-registered.err" ||
@@ -756,6 +834,8 @@ fi
 
 echo "::group::assert headscale-go node state"
 "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
+expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
+expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
@@ -764,6 +844,9 @@ ruby -rjson -e '
   expected_tags = ARGV.fetch(5).split(",").reject(&:empty?).sort
   expected_hostname_prefix = ARGV.fetch(6)
   expect_tags_exact = ARGV.fetch(7) == "true"
+  expected_names = ARGV.fetch(8).split(",")
+  expected_users = ARGV.fetch(9).split(",")
+  expected_user_by_host = expected_names.zip(expected_users).to_h
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
@@ -774,7 +857,13 @@ ruby -rjson -e '
     addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
     available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
     approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
-    expected_user = expected_tags.empty? ? "alice" : "tagged-devices"
+    expected_user = if expected_tags.empty?
+      expected_user_by_host.fetch(given_name.to_s) {
+        abort("unexpected node hostname #{given_name.inspect}; expected one of #{expected_names.inspect}")
+      }
+    else
+      "tagged-devices"
+    end
     abort("expected user #{expected_user}, got #{user.inspect}") unless user_name == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{given_name.inspect}") unless given_name.to_s.start_with?(expected_hostname_prefix)
     abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
@@ -803,7 +892,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({nodes: nodes, primary_nodes: primary_nodes})
   end
-' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)"
+  ' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then

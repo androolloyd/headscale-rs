@@ -32,6 +32,7 @@ expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
+client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 case "${login_mode}" in
   authkey | web) ;;
   *)
@@ -201,6 +202,25 @@ for ((idx = 1; idx <= client_count; idx++)); do
   fi
 done
 
+client_users=()
+if [[ -n "${client_users_csv}" ]]; then
+  IFS=',' read -r -a client_users <<<"${client_users_csv}"
+  if ((${#client_users[@]} != client_count)); then
+    echo "REAL_CLIENT_CLIENT_USERS must contain ${client_count} comma-separated users, got ${client_users_csv}" >&2
+    exit 2
+  fi
+  for user in "${client_users[@]}"; do
+    if [[ -z "${user}" ]]; then
+      echo "REAL_CLIENT_CLIENT_USERS must not contain empty users, got ${client_users_csv}" >&2
+      exit 2
+    fi
+  done
+else
+  for ((idx = 0; idx < client_count; idx++)); do
+    client_users+=("alice")
+  done
+fi
+
 cleanup() {
   for client_name in "${client_names[@]}"; do
     docker rm -f "${client_name}" >/dev/null 2>&1 || true
@@ -364,21 +384,44 @@ if [[ -n "${policy_json}" ]]; then
 fi
 
 authkey=""
+authkeys=()
 if [[ "${login_mode}" == "authkey" ]]; then
   echo "::group::mint preauth key"
-  preauth_body="$(
-    ruby -rjson -e '
-      tags = ARGV.fetch(0).split(",").reject(&:empty?)
-      puts JSON.generate({user: "alice", reusable: true, tags: tags})
-    ' "${preauth_tags}"
-  )"
-  preauth_json="$(
-    curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
-      -H 'content-type: application/json' \
-      -d "${preauth_body}"
-  )"
-  authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
-  echo "minted ${authkey%%-*}-..."
+  if [[ -n "${client_users_csv}" ]]; then
+    for idx in "${!client_names[@]}"; do
+      preauth_body="$(
+        ruby -rjson -e '
+          tags = ARGV.fetch(1).split(",").reject(&:empty?)
+          puts JSON.generate({user: ARGV.fetch(0), reusable: true, tags: tags})
+        ' "${client_users[$idx]}" "${preauth_tags}"
+      )"
+      preauth_json="$(
+        curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
+          -H 'content-type: application/json' \
+          -d "${preauth_body}"
+      )"
+      authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
+      authkeys+=("${authkey}")
+    done
+    echo "minted ${#authkeys[@]} per-client keys"
+  else
+    preauth_body="$(
+      ruby -rjson -e '
+        tags = ARGV.fetch(0).split(",").reject(&:empty?)
+        puts JSON.generate({user: "alice", reusable: true, tags: tags})
+      ' "${preauth_tags}"
+    )"
+    preauth_json="$(
+      curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
+        -H 'content-type: application/json' \
+        -d "${preauth_body}"
+    )"
+    authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
+    for _client_name in "${client_names[@]}"; do
+      authkeys+=("${authkey}")
+    done
+    echo "minted ${authkey%%-*}-..."
+  fi
   echo "::endgroup::"
 fi
 
@@ -400,7 +443,8 @@ done
 echo "::endgroup::"
 
 echo "::group::tailscale up"
-for client_name in "${client_names[@]}"; do
+for idx in "${!client_names[@]}"; do
+  client_name="${client_names[$idx]}"
   up_args=(
     tailscale up
     "--login-server=https://host.docker.internal:${https_port}"
@@ -410,7 +454,7 @@ for client_name in "${client_names[@]}"; do
     --accept-dns=false
   )
   if [[ "${login_mode}" == "authkey" ]]; then
-    up_args+=("--authkey=${authkey}")
+    up_args+=("--authkey=${authkeys[$idx]}")
   fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
@@ -437,9 +481,11 @@ for client_name in "${client_names[@]}"; do
     fi
     registration_id="$(cat "${registration_id_path}")"
     register_status=0
+    register_user="${client_users[$idx]}"
+    register_body="$(ruby -rjson -e 'puts JSON.generate({user: ARGV.fetch(0)})' "${register_user}")"
     curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/register/${registration_id}" \
       -H 'content-type: application/json' \
-      -d '{"user":"alice"}' \
+      -d "${register_body}" \
       >"${work_dir}/${client_name}.registered.json" \
       2>"${work_dir}/${client_name}.registered.err" ||
       register_status="$?"
@@ -480,7 +526,8 @@ echo "::endgroup::"
 
 if ((do_reauth_after_login)); then
   echo "::group::force web reauth"
-  for client_name in "${client_names[@]}"; do
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
     reauth_args=(
       tailscale up
       "--login-server=https://host.docker.internal:${https_port}"
@@ -507,9 +554,11 @@ if ((do_reauth_after_login)); then
     fi
     registration_id="$(cat "${registration_id_path}")"
     register_status=0
+    register_user="${client_users[$idx]}"
+    register_body="$(ruby -rjson -e 'puts JSON.generate({user: ARGV.fetch(0)})' "${register_user}")"
     curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/register/${registration_id}" \
       -H 'content-type: application/json' \
-      -d '{"user":"alice"}' \
+      -d "${register_body}" \
       >"${work_dir}/${client_name}.reauth-registered.json" \
       2>"${work_dir}/${client_name}.reauth-registered.err" ||
       register_status="$?"
@@ -612,6 +661,8 @@ if [[ -n "${expected_primary_route}" ]]; then
 else
   printf '{}\n' >"${work_dir}/debug-routes.json"
 fi
+expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
+expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
@@ -621,6 +672,9 @@ ruby -rjson -e '
   expected_tags = ARGV.fetch(6).split(",").reject(&:empty?).sort
   expected_hostname_prefix = ARGV.fetch(7)
   expect_tags_exact = ARGV.fetch(8) == "true"
+  expected_names = ARGV.fetch(9).split(",")
+  expected_users = ARGV.fetch(10).split(",")
+  expected_user_by_host = expected_names.zip(expected_users).to_h
 
   def stable_id_from_key(hex)
     h = 0xcbf29ce484222325
@@ -634,7 +688,10 @@ ruby -rjson -e '
   machines = JSON.parse(File.read(ARGV.fetch(0)))
   abort("expected #{expected_count} registered machines, got #{machines.length}") unless machines.length == expected_count
   machines.each do |machine|
-    abort("expected user alice, got #{machine["user"].inspect}") unless machine["user"] == "alice"
+    expected_user = expected_user_by_host.fetch(machine["hostname"]) {
+      abort("unexpected machine hostname #{machine["hostname"].inspect}; expected one of #{expected_names.inspect}")
+    }
+    abort("expected user #{expected_user.inspect}, got #{machine["user"].inspect}") unless machine["user"] == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
     abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
     available_routes = Array(machine["available_routes"]).sort
@@ -670,7 +727,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)"
+  ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then

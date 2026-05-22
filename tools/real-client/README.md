@@ -86,6 +86,9 @@ Useful knobs:
 - `REAL_CLIENT_TIMEOUT_SECS` defaults to `120`.
 - `REAL_CLIENT_LOGIN_MODE` defaults to `authkey`; `web` runs the same script
   through the pending web-registration flow.
+- `REAL_CLIENT_CLIENT_USERS` can assign comma-separated per-client users. By
+  default every client registers as `alice`; when set in auth-key mode, each
+  client gets a user-specific key.
 
 The matching headscale-go v0.28.0 smoke is:
 
@@ -275,6 +278,19 @@ tools/real-client/acl-empty-headscale-go-smoke.sh
 Useful knobs:
 
 - `REAL_CLIENT_EXPECT_PEER_COUNTS` defaults to `1,0`.
+
+The `autogroup:self` scenario starts three clients as `alice`, `bob`, and
+`alice`, then asserts that only same-user peers are visible:
+
+```sh
+tools/real-client/acl-autogroup-self-smoke.sh
+tools/real-client/acl-autogroup-self-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_CLIENT_USERS` defaults to `alice,bob,alice`.
+- `REAL_CLIENT_EXPECT_PEER_COUNTS` defaults to `1,0,1`.
 
 ## Advertised Route Smoke
 

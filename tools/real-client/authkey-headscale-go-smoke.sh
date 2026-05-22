@@ -29,7 +29,10 @@ reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 headscale_go_tls="${REAL_CLIENT_HEADSCALE_GO_TLS:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
+base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
+magic_dns="${REAL_CLIENT_MAGIC_DNS:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
+expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 case "${login_mode}" in
@@ -139,6 +142,41 @@ case "${headscale_go_tls}" in
     exit 2
     ;;
 esac
+if [[ -z "${magic_dns}" ]]; then
+  if [[ -n "${base_domain}" ]]; then
+    magic_dns=true
+  else
+    magic_dns=false
+  fi
+fi
+case "${magic_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    use_magic_dns=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    use_magic_dns=0
+    ;;
+  *)
+    echo "REAL_CLIENT_MAGIC_DNS must be true or false, got ${magic_dns}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_no_magic_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_no_magic_dns=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_no_magic_dns=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS must be true or false, got ${expected_no_magic_dns}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_no_magic_dns)) && [[ -n "${expected_magic_dns_suffix}" ]]; then
+  echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS conflicts with REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX" >&2
+  exit 2
+fi
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -387,8 +425,8 @@ database:
     path: ${work_dir}/db.sqlite
 
 dns:
-  magic_dns: true
-  base_domain: tail.test
+  magic_dns: $([[ "${use_magic_dns}" -eq 1 ]] && printf true || printf false)
+  base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
     global: []
@@ -801,6 +839,41 @@ if [[ -n "${expected_magic_dns_suffix}" ]]; then
     end
     puts JSON.pretty_generate({magic_dns_suffix: expected_suffix, clients: status_paths.length})
   ' "${expected_magic_dns_suffix}" "${magicdns_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if ((expect_no_magic_dns)); then
+  echo "::group::assert MagicDNS disabled client status"
+  no_magicdns_status_paths=()
+  for client_name in "${client_names[@]}"; do
+    status_path="${work_dir}/${client_name}.no-magicdns-status.json"
+    docker exec "${client_name}" tailscale status --json >"${status_path}"
+    no_magicdns_status_paths+=("${status_path}")
+  done
+  ruby -rjson -e '
+    status_paths = ARGV
+    expected_peers = status_paths.length - 1
+
+    status_paths.each do |path|
+      status = JSON.parse(File.read(path))
+      self_node = status.fetch("Self")
+      self_host = self_node.fetch("HostName").to_s
+      suffix = status["MagicDNSSuffix"].to_s.sub(/\.\z/, "")
+      abort("#{path}: expected MagicDNSSuffix to fall back to self hostname #{self_host.inspect}, got #{suffix.inspect}") unless suffix == self_host
+
+      self_dns = self_node["DNSName"].to_s.sub(/\.\z/, "")
+      abort("#{path}: expected bare self DNSName #{self_host.inspect}, got #{self_dns.inspect}") unless self_dns == self_host
+
+      peers = status["Peer"] || {}
+      abort("#{path}: expected #{expected_peers} peers, got #{peers.length}") unless peers.length == expected_peers
+      peers.each_value do |peer|
+        peer_host = peer.fetch("HostName").to_s
+        peer_dns = peer["DNSName"].to_s.sub(/\.\z/, "")
+        abort("#{path}: expected bare peer DNSName #{peer_host.inspect}, got #{peer_dns.inspect}") unless peer_dns == peer_host
+      end
+    end
+    puts JSON.pretty_generate({magic_dns: false, clients: status_paths.length})
+  ' "${no_magicdns_status_paths[@]}"
   echo "::endgroup::"
 fi
 

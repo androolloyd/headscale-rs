@@ -367,6 +367,17 @@ pub mod upstream {
             self.require_api_key_auth().into_service_server()
         }
 
+        pub fn reflection_service() -> Result<
+            tonic_reflection::server::v1::ServerReflectionServer<
+                impl tonic_reflection::server::v1::ServerReflection,
+            >,
+            tonic_reflection::server::Error,
+        > {
+            tonic_reflection::server::Builder::configure()
+                .register_encoded_file_descriptor_set(crate::generated::FILE_DESCRIPTOR_SET)
+                .build_v1()
+        }
+
         async fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
             if !self.require_api_key_auth {
                 return Ok(());
@@ -1465,6 +1476,7 @@ mod upstream_tests {
 
     use axum::body::to_bytes;
     use chrono::Utc;
+    use prost::Message as _;
     use tonic::Request;
     use tower::ServiceExt;
 
@@ -1777,6 +1789,33 @@ mod upstream_tests {
         );
         let health = service.health(valid).await.unwrap().into_inner();
         assert!(health.database_connectivity);
+    }
+
+    #[test]
+    fn upstream_grpc_reflection_descriptor_advertises_headscale_service() {
+        let descriptors =
+            prost_types::FileDescriptorSet::decode(crate::generated::FILE_DESCRIPTOR_SET)
+                .expect("generated descriptor set decodes");
+        let service = descriptors
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("headscale.v1"))
+            .flat_map(|file| file.service.iter())
+            .find(|service| service.name.as_deref() == Some("HeadscaleService"))
+            .expect("HeadscaleService present in descriptor set");
+        let methods = service
+            .method
+            .iter()
+            .filter_map(|method| method.name.as_deref())
+            .collect::<Vec<_>>();
+        assert!(methods.contains(&"CreateUser"));
+        assert!(methods.contains(&"RegisterNode"));
+        assert!(methods.contains(&"SetApprovedRoutes"));
+        assert!(methods.contains(&"Health"));
+        assert!(!methods.iter().any(|method| method.contains("Version")));
+
+        let _reflection =
+            HeadscaleAdminService::reflection_service().expect("reflection service builds");
     }
 
     #[tokio::test]

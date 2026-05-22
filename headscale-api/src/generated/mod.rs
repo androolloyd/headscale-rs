@@ -12,5 +12,7 @@
 #[path = "headscale.v1.rs"]
 pub mod headscale_v1;
 
+pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("headscale_descriptor.bin");
+
 // Re-export for convenience
 pub use headscale_v1::*;

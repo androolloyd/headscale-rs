@@ -224,6 +224,7 @@ async fn build_persistent_wire_runtime_with_dns(
         Arc::new(PersistentMachineAdmin::new(pool.clone()).with_user_admin(users.clone()));
     let wire_registry = Arc::new(MachineRegistry::new());
     let registration_cache = Arc::new(RegistrationCache::new());
+    let ip_allocator: Arc<dyn IpAllocator> = Arc::new(CidrIpAllocator::from_cidr(mesh_cidr)?);
     let policy = Arc::new(PolicyStore::new());
     let policy_loaded = load_persisted_policy(pool, &policy).await?;
     tracing::info!(
@@ -248,7 +249,8 @@ async fn build_persistent_wire_runtime_with_dns(
     .with_database_pool(pool.clone())
     .with_policy_pool(pool.clone())
     .with_registration_cache(registration_cache.clone())
-    .with_wire_registry(wire_registry.clone());
+    .with_wire_registry(wire_registry.clone())
+    .with_ip_allocator(ip_allocator.clone());
     let oidc = oidc.map(|runtime| {
         let handler = PersistentOidcRegistrationHandler::new(
             registration_cache.clone(),
@@ -264,7 +266,7 @@ async fn build_persistent_wire_runtime_with_dns(
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
         preauth,
-        ip_allocator: Arc::new(CidrIpAllocator::from_cidr(mesh_cidr)?),
+        ip_allocator,
         machines: wire_registry,
         registration_store: Some(machines),
         derp_map: Arc::new(derp_map),

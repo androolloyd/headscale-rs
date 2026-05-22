@@ -45,7 +45,7 @@
 //! the registry directly.
 
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -57,8 +57,8 @@ use sqlx::SqlitePool;
 
 use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
-    MachineRecord, MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration,
-    RegistrationCache, routes::auto_approved_routes_for_node,
+    IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
+    PersistedMachineRegistration, RegistrationCache, routes::auto_approved_routes_for_node,
 };
 
 use super::auth::now_unix;
@@ -82,6 +82,11 @@ pub struct MachineAdminRecord {
     pub user: String,
     /// Allocated tailnet IPv4 (string form for stable JSON).
     pub ipv4: String,
+    /// Optional allocated tailnet IPv6. Persistent DB-backed nodes can
+    /// project this from `nodes.ipv6`; the current wire runtime only
+    /// allocates IPv4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<String>,
     /// Best-effort online flag. v0 returns `true` for any record
     /// present in the wire registry that hasn't been "expired" by
     /// the admin; richer tracking lands with NodeMetrics integration.
@@ -196,6 +201,17 @@ pub trait MachineAdmin: Send + Sync {
     /// Replace the node's advertised route list while preserving
     /// operator approvals.
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError>;
+    /// Assign missing node IPs where the backing store supports it.
+    ///
+    /// The current Octra allocator contract returns IPv4 only, so the
+    /// persistent implementation can backfill missing IPv4 without
+    /// inventing IPv6 prefix/config semantics.
+    async fn backfill_node_ips(
+        &self,
+        _ip_allocator: Option<&dyn IpAllocator>,
+    ) -> Result<Vec<String>, MachineAdminError> {
+        Ok(Vec::new())
+    }
     /// Mark a machine deleted. Same sidecar story as `expire`. The
     /// record disappears from `list()` once flagged.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
@@ -292,6 +308,7 @@ impl WireMachineAdmin {
             name: rec.hostname.clone(),
             user: rec.user.clone(),
             ipv4: rec.ipv4.to_string(),
+            ipv6: None,
             online: !is_expired,
             last_seen,
             created_at: rec.created_at.timestamp().max(0) as u64,
@@ -439,6 +456,10 @@ impl PersistentMachineAdmin {
             .ipv4
             .parse::<Ipv4Addr>()
             .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        if let Some(ipv6) = &record.ipv6 {
+            ipv6.parse::<Ipv6Addr>()
+                .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))?;
+        }
         let user_id = self.user_id_for_record(&record).await?;
         if validate_requested_tags
             && validate_requested_tags_for_node(
@@ -493,6 +514,9 @@ impl PersistentMachineAdmin {
             }
             if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv4.clone_from(ipv4);
+            }
+            if let Some(ipv6) = existing.ipv6.as_ref().filter(|value| !value.is_empty()) {
+                record.ipv6 = Some(ipv6.clone());
             }
             let mut approved = existing.approved_route_list();
             approved.extend(record.approved_routes.clone());
@@ -623,6 +647,7 @@ impl PersistentMachineAdmin {
             name,
             user: self.user_name_for_row(&row).await,
             ipv4: row.ipv4.clone().unwrap_or_default(),
+            ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
             online: !expired,
             last_seen: row.last_seen.unwrap_or(row.created_at).max(0) as u64,
             created_at: row.created_at.max(0) as u64,
@@ -798,13 +823,11 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             .user_id_for_record(&machine_admin_record_from_wire(&record))
             .await
             .map_err(|err| err.to_string())?;
-        let row = headscale_db::headscale_nodes::update_from_auth_path(
-            &self.pool,
-            row.id,
-            create_params_for_wire_record(&record, user_id, row.auth_key_id),
-        )
-        .await
-        .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
+        params.ipv6 = row.ipv6.clone();
+        let row = headscale_db::headscale_nodes::update_from_auth_path(&self.pool, row.id, params)
+            .await
+            .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
             .row_to_wire_record(row)
             .await
@@ -864,6 +887,10 @@ impl MachineAdmin for PersistentMachineAdmin {
             .ipv4
             .parse::<Ipv4Addr>()
             .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        if let Some(ipv6) = &record.ipv6 {
+            ipv6.parse::<Ipv6Addr>()
+                .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))?;
+        }
         let user_id = self.user_id_for_record(&record).await?;
         let row = headscale_db::headscale_nodes::create(
             &self.pool,
@@ -952,6 +979,47 @@ impl MachineAdmin for PersistentMachineAdmin {
             .await
             .map(|_| ())
             .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn backfill_node_ips(
+        &self,
+        ip_allocator: Option<&dyn IpAllocator>,
+    ) -> Result<Vec<String>, MachineAdminError> {
+        let Some(ip_allocator) = ip_allocator else {
+            return Ok(Vec::new());
+        };
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+        let mut changes = Vec::new();
+        for row in rows {
+            if row.ipv4.as_deref().is_some_and(|value| !value.is_empty()) {
+                continue;
+            }
+            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+            let alloc_input = if node_key_hex.is_empty() {
+                row.id.to_string()
+            } else {
+                node_key_hex
+            };
+            let ipv4 = ip_allocator
+                .allocate(&alloc_input)
+                .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv4: {e}")))?
+                .to_string();
+            headscale_db::headscale_nodes::set_ip_addresses(
+                &self.pool,
+                row.id,
+                Some(ipv4.clone()),
+                row.ipv6.clone(),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &row.id.to_string()))?;
+            changes.push(format!(
+                "assigned IPv4 \"{ipv4}\" to Node({}) \"{}\"",
+                row.id, row.hostname
+            ));
+        }
+        Ok(changes)
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
@@ -1188,7 +1256,7 @@ fn create_params_for_record_with_auth_key(
         endpoints: Vec::new(),
         host_info: host_info_for_record(record),
         ipv4: Some(record.ipv4.clone()),
-        ipv6: None,
+        ipv6: record.ipv6.clone(),
         hostname: record.name.clone(),
         given_name: record.name.clone(),
         user_id,
@@ -1210,7 +1278,9 @@ fn create_params_for_auth_path(
     let Ok(canonical) = canonical_wire_record_for_auth_path(record, wire_record) else {
         return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
     };
-    create_params_for_wire_record(&canonical, user_id, auth_key_id)
+    let mut params = create_params_for_wire_record(&canonical, user_id, auth_key_id);
+    params.ipv6 = record.ipv6.clone();
+    params
 }
 
 fn canonical_wire_record_for_auth_path(
@@ -1270,6 +1340,7 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
         name: record.hostname.clone(),
         user: record.user.clone(),
         ipv4: record.ipv4.to_string(),
+        ipv6: None,
         online: !expired,
         last_seen: record.last_seen.timestamp().max(0) as u64,
         created_at: record.created_at.timestamp().max(0) as u64,
@@ -1487,10 +1558,18 @@ mod tests {
     use super::*;
     use crate::oidc::OidcRegistrationHandler;
     use crate::policy::parse_hujson_policy;
-    use crate::tailscale_wire::{MachineRecord, MachineRegistry};
+    use crate::tailscale_wire::{AllocError, MachineRecord, MachineRegistry};
     use chrono::TimeZone;
     use headscale_db::Database;
     use std::net::Ipv4Addr;
+
+    struct FixedIpAllocator(Ipv4Addr);
+
+    impl IpAllocator for FixedIpAllocator {
+        fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+            Ok(self.0)
+        }
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -1638,6 +1717,7 @@ mod tests {
             name: "debug-node".into(),
             user: "alice".into(),
             ipv4: "100.64.0.44".into(),
+            ipv6: None,
             online: false,
             last_seen: 1_700_000_000,
             created_at: 1_700_000_000,
@@ -1717,6 +1797,7 @@ mod tests {
             name: "alice-laptop".into(),
             user: "alice".into(),
             ipv4: "100.64.0.9".into(),
+            ipv6: None,
             online: true,
             last_seen: 1_700_000_000,
             created_at: 1_700_000_000,
@@ -1787,6 +1868,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_machine_admin_projects_ipv6_from_go_nodes_table() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let mut record = persistent_record();
+        record.ipv6 = Some("fd7a:115c:a1e0::9".into());
+
+        let created = admin.create(record).await.unwrap();
+        let listed = admin.list().await;
+
+        assert_eq!(created.ipv6.as_deref(), Some("fd7a:115c:a1e0::9"));
+        assert_eq!(listed[0].ipv6.as_deref(), Some("fd7a:115c:a1e0::9"));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_backfill_assigns_missing_ipv4_only() {
+        let (admin, db, users) = persistent_fixture().await;
+        let user = users.get("alice").await.unwrap().unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: json!({"Hostname": "needs-ip"}),
+                ipv4: None,
+                ipv6: Some("fd7a:115c:a1e0::10".into()),
+                hostname: "needs-ip".into(),
+                given_name: "needs-ip".into(),
+                user_id: Some(user.id as i64),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let changes = admin
+            .backfill_node_ips(Some(&FixedIpAllocator(Ipv4Addr::new(100, 64, 0, 10))))
+            .await
+            .unwrap();
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            changes,
+            vec!["assigned IPv4 \"100.64.0.10\" to Node(1) \"needs-ip\""]
+        );
+        assert_eq!(row.ipv4.as_deref(), Some("100.64.0.10"));
+        assert_eq!(row.ipv6.as_deref(), Some("fd7a:115c:a1e0::10"));
+    }
+
+    #[tokio::test]
     async fn persistent_machine_admin_hydrates_wire_registry_from_go_nodes() {
         let (admin, _db, _users) = persistent_fixture().await;
         let mut record = persistent_record();
@@ -1843,6 +1975,7 @@ mod tests {
     async fn persistent_machine_admin_auth_path_reauth_updates_existing_row() {
         let (admin, db, _users) = persistent_fixture().await;
         let mut original = persistent_record();
+        original.ipv6 = Some("fd7a:115c:a1e0::9".into());
         original.approved_routes = vec!["10.0.0.0/24".into()];
         let created = admin.create(original).await.unwrap();
 
@@ -1867,6 +2000,10 @@ mod tests {
         assert_eq!(updated.id, "cc".repeat(32));
         assert_eq!(updated.machine_key_hex, created.machine_key_hex);
         assert_eq!(updated.ipv4, created.ipv4, "reauth keeps existing IP");
+        assert_eq!(
+            updated.ipv6, created.ipv6,
+            "reauth keeps existing IPv6 projection"
+        );
         assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
         assert_eq!(updated.expiry, Some(4_102_444_800));
         assert_eq!(updated.approved_routes, vec!["10.0.0.0/24", "10.1.0.0/24"]);

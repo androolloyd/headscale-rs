@@ -613,6 +613,37 @@ pub async fn set_last_seen(
     get_by_id(pool, id).await
 }
 
+pub async fn set_ip_addresses(
+    pool: &SqlitePool,
+    id: i64,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+) -> Result<HeadscaleNodeRow> {
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            ipv4 = ?,
+            ipv6 = ?,
+            updated_at = datetime(?, 'unixepoch')
+        WHERE id = ? AND deleted_at IS NULL
+        ",
+    )
+    .bind(ipv4)
+    .bind(ipv6)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 pub async fn logout(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
     let affected = sqlx::query(
@@ -964,6 +995,30 @@ mod tests {
             .unwrap();
         assert!(cleared.host_info_value().get("RoutableIPs").is_none());
         assert_eq!(cleared.approved_route_list(), vec!["10.0.0.0/24"]);
+    }
+
+    #[tokio::test]
+    async fn set_ip_addresses_updates_ipv4_and_ipv6_only() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let node = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let updated = set_ip_addresses(
+            db.pool(),
+            node.id,
+            Some("100.64.0.44".into()),
+            Some("fd7a:115c:a1e0::44".into()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.ipv4.as_deref(), Some("100.64.0.44"));
+        assert_eq!(updated.ipv6.as_deref(), Some("fd7a:115c:a1e0::44"));
+        assert_eq!(updated.node_key, node.node_key);
+        assert_eq!(updated.approved_route_list(), node.approved_route_list());
     }
 
     #[tokio::test]

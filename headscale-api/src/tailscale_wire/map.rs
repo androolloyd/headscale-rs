@@ -2451,6 +2451,103 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_disco_key_update_uses_full_peer_delta() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let old_disco = format!("discokey:{}", "1a".repeat(32));
+        let new_disco = format!("discokey:{}", "2a".repeat(32));
+        let mut peer_a = MachineRecord::new_at(
+            chrono::Utc::now(),
+            a.clone(),
+            String::new(),
+            "u".into(),
+            "peer-a".into(),
+            Ipv4Addr::new(100, 64, 0, 10),
+            false,
+        );
+        peer_a.disco_key = Some(old_disco.clone());
+        state.machines.upsert(a.clone(), peer_a);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{b}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&stream_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(
+            first_mr.peers[0].disco_key.as_deref(),
+            Some(old_disco.as_str())
+        );
+
+        let update_req = serde_json::json!({
+            "Version": 39,
+            "OmitPeers": true,
+            "DiscoKey": &new_disco,
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .machines
+                .get(&a)
+                .expect("peer-a still registered")
+                .disco_key
+                .as_deref(),
+            Some(new_disco.as_str())
+        );
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        let peer = &mr.peers_changed[0];
+        assert_eq!(peer.id, stable_id_from_key(&a));
+        assert_eq!(peer.disco_key.as_deref(), Some(new_disco.as_str()));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_derp_update_uses_peer_changed_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

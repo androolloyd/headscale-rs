@@ -158,12 +158,23 @@ tools/real-client/route-primary-failover-smoke.sh
 tools/real-client/route-primary-failover-headscale-go-smoke.sh
 ```
 
+The primary-route withdrawal scenario instead asks the current primary client
+to stop advertising the route with `tailscale set --advertise-routes=` and
+asserts that another advertising router takes over:
+
+```sh
+tools/real-client/route-primary-withdraw-smoke.sh
+tools/real-client/route-primary-withdraw-headscale-go-smoke.sh
+```
+
 Additional knobs:
 
 - `REAL_CLIENT_CLIENT_COUNT` defaults to `2` in the primary-route wrappers.
 - `REAL_CLIENT_EXPECT_PRIMARY_ROUTE` defaults to `REAL_CLIENT_ROUTE`.
 - `REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE` defaults to `REAL_CLIENT_ROUTE`
   in the failover wrappers.
+- `REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE` defaults to `REAL_CLIENT_ROUTE`
+  in the withdrawal wrappers.
 
 The exit-node scenario advertises the default-route pair with
 `tailscale up --advertise-exit-node`, approves both routes, and checks that

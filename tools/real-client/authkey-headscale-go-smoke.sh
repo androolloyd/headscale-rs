@@ -17,6 +17,7 @@ expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
+expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -409,6 +410,94 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
       nodes: after_nodes,
     })
   ' "${work_dir}/nodes-before-failover.json" "${work_dir}/nodes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_id}" "${expected_machine_count}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_primary_withdraw_route}" ]]; then
+  echo "::group::assert primary route withdrawal"
+  cp "${work_dir}/nodes.json" "${work_dir}/nodes-before-withdraw.json"
+  withdraw_client_name="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(1)
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      primary_nodes = nodes.select do |node|
+        Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+      end
+      abort("expected exactly one primary node before withdrawal, got #{primary_nodes.length}") unless primary_nodes.length == 1
+      node = primary_nodes.fetch(0)
+      puts node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    ' "${work_dir}/nodes-before-withdraw.json" "${expected_primary_withdraw_route}"
+  )"
+  withdraw_status=0
+  run_with_timeout "tailscale withdraw route ${withdraw_client_name}" \
+    docker exec "${withdraw_client_name}" tailscale set --advertise-routes= ||
+    withdraw_status="$?"
+  if ((withdraw_status != 0)); then
+    echo "tailscale route withdrawal ${withdraw_client_name} returned ${withdraw_status}; verifying route state"
+  fi
+  if ! wait_for "tailscale logged-in netmap after withdrawal ${withdraw_client_name}" "tailscale_logged_in '${withdraw_client_name}'"; then
+    dump_client_debug "${withdraw_client_name}"
+    exit 1
+  fi
+
+  deadline=$((SECONDS + timeout_secs))
+  until
+    "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-after-withdraw.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(2)
+        withdrawn_client = ARGV.fetch(3)
+        expected_count = Integer(ARGV.fetch(4))
+
+        before_payload = JSON.parse(File.read(ARGV.fetch(0)))
+        before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
+        after_payload = JSON.parse(File.read(ARGV.fetch(1)))
+        after_nodes = after_payload.is_a?(Array) ? after_payload : after_payload.fetch("nodes")
+        abort("expected #{expected_count} nodes before withdrawal, got #{before_nodes.length}") unless before_nodes.length == expected_count
+        abort("expected #{expected_count} nodes after withdrawal, got #{after_nodes.length}") unless after_nodes.length == expected_count
+
+        before_primary = before_nodes.select do |node|
+          Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+        end
+        after_primary = after_nodes.select do |node|
+          Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+        end
+        abort("expected exactly one primary node before withdrawal, got #{before_primary.length}") unless before_primary.length == 1
+        abort("expected exactly one primary node after withdrawal, got #{after_primary.length}") unless after_primary.length == 1
+        before_owner = Integer(before_primary.fetch(0).fetch("id"))
+        after_owner = Integer(after_primary.fetch(0).fetch("id"))
+        abort("expected primary owner to change, still #{after_owner}") if after_owner == before_owner
+
+        withdrawn = after_nodes.find do |node|
+          name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+          name == withdrawn_client
+        end
+        abort("missing withdrawn client #{withdrawn_client}") unless withdrawn
+        abort("withdrawn client still advertises #{route}") if Array(withdrawn["availableRoutes"] || withdrawn["available_routes"]).include?(route)
+
+        remaining_ids = after_nodes
+          .reject do |node|
+            name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+            name == withdrawn_client
+          end
+          .select { |node| Array(node["availableRoutes"] || node["available_routes"]).include?(route) }
+          .map { |node| Integer(node.fetch("id")) }
+        abort("new primary owner #{after_owner} not among remaining advertising routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          withdrawn_client: withdrawn_client,
+          before_owner: before_owner,
+          after_owner: after_owner,
+          nodes: after_nodes,
+        })
+      ' "${work_dir}/nodes-before-withdraw.json" "${work_dir}/nodes-after-withdraw.json" "${expected_primary_withdraw_route}" "${withdraw_client_name}" "${expected_machine_count}"
+  do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for primary route withdrawal" >&2
+      exit 1
+    fi
+    sleep 1
+  done
   echo "::endgroup::"
 fi
 

@@ -16,6 +16,7 @@ expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
+expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -378,6 +379,114 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
       debug_routes: after_debug,
     })
   ' "${work_dir}/machines-before-failover.json" "${work_dir}/debug-routes-before-failover.json" "${work_dir}/machines-after-failover.json" "${work_dir}/debug-routes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_key}" "${expected_machine_count}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_primary_withdraw_route}" ]]; then
+  echo "::group::assert primary route withdrawal"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-withdraw.json"
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes-before-withdraw.json"
+  withdraw_client_name="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(2)
+
+      def stable_id_from_key(hex)
+        h = 0xcbf29ce484222325
+        hex.each_byte do |byte|
+          h ^= byte
+          h = (h * 0x100000001b3) & 0xffffffffffffffff
+        end
+        h & 0x7fffffffffffffff
+      end
+
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      debug_routes = JSON.parse(File.read(ARGV.fetch(1)))
+      primary_owner = debug_routes.fetch("primary_routes").fetch(route) {
+        abort("missing primary route #{route.inspect} before withdrawal")
+      }
+      machine = machines.find do |candidate|
+        stable_id_from_key(candidate.fetch("node_key").sub(/\Anodekey:/, "")) == primary_owner
+      end
+      abort("primary owner #{primary_owner.inspect} did not match a registered machine") unless machine
+      puts machine.fetch("hostname")
+    ' "${work_dir}/machines-before-withdraw.json" "${work_dir}/debug-routes-before-withdraw.json" "${expected_primary_withdraw_route}"
+  )"
+  withdraw_status=0
+  run_with_timeout "tailscale withdraw route ${withdraw_client_name}" \
+    docker exec "${withdraw_client_name}" tailscale set --advertise-routes= ||
+    withdraw_status="$?"
+  if ((withdraw_status != 0)); then
+    echo "tailscale route withdrawal ${withdraw_client_name} returned ${withdraw_status}; verifying route state"
+  fi
+  if ! wait_for "tailscale logged-in netmap after withdrawal ${withdraw_client_name}" "tailscale_logged_in '${withdraw_client_name}'"; then
+    dump_client_debug "${withdraw_client_name}"
+    exit 1
+  fi
+
+  deadline=$((SECONDS + timeout_secs))
+  until
+    curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-withdraw.json" &&
+      curl -fsS -H 'accept: application/json' \
+        "http://127.0.0.1:${http_port}/debug/routes" \
+        >"${work_dir}/debug-routes-after-withdraw.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(4)
+        withdrawn_client = ARGV.fetch(5)
+        expected_count = Integer(ARGV.fetch(6))
+
+        def stable_id_from_key(hex)
+          h = 0xcbf29ce484222325
+          hex.each_byte do |byte|
+            h ^= byte
+            h = (h * 0x100000001b3) & 0xffffffffffffffff
+          end
+          h & 0x7fffffffffffffff
+        end
+
+        before_machines = JSON.parse(File.read(ARGV.fetch(0)))
+        before_debug = JSON.parse(File.read(ARGV.fetch(1)))
+        after_machines = JSON.parse(File.read(ARGV.fetch(2)))
+        after_debug = JSON.parse(File.read(ARGV.fetch(3)))
+        abort("expected #{expected_count} machines before withdrawal, got #{before_machines.length}") unless before_machines.length == expected_count
+        abort("expected #{expected_count} machines after withdrawal, got #{after_machines.length}") unless after_machines.length == expected_count
+
+        before_owner = before_debug.fetch("primary_routes").fetch(route)
+        after_owner = after_debug.fetch("primary_routes").fetch(route) {
+          abort("missing primary route #{route.inspect} after withdrawal")
+        }
+        abort("expected primary owner to change, still #{after_owner.inspect}") if after_owner == before_owner
+
+        withdrawn = after_machines.find { |machine| machine.fetch("hostname") == withdrawn_client }
+        abort("missing withdrawn client #{withdrawn_client}") unless withdrawn
+        abort("withdrawn client still advertises #{route}") if Array(withdrawn["available_routes"]).include?(route)
+
+        remaining_ids = after_machines
+          .reject { |machine| machine.fetch("hostname") == withdrawn_client }
+          .select { |machine| Array(machine["available_routes"]).include?(route) && Array(machine["approved_routes"]).include?(route) }
+          .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+        abort("new primary owner #{after_owner.inspect} not among remaining active routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+        active_candidates = after_debug.fetch("available_routes").select do |_node_id, routes|
+          Array(routes).include?(route)
+        end
+        abort("expected #{expected_count - 1} active candidates after withdrawal, got #{active_candidates.length}") unless active_candidates.length == expected_count - 1
+
+        puts JSON.pretty_generate({
+          withdrawn_client: withdrawn_client,
+          before_owner: before_owner,
+          after_owner: after_owner,
+          debug_routes: after_debug,
+        })
+      ' "${work_dir}/machines-before-withdraw.json" "${work_dir}/debug-routes-before-withdraw.json" "${work_dir}/machines-after-withdraw.json" "${work_dir}/debug-routes-after-withdraw.json" "${expected_primary_withdraw_route}" "${withdraw_client_name}" "${expected_machine_count}"
+  do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for primary route withdrawal" >&2
+      exit 1
+    fi
+    sleep 1
+  done
   echo "::endgroup::"
 fi
 

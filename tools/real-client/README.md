@@ -99,3 +99,23 @@ Additional knobs:
 
 - `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
+
+## Advertised Route Smoke
+
+The route-advertisement scenario reuses the auth-key setup and adds
+`tailscale up --advertise-routes=10.77.0.0/24`.
+
+```sh
+tools/real-client/route-advertise-smoke.sh
+tools/real-client/route-advertise-headscale-go-smoke.sh
+```
+
+Both scripts assert that the control server records the advertised route as an
+available route for the registered node. The route is intentionally not
+approved in this smoke; approval and primary-route behavior are covered by the
+Rust unit/differential tests and still need broader real-client scenarios.
+
+Useful knobs:
+
+- `REAL_CLIENT_ADVERTISE_ROUTES` defaults to `10.77.0.0/24`.
+- `REAL_CLIENT_EXPECT_AVAILABLE_ROUTES` defaults to the advertised routes.

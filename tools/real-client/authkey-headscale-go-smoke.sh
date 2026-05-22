@@ -8,6 +8,8 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
+advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -224,15 +226,20 @@ wait_for "tailscaled local socket" \
 echo "::endgroup::"
 
 echo "::group::tailscale up"
+up_args=(
+  tailscale up
+  "--login-server=http://host.docker.internal:${http_port}"
+  "--hostname=${client_name}"
+  "--authkey=${authkey}"
+  --timeout=15s
+  --accept-routes=false
+  --accept-dns=false
+)
+if [[ -n "${advertise_routes}" ]]; then
+  up_args+=("--advertise-routes=${advertise_routes}")
+fi
 up_status=0
-run_with_timeout "tailscale up" \
-  docker exec "${client_name}" tailscale up \
-    "--login-server=http://host.docker.internal:${http_port}" \
-    "--hostname=${client_name}" \
-    "--authkey=${authkey}" \
-    --timeout=15s \
-    --accept-routes=false \
-    --accept-dns=false ||
+run_with_timeout "tailscale up" docker exec "${client_name}" "${up_args[@]}" ||
   up_status="$?"
 if ((up_status != 0)); then
   echo "tailscale up returned ${up_status}; verifying logged-in netmap"
@@ -248,6 +255,7 @@ echo "::endgroup::"
 echo "::group::assert headscale-go node state"
 "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
 ruby -rjson -e '
+  expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected one registered node, got #{nodes.length}") unless nodes.length == 1
@@ -256,11 +264,15 @@ ruby -rjson -e '
   user_name = user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
   given_name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
   addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
+  available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
   abort("expected user alice, got #{user.inspect}") unless user_name == "alice"
   abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
   abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
+  unless expected_routes.empty? || available_routes == expected_routes
+    abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+  end
   puts JSON.pretty_generate(node)
-' "${work_dir}/nodes.json"
+' "${work_dir}/nodes.json" "${expected_available_routes}"
 echo "::endgroup::"
 
 echo "headscale-go auth-key real-client smoke passed"

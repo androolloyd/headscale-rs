@@ -7,6 +7,8 @@ cd "${repo_root}"
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
+advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -148,15 +150,20 @@ wait_for "tailscaled local socket" \
 echo "::endgroup::"
 
 echo "::group::tailscale up"
+up_args=(
+  tailscale up
+  "--login-server=https://host.docker.internal:${https_port}"
+  "--hostname=${client_name}"
+  "--authkey=${authkey}"
+  --timeout=15s
+  --accept-routes=false
+  --accept-dns=false
+)
+if [[ -n "${advertise_routes}" ]]; then
+  up_args+=("--advertise-routes=${advertise_routes}")
+fi
 up_status=0
-run_with_timeout "tailscale up" \
-  docker exec "${client_name}" tailscale up \
-    "--login-server=https://host.docker.internal:${https_port}" \
-    "--hostname=${client_name}" \
-    "--authkey=${authkey}" \
-    --timeout=15s \
-    --accept-routes=false \
-    --accept-dns=false ||
+run_with_timeout "tailscale up" docker exec "${client_name}" "${up_args[@]}" ||
   up_status="$?"
 if ((up_status != 0)); then
   echo "tailscale up returned ${up_status}; verifying logged-in netmap"
@@ -172,14 +179,19 @@ echo "::endgroup::"
 echo "::group::assert harness machine state"
 curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines.json"
 ruby -rjson -e '
+  expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   machines = JSON.parse(File.read(ARGV.fetch(0)))
   abort("expected one registered machine, got #{machines.length}") unless machines.length == 1
   machine = machines.fetch(0)
   abort("expected user alice, got #{machine["user"].inspect}") unless machine["user"] == "alice"
   abort("expected hostname prefix, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?("hsrs-authkey-")
   abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
+  available_routes = Array(machine["available_routes"]).sort
+  unless expected_routes.empty? || available_routes == expected_routes
+    abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+  end
   puts JSON.pretty_generate(machine)
-' "${work_dir}/machines.json"
+' "${work_dir}/machines.json" "${expected_available_routes}"
 echo "::endgroup::"
 
 echo "auth-key real-client smoke passed"

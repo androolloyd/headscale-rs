@@ -61,3 +61,24 @@ Each scenario should run the same stock `tailscaled` image against:
 Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
 its own preauth, persistence, billing, and deployment concerns around the shared
 headscale-rs wire surface.
+
+## Auth-Key Smoke
+
+The first runnable stock-client scenario is:
+
+```sh
+tools/real-client/authkey-smoke.sh
+```
+
+It builds the Rust harness, starts it on loopback plus a Docker-reachable HTTPS
+port, runs a stock `tailscale/tailscale:v1.94.1` client container, logs in with
+a minted reusable auth key, waits for the client to have a logged-in self node
+in its netmap, and asserts that the harness registered exactly one `alice`
+machine. The smoke disables client DNS acceptance because the minimal harness
+does not start a local DERP/DNS environment.
+
+Useful knobs:
+
+- `TAILSCALE_IMAGE` defaults to `tailscale/tailscale:v1.94.1`.
+- `REAL_CLIENT_WORKDIR` defaults to `target/real-client/authkey-smoke`.
+- `REAL_CLIENT_TIMEOUT_SECS` defaults to `120`.

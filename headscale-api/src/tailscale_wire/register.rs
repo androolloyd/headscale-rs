@@ -365,7 +365,7 @@ async fn register_inner(
         requested_os_version
     };
     let expiry = if forced_tags.is_empty() {
-        body.expiry
+        effective_authkey_expiry(body.expiry, now)
     } else {
         existing_machine
             .as_ref()
@@ -541,6 +541,13 @@ fn merge_existing_approved_routes(
         .collect();
     merged.extend(auto_approved_routes);
     merged.into_iter().collect()
+}
+
+fn effective_authkey_expiry(
+    expiry: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    expiry.filter(|expiry| *expiry > now)
 }
 
 fn preauth_error_response(err: RedeemError) -> axum::response::Response {
@@ -1042,6 +1049,40 @@ mod tests {
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert!(rec.forced_tags.is_empty());
         assert_eq!(rec.expiry, Some(requested_expiry));
+    }
+
+    #[tokio::test]
+    async fn authkey_untagged_preauth_ignores_go_zero_expiry() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-zero-expiry";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "15".repeat(32);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Expiry"] = serde_json::json!("0001-01-01T00:00:00Z");
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!rr.node_key_expired);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert!(rec.forced_tags.is_empty());
+        assert!(
+            rec.expiry.is_none(),
+            "Go's zero time should not create an already-expired node"
+        );
     }
 
     #[tokio::test]

@@ -1301,6 +1301,7 @@ pub fn router(state: WireState) -> Router {
             get(basic_handlers::handle_swagger_api_v1),
         )
         .route("/metrics", get(basic_handlers::handle_metrics))
+        .route("/verify", post(basic_handlers::handle_verify))
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),
@@ -1390,6 +1391,7 @@ fn prometheus_http_path(path: &str) -> Option<&'static str> {
         "/health" => Some("/health"),
         "/version" => Some("/version"),
         "/key" => Some("/key"),
+        "/verify" => Some("/verify"),
         "/apple" => Some("/apple"),
         "/windows" => Some("/windows"),
         "/swagger" => Some("/swagger"),

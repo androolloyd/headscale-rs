@@ -7,11 +7,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
@@ -47,6 +49,20 @@ pub struct VersionInfo {
     pub build_time: String,
     pub go: GoInfo,
     pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct DerpAdmitClientRequest {
+    #[serde(rename = "NodePublic", default)]
+    node_public: Option<String>,
+    #[serde(rename = "Source", default)]
+    source: Option<IpAddr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DerpAdmitClientResponse {
+    #[serde(rename = "Allow")]
+    pub allow: bool,
 }
 
 pub async fn handle_robots() -> Response {
@@ -108,6 +124,39 @@ pub async fn handle_metrics(State(state): State<WireState>) -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)],
         metrics_text(&state),
+    )
+        .into_response()
+}
+
+pub async fn handle_verify(State(state): State<WireState>, raw: Bytes) -> Response {
+    let req = match serde_json::from_slice::<DerpAdmitClientRequest>(&raw) {
+        Ok(req) => req,
+        Err(_) => return http_error(StatusCode::BAD_REQUEST, "Bad Request: invalid JSON"),
+    };
+    let DerpAdmitClientRequest {
+        node_public,
+        source: _,
+    } = req;
+
+    let node_key_hex = match node_public.as_deref() {
+        Some(node_public) => match derp_admit_node_key_hex(node_public) {
+            Ok(node_key_hex) => Some(node_key_hex),
+            Err(()) => return http_error(StatusCode::BAD_REQUEST, "Bad Request: invalid JSON"),
+        },
+        None => None,
+    };
+
+    let allow = node_key_hex.is_some_and(|node_key_hex| state.machines.get(node_key_hex).is_some());
+    let body = format!(
+        "{}\n",
+        serde_json::to_string(&DerpAdmitClientResponse { allow })
+            .expect("DERP admit response serialization is infallible")
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
     )
         .into_response()
 }
@@ -829,6 +878,22 @@ fn http_error(status: StatusCode, msg: &str) -> Response {
         format!("{msg}\n"),
     )
         .into_response()
+}
+
+fn derp_admit_node_key_hex(node_public: &str) -> Result<&str, ()> {
+    let Some(node_key_hex) = node_public.strip_prefix("nodekey:") else {
+        return Err(());
+    };
+    if node_key_hex.len() == 64
+        && node_key_hex
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        Ok(node_key_hex)
+    } else {
+        Err(())
+    }
 }
 
 fn wants_json(headers: &HeaderMap) -> bool {
@@ -2324,6 +2389,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verify_endpoint_allows_registered_node_key() {
+        let (state, _dir) = fixture_state();
+        let node_key = "11".repeat(32);
+        let rec = record(&node_key, 11, &[], &[]);
+        state.machines.upsert(rec.node_key_hex.clone(), rec);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(format!(
+                        "{{\"NodePublic\":\"nodekey:{node_key}\",\"Source\":\"203.0.113.10\"}}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"{\"Allow\":true}\n");
+    }
+
+    #[tokio::test]
+    async fn verify_endpoint_denies_unknown_node_key() {
+        let (state, _dir) = fixture_state();
+        let node_key = "22".repeat(32);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(format!(
+                        "{{\"NodePublic\":\"nodekey:{node_key}\",\"Source\":\"203.0.113.11\"}}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: DerpAdmitClientResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!parsed.allow);
+    }
+
+    #[tokio::test]
+    async fn verify_endpoint_rejects_invalid_admit_json_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(
+                        "{\"NodePublic\":\"not-a-node-key\"}",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"Bad Request: invalid JSON\n");
+    }
+
+    #[tokio::test]
     async fn swagger_ui_matches_headscale_go_public_path() {
         let (state, _dir) = fixture_state();
         let resp = router(state)
@@ -2484,6 +2632,22 @@ mod tests {
             .unwrap();
         assert_eq!(apple_resp.status(), StatusCode::OK);
 
+        let verify_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(format!(
+                        "{{\"NodePublic\":\"nodekey:{}\"}}",
+                        "33".repeat(32)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+
         let metrics_resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2507,6 +2671,12 @@ mod tests {
         assert!(
             body.contains(
                 "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/apple/{platform}\"} 1\n"
+            ),
+            "{body}",
+        );
+        assert!(
+            body.contains(
+                "headscale_http_requests_total{code=\"200\",method=\"POST\",path=\"/verify\"} 1\n"
             ),
             "{body}",
         );

@@ -13,7 +13,7 @@ use headscale_api::admin::{
 };
 use headscale_api::dns::DnsStore;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
-use headscale_api::policy::PolicyStore;
+use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls::SanConfig;
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, RegistrationCache,
@@ -157,6 +157,11 @@ async fn build_persistent_wire_runtime(
     let wire_registry = Arc::new(MachineRegistry::new());
     let registration_cache = Arc::new(RegistrationCache::new());
     let policy = Arc::new(PolicyStore::new());
+    let policy_loaded = load_persisted_policy(pool, &policy).await?;
+    tracing::info!(
+        loaded = policy_loaded,
+        "loaded persisted policy into wire runtime"
+    );
     let hydrated = machines
         .hydrate_wire_registry(&wire_registry)
         .await
@@ -191,6 +196,18 @@ async fn build_persistent_wire_runtime(
     };
 
     Ok(PersistentWireRuntime { state, oidc })
+}
+
+async fn load_persisted_policy(pool: &sqlx::SqlitePool, policy: &PolicyStore) -> Result<bool> {
+    let Some(row) = headscale_db::policies::get_latest(pool)
+        .await
+        .context("load persisted ACL policy")?
+    else {
+        return Ok(false);
+    };
+    let doc = parse_hujson_policy(&row.data).context("parse persisted ACL policy")?;
+    policy.set_at(doc, row.data, row.updated_at);
+    Ok(true)
 }
 
 async fn open_sqlite_database(path: &Path) -> Result<Database> {
@@ -385,6 +402,39 @@ mod tests {
         assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.register_method, 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_loads_latest_sqlite_policy() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = r#"{"tagOwners":{"tag:old":["alice@"]}}"#;
+        let latest = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        headscale_db::policies::set(db.pool(), old).await.unwrap();
+        headscale_db::policies::set(db.pool(), latest)
+            .await
+            .unwrap();
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            Some(oidc_runtime()),
+        )
+        .await
+        .unwrap();
+
+        let tags = Vec::new();
+        let node = headscale_api::policy::NodeView {
+            addr: Some("100.64.0.9"),
+            user: Some("alice"),
+            tags: &tags,
+        };
+        assert_eq!(runtime.state.policy.raw().as_deref(), Some(latest));
+        assert!(runtime.state.policy.tag_exists("tag:server"));
+        assert!(!runtime.state.policy.tag_exists("tag:old"));
+        assert!(runtime.state.policy.node_can_have_tag(&node, "tag:server"));
     }
 
     #[test]

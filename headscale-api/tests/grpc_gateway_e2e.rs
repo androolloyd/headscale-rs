@@ -525,6 +525,96 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
+    let (app, token) = fixture().await;
+    let registration_key = "exitrouteabcdefghijklmno";
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"exit-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/debug/node",
+            Some(&token),
+            Body::from(format!(
+                r#"{{"user":"exit-user","key":"{registration_key}","name":"exit-node","routes":["0.0.0.0/0","::/0"]}}"#
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let node_id = body["node"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        body["node"]["availableRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/register?user=exit-user&key={registration_key}"),
+            Some(&token),
+            Body::from(r#"{}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/approve_routes"),
+            Some(&token),
+            Body::from(r#"{"routes":["0.0.0.0/0"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["node"]["approvedRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+    assert_eq!(body["node"]["subnetRoutes"], serde_json::json!([]));
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/node?user=exit-user",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let node = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == node_id)
+        .expect("listed exit node");
+    assert_eq!(
+        node["subnetRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+}
+
+#[tokio::test]
 async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
     let (app, token) = fixture().await;
 

@@ -68,12 +68,31 @@ impl Default for OidcPkceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OidcAuthConfig {
+    pub issuer: String,
     pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub userinfo_endpoint: Option<String>,
+    pub jwks_uri: String,
     pub client_id: String,
+    pub client_secret: String,
     pub redirect_url: String,
     pub scopes: Vec<String>,
     pub extra_params: BTreeMap<String, String>,
     pub pkce: OidcPkceConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OidcProviderMetadata {
+    #[serde(default)]
+    pub issuer: String,
+    #[serde(default)]
+    pub authorization_endpoint: String,
+    #[serde(default)]
+    pub token_endpoint: String,
+    #[serde(default)]
+    pub userinfo_endpoint: Option<String>,
+    #[serde(default)]
+    pub jwks_uri: String,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +255,148 @@ pub enum OidcRuntimeError {
     StateCookieMismatch,
     #[error("registration not found")]
     RegistrationNotFound,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OidcDiscoveryError {
+    #[error("oidc issuer is empty")]
+    EmptyIssuer,
+    #[error("failed to fetch OIDC discovery metadata from {url}: {message}")]
+    Fetch { url: String, message: String },
+    #[error("failed to decode OIDC discovery metadata from {url}: {message}")]
+    Decode { url: String, message: String },
+    #[error("OIDC discovery metadata is missing {field}")]
+    MissingField { field: &'static str },
+    #[error("OIDC discovery issuer mismatch: expected {expected}, got {actual}")]
+    IssuerMismatch { expected: String, actual: String },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OidcRuntimeBuildError {
+    #[error(transparent)]
+    Discovery(#[from] OidcDiscoveryError),
+    #[error("unsupported OIDC PKCE method {method:?}")]
+    InvalidPkceMethod { method: String },
+}
+
+impl OidcProviderMetadata {
+    pub fn validate_for_issuer(&self, issuer: &str) -> Result<(), OidcDiscoveryError> {
+        let expected = normalize_issuer(issuer)?;
+        let actual = require_oidc_field(&self.issuer, "issuer")?;
+        require_oidc_field(&self.authorization_endpoint, "authorization_endpoint")?;
+        require_oidc_field(&self.token_endpoint, "token_endpoint")?;
+        require_oidc_field(&self.jwks_uri, "jwks_uri")?;
+
+        if normalize_issuer(actual)? != expected {
+            return Err(OidcDiscoveryError::IssuerMismatch {
+                expected,
+                actual: actual.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+pub fn oidc_discovery_url(issuer: &str) -> Result<String, OidcDiscoveryError> {
+    Ok(format!(
+        "{}/.well-known/openid-configuration",
+        normalize_issuer(issuer)?
+    ))
+}
+
+#[cfg(feature = "full")]
+pub async fn discover_oidc_metadata(
+    issuer: &str,
+) -> Result<OidcProviderMetadata, OidcDiscoveryError> {
+    let client = reqwest::Client::new();
+    discover_oidc_metadata_with_client(&client, issuer).await
+}
+
+#[cfg(feature = "full")]
+pub async fn discover_oidc_metadata_with_client(
+    client: &reqwest::Client,
+    issuer: &str,
+) -> Result<OidcProviderMetadata, OidcDiscoveryError> {
+    let url = oidc_discovery_url(issuer)?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| OidcDiscoveryError::Fetch {
+            url: url.clone(),
+            message: err.to_string(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(OidcDiscoveryError::Fetch {
+            url,
+            message: format!("HTTP {status}"),
+        });
+    }
+
+    let metadata = response
+        .json::<OidcProviderMetadata>()
+        .await
+        .map_err(|err| OidcDiscoveryError::Decode {
+            url: url.clone(),
+            message: err.to_string(),
+        })?;
+    metadata.validate_for_issuer(issuer)?;
+    Ok(metadata)
+}
+
+#[cfg(feature = "full")]
+pub fn auth_config_from_core_oidc(
+    oidc: &headscale_core::config::OidcConfig,
+    server_url: &str,
+    metadata: OidcProviderMetadata,
+) -> Result<OidcAuthConfig, OidcRuntimeBuildError> {
+    metadata.validate_for_issuer(&oidc.issuer)?;
+
+    Ok(OidcAuthConfig {
+        issuer: normalize_issuer(&metadata.issuer)?,
+        authorization_endpoint: metadata.authorization_endpoint,
+        token_endpoint: metadata.token_endpoint,
+        userinfo_endpoint: metadata.userinfo_endpoint,
+        jwks_uri: metadata.jwks_uri,
+        client_id: oidc.client_id.clone(),
+        client_secret: oidc.client_secret.clone(),
+        redirect_url: oidc_redirect_url(server_url),
+        scopes: oidc.scope.clone(),
+        extra_params: oidc.extra_params.clone(),
+        pkce: OidcPkceConfig {
+            enabled: oidc.pkce.enabled,
+            method: oidc_pkce_method_from_str(&oidc.pkce.method)?,
+        },
+    })
+}
+
+#[cfg(feature = "full")]
+pub async fn runtime_from_core_oidc(
+    oidc: &headscale_core::config::OidcConfig,
+    server_url: &str,
+) -> Result<Option<OidcAuthRuntime>, OidcRuntimeBuildError> {
+    if oidc.issuer.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let metadata = match discover_oidc_metadata(&oidc.issuer).await {
+        Ok(metadata) => metadata,
+        Err(err) if !oidc.only_start_if_oidc_is_available => {
+            tracing::warn!(
+                error = %err,
+                "OIDC provider discovery failed; continuing without OIDC because oidc.only_start_if_oidc_is_available=false"
+            );
+            return Ok(None);
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    Ok(Some(OidcAuthRuntime::new(auth_config_from_core_oidc(
+        oidc, server_url, metadata,
+    )?)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,6 +701,41 @@ pub fn clean_identifier(identifier: &str) -> String {
     clean_slash_path(identifier)
 }
 
+fn normalize_issuer(issuer: &str) -> Result<String, OidcDiscoveryError> {
+    let issuer = issuer.trim().trim_end_matches('/');
+    if issuer.is_empty() {
+        return Err(OidcDiscoveryError::EmptyIssuer);
+    }
+    Ok(issuer.to_string())
+}
+
+fn require_oidc_field<'a>(
+    value: &'a str,
+    field: &'static str,
+) -> Result<&'a str, OidcDiscoveryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OidcDiscoveryError::MissingField { field });
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "full")]
+fn oidc_redirect_url(server_url: &str) -> String {
+    format!("{}/oidc/callback", server_url.trim_end_matches('/'))
+}
+
+#[cfg(feature = "full")]
+fn oidc_pkce_method_from_str(method: &str) -> Result<OidcPkceMethod, OidcRuntimeBuildError> {
+    match method {
+        "plain" => Ok(OidcPkceMethod::Plain),
+        "S256" => Ok(OidcPkceMethod::S256),
+        _ => Err(OidcRuntimeBuildError::InvalidPkceMethod {
+            method: method.to_string(),
+        }),
+    }
+}
+
 fn build_auth_url(
     cfg: &OidcAuthConfig,
     state: &str,
@@ -791,8 +987,13 @@ mod tests {
 
     fn auth_config(pkce: OidcPkceConfig) -> OidcAuthConfig {
         OidcAuthConfig {
+            issuer: "https://issuer.example".into(),
             authorization_endpoint: "https://issuer.example/oauth2/auth".into(),
+            token_endpoint: "https://issuer.example/oauth2/token".into(),
+            userinfo_endpoint: Some("https://issuer.example/oauth2/userinfo".into()),
+            jwks_uri: "https://issuer.example/oauth2/jwks".into(),
             client_id: "headscale-rs".into(),
+            client_secret: "secret".into(),
             redirect_url: "https://headscale.example/oidc/callback".into(),
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             extra_params: BTreeMap::from([("domain_hint".into(), "example.com".into())]),
@@ -807,6 +1008,149 @@ mod tests {
             .flat_map(|query| query.split('&'))
             .filter_map(|part| part.split_once('='))
             .find_map(|(part_key, value)| (part_key == key).then(|| value.to_string()))
+    }
+
+    fn provider_metadata() -> OidcProviderMetadata {
+        OidcProviderMetadata {
+            issuer: "https://issuer.example".into(),
+            authorization_endpoint: "https://issuer.example/oauth2/auth".into(),
+            token_endpoint: "https://issuer.example/oauth2/token".into(),
+            userinfo_endpoint: Some("https://issuer.example/oauth2/userinfo".into()),
+            jwks_uri: "https://issuer.example/oauth2/jwks".into(),
+        }
+    }
+
+    #[test]
+    fn oidc_discovery_url_matches_issuer_path_rules() {
+        assert_eq!(
+            oidc_discovery_url(" https://issuer.example/ ").unwrap(),
+            "https://issuer.example/.well-known/openid-configuration"
+        );
+        assert_eq!(
+            oidc_discovery_url("https://issuer.example/realms/headscale/").unwrap(),
+            "https://issuer.example/realms/headscale/.well-known/openid-configuration"
+        );
+        assert_eq!(oidc_discovery_url(""), Err(OidcDiscoveryError::EmptyIssuer));
+    }
+
+    #[test]
+    fn oidc_metadata_validates_required_fields_and_issuer() {
+        let metadata = provider_metadata();
+        assert_eq!(
+            metadata.validate_for_issuer("https://issuer.example/"),
+            Ok(())
+        );
+
+        let mut missing_auth_endpoint = metadata.clone();
+        missing_auth_endpoint.authorization_endpoint.clear();
+        assert_eq!(
+            missing_auth_endpoint.validate_for_issuer("https://issuer.example"),
+            Err(OidcDiscoveryError::MissingField {
+                field: "authorization_endpoint"
+            })
+        );
+
+        let mut mismatch = metadata;
+        mismatch.issuer = "https://other.example".into();
+        assert_eq!(
+            mismatch.validate_for_issuer("https://issuer.example"),
+            Err(OidcDiscoveryError::IssuerMismatch {
+                expected: "https://issuer.example".into(),
+                actual: "https://other.example".into(),
+            })
+        );
+    }
+
+    #[cfg(feature = "full")]
+    #[test]
+    fn oidc_core_config_builds_runtime_config_from_discovery() {
+        let oidc = headscale_core::config::OidcConfig {
+            issuer: "https://issuer.example/".into(),
+            client_id: "client-id".into(),
+            client_secret: "client-secret".into(),
+            scope: vec!["openid".into(), "email".into()],
+            extra_params: BTreeMap::from([("domain_hint".into(), "example.com".into())]),
+            pkce: headscale_core::config::PkceConfig {
+                enabled: true,
+                method: "plain".into(),
+            },
+            ..headscale_core::config::OidcConfig::default()
+        };
+
+        let cfg =
+            auth_config_from_core_oidc(&oidc, "https://headscale.example/", provider_metadata())
+                .unwrap();
+
+        assert_eq!(cfg.issuer, "https://issuer.example");
+        assert_eq!(
+            cfg.authorization_endpoint,
+            "https://issuer.example/oauth2/auth"
+        );
+        assert_eq!(cfg.token_endpoint, "https://issuer.example/oauth2/token");
+        assert_eq!(
+            cfg.userinfo_endpoint.as_deref(),
+            Some("https://issuer.example/oauth2/userinfo")
+        );
+        assert_eq!(cfg.jwks_uri, "https://issuer.example/oauth2/jwks");
+        assert_eq!(cfg.client_id, "client-id");
+        assert_eq!(cfg.client_secret, "client-secret");
+        assert_eq!(cfg.redirect_url, "https://headscale.example/oidc/callback");
+        assert_eq!(cfg.scopes, vec!["openid", "email"]);
+        assert_eq!(
+            cfg.extra_params.get("domain_hint").map(String::as_str),
+            Some("example.com")
+        );
+        assert_eq!(
+            cfg.pkce,
+            OidcPkceConfig {
+                enabled: true,
+                method: OidcPkceMethod::Plain,
+            }
+        );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_discovery_fetches_provider_metadata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let issuer = format!("http://{addr}/issuer");
+        let route_issuer = issuer.clone();
+        let app = axum::Router::new().route(
+            "/issuer/.well-known/openid-configuration",
+            axum::routing::get(move || {
+                let issuer = route_issuer.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "issuer": issuer,
+                        "authorization_endpoint": format!("{issuer}/oauth2/auth"),
+                        "token_endpoint": format!("{issuer}/oauth2/token"),
+                        "userinfo_endpoint": format!("{issuer}/oauth2/userinfo"),
+                        "jwks_uri": format!("{issuer}/oauth2/jwks"),
+                    }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let metadata = discover_oidc_metadata(&issuer).await.unwrap();
+        assert_eq!(metadata.issuer, issuer);
+        assert_eq!(
+            metadata.authorization_endpoint,
+            format!("{}/oauth2/auth", metadata.issuer)
+        );
+        assert_eq!(
+            metadata.token_endpoint,
+            format!("{}/oauth2/token", metadata.issuer)
+        );
+        assert_eq!(
+            metadata.jwks_uri,
+            format!("{}/oauth2/jwks", metadata.issuer)
+        );
+
+        handle.abort();
     }
 
     #[test]

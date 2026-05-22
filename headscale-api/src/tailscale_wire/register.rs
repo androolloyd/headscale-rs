@@ -846,8 +846,13 @@ mod tests {
 
     fn oidc_runtime() -> crate::oidc::OidcAuthRuntime {
         crate::oidc::OidcAuthRuntime::new(crate::oidc::OidcAuthConfig {
+            issuer: "https://issuer.example".into(),
             authorization_endpoint: "https://issuer.example/oauth2/auth".into(),
+            token_endpoint: "https://issuer.example/oauth2/token".into(),
+            userinfo_endpoint: Some("https://issuer.example/oauth2/userinfo".into()),
+            jwks_uri: "https://issuer.example/oauth2/jwks".into(),
             client_id: "headscale-rs".into(),
+            client_secret: "secret".into(),
             redirect_url: "https://headscale.example/oidc/callback".into(),
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             extra_params: BTreeMap::from([("domain_hint".into(), "example.com".into())]),

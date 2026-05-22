@@ -148,6 +148,34 @@ Useful knobs:
   negative web-registration cases.
 - `REAL_CLIENT_TAILSCALE_UP_TIMEOUT` defaults to `45s` for web registration.
 
+## OIDC Smoke
+
+The OIDC scenario starts the production `headscale server` path with `[oidc]`
+configured, runs upstream `headscale mockoidc` as the identity provider, starts a
+stock client without an auth key, and drives the browser callback with a cookie
+jar:
+
+```sh
+tools/real-client/oidc-smoke.sh
+tools/real-client/oidc-headscale-go-smoke.sh
+```
+
+Both scripts assert that the client reaches a logged-in netmap and that SQLite
+records one OIDC-registered node plus the expected OIDC user profile. The
+headscale-go script also checks the upstream `headscale nodes list` JSON output.
+
+Useful knobs:
+
+- `TAILSCALE_IMAGE` defaults to `tailscale/tailscale:v1.94.1`.
+- `REAL_CLIENT_WORKDIR` defaults to `target/real-client/oidc-smoke` or
+  `target/real-client/oidc-headscale-go-smoke`.
+- `REAL_CLIENT_TIMEOUT_SECS` defaults to `150`.
+- `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
+- `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
+- `REAL_CLIENT_OIDC_EMAIL`, `REAL_CLIENT_OIDC_USERNAME`,
+  `REAL_CLIENT_OIDC_SUBJECT`, and `REAL_CLIENT_OIDC_GROUPS` control the mock
+  identity.
+
 ## Tagged Preauth Smoke
 
 The tagged-preauth scenario mints a reusable auth key with ACL tags, logs in a

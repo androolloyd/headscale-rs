@@ -32,13 +32,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
-    #[arg(
-        short,
-        long,
-        default_value = "info",
-        env = "HEADSCALE_LOG",
-        global = true
-    )]
+    #[arg(long, default_value = "info", env = "HEADSCALE_LOG", global = true)]
     log_level: String,
 
     #[command(flatten)]

@@ -918,17 +918,17 @@ mod tests {
                 axum::routing::post(wire_map_handlers::handle_map_flat),
             )
             .with_state(runtime.state);
-        let resp = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri(format!("/machine/nodekey:{a}/map"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(b"{}".to_vec()))
-                    .unwrap(),
-            )
-            .await
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{a}/map"))
+            .header("content-type", "application/json")
+            .body(Body::from(b"{}".to_vec()))
             .unwrap();
+        req.extensions_mut()
+            .insert(headscale_api::tailscale_wire::noise::NoisePeerMachineKey(
+                "3a".repeat(32),
+            ));
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let map: MapResponse = serde_json::from_slice(&body).unwrap();

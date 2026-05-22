@@ -77,6 +77,10 @@ pub async fn handle_register(
     Path(node_key_path): Path<String>,
     raw: Bytes,
 ) -> axum::response::Response {
+    let machine_key = match require_noise_machine_key(machine_key) {
+        Ok(machine_key) => machine_key,
+        Err(resp) => return resp,
+    };
     let body = match parse_register_body(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
@@ -99,13 +103,7 @@ pub async fn handle_register(
         )
             .into_response();
     }
-    register_inner(
-        state,
-        body_node_key_hex,
-        machine_key.map(|Extension(NoisePeerMachineKey(key))| key),
-        body,
-    )
-    .await
+    register_inner(state, body_node_key_hex, machine_key, body).await
 }
 
 /// `POST /machine/register` (v1.78+ flat path).
@@ -120,6 +118,10 @@ pub async fn handle_register_flat(
     machine_key: Option<Extension<NoisePeerMachineKey>>,
     raw: Bytes,
 ) -> axum::response::Response {
+    let machine_key = match require_noise_machine_key(machine_key) {
+        Ok(machine_key) => machine_key,
+        Err(resp) => return resp,
+    };
     let body = match parse_register_body(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
@@ -137,13 +139,7 @@ pub async fn handle_register_flat(
         )
             .into_response();
     }
-    register_inner(
-        state,
-        body_node_key_hex,
-        machine_key.map(|Extension(NoisePeerMachineKey(key))| key),
-        body,
-    )
-    .await
+    register_inner(state, body_node_key_hex, machine_key, body).await
 }
 
 /// Shared logic between the keyed and flat register handlers.
@@ -156,7 +152,7 @@ pub async fn handle_register_flat(
 async fn register_inner(
     state: WireState,
     node_key_hex: String,
-    machine_key_hex: Option<String>,
+    machine_key_hex: String,
     body: RegisterRequest,
 ) -> axum::response::Response {
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
@@ -167,7 +163,7 @@ async fn register_inner(
         && expiry <= now
         && let Some(record) = state.machines.get(&node_key_hex)
     {
-        if let Err(resp) = validate_existing_machine_key(machine_key_hex.as_deref(), &record) {
+        if let Err(resp) = validate_existing_machine_key(&machine_key_hex, &record) {
             return resp;
         }
         return logout_existing_node(&state, &node_key_hex, &record, expiry);
@@ -175,7 +171,7 @@ async fn register_inner(
 
     if authkey.is_empty() {
         if let Some(record) = state.machines.get(&node_key_hex) {
-            if let Err(resp) = validate_existing_machine_key(machine_key_hex.as_deref(), &record) {
+            if let Err(resp) = validate_existing_machine_key(&machine_key_hex, &record) {
                 return resp;
             }
             if record.is_expired_at(now) {
@@ -240,7 +236,6 @@ async fn register_inner(
         return register_interactive(state, node_key_hex, machine_key_hex, body).await;
     }
 
-    let machine_key_hex = machine_key_hex.unwrap_or_default();
     let redeemed = match state.preauth.redeem(authkey).await {
         Ok(ok) => ok,
         Err(err) => {
@@ -459,7 +454,7 @@ async fn register_inner(
 async fn register_interactive(
     state: WireState,
     node_key_hex: String,
-    machine_key_hex: Option<String>,
+    machine_key_hex: String,
     body: RegisterRequest,
 ) -> axum::response::Response {
     let RegisterHostInfoParts {
@@ -481,7 +476,7 @@ async fn register_interactive(
     let registration_id = new_registration_id();
     let record = MachineRecord {
         node_key_hex,
-        machine_key_hex: machine_key_hex.unwrap_or_default(),
+        machine_key_hex,
         user: String::new(),
         hostname,
         os,
@@ -639,14 +634,35 @@ fn logout_existing_node(
     Json(register_response_for_record(&updated)).into_response()
 }
 
+fn require_noise_machine_key(
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
+) -> Result<String, axum::response::Response> {
+    let Some(Extension(NoisePeerMachineKey(machine_key))) = machine_key else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing Noise machine key".into(),
+            }),
+        )
+            .into_response());
+    };
+    if machine_key.is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing Noise machine key".into(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(machine_key)
+}
+
 fn validate_existing_machine_key(
-    presented_machine_key_hex: Option<&str>,
+    presented_machine_key_hex: &str,
     record: &MachineRecord,
 ) -> Result<(), axum::response::Response> {
-    let Some(presented) = presented_machine_key_hex else {
-        return Ok(());
-    };
-    if record.machine_key_hex.is_empty() || record.machine_key_hex == presented {
+    if record.machine_key_hex == presented_machine_key_hex {
         return Ok(());
     }
 
@@ -870,7 +886,7 @@ mod tests {
     use crate::tailscale_wire::{
         MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration, RedeemOk,
         WireState,
-        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as router},
+        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
     };
@@ -879,6 +895,21 @@ mod tests {
     use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
     use tower::ServiceExt;
+
+    const TEST_MACHINE_KEY_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn router(state: WireState) -> axum::Router {
+        machine_router(state).layer(axum::middleware::from_fn(
+            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                if req.extensions().get::<NoisePeerMachineKey>().is_none() {
+                    req.extensions_mut()
+                        .insert(NoisePeerMachineKey(TEST_MACHINE_KEY_HEX.to_string()));
+                }
+                next.run(req).await
+            },
+        ))
+    }
 
     fn fixture() -> (WireState, MockRedeemer, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -1064,6 +1095,31 @@ mod tests {
         );
         assert!(registration_id_from_followup("/register/short").is_err());
         assert!(registration_id_from_followup("https://headscale.example/oidc/callback").is_err());
+    }
+
+    #[tokio::test]
+    async fn register_requires_noise_machine_key() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-no-noise-machine-key";
+        redeemer.insert(authkey, "alice");
+        let app = machine_router(state.clone());
+        let node_key_hex = "a0".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.machines.get(&node_key_hex).is_none());
     }
 
     #[tokio::test]

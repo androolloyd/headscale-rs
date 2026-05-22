@@ -1259,10 +1259,9 @@ impl MachineRegistry {
         })
     }
 
-    /// Logout a machine: clears the Noise/ed25519 key material so the
-    /// next request can't fast-path past register, and stamps
-    /// `expiry = now()` so the next `/map` round-trip returns a logout
-    /// response.
+    /// Logout a machine: stamps `expiry = now()` so the next `/map`
+    /// round-trip returns a logout response while preserving the
+    /// machine key that the Noise session is bound to.
     ///
     /// Mirrors `db.NodeLogout`. The record stays in the registry —
     /// upstream behaviour is "logged-out node still exists, but must
@@ -1271,9 +1270,6 @@ impl MachineRegistry {
         let now = Utc::now();
         self.update_with(|map| match map.get_mut(node_key_hex) {
             Some(rec) => {
-                rec.machine_key_hex.clear();
-                rec.disco_key = None;
-                rec.endpoints.clear();
                 rec.expiry = Some(now);
                 true
             }
@@ -1758,17 +1754,21 @@ mod registry_tests {
         assert!(!reg.rename("nk-zzz", "x".into()));
     }
 
-    /// `logout` clears Noise/disco keys + endpoints AND stamps expiry.
+    /// `logout` preserves the Noise machine key and stamps expiry.
     #[test]
-    fn logout_clears_keys_and_stamps_expiry() {
+    fn logout_preserves_machine_key_and_stamps_expiry() {
         let reg = MachineRegistry::new();
         reg.upsert("nk-a".to_string(), mk_record(3));
+        let original = reg.get("nk-a").unwrap();
+        let machine_key_hex = original.machine_key_hex;
+        let disco_key = original.disco_key;
+        let endpoints = original.endpoints;
         let before = Utc::now();
         assert!(reg.logout("nk-a"));
         let rec = reg.get("nk-a").unwrap();
-        assert!(rec.machine_key_hex.is_empty());
-        assert!(rec.disco_key.is_none());
-        assert!(rec.endpoints.is_empty());
+        assert_eq!(rec.machine_key_hex, machine_key_hex);
+        assert_eq!(rec.disco_key, disco_key);
+        assert_eq!(rec.endpoints, endpoints);
         // Expiry set to ~now (no more than 1s in the future since `logout` ran).
         let exp = rec.expiry.expect("expiry stamped");
         assert!(exp >= before);

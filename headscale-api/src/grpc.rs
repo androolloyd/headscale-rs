@@ -1659,7 +1659,7 @@ mod upstream_tests {
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
         MachineRegistry, RegistrationCache, RegistrationWaitOutcome, WireState,
-        noise::{ServerNoiseKey, inner_router as machine_router},
+        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         test_support::{MockIpAllocator, MockRedeemer},
     };
 
@@ -2246,6 +2246,7 @@ mod upstream_tests {
         };
         let app = machine_router(state.clone());
         let node_key_hex = "77".repeat(32);
+        let machine_key_hex = "88".repeat(32);
         let body = serde_json::json!({
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Expiry": "2026-06-01T00:00:00Z",
@@ -2255,17 +2256,15 @@ mod upstream_tests {
                 "RequestTags": ["tag:server", "tag:server"]
             }
         });
-        let resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
-                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
+        let mut initial_req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
+        initial_req
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(initial_req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let pending_response: crate::tailscale_wire::RegisterResponse =
@@ -2285,18 +2284,18 @@ mod upstream_tests {
         let followup_task = {
             let app = app.clone();
             let node_key_hex = node_key_hex.clone();
+            let machine_key_hex = machine_key_hex.clone();
             tokio::spawn(async move {
-                app.oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri(format!("/machine/nodekey:{node_key_hex}/register"))
-                        .body(axum::body::Body::from(
-                            serde_json::to_vec(&followup_body).unwrap(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+                let mut req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&followup_body).unwrap(),
+                    ))
+                    .unwrap();
+                req.extensions_mut()
+                    .insert(NoisePeerMachineKey(machine_key_hex));
+                app.oneshot(req).await.unwrap()
             })
         };
         tokio::task::yield_now().await;

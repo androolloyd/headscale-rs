@@ -17,7 +17,7 @@ use headscale_api::{
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, PreauthRedeemer,
         RedeemError, RedeemOk, RegisterResponse, RegistrationCache, ServerNoiseKey, WireState,
-        register as wire_register_handlers, router_with_oidc,
+        noise::NoisePeerMachineKey, register as wire_register_handlers, router_with_oidc,
     },
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -26,6 +26,9 @@ use serde::Serialize;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+const TEST_MACHINE_KEY_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[tokio::test]
 async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration() {
@@ -240,11 +243,14 @@ fn register_request(node_key_hex: &str, followup: Option<&str>) -> Request<Body>
         body["Followup"] = json!(followup);
     }
 
-    Request::builder()
+    let mut req = Request::builder()
         .method(Method::POST)
         .uri(format!("/machine/nodekey:{node_key_hex}/register"))
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
+        .unwrap();
+    req.extensions_mut()
+        .insert(NoisePeerMachineKey(TEST_MACHINE_KEY_HEX.to_string()));
+    req
 }
 
 fn wire_machine_router(state: WireState) -> Router {

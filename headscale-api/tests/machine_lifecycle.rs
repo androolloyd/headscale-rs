@@ -11,7 +11,7 @@
 //! | upstream Go test                              | Rust counterpart                                  |
 //! |-----------------------------------------------|---------------------------------------------------|
 //! | `TestSetExpiry`                               | `admin_expire_then_full_map_marks_self_expired`   |
-//! | `TestNodeLogout`                              | `admin_logout_clears_keys_and_expires_now`        |
+//! | `TestNodeLogout`                              | `admin_logout_preserves_machine_key_and_expires_now` |
 //! | `TestNodeRename`                              | `admin_rename_round_trip`                         |
 //! | `TestDeleteNode`                              | `admin_delete_removes_from_list_and_wire`         |
 //! | `TestSetTags`                                 | `admin_set_tags_round_trip`                       |
@@ -36,7 +36,7 @@ use headscale_api::admin::{
     AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin, router as admin_router,
 };
 use headscale_api::tailscale_wire::{
-    MachineRecord, MachineRegistry, WireState, map as wire_map_handlers,
+    MachineRecord, MachineRegistry, WireState, map as wire_map_handlers, noise::NoisePeerMachineKey,
 };
 use tower::ServiceExt;
 
@@ -180,12 +180,18 @@ async fn wire_map_body(
     body: &'static str,
 ) -> (StatusCode, serde_json::Value) {
     let router = wire_machine_router(wire.clone());
-    let req = Request::builder()
+    let machine_key = wire
+        .machines
+        .get(node_key_hex)
+        .map_or_else(|| "00".repeat(32), |record| record.machine_key_hex);
+    let mut req = Request::builder()
         .method(Method::POST)
         .uri(format!("/machine/nodekey:{node_key_hex}/map"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap();
+    req.extensions_mut()
+        .insert(NoisePeerMachineKey(machine_key));
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
@@ -296,16 +302,17 @@ async fn admin_expire_invalid_timestamp_400() {
 }
 
 #[tokio::test]
-async fn admin_logout_clears_keys_and_expires_now() {
+async fn admin_logout_preserves_machine_key_and_expires_now() {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert("bb".repeat(32), mk_record(0xbb, "node-2", 11, false));
     let (wire, admin) = fixture(reg.clone());
+    let original_machine_key = reg.get(&"bb".repeat(32)).unwrap().machine_key_hex;
 
     let (s, _) = admin_post(&admin, &"bb".repeat(32), "logout", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 
     let rec = reg.get(&"bb".repeat(32)).expect("record still present");
-    assert!(rec.machine_key_hex.is_empty());
+    assert_eq!(rec.machine_key_hex, original_machine_key);
     assert!(rec.expiry.is_some());
 
     // Full /map sees the upstream expired self-node state.

@@ -35,12 +35,14 @@ use std::{
 };
 
 use axum::{
-    Json,
+    Extension, Json,
     body::{Body, Bytes},
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+
+use super::noise::NoisePeerMachineKey;
 
 /// Decode a `MapRequest` from a raw body without requiring
 /// `Content-Type: application/json`. Stock `tailscale up` (via
@@ -535,9 +537,14 @@ struct ErrorBody {
 
 pub async fn handle_map(
     State(state): State<WireState>,
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
     Path(node_key_path): Path<String>,
     raw: Bytes,
 ) -> Response {
+    let machine_key = match require_noise_machine_key(machine_key) {
+        Ok(machine_key) => machine_key,
+        Err(resp) => return resp,
+    };
     let req = match parse_map_body(&raw) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -546,14 +553,22 @@ pub async fn handle_map(
         Some(h) => h.to_string(),
         None => node_key_path.clone(),
     };
-    map_inner(state, node_key_hex, req).await
+    map_inner(state, node_key_hex, machine_key, req).await
 }
 
 /// `POST /machine/map` (v1.78+ flat path).
 ///
 /// NodeKey lives in the request body (`MapRequest.NodeKey`). The
 /// keyed `/machine/{node_key}/map` route is kept for older clients.
-pub async fn handle_map_flat(State(state): State<WireState>, raw: Bytes) -> Response {
+pub async fn handle_map_flat(
+    State(state): State<WireState>,
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
+    raw: Bytes,
+) -> Response {
+    let machine_key = match require_noise_machine_key(machine_key) {
+        Ok(machine_key) => machine_key,
+        Err(resp) => return resp,
+    };
     let req = match parse_map_body(&raw) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -571,10 +586,15 @@ pub async fn handle_map_flat(State(state): State<WireState>, raw: Bytes) -> Resp
         )
             .into_response();
     }
-    map_inner(state, node_key_hex, req).await
+    map_inner(state, node_key_hex, machine_key, req).await
 }
 
-async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> Response {
+async fn map_inner(
+    state: WireState,
+    node_key_hex: String,
+    machine_key_hex: String,
+    req: MapRequest,
+) -> Response {
     // The caller must already have registered. If not, 404 — they need
     // to go through `/machine/{node_key}/register` first.
     let Some(mut own) = state.machines.get(&node_key_hex) else {
@@ -586,6 +606,9 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         )
             .into_response();
     };
+    if let Err(resp) = validate_map_machine_key(&machine_key_hex, &own) {
+        return resp;
+    }
 
     // P1 lifecycle: stamp `last_seen` on every /map arrival.
     // (Mirrors upstream's `db.UpdateNodeFromMapRequest`.) The COW
@@ -1040,6 +1063,47 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     }
 }
 
+fn require_noise_machine_key(
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
+) -> Result<String, Response> {
+    let Some(Extension(NoisePeerMachineKey(machine_key))) = machine_key else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing Noise machine key".into(),
+            }),
+        )
+            .into_response());
+    };
+    if machine_key.is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing Noise machine key".into(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(machine_key)
+}
+
+fn validate_map_machine_key(
+    presented_machine_key_hex: &str,
+    record: &MachineRecord,
+) -> Result<(), Response> {
+    if record.machine_key_hex == presented_machine_key_hex {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorBody {
+            error: "node exists with different machine key".into(),
+        }),
+    )
+        .into_response())
+}
+
 /// Rebuild an incremental peer update for an in-flight `Stream:true`
 /// `/machine/map` poller after the registry changes. Upstream
 /// headscale sends the initial stream response as a full `Peers`
@@ -1271,7 +1335,7 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         MachineRecord, MachineRegistry, WireState,
-        noise::{ServerNoiseKey, inner_router as router},
+        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
         router as public_router,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -1282,6 +1346,21 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::ServiceExt;
+
+    const TEST_MACHINE_KEY_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn router(state: WireState) -> axum::Router {
+        machine_router(state).layer(axum::middleware::from_fn(
+            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                if req.extensions().get::<NoisePeerMachineKey>().is_none() {
+                    req.extensions_mut()
+                        .insert(NoisePeerMachineKey(TEST_MACHINE_KEY_HEX.to_string()));
+                }
+                next.run(req).await
+            },
+        ))
+    }
 
     fn fixture() -> (WireState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -1308,7 +1387,7 @@ mod tests {
             MachineRecord::new_at(
                 chrono::Utc::now(),
                 node_hex.to_string(),
-                String::new(),
+                TEST_MACHINE_KEY_HEX.to_string(),
                 "u".into(),
                 host.into(),
                 Ipv4Addr::new(100, 64, 0, last_octet),
@@ -1326,7 +1405,7 @@ mod tests {
         let mut rec = MachineRecord::new_at(
             chrono::Utc::now(),
             node_hex.to_string(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "u".into(),
             host.into(),
             Ipv4Addr::new(100, 64, 0, last_octet),
@@ -1353,7 +1432,7 @@ mod tests {
         let mut rec = MachineRecord::new_at(
             chrono::Utc::now(),
             node_hex.to_string(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             user.into(),
             host.into(),
             Ipv4Addr::new(100, 64, 0, last_octet),
@@ -1432,6 +1511,49 @@ mod tests {
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_requires_noise_machine_key() {
+        let (state, _dir) = fixture();
+        let node_key = "a0".repeat(32);
+        insert_peer(&state, &node_key, "peer-a", 10);
+
+        let app = machine_router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn map_rejects_mismatched_noise_machine_key() {
+        let (state, _dir) = fixture();
+        let node_key = "a1".repeat(32);
+        insert_peer(&state, &node_key, "peer-a", 10);
+
+        let app = router(state);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key}/map"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(b"{}".to_vec()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey("11".repeat(32)));
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1896,7 +2018,7 @@ mod tests {
         let mut record = MachineRecord::new_at(
             chrono::Utc::now(),
             "f1".repeat(32),
-            "f2".repeat(32),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "alice".into(),
             "old-host".into(),
             Ipv4Addr::new(100, 64, 0, 44),
@@ -2784,7 +2906,7 @@ mod tests {
         let mut peer_a = MachineRecord::new_at(
             chrono::Utc::now(),
             a.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "u".into(),
             "peer-a".into(),
             Ipv4Addr::new(100, 64, 0, 10),
@@ -2873,7 +2995,7 @@ mod tests {
         let mut peer_a = MachineRecord::new_at(
             chrono::Utc::now(),
             a.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "u".into(),
             "peer-a".into(),
             Ipv4Addr::new(100, 64, 0, 10),
@@ -2968,7 +3090,7 @@ mod tests {
         let mut peer_a = MachineRecord::new_at(
             chrono::Utc::now(),
             a.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "u".into(),
             "peer-a".into(),
             Ipv4Addr::new(100, 64, 0, 10),
@@ -3310,7 +3432,7 @@ mod tests {
         let mut server_rec = MachineRecord::new_at(
             chrono::Utc::now(),
             server.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "alice".into(),
             "server".into(),
             Ipv4Addr::new(100, 64, 0, 11),
@@ -3324,7 +3446,7 @@ mod tests {
             MachineRecord::new_at(
                 chrono::Utc::now(),
                 admin,
-                String::new(),
+                TEST_MACHINE_KEY_HEX.to_string(),
                 "bob".into(),
                 "admin".into(),
                 Ipv4Addr::new(100, 64, 0, 12),
@@ -3387,7 +3509,7 @@ mod tests {
             MachineRecord::new_at(
                 chrono::Utc::now(),
                 node_key.clone(),
-                String::new(),
+                TEST_MACHINE_KEY_HEX.to_string(),
                 "alice".into(),
                 "server".into(),
                 Ipv4Addr::new(100, 64, 0, 12),
@@ -3423,7 +3545,7 @@ mod tests {
         let mut rec = MachineRecord::new_at(
             chrono::Utc::now(),
             node_key.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "alice".into(),
             "server".into(),
             Ipv4Addr::new(100, 64, 0, 13),
@@ -3475,7 +3597,7 @@ mod tests {
         let rec = MachineRecord::new_at(
             chrono::Utc::now(),
             node_key.clone(),
-            String::new(),
+            TEST_MACHINE_KEY_HEX.to_string(),
             "alice".into(),
             "laptop".into(),
             Ipv4Addr::new(100, 64, 0, 15),

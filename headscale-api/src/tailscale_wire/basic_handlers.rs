@@ -2586,7 +2586,7 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MachineRegistry, WireState,
-        noise::{ServerNoiseKey, inner_router as machine_router},
+        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         router,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::stable_id_from_key,
@@ -4355,23 +4355,22 @@ mod tests {
 
         let app = router(state.clone());
         let machine_app = machine_router(state.clone());
-        let stream_resp = machine_app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(format!("/machine/nodekey:{node_key}/map"))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({
-                            "Stream": true,
-                            "Version": 39
-                        }))
-                        .unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
+        let mut stream_req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key}/map"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "Stream": true,
+                    "Version": 39
+                }))
+                .unwrap(),
+            ))
             .unwrap();
+        stream_req
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(format!("mkey-{node_key}")));
+        let stream_resp = machine_app.oneshot(stream_req).await.unwrap();
         assert_eq!(stream_resp.status(), StatusCode::OK);
 
         let resp = app

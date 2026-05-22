@@ -619,9 +619,6 @@ pub async fn logout(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
         "
         UPDATE nodes
         SET
-            machine_key = NULL,
-            disco_key = NULL,
-            endpoints = '[]',
             expiry = datetime(?, 'unixepoch'),
             updated_at = datetime(?, 'unixepoch')
         WHERE id = ? AND deleted_at IS NULL
@@ -902,9 +899,9 @@ mod tests {
         assert_eq!(seen.last_seen, Some(1_700_000_002));
 
         let logged_out = logout(db.pool(), node.id).await.unwrap();
-        assert!(logged_out.machine_key.is_empty());
-        assert!(logged_out.disco_key.is_empty());
-        assert!(logged_out.endpoint_list().is_empty());
+        assert_eq!(logged_out.machine_key, node.machine_key);
+        assert_eq!(logged_out.disco_key, node.disco_key);
+        assert_eq!(logged_out.endpoint_list(), node.endpoint_list());
         assert!(logged_out.expiry.is_some());
 
         destroy(db.pool(), node.id).await.unwrap();

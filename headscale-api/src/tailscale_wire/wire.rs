@@ -72,8 +72,8 @@ pub struct MachineRecord {
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
     /// path `/machine/{node_key}/map` carries the raw hex.
     pub node_key_hex: String,
-    /// Hex-encoded (no prefix) machine key (X25519). May be empty if
-    /// the registrant only presented a NodeKey.
+    /// Hex-encoded (no prefix) machine key (X25519) bound to the
+    /// node's Noise identity.
     pub machine_key_hex: String,
     /// User the preauth key was minted for.
     pub user: String,

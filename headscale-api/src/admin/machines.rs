@@ -95,8 +95,7 @@ pub struct MachineAdminRecord {
     /// Unix-seconds node expiry timestamp. `None` means never expires.
     #[serde(default)]
     pub expiry: Option<u64>,
-    /// Hex machine key (may be empty if the registrant only carried a
-    /// NodeKey).
+    /// Hex machine key bound to the node's Noise identity.
     pub machine_key_hex: String,
     /// OS placeholder. The wire `MachineRecord` doesn't carry OS today
     /// (HostInfo is only used inside the register handler); v0 shows
@@ -1592,16 +1591,15 @@ mod tests {
         assert!(view.expired);
     }
 
-    /// `logout` clears keys + stamps expiry=now on the wire record.
+    /// `logout` preserves the machine key and stamps expiry=now on the wire record.
     #[test]
     fn logout_writes_through_to_wire_registry() {
         let (a, reg) = fixture();
         let id = "aa".repeat(32);
-        // Pre-condition: machine_key_hex is populated.
-        assert!(!reg.get(&id).unwrap().machine_key_hex.is_empty());
+        let original_machine_key = reg.get(&id).unwrap().machine_key_hex;
         rt().block_on(a.logout(&id)).unwrap();
         let rec = reg.get(&id).unwrap();
-        assert!(rec.machine_key_hex.is_empty());
+        assert_eq!(rec.machine_key_hex, original_machine_key);
         assert!(rec.expiry.is_some());
         assert!(rec.is_expired_at(chrono::Utc::now()));
     }
@@ -2551,6 +2549,7 @@ mod tests {
         let (admin, db, _users) = persistent_fixture().await;
         let created = admin.create(persistent_record()).await.unwrap();
         let node_key = created.id.clone();
+        let machine_key = created.machine_key_hex.clone();
 
         admin.rename(&node_key, "alice-renamed").await.unwrap();
         assert_eq!(admin.get(&node_key).await.unwrap().name, "alice-renamed");
@@ -2585,7 +2584,7 @@ mod tests {
 
         admin.logout(&node_key).await.unwrap();
         let logged_out = admin.get(&node_key).await.unwrap();
-        assert!(logged_out.machine_key_hex.is_empty());
+        assert_eq!(logged_out.machine_key_hex, machine_key);
         assert!(logged_out.expiry.is_some());
 
         admin.delete(&node_key).await.unwrap();

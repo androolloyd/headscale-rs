@@ -457,13 +457,12 @@ async fn documents_preauth_user_id_fk_on_delete_set_null_schema_gap() {
     let stale_user_id: Option<i64> =
         sqlx::query_scalar("SELECT user_id FROM pre_auth_keys WHERE id = ?")
             .bind(auth_key_id)
-            .fetch_one(db.pool())
+            .fetch_optional(db.pool())
             .await
             .expect("query preauth key after user delete");
     assert_eq!(
-        stale_user_id,
-        Some(user_id),
-        "upstream would keep the preauth key row but SET NULL on user deletion"
+        stale_user_id, None,
+        "DestroyUser deletes the target user's pre-auth keys before deleting the user"
     );
 }
 

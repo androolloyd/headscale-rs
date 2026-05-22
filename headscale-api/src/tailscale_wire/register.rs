@@ -332,6 +332,13 @@ async fn register_inner(
         .as_ref()
         .map(|(_, existing)| (existing.disco_key.clone(), existing.endpoints.clone()))
         .unwrap_or((None, Vec::new()));
+    let expiry = if forced_tags.is_empty() {
+        body.expiry
+    } else {
+        existing_machine
+            .as_ref()
+            .and_then(|(_, existing)| existing.expiry)
+    };
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
@@ -343,7 +350,7 @@ async fn register_inner(
         // reauth preserves the last map-provided values.
         disco_key,
         endpoints,
-        expiry: body.expiry,
+        expiry,
         last_seen: now,
         ephemeral,
         created_at,
@@ -812,6 +819,132 @@ mod tests {
         assert_eq!(rec.hostname, "peer-a");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn authkey_tagged_preauth_disables_requested_expiry() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-tagged-expiry";
+        redeemer.insert_full(
+            authkey,
+            RedeemOk::for_user("alice").tags(vec!["tag:server".into(), "tag:prod".into()]),
+        );
+        let app = router(state.clone());
+        let node_key_hex = "12".repeat(32);
+        let requested_expiry = chrono::Utc::now() + chrono::Duration::hours(24);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Expiry"] = serde_json::json!(requested_expiry);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.forced_tags, vec!["tag:server", "tag:prod"]);
+        assert!(
+            rec.expiry.is_none(),
+            "tagged preauth registrations disable node-key expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn authkey_untagged_preauth_preserves_requested_expiry() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-untagged-expiry";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "13".repeat(32);
+        let requested_expiry = chrono::Utc::now() + chrono::Duration::hours(24);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Expiry"] = serde_json::json!(requested_expiry);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert!(rec.forced_tags.is_empty());
+        assert_eq!(rec.expiry, Some(requested_expiry));
+    }
+
+    #[tokio::test]
+    async fn authkey_tagged_reauth_preserves_disabled_expiry() {
+        let (state, redeemer, _dir) = fixture();
+        let first_authkey = "hskey-auth-tagged-reauth-first";
+        let second_authkey = "hskey-auth-tagged-reauth-second";
+        redeemer.insert_full(
+            first_authkey,
+            RedeemOk::for_user("alice").tags(vec!["tag:server".into()]),
+        );
+        redeemer.insert_full(
+            second_authkey,
+            RedeemOk::for_user("alice").tags(vec!["tag:server".into()]),
+        );
+        let app = router(state.clone());
+        let node_key_hex = "14".repeat(32);
+        let first_expiry = chrono::Utc::now() + chrono::Duration::hours(24);
+        let mut first_body = req_body(&node_key_hex, first_authkey);
+        first_body["Expiry"] = serde_json::json!(first_expiry);
+
+        let first = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&first_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(state.machines.get(&node_key_hex).unwrap().expiry.is_none());
+
+        let second_expiry = chrono::Utc::now() + chrono::Duration::hours(48);
+        let mut second_body = req_body(&node_key_hex, second_authkey);
+        second_body["Expiry"] = serde_json::json!(second_expiry);
+        let second = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&second_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.forced_tags, vec!["tag:server"]);
+        assert!(
+            rec.expiry.is_none(),
+            "tagged reauth keeps node-key expiry disabled"
+        );
     }
 
     #[tokio::test]

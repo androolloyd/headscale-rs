@@ -8,11 +8,14 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
+client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
+expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
+expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -20,19 +23,31 @@ case "${work_root}" in
 esac
 mkdir -p "${work_dir}/bin"
 
+if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
+  echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+
 http_port=""
 grpc_port=""
 metrics_port=""
 server_pid=""
-client_name="${run_id}-client"
+client_names=()
+for ((idx = 1; idx <= client_count; idx++)); do
+  if ((client_count == 1)); then
+    client_names+=("${run_id}-client")
+  else
+    client_names+=("${run_id}-client-${idx}")
+  fi
+done
 config_path="${work_dir}/config.yaml"
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 socket_path="/tmp/${run_id}.sock"
 
 cleanup() {
-  if [[ -n "${client_name}" ]]; then
+  for client_name in "${client_names[@]}"; do
     docker rm -f "${client_name}" >/dev/null 2>&1 || true
-  fi
+  done
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
@@ -84,6 +99,7 @@ run_with_timeout() {
 }
 
 tailscale_logged_in() {
+  local client_name="$1"
   docker exec "${client_name}" tailscale status --json 2>/dev/null |
     ruby -rjson -e '
       status = JSON.parse(STDIN.read)
@@ -98,6 +114,7 @@ tailscale_logged_in() {
 }
 
 dump_client_debug() {
+  local client_name="$1"
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -160 /tmp/tailscaled.log 2>/dev/null || true' >&2
 }
@@ -215,49 +232,53 @@ echo "minted ${authkey%%-*}-..."
 echo "::endgroup::"
 
 echo "::group::start stock tailscale client"
-docker run -d \
-  --name "${client_name}" \
-  --hostname "${client_name}" \
-  --add-host host.docker.internal:host-gateway \
-  --entrypoint /bin/sh \
-  "${image}" \
-  -ceu 'tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
-  >/dev/null
+for client_name in "${client_names[@]}"; do
+  docker run -d \
+    --name "${client_name}" \
+    --hostname "${client_name}" \
+    --add-host host.docker.internal:host-gateway \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ceu 'tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
+    >/dev/null
 
-wait_for "tailscaled local socket" \
-  "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+  wait_for "tailscaled local socket ${client_name}" \
+    "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+done
 echo "::endgroup::"
 
 echo "::group::tailscale up"
-up_args=(
-  tailscale up
-  "--login-server=http://host.docker.internal:${http_port}"
-  "--hostname=${client_name}"
-  "--authkey=${authkey}"
-  --timeout=15s
-  --accept-routes=false
-  --accept-dns=false
-)
-if [[ -n "${advertise_routes}" ]]; then
-  up_args+=("--advertise-routes=${advertise_routes}")
-fi
-case "${advertise_exit_node}" in
-  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
-    up_args+=(--advertise-exit-node)
-    ;;
-esac
-up_status=0
-run_with_timeout "tailscale up" docker exec "${client_name}" "${up_args[@]}" ||
-  up_status="$?"
-if ((up_status != 0)); then
-  echo "tailscale up returned ${up_status}; verifying logged-in netmap"
-fi
+for client_name in "${client_names[@]}"; do
+  up_args=(
+    tailscale up
+    "--login-server=http://host.docker.internal:${http_port}"
+    "--hostname=${client_name}"
+    "--authkey=${authkey}"
+    --timeout=15s
+    --accept-routes=false
+    --accept-dns=false
+  )
+  if [[ -n "${advertise_routes}" ]]; then
+    up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  case "${advertise_exit_node}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      up_args+=(--advertise-exit-node)
+      ;;
+  esac
+  up_status=0
+  run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+    up_status="$?"
+  if ((up_status != 0)); then
+    echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
+  fi
 
-if ! wait_for "tailscale logged-in netmap" tailscale_logged_in; then
-  dump_client_debug
-  exit 1
-fi
-docker exec "${client_name}" tailscale status --json >"${work_dir}/tailscale-status.json"
+  if ! wait_for "tailscale logged-in netmap ${client_name}" "tailscale_logged_in '${client_name}'"; then
+    dump_client_debug "${client_name}"
+    exit 1
+  fi
+  docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
+done
 echo "::endgroup::"
 
 if [[ -n "${approve_routes}" ]]; then
@@ -267,14 +288,17 @@ if [[ -n "${approve_routes}" ]]; then
     ruby -rjson -e '
       payload = JSON.parse(File.read(ARGV.fetch(0)))
       nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
-      abort("expected one registered node, got #{nodes.length}") unless nodes.length == 1
-      puts nodes.fetch(0).fetch("id")
-    ' "${work_dir}/nodes-before-approve.json"
+      expected = Integer(ARGV.fetch(1))
+      abort("expected #{expected} registered nodes, got #{nodes.length}") unless nodes.length == expected
+      puts nodes.map { |node| node.fetch("id") }
+    ' "${work_dir}/nodes-before-approve.json" "${expected_machine_count}"
   )"
-  "${headscale_bin}" -c "${config_path}" -o json nodes approve-routes \
-    --identifier "${node_id}" \
-    --routes "${approve_routes}" \
-    >"${work_dir}/approved-routes.json"
+  while IFS= read -r node_id; do
+    "${headscale_bin}" -c "${config_path}" -o json nodes approve-routes \
+      --identifier "${node_id}" \
+      --routes "${approve_routes}" \
+      >"${work_dir}/approved-routes-${node_id}.json"
+  done <<<"${node_id}"
   echo "::endgroup::"
 fi
 
@@ -283,27 +307,43 @@ echo "::group::assert headscale-go node state"
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
+  expected_count = Integer(ARGV.fetch(3))
+  expected_primary_route = ARGV.fetch(4)
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
-  abort("expected one registered node, got #{nodes.length}") unless nodes.length == 1
-  node = nodes.fetch(0)
-  user = node["user"] || node["User"]
-  user_name = user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
-  given_name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
-  addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
-  available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
-  approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
-  abort("expected user alice, got #{user.inspect}") unless user_name == "alice"
-  abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
-  abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
-  unless expected_routes.empty? || available_routes == expected_routes
-    abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+  abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
+  nodes.each do |node|
+    user = node["user"] || node["User"]
+    user_name = user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
+    given_name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
+    available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
+    approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
+    abort("expected user alice, got #{user.inspect}") unless user_name == "alice"
+    abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
+    abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
+    unless expected_routes.empty? || available_routes == expected_routes
+      abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+    end
+    unless expected_approved.empty? || approved_routes == expected_approved
+      abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+    end
   end
-  unless expected_approved.empty? || approved_routes == expected_approved
-    abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+
+  primary_nodes = []
+  unless expected_primary_route.empty?
+    primary_nodes = nodes.select do |node|
+      Array(node["subnetRoutes"] || node["subnet_routes"]).include?(expected_primary_route)
+    end
+    abort("expected exactly one primary node for #{expected_primary_route}, got #{primary_nodes.length}") unless primary_nodes.length == 1
   end
-  puts JSON.pretty_generate(node)
-' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}"
+
+  if expected_count == 1
+    puts JSON.pretty_generate(nodes.fetch(0))
+  else
+    puts JSON.pretty_generate({nodes: nodes, primary_nodes: primary_nodes})
+  end
+' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}"
 echo "::endgroup::"
 
 echo "headscale-go auth-key real-client smoke passed"

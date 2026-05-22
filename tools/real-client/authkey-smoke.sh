@@ -7,11 +7,14 @@ cd "${repo_root}"
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
+client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
+expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
+expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -19,15 +22,27 @@ case "${work_root}" in
 esac
 mkdir -p "${work_dir}"
 
+if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
+  echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+
 http_port=""
 https_port=""
 harness_pid=""
-client_name="${run_id}-client"
+client_names=()
+for ((idx = 1; idx <= client_count; idx++)); do
+  if ((client_count == 1)); then
+    client_names+=("${run_id}-client")
+  else
+    client_names+=("${run_id}-client-${idx}")
+  fi
+done
 
 cleanup() {
-  if [[ -n "${client_name}" ]]; then
+  for client_name in "${client_names[@]}"; do
     docker rm -f "${client_name}" >/dev/null 2>&1 || true
-  fi
+  done
   if [[ -n "${harness_pid}" ]]; then
     kill "${harness_pid}" >/dev/null 2>&1 || true
     wait "${harness_pid}" >/dev/null 2>&1 || true
@@ -78,6 +93,7 @@ run_with_timeout() {
 }
 
 tailscale_logged_in() {
+  local client_name="$1"
   docker exec "${client_name}" tailscale status --json 2>/dev/null |
     ruby -rjson -e '
       status = JSON.parse(STDIN.read)
@@ -92,6 +108,7 @@ tailscale_logged_in() {
 }
 
 dump_client_debug() {
+  local client_name="$1"
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -160 /tmp/tailscaled.log 2>/dev/null || true' >&2
 }
@@ -138,50 +155,54 @@ echo "minted ${authkey%%-*}-..."
 echo "::endgroup::"
 
 echo "::group::start stock tailscale client"
-docker run -d \
-  --name "${client_name}" \
-  --hostname "${client_name}" \
-  --add-host host.docker.internal:host-gateway \
-  -v "${work_dir}/state/tls.crt:/usr/local/share/ca-certificates/headscale-rs.crt:ro" \
-  --entrypoint /bin/sh \
-  "${image}" \
-  -ceu 'update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
-  >/dev/null
+for client_name in "${client_names[@]}"; do
+  docker run -d \
+    --name "${client_name}" \
+    --hostname "${client_name}" \
+    --add-host host.docker.internal:host-gateway \
+    -v "${work_dir}/state/tls.crt:/usr/local/share/ca-certificates/headscale-rs.crt:ro" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ceu 'update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
+    >/dev/null
 
-wait_for "tailscaled local socket" \
-  "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+  wait_for "tailscaled local socket ${client_name}" \
+    "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+done
 echo "::endgroup::"
 
 echo "::group::tailscale up"
-up_args=(
-  tailscale up
-  "--login-server=https://host.docker.internal:${https_port}"
-  "--hostname=${client_name}"
-  "--authkey=${authkey}"
-  --timeout=15s
-  --accept-routes=false
-  --accept-dns=false
-)
-if [[ -n "${advertise_routes}" ]]; then
-  up_args+=("--advertise-routes=${advertise_routes}")
-fi
-case "${advertise_exit_node}" in
-  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
-    up_args+=(--advertise-exit-node)
-    ;;
-esac
-up_status=0
-run_with_timeout "tailscale up" docker exec "${client_name}" "${up_args[@]}" ||
-  up_status="$?"
-if ((up_status != 0)); then
-  echo "tailscale up returned ${up_status}; verifying logged-in netmap"
-fi
+for client_name in "${client_names[@]}"; do
+  up_args=(
+    tailscale up
+    "--login-server=https://host.docker.internal:${https_port}"
+    "--hostname=${client_name}"
+    "--authkey=${authkey}"
+    --timeout=15s
+    --accept-routes=false
+    --accept-dns=false
+  )
+  if [[ -n "${advertise_routes}" ]]; then
+    up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  case "${advertise_exit_node}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      up_args+=(--advertise-exit-node)
+      ;;
+  esac
+  up_status=0
+  run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+    up_status="$?"
+  if ((up_status != 0)); then
+    echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
+  fi
 
-if ! wait_for "tailscale logged-in netmap" tailscale_logged_in; then
-  dump_client_debug
-  exit 1
-fi
-docker exec "${client_name}" tailscale status --json >"${work_dir}/tailscale-status.json"
+  if ! wait_for "tailscale logged-in netmap ${client_name}" "tailscale_logged_in '${client_name}'"; then
+    dump_client_debug "${client_name}"
+    exit 1
+  fi
+  docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
+done
 echo "::endgroup::"
 
 if [[ -n "${approve_routes}" ]]; then
@@ -190,39 +211,82 @@ if [[ -n "${approve_routes}" ]]; then
   node_key="$(
     ruby -rjson -e '
       machines = JSON.parse(File.read(ARGV.fetch(0)))
-      abort("expected one registered machine, got #{machines.length}") unless machines.length == 1
-      puts machines.fetch(0).fetch("node_key")
-    ' "${work_dir}/machines-before-approve.json"
+      expected = Integer(ARGV.fetch(1))
+      abort("expected #{expected} registered machines, got #{machines.length}") unless machines.length == expected
+      puts machines.map { |machine| machine.fetch("node_key") }
+    ' "${work_dir}/machines-before-approve.json" "${expected_machine_count}"
   )"
   routes_json="$(ruby -rjson -e 'puts JSON.generate({routes: ARGV.fetch(0).split(",").reject(&:empty?)})' "${approve_routes}")"
-  curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${node_key}/routes" \
-    -H 'content-type: application/json' \
-    -d "${routes_json}" \
-    >"${work_dir}/approved-routes.json"
+  while IFS= read -r node_key; do
+    curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${node_key}/routes" \
+      -H 'content-type: application/json' \
+      -d "${routes_json}" \
+      >"${work_dir}/approved-routes-${node_key#nodekey:}.json"
+  done <<<"${node_key}"
   echo "::endgroup::"
 fi
 
 echo "::group::assert harness machine state"
 curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines.json"
+if [[ -n "${expected_primary_route}" ]]; then
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes.json"
+else
+  printf '{}\n' >"${work_dir}/debug-routes.json"
+fi
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
   expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
+  expected_count = Integer(ARGV.fetch(3))
+  expected_primary_route = ARGV.fetch(4)
+  debug_routes_path = ARGV.fetch(5)
+
+  def stable_id_from_key(hex)
+    h = 0xcbf29ce484222325
+    hex.each_byte do |byte|
+      h ^= byte
+      h = (h * 0x100000001b3) & 0xffffffffffffffff
+    end
+    h & 0x7fffffffffffffff
+  end
+
   machines = JSON.parse(File.read(ARGV.fetch(0)))
-  abort("expected one registered machine, got #{machines.length}") unless machines.length == 1
-  machine = machines.fetch(0)
-  abort("expected user alice, got #{machine["user"].inspect}") unless machine["user"] == "alice"
-  abort("expected hostname prefix, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?("hsrs-authkey-")
-  abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
-  available_routes = Array(machine["available_routes"]).sort
-  unless expected_routes.empty? || available_routes == expected_routes
-    abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+  abort("expected #{expected_count} registered machines, got #{machines.length}") unless machines.length == expected_count
+  machines.each do |machine|
+    abort("expected user alice, got #{machine["user"].inspect}") unless machine["user"] == "alice"
+    abort("expected hostname prefix, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?("hsrs-authkey-")
+    abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
+    available_routes = Array(machine["available_routes"]).sort
+    unless expected_routes.empty? || available_routes == expected_routes
+      abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
+    end
+    approved_routes = Array(machine["approved_routes"]).sort
+    unless expected_approved.empty? || approved_routes == expected_approved
+      abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+    end
   end
-  approved_routes = Array(machine["approved_routes"]).sort
-  unless expected_approved.empty? || approved_routes == expected_approved
-    abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+
+  debug_routes = nil
+  unless expected_primary_route.empty?
+    debug_routes = JSON.parse(File.read(debug_routes_path))
+    primary_owner = debug_routes.fetch("primary_routes").fetch(expected_primary_route) {
+      abort("missing primary route #{expected_primary_route.inspect} in #{debug_routes.inspect}")
+    }
+    node_ids = machines.map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+    abort("primary route owner #{primary_owner.inspect} not in registered node IDs #{node_ids.inspect}") unless node_ids.include?(primary_owner)
+    available_entries = debug_routes.fetch("available_routes").select do |_node_id, routes|
+      Array(routes).include?(expected_primary_route)
+    end
+    abort("expected #{expected_count} available primary-route candidates, got #{available_entries.length}") unless available_entries.length == expected_count
   end
-  puts JSON.pretty_generate(machine)
-' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}"
+
+  if expected_count == 1
+    puts JSON.pretty_generate(machines.fetch(0))
+  else
+    puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
+  end
+' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json"
 echo "::endgroup::"
 
 echo "auth-key real-client smoke passed"

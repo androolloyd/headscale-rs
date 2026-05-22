@@ -113,8 +113,8 @@ tools/real-client/route-advertise-headscale-go-smoke.sh
 
 Both scripts assert that the control server records the advertised route as an
 available route for the registered node. The route is intentionally not
-approved in this smoke; approval and primary-route behavior are covered by the
-Rust unit/differential tests and still need broader real-client scenarios.
+approved in this smoke; approval and primary-route behavior are covered by
+separate smokes plus Rust unit/differential tests.
 
 Useful knobs:
 
@@ -140,6 +140,20 @@ Additional knobs:
 - `REAL_CLIENT_APPROVE_ROUTES` defaults to `REAL_CLIENT_ROUTE` in the approval
   wrappers.
 - `REAL_CLIENT_EXPECT_APPROVED_ROUTES` defaults to the approved routes.
+
+The primary-route scenario starts two stock clients, advertises and approves
+the same subnet route on both, and asserts that exactly one node is selected as
+the primary route owner:
+
+```sh
+tools/real-client/route-primary-smoke.sh
+tools/real-client/route-primary-headscale-go-smoke.sh
+```
+
+Additional knobs:
+
+- `REAL_CLIENT_CLIENT_COUNT` defaults to `2` in the primary-route wrappers.
+- `REAL_CLIENT_EXPECT_PRIMARY_ROUTE` defaults to `REAL_CLIENT_ROUTE`.
 
 The exit-node scenario advertises the default-route pair with
 `tailscale up --advertise-exit-node`, approves both routes, and checks that

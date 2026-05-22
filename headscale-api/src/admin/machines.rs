@@ -154,6 +154,7 @@ pub trait MachineAdmin: Send + Sync {
         &self,
         record: MachineAdminRecord,
         _policy: &PolicyStore,
+        _wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         let record = self.create(record).await?;
         Ok(AuthPathRegistrationResult {
@@ -397,7 +398,7 @@ impl PersistentMachineAdmin {
         record: MachineAdminRecord,
         policy: &PolicyStore,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path_inner(record, policy, None, true)
+        self.create_or_update_auth_path_inner(record, policy, None, true, None)
             .await
     }
 
@@ -407,10 +408,17 @@ impl PersistentMachineAdmin {
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        let mut record = machine_admin_record_from_wire(&record);
+        let wire_record = record;
+        let mut record = machine_admin_record_from_wire(&wire_record);
         record.register_method = REGISTER_METHOD_AUTH_KEY;
-        self.create_or_update_auth_path_inner(record, policy, auth_key_id, false)
-            .await
+        self.create_or_update_auth_path_inner(
+            record,
+            policy,
+            auth_key_id,
+            false,
+            Some(&wire_record),
+        )
+        .await
     }
 
     async fn create_or_update_auth_path_inner(
@@ -419,6 +427,7 @@ impl PersistentMachineAdmin {
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
         validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
@@ -499,7 +508,7 @@ impl PersistentMachineAdmin {
             let row = headscale_db::headscale_nodes::update_from_auth_path(
                 &self.pool,
                 existing.id,
-                create_params_for_record_with_auth_key(&record, user_id, auth_key_id),
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -522,7 +531,7 @@ impl PersistentMachineAdmin {
             .map_err(MachineAdminError::BadRequest)?;
             let row = headscale_db::headscale_nodes::create(
                 &self.pool,
-                create_params_for_record_with_auth_key(&record, user_id, auth_key_id),
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -727,10 +736,10 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
 
         let result = self
             .machines
-            .create_or_update_auth_path(record, &self.policy)
+            .create_or_update_auth_path_inner(record, &self.policy, None, true, Some(&pending))
             .await
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        let wire_record = machine_admin_record_to_wire(&result.record)
+        let wire_record = canonical_wire_record_for_auth_path(&result.record, Some(&pending))
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
         if let Some(registry) = &self.wire_registry {
             if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
@@ -868,8 +877,10 @@ impl MachineAdmin for PersistentMachineAdmin {
         &self,
         record: MachineAdminRecord,
         policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path(record, policy).await
+        self.create_or_update_auth_path_inner(record, policy, None, true, wire_record.as_ref())
+            .await
     }
 
     async fn expire_at(
@@ -1022,8 +1033,9 @@ impl MachineAdmin for WireMachineAdmin {
         &self,
         record: MachineAdminRecord,
         _policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        let wire = machine_admin_record_to_wire(&record)?;
+        let wire = canonical_wire_record_for_auth_path(&record, wire_record.as_ref())?;
         let old_node_key_hex = self
             .registry
             .get_by_machine_key_for_user(&wire.machine_key_hex, &record.user)
@@ -1167,6 +1179,54 @@ fn create_params_for_record_with_auth_key(
         last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
         approved_routes: record.approved_routes.clone(),
     }
+}
+
+fn create_params_for_auth_path(
+    record: &MachineAdminRecord,
+    wire_record: Option<&MachineRecord>,
+    user_id: Option<i64>,
+    auth_key_id: Option<i64>,
+) -> headscale_db::headscale_nodes::CreateParams {
+    let Ok(canonical) = canonical_wire_record_for_auth_path(record, wire_record) else {
+        return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
+    };
+    create_params_for_wire_record(&canonical, user_id, auth_key_id)
+}
+
+fn canonical_wire_record_for_auth_path(
+    record: &MachineAdminRecord,
+    wire_record: Option<&MachineRecord>,
+) -> Result<MachineRecord, MachineAdminError> {
+    let mut canonical = match wire_record {
+        Some(wire_record) => wire_record.clone(),
+        None => machine_admin_record_to_wire(record)?,
+    };
+    canonical.node_key_hex.clone_from(&record.id);
+    canonical
+        .machine_key_hex
+        .clone_from(&record.machine_key_hex);
+    canonical.user.clone_from(&record.user);
+    canonical.hostname.clone_from(&record.name);
+    canonical.ipv4 = record.ipv4.parse().map_err(|e| {
+        MachineAdminError::BadRequest(format!(
+            "persisted node {} has invalid IPv4 '{}': {e}",
+            record.id, record.ipv4
+        ))
+    })?;
+    canonical.last_seen = unix_timestamp_for_record(record.last_seen, &record.id, "last_seen")?;
+    canonical.expiry = record
+        .expiry
+        .map(|expiry| unix_timestamp_for_record(expiry, &record.id, "expiry"))
+        .transpose()?;
+    canonical.os.clone_from(&record.os);
+    canonical.os_version.clone_from(&record.version);
+    canonical.forced_tags.clone_from(&record.tags);
+    canonical.available_routes.clone_from(&record.routes);
+    canonical
+        .approved_routes
+        .clone_from(&record.approved_routes);
+    canonical.register_method = record.register_method;
+    Ok(canonical)
 }
 
 fn create_params_for_wire_record(
@@ -1617,6 +1677,20 @@ mod tests {
         (admin, db, users)
     }
 
+    async fn persistent_file_fixture(
+        url: &str,
+        create_user: bool,
+    ) -> (PersistentMachineAdmin, Database, Arc<PersistentUserAdmin>) {
+        let db = Database::new(url).await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        if create_user {
+            users.create("alice").await.unwrap();
+        }
+        let admin = PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone());
+        (admin, db, users)
+    }
+
     fn persistent_record() -> MachineAdminRecord {
         MachineAdminRecord {
             node_id: 0,
@@ -1842,6 +1916,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_auth_key_registration_hydrates_canonical_fields_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let node_key = "ab".repeat(32);
+        let machine_key = "cd".repeat(32);
+
+        let (admin, db, users) = persistent_file_fixture(&url, true).await;
+        let preauth = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: vec!["tag:server".into()],
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut record = MachineRecord::new_at(
+            Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            node_key.clone(),
+            machine_key.clone(),
+            "alice".into(),
+            "authkey-node".into(),
+            Ipv4Addr::new(100, 64, 0, 88),
+            false,
+        );
+        record.last_seen = Utc.timestamp_opt(1_700_000_111, 0).unwrap();
+        record.disco_key = Some("discokey:authkey-node".into());
+        record.endpoints = vec!["192.0.2.10:41641".into(), "2001:db8::10:41641".into()];
+        record.home_derp = 7;
+        record.os = "linux".into();
+        record.os_version = "6.8.0".into();
+        record.ssh_host_keys = vec!["ssh-ed25519 AAAAC3NzaAuth".into()];
+        record.forced_tags = vec!["tag:server".into()];
+        record.available_routes = vec!["10.40.0.0/24".into()];
+        record.approved_routes = vec!["10.40.0.0/24".into()];
+
+        let created = admin
+            .create_or_update_auth_key_path(
+                record.clone(),
+                &PolicyStore::new(),
+                Some(preauth.row.id),
+            )
+            .await
+            .unwrap()
+            .record;
+        assert_eq!(created.node_id, 1);
+        assert_eq!(created.id, node_key);
+        assert_eq!(created.user, "alice");
+        assert_eq!(created.machine_key_hex, machine_key);
+        assert_eq!(created.register_method, REGISTER_METHOD_AUTH_KEY);
+        assert_eq!(created.tags, vec!["tag:server"]);
+        assert_eq!(created.routes, vec!["10.40.0.0/24"]);
+        assert_eq!(created.approved_routes, vec!["10.40.0.0/24"]);
+
+        let raw = headscale_db::headscale_nodes::get_by_id(db.pool(), created.node_id as i64)
+            .await
+            .unwrap();
+        assert_eq!(raw.id, 1);
+        assert_eq!(raw.user_id, Some(1));
+        assert_eq!(raw.node_key, format!("nodekey:{}", record.node_key_hex));
+        assert_eq!(raw.machine_key, format!("mkey:{}", record.machine_key_hex));
+        assert_eq!(raw.disco_key, "discokey:authkey-node");
+        assert_eq!(raw.endpoint_list(), record.endpoints);
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
+        );
+        assert_eq!(raw.auth_key_id, Some(preauth.row.id));
+        assert_eq!(raw.tag_list(), vec!["tag:server"]);
+        assert_eq!(raw.approved_route_list(), vec!["10.40.0.0/24"]);
+        let host_info = raw.host_info_value();
+        assert_eq!(host_info.get("OS").and_then(Value::as_str), Some("linux"));
+        assert_eq!(
+            host_info.get("OSVersion").and_then(Value::as_str),
+            Some("6.8.0")
+        );
+        assert_eq!(
+            routes_from_host_info(&host_info),
+            vec!["10.40.0.0/24".to_string()]
+        );
+        assert_eq!(preferred_derp_from_host_info(&host_info), 7);
+        assert_eq!(
+            ssh_host_keys_from_host_info(&host_info),
+            vec!["ssh-ed25519 AAAAC3NzaAuth".to_string()]
+        );
+        drop(admin);
+        drop(users);
+        db.close().await;
+
+        let (reopened_admin, reopened_db, reopened_users) =
+            persistent_file_fixture(&url, false).await;
+        let registry = MachineRegistry::new();
+        assert_eq!(
+            reopened_admin
+                .hydrate_wire_registry(&registry)
+                .await
+                .unwrap(),
+            1
+        );
+        let hydrated = registry.get(&record.node_key_hex).unwrap();
+        assert_eq!(hydrated.node_key_hex, record.node_key_hex);
+        assert_eq!(hydrated.machine_key_hex, record.machine_key_hex);
+        assert_eq!(hydrated.user, "alice");
+        assert_eq!(hydrated.hostname, "authkey-node");
+        assert_eq!(hydrated.ipv4.to_string(), "100.64.0.88");
+        assert_eq!(hydrated.disco_key, Some("discokey:authkey-node".into()));
+        assert_eq!(hydrated.endpoints, record.endpoints);
+        assert_eq!(hydrated.home_derp, 7);
+        assert_eq!(hydrated.os, "linux");
+        assert_eq!(hydrated.os_version, "6.8.0");
+        assert_eq!(hydrated.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaAuth"]);
+        assert_eq!(hydrated.forced_tags, vec!["tag:server"]);
+        assert_eq!(hydrated.available_routes, vec!["10.40.0.0/24"]);
+        assert_eq!(hydrated.approved_routes, vec!["10.40.0.0/24"]);
+        assert_eq!(hydrated.register_method, REGISTER_METHOD_AUTH_KEY);
+        drop(reopened_admin);
+        drop(reopened_users);
+        reopened_db.close().await;
+    }
+
+    #[tokio::test]
     async fn persistent_machine_admin_auth_key_path_reauth_updates_existing_row() {
         let (admin, db, _users) = persistent_fixture().await;
         let first_key = headscale_db::preauth_keys::create_for_test(
@@ -1998,6 +2197,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_oidc_registration_hydrates_canonical_fields_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let node_key = "de".repeat(32);
+        let machine_key = "ef".repeat(32);
+
+        let (admin, db, users) = persistent_file_fixture(&url, true).await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let policy = Arc::new(PolicyStore::new());
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let mut pending = MachineRecord::new_at(
+            Utc.timestamp_opt(1_700_001_000, 0).unwrap(),
+            node_key.clone(),
+            machine_key.clone(),
+            String::new(),
+            "oidc-node".into(),
+            Ipv4Addr::new(100, 64, 0, 89),
+            false,
+        );
+        pending.last_seen = Utc.timestamp_opt(1_700_001_111, 0).unwrap();
+        pending.disco_key = Some("discokey:oidc-node".into());
+        pending.endpoints = vec!["192.0.2.20:41641".into(), "2001:db8::20:41641".into()];
+        pending.home_derp = 9;
+        pending.os = "darwin".into();
+        pending.os_version = "14.5".into();
+        pending.ssh_host_keys = vec!["ssh-ed25519 AAAAC3NzaOidc".into()];
+        pending.forced_tags = vec!["tag:server".into()];
+        pending.available_routes = vec!["10.50.0.0/24".into()];
+        pending.approved_routes = vec!["10.50.0.0/24".into()];
+        let registration_id = "t".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy);
+        let expiry = Utc.timestamp_opt(4_102_444_800, 0).unwrap();
+        let result = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 1,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                expiry,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let stored = admin.get(&node_key).await.unwrap();
+        assert_eq!(stored.node_id, 1);
+        assert_eq!(stored.id, node_key);
+        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.machine_key_hex, machine_key);
+        assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(stored.expiry, None);
+        assert_eq!(stored.tags, vec!["tag:server"]);
+        assert_eq!(stored.routes, vec!["10.50.0.0/24"]);
+        assert_eq!(stored.approved_routes, vec!["10.50.0.0/24"]);
+
+        let raw = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
+            .await
+            .unwrap();
+        assert_eq!(raw.id, 1);
+        assert_eq!(raw.user_id, Some(1));
+        assert_eq!(raw.node_key, format!("nodekey:{}", pending.node_key_hex));
+        assert_eq!(raw.machine_key, format!("mkey:{}", pending.machine_key_hex));
+        assert_eq!(raw.disco_key, "discokey:oidc-node");
+        assert_eq!(raw.endpoint_list(), pending.endpoints);
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+        );
+        assert_eq!(raw.auth_key_id, None);
+        assert_eq!(raw.tag_list(), vec!["tag:server"]);
+        assert_eq!(raw.approved_route_list(), vec!["10.50.0.0/24"]);
+        assert_eq!(raw.expiry, None);
+        let host_info = raw.host_info_value();
+        assert_eq!(host_info.get("OS").and_then(Value::as_str), Some("darwin"));
+        assert_eq!(
+            host_info.get("OSVersion").and_then(Value::as_str),
+            Some("14.5")
+        );
+        assert_eq!(
+            routes_from_host_info(&host_info),
+            vec!["10.50.0.0/24".to_string()]
+        );
+        assert_eq!(preferred_derp_from_host_info(&host_info), 9);
+        assert_eq!(
+            ssh_host_keys_from_host_info(&host_info),
+            vec!["ssh-ed25519 AAAAC3NzaOidc".to_string()]
+        );
+        drop(handler);
+        drop(cache);
+        drop(admin);
+        drop(users);
+        db.close().await;
+
+        let (reopened_admin, reopened_db, reopened_users) =
+            persistent_file_fixture(&url, false).await;
+        let registry = MachineRegistry::new();
+        assert_eq!(
+            reopened_admin
+                .hydrate_wire_registry(&registry)
+                .await
+                .unwrap(),
+            1
+        );
+        let hydrated = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(hydrated.node_key_hex, pending.node_key_hex);
+        assert_eq!(hydrated.machine_key_hex, pending.machine_key_hex);
+        assert_eq!(hydrated.user, "alice");
+        assert_eq!(hydrated.hostname, "oidc-node");
+        assert_eq!(hydrated.ipv4.to_string(), "100.64.0.89");
+        assert_eq!(hydrated.disco_key, Some("discokey:oidc-node".into()));
+        assert_eq!(hydrated.endpoints, pending.endpoints);
+        assert_eq!(hydrated.home_derp, 9);
+        assert_eq!(hydrated.os, "darwin");
+        assert_eq!(hydrated.os_version, "14.5");
+        assert_eq!(hydrated.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaOidc"]);
+        assert_eq!(hydrated.forced_tags, vec!["tag:server"]);
+        assert_eq!(hydrated.available_routes, vec!["10.50.0.0/24"]);
+        assert_eq!(hydrated.approved_routes, vec!["10.50.0.0/24"]);
+        assert_eq!(hydrated.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(hydrated.expiry, None);
+        drop(reopened_admin);
+        drop(reopened_users);
+        reopened_db.close().await;
+    }
+
+    #[tokio::test]
     async fn persistent_oidc_registration_handler_rekeys_live_registry() {
         let (admin, db, _users) = persistent_fixture().await;
         let created = admin.create(persistent_record()).await.unwrap();
@@ -2019,6 +2358,10 @@ mod tests {
             false,
         );
         pending.available_routes = vec!["10.30.0.0/24".into()];
+        pending.disco_key = Some("discokey:oidc-rekey".into());
+        pending.endpoints = vec!["192.0.2.30:41641".into()];
+        pending.home_derp = 30;
+        pending.ssh_host_keys = vec!["ssh-ed25519 AAAAC3NzaOidcRekey".into()];
         let registration_id = "q".repeat(24);
         cache.insert(registration_id.clone(), pending.clone());
 
@@ -2051,6 +2394,10 @@ mod tests {
         assert_eq!(wire.ipv4.to_string(), created.ipv4);
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
         assert_eq!(wire.user, "alice");
+        assert_eq!(wire.disco_key.as_deref(), Some("discokey:oidc-rekey"));
+        assert_eq!(wire.endpoints, vec!["192.0.2.30:41641"]);
+        assert_eq!(wire.home_derp, 30);
+        assert_eq!(wire.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaOidcRekey"]);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
             .fetch_one(db.pool())
             .await

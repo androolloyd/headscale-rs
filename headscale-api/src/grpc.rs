@@ -751,22 +751,22 @@ pub mod upstream {
                 .await
                 .map_err(user_error_to_status)?
                 .ok_or_else(|| Status::not_found("user not found"))?;
-            let mut record = self
+            let pending = self
                 .registration_cache
                 .get(&body.key)
-                .map(wire_record_to_machine_admin)
                 .ok_or_else(|| Status::not_found("registration not found"))?;
+            let mut record = wire_record_to_machine_admin(pending.clone());
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
             apply_requested_tags(&self.policy, &mut record)?;
 
             let result = self
                 .machines
-                .complete_registration(record, &self.policy)
+                .complete_registration(record, &self.policy, Some(pending.clone()))
                 .await
                 .map_err(machine_error_to_status)?;
             let node = result.record;
-            let wire_record = machine_admin_to_wire_record(&node);
+            let wire_record = machine_admin_to_wire_record_with_pending(&node, &pending);
             if let Some(registry) = &self.wire_registry {
                 if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
                     registry.replace_node_key(
@@ -1198,6 +1198,34 @@ pub mod upstream {
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
         record.last_seen = last_seen;
+        record.os.clone_from(&machine.os);
+        record.os_version.clone_from(&machine.version);
+        record.forced_tags.clone_from(&machine.tags);
+        record.available_routes.clone_from(&machine.routes);
+        record.approved_routes.clone_from(&machine.approved_routes);
+        record.register_method = machine.register_method;
+        record
+    }
+
+    fn machine_admin_to_wire_record_with_pending(
+        machine: &MachineAdminRecord,
+        pending: &MachineRecord,
+    ) -> MachineRecord {
+        let mut record = pending.clone();
+        record.node_key_hex.clone_from(&machine.id);
+        record.machine_key_hex.clone_from(&machine.machine_key_hex);
+        record.user.clone_from(&machine.user);
+        record.hostname.clone_from(&machine.name);
+        record.ipv4 = machine
+            .ipv4
+            .parse()
+            .unwrap_or_else(|_| cgnat_ip_from_key(&machine.id));
+        record.expiry = machine
+            .expiry
+            .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
+        if let Some(last_seen) = chrono::DateTime::from_timestamp(machine.last_seen as i64, 0) {
+            record.last_seen = last_seen;
+        }
         record.os.clone_from(&machine.os);
         record.os_version.clone_from(&machine.version);
         record.forced_tags.clone_from(&machine.tags);
@@ -2301,6 +2329,207 @@ mod upstream_tests {
         assert_eq!(row.tag_list(), Vec::<String>::new());
         assert_eq!(row.host_info_value()["RoutableIPs"][0], "10.60.0.0/24");
         assert!(registration_cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_persistent_register_survives_restarted_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("headscale.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let db = headscale_db::Database::new(&db_url)
+            .await
+            .expect("open file-backed db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                    .with_user_admin(users.clone()),
+            ),
+            policy,
+            machines.clone(),
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone())
+        .with_registration_cache(registration_cache.clone())
+        .with_wire_registry(wire_registry.clone());
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let node_key_hex = "e1".repeat(32);
+        let machine_key_hex = "e2".repeat(32);
+        let registration_id = "r".repeat(24);
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            node_key_hex.clone(),
+            machine_key_hex.clone(),
+            String::new(),
+            "restart-web".into(),
+            Ipv4Addr::new(100, 64, 0, 80),
+            false,
+        );
+        pending.forced_tags = vec!["tag:server".into()];
+        pending.available_routes = vec!["10.80.0.0/24".into()];
+        pending.disco_key = Some("discokey:web-restart".into());
+        pending.endpoints = vec!["192.0.2.80:41641".into(), "2001:db8::80:41641".into()];
+        pending.home_derp = 8;
+        pending.os = "linux".into();
+        pending.os_version = "6.10.0".into();
+        pending.ssh_host_keys = vec!["ssh-ed25519 AAAAC3NzaCli".into()];
+        pending.expiry = Some(Utc::now() + chrono::Duration::days(30));
+        registration_cache.insert(registration_id.clone(), pending);
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: registration_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.id, 1);
+        assert_eq!(registered.user.as_ref().unwrap().id, 1);
+        assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
+        assert_eq!(registered.machine_key, format!("mkey:{machine_key_hex}"));
+        assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
+        assert_eq!(registered.tags, vec!["tag:server"]);
+        assert_eq!(registered.available_routes, vec!["10.80.0.0/24"]);
+        assert!(registered.expiry.is_none());
+        let live = wire_registry.get(&node_key_hex).expect("live projection");
+        assert_eq!(live.disco_key.as_deref(), Some("discokey:web-restart"));
+        assert_eq!(
+            live.endpoints,
+            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+        );
+        assert_eq!(live.home_derp, 8);
+        assert_eq!(live.os, "linux");
+        assert_eq!(live.os_version, "6.10.0");
+        assert_eq!(live.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaCli"]);
+
+        drop(service);
+        drop(machines);
+        drop(users);
+        drop(registration_cache);
+        drop(wire_registry);
+        db.close().await;
+
+        let reopened = headscale_db::Database::new(&db_url)
+            .await
+            .expect("reopen file-backed db");
+        reopened.migrate().await.expect("rerun migrations");
+        let row = headscale_db::headscale_nodes::get_by_id(reopened.pool(), 1)
+            .await
+            .unwrap();
+        assert_eq!(row.user_id, Some(1));
+        assert_eq!(row.auth_key_id, None);
+        assert_eq!(
+            row.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_CLI
+        );
+        assert_eq!(row.node_key, format!("nodekey:{node_key_hex}"));
+        assert_eq!(row.machine_key, format!("mkey:{machine_key_hex}"));
+        assert_eq!(row.ipv4.as_deref(), Some("100.64.0.80"));
+        assert_eq!(row.tag_list(), vec!["tag:server"]);
+        assert_eq!(row.disco_key, "discokey:web-restart");
+        assert_eq!(
+            row.endpoint_list(),
+            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+        );
+        let host_info = row.host_info_value();
+        assert_eq!(host_info["RoutableIPs"][0], "10.80.0.0/24");
+        assert_eq!(
+            host_info
+                .get("NetInfo")
+                .and_then(|v| v.get("PreferredDERP"))
+                .and_then(|v| v.as_i64()),
+            Some(8)
+        );
+        assert_eq!(host_info.get("OS").and_then(|v| v.as_str()), Some("linux"));
+        assert_eq!(
+            host_info.get("OSVersion").and_then(|v| v.as_str()),
+            Some("6.10.0")
+        );
+        assert_eq!(
+            host_info
+                .get("sshHostKeys")
+                .and_then(|v| v.as_array())
+                .and_then(|keys| keys.first())
+                .and_then(|v| v.as_str()),
+            Some("ssh-ed25519 AAAAC3NzaCli")
+        );
+
+        let fresh_users = Arc::new(PersistentUserAdmin::new(reopened.pool().clone()));
+        let fresh_machines = PersistentMachineAdmin::new(reopened.pool().clone())
+            .with_user_admin(fresh_users.clone());
+        let fresh_registry = MachineRegistry::new();
+        assert_eq!(
+            fresh_machines
+                .hydrate_wire_registry(&fresh_registry)
+                .await
+                .unwrap(),
+            1
+        );
+        let hydrated = fresh_registry.get(&node_key_hex).expect("hydrated node");
+        assert_eq!(hydrated.disco_key.as_deref(), Some("discokey:web-restart"));
+        assert_eq!(
+            hydrated.endpoints,
+            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+        );
+        assert_eq!(hydrated.home_derp, 8);
+        assert_eq!(hydrated.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaCli"]);
+
+        let fresh_service =
+            admin_service_with_persistent_machines_for_pool(reopened.pool().clone());
+        let listed = fresh_service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.nodes.len(), 1);
+        let listed_node = &listed.nodes[0];
+        assert_eq!(listed_node.id, 1);
+        assert_eq!(listed_node.user.as_ref().unwrap().id, 1);
+        assert_eq!(listed_node.node_key, format!("nodekey:{node_key_hex}"));
+        assert_eq!(listed_node.machine_key, format!("mkey:{machine_key_hex}"));
+        assert_eq!(listed_node.register_method, RegisterMethod::Cli as i32);
+        assert_eq!(listed_node.tags, vec!["tag:server"]);
+        assert_eq!(listed_node.available_routes, vec!["10.80.0.0/24"]);
+        assert!(listed_node.expiry.is_none());
+
+        let got = fresh_service
+            .get_node(Request::new(GetNodeRequest { node_id: 1 }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node after restart");
+        assert_eq!(got.node_key, listed_node.node_key);
+        assert_eq!(got.available_routes, listed_node.available_routes);
+        drop(fresh_service);
+        reopened.close().await;
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
-//! End-to-end coverage for the extended policy v2 surface (autogroups,
-//! NodeAttrs, autoApprovers, ipsets, hosts, tag_owners, ssh). Loads
-//! representative hujson fixtures modelled on upstream
-//! `juanfont/headscale@main:hscontrol/policy/v2/testdata/` and walks
-//! each through the public PolicyDoc API to verify:
+//! End-to-end coverage for policy v2 surfaces. Headscale-go v0.28
+//! HuJSON fixtures use the strict upstream schema; Octra/internal
+//! extension surfaces such as `node_attrs` and `ipsets` are exercised
+//! through the TOML/internal parser instead of the public Go-shaped
+//! HuJSON parser.
 //!
 //! 1. The hujson parser accepts the upstream-shape document.
 //! 2. The PolicyDoc fields land in the right places (no silent drop).
@@ -14,13 +14,73 @@
 
 #![cfg(feature = "admin")]
 
-use headscale_api::policy::{NodeView, PolicyStore, parse_hujson_policy};
+use headscale_api::policy::{NodeView, PolicyDoc, PolicyStore, parse_hujson_policy};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/policy");
 
 fn load(name: &str) -> String {
     let path = format!("{FIXTURES}/{name}");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+}
+
+fn nodeattrs_doc() -> PolicyDoc {
+    PolicyDoc::from_toml(
+        r#"
+            version = 1
+
+            [[rules]]
+            action = "accept"
+            src = ["*"]
+            dst = ["*"]
+            ports = ["*/*"]
+
+            [tag_owners]
+            "tag:exit" = ["alice@example.com"]
+            "tag:funnel" = ["alice@example.com"]
+
+            [[node_attrs]]
+            target = ["*"]
+            attr = ["mullvad-exit-node"]
+
+            [[node_attrs]]
+            target = ["tag:funnel"]
+            attr = ["funnel"]
+
+            [[node_attrs]]
+            target = ["tag:exit"]
+            attr = ["exit-node"]
+        "#,
+    )
+    .unwrap()
+}
+
+fn ipsets_doc() -> PolicyDoc {
+    PolicyDoc::from_toml(
+        r#"
+            version = 1
+
+            [ipsets]
+            office = ["10.0.0.0/8", "192.168.0.0/16"]
+            lab = ["172.16.0.0/12"]
+
+            [hosts]
+            monitor = "10.1.2.3/32"
+            router = "10.0.0.1/32"
+
+            [[rules]]
+            action = "accept"
+            src = ["ipset:office"]
+            dst = ["ipset:lab"]
+            ports = ["*/*"]
+
+            [[rules]]
+            action = "accept"
+            src = ["host:monitor"]
+            dst = ["host:router"]
+            ports = ["tcp/22"]
+        "#,
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -43,14 +103,13 @@ fn parses_upstream_acl_a01_fixture() {
 }
 
 // ---------------------------------------------------------------------------
-// upstream_nodeattrs — `nodeAttrs` (camelCase) round-trips and
+// internal node_attrs — extension block round-trips and
 // node_attrs_for returns the merged flag list per target
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parses_upstream_nodeattrs_fixture() {
-    let raw = load("upstream_nodeattrs.hujson");
-    let doc = parse_hujson_policy(&raw).expect("nodeattrs fixture must parse");
+fn parses_internal_nodeattrs_toml() {
+    let doc = nodeattrs_doc();
     assert_eq!(doc.node_attrs.len(), 3);
 
     let exit_tags = vec!["exit".to_string()];
@@ -86,13 +145,12 @@ fn parses_upstream_nodeattrs_fixture() {
 }
 
 // ---------------------------------------------------------------------------
-// upstream_ipsets — `ipsets` + `hosts` expansion via `expand_principal`
+// internal ipsets — `ipsets` + `hosts` expansion via `expand_principal`
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parses_upstream_ipsets_fixture() {
-    let raw = load("upstream_ipsets.hujson");
-    let doc = parse_hujson_policy(&raw).expect("ipsets fixture must parse");
+fn parses_internal_ipsets_toml() {
+    let doc = ipsets_doc();
     assert_eq!(doc.ipsets["office"].len(), 2);
     assert_eq!(doc.ipsets["lab"].len(), 1);
     assert_eq!(doc.hosts["monitor"], "10.1.2.3/32");
@@ -165,9 +223,8 @@ fn store_node_attrs_for_returns_empty_when_unloaded() {
 #[test]
 fn store_node_attrs_for_forwards_to_doc() {
     let s = PolicyStore::new();
-    let raw = load("upstream_nodeattrs.hujson");
-    let doc = parse_hujson_policy(&raw).unwrap();
-    s.set(doc, raw);
+    let doc = nodeattrs_doc();
+    s.set(doc, "internal-nodeattrs-toml".to_string());
     let exit_tags = vec!["exit".to_string()];
     let n = NodeView::new("100.64.0.1").with_tags(&exit_tags);
     let attrs = s.node_attrs_for(&n);
@@ -241,14 +298,12 @@ fn expand_principal_drops_non_flattenable_autogroups() {
 
 #[test]
 fn expand_principal_handles_unknown_ipset() {
-    let raw = load("upstream_ipsets.hujson");
-    let doc = parse_hujson_policy(&raw).unwrap();
+    let doc = ipsets_doc();
     assert!(doc.expand_principal("ipset:does-not-exist").is_empty());
 }
 
 #[test]
 fn expand_principal_handles_unknown_host() {
-    let raw = load("upstream_ipsets.hujson");
-    let doc = parse_hujson_policy(&raw).unwrap();
+    let doc = ipsets_doc();
     assert!(doc.expand_principal("host:does-not-exist").is_empty());
 }

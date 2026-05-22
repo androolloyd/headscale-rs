@@ -19,7 +19,7 @@ use axum::{
 use headscale_api::admin::{
     AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin, router,
 };
-use headscale_api::policy::PolicyStore;
+use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::{MachineRecord, MachineRegistry};
 use tower::ServiceExt;
 
@@ -51,6 +51,22 @@ fn fixture_state_with_policy(policy: PolicyStore) -> AdminState {
 
 fn fixture_state() -> AdminState {
     fixture_state_with_policy(PolicyStore::new())
+}
+
+fn fixture_state_with_tag_policy(tags: &[&str]) -> AdminState {
+    fixture_state_with_policy(policy_with_tags(tags))
+}
+
+fn policy_with_tags(tags: &[&str]) -> PolicyStore {
+    let policy = PolicyStore::new();
+    let owners = tags
+        .iter()
+        .map(|tag| format!(r#""{tag}":["alice@"]"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let raw = format!(r#"{{"tagOwners":{{{owners}}}}}"#);
+    policy.set(parse_hujson_policy(&raw).unwrap(), raw);
+    policy
 }
 
 fn app() -> Router {
@@ -161,11 +177,7 @@ async fn api_policy_get_anonymous_401() {
 #[tokio::test]
 async fn api_policy_put_anonymous_401() {
     let resp = app()
-        .oneshot(req_put_text(
-            "/api/v1/policy",
-            r#"{"version":1,"rules":[]}"#,
-            None,
-        ))
+        .oneshot(req_put_text("/api/v1/policy", r#"{"acls":[]}"#, None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -176,7 +188,7 @@ async fn api_policy_validate_anonymous_401() {
     let resp = app()
         .oneshot(req_post_json(
             "/api/v1/policy/validate",
-            r#"{"version":1,"rules":[]}"#,
+            r#"{"acls":[]}"#,
             None,
         ))
         .await
@@ -301,6 +313,52 @@ async fn api_machine_routes_invalid_prefix_returns_400() {
     assert!(body(resp).await.contains("invalid route"));
 }
 
+#[tokio::test]
+async fn api_machine_tags_rejects_empty_list() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/tags"),
+            r#"{"tags":[]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("cannot remove all tags"));
+}
+
+#[tokio::test]
+async fn api_machine_tags_rejects_malformed_tag() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/tags"),
+            r#"{"tags":["server"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("tag must start"));
+}
+
+#[tokio::test]
+async fn api_machine_tags_rejects_tags_missing_from_loaded_policy() {
+    let app = router(fixture_state_with_tag_policy(&["tag:prod"]));
+    let id = "aa".repeat(32);
+    let resp = app
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/tags"),
+            r#"{"tags":["tag:web"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("requested tags [tag:web]"));
+}
+
 // ---------------------------------------------------------------------------
 // Not-found / conflict semantics
 // ---------------------------------------------------------------------------
@@ -349,6 +407,21 @@ async fn api_machine_routes_unknown_id_returns_404() {
         .oneshot(req_post_json(
             &format!("/api/v1/machines/{bad}/routes"),
             r#"{"routes":["10.0.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_machine_tags_unknown_id_returns_404_after_validation() {
+    let app = router(fixture_state_with_tag_policy(&["tag:prod"]));
+    let bad = "ff".repeat(32);
+    let resp = app
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{bad}/tags"),
+            r#"{"tags":["tag:prod"]}"#,
             Some(BEARER),
         ))
         .await
@@ -454,6 +527,30 @@ async fn api_machine_approve_routes_alias_matches_upstream_spelling() {
     assert_eq!(v["approved_routes"], serde_json::json!(["10.20.0.0/24"]));
 }
 
+#[tokio::test]
+async fn api_machine_tags_accepts_loaded_policy_tags() {
+    let app = router(fixture_state_with_tag_policy(&["tag:prod", "tag:web"]));
+    let id = "aa".repeat(32);
+    let resp = app
+        .clone()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/tags"),
+            r#"{"tags":["tag:prod","tag:web"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(req_authed(Method::GET, &format!("/api/v1/machines/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(v["tags"], serde_json::json!(["tag:prod", "tag:web"]));
+}
+
 // ---------------------------------------------------------------------------
 // Policy routes — get/put/validate
 // ---------------------------------------------------------------------------
@@ -475,7 +572,7 @@ async fn api_policy_get_returns_loaded_false_when_unset() {
 async fn api_policy_put_then_get_round_trips_raw() {
     let policy = PolicyStore::new();
     let app = router(fixture_state_with_policy(policy));
-    let raw = "{\n  // hello\n  \"version\":1,\n  \"rules\":[]\n}";
+    let raw = "{\n  // hello\n  \"acls\":[]\n}";
     let resp = app
         .clone()
         .oneshot(req_put_text("/api/v1/policy", raw, Some(BEARER)))
@@ -519,8 +616,7 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
         .build();
     let app = router(state);
     let raw = r#"{
-        "version": 1,
-        "auto_approvers": {
+        "autoApprovers": {
             "routes": {"10.77.0.0/16": ["alice@"]}
         }
     }"#;
@@ -542,8 +638,7 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
 async fn api_policy_put_invalid_hujson_returns_400_and_preserves_existing() {
     let app = router(fixture_state());
     // First: load a known-good policy.
-    let good =
-        r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+    let good = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
     let resp = app
         .clone()
         .oneshot(req_put_text("/api/v1/policy", good, Some(BEARER)))
@@ -576,10 +671,9 @@ async fn api_policy_put_invalid_hujson_returns_400_and_preserves_existing() {
 async fn api_policy_validate_good_returns_rule_count() {
     let app = router(fixture_state());
     let raw = r#"{
-        "version": 1,
-        "rules": [
-            {"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]},
-            {"action":"accept","src":["group:a"],"dst":["*"],"ports":["tcp/80"]}
+        "acls": [
+            {"action":"accept","proto":"tcp","src":["*"],"dst":["*:22"]},
+            {"action":"accept","proto":"tcp","src":["group:a"],"dst":["*:80"]}
         ],
         "groups": {"a": ["100.64.0.1"]}
     }"#;
@@ -598,7 +692,7 @@ async fn api_policy_validate_bad_returns_400() {
     let resp = app()
         .oneshot(req_post_json(
             "/api/v1/policy/validate",
-            r#"{"version":1,"rules":[{"action":"nope","src":["*"],"dst":["*"]}]}"#,
+            r#"{"acls":[{"action":"nope","src":["*"],"dst":["*"]}]}"#,
             Some(BEARER),
         ))
         .await
@@ -807,7 +901,7 @@ async fn api_tailnet_reports_policy_loaded_flag() {
         .clone()
         .oneshot(req_put_text(
             "/api/v1/policy",
-            r#"{"version":1,"rules":[]}"#,
+            r#"{"acls":[]}"#,
             Some(BEARER),
         ))
         .await

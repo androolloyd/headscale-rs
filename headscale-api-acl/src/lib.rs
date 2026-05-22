@@ -33,11 +33,9 @@
 //! This evaluator mirrors features of upstream `juanfont/headscale`
 //! `hscontrol/policy/v2/`:
 //!
-//! * `groups` / `tagOwners` / `hosts` / `ipsets` definitions.
+//! * `groups` / `tagOwners` / `hosts` definitions.
 //! * `autogroup:*` expansion — `internet`, `member`, `nonroot`,
 //!   `tagged`, `tag:<x>`, `self`.
-//! * `nodeAttrs` — per-target capability flags (`funnel`,
-//!   `exit-node`, …) returned by [`AclDoc::attrs_for`].
 //! * `autoApprovers` — route + exit-node auto-approval queried via
 //!   [`AclDoc::auto_approves_route`] / [`AclDoc::auto_approves_exit_node`].
 //!
@@ -46,13 +44,12 @@
 //! TOML for the OctraVPN off-chain distribution; HuJSON for the
 //! headscale admin PUT endpoint. Both parse to the same [`AclDoc`].
 //!
-//! Headscale aliases:
-//!
-//! * `acls` ↔ `rules` — upstream `juanfont/headscale` uses `acls`,
-//!   OctraVPN uses `rules`. Both accepted.
-//! * `tagOwners` ↔ `tag_owners`.
-//! * `nodeAttrs` ↔ `node_attrs`.
-//! * `autoApprovers` ↔ `auto_approvers`; `exitNode` ↔ `exit_node`.
+//! The HuJSON parser is intentionally strict to match headscale-go:
+//! upstream top-level names only (`groups`, `hosts`, `tagOwners`,
+//! `acls`, `autoApprovers`, `ssh`), ACL `action` must be `accept`,
+//! and ports live in `dst` entries (`host:22`), not a rule-level
+//! `ports` field. TOML keeps the canonical/internal field names used
+//! by OctraVPN (`rules`, `tag_owners`, `node_attrs`, ...).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -66,19 +63,38 @@ use thiserror::Error;
 // Types
 // =====================================================================
 
-/// `accept` vs `deny`. Wire form: `"accept"` / `"deny"`. The
-/// `headscale-api` facade re-exports this as `PolicyAction`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Policy decision action. HuJSON/TOML policy parsing accepts only
+/// upstream's `"accept"` action; `Deny` is retained for default-deny
+/// evaluation results and programmatically constructed internal docs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AclAction {
     Accept,
     Deny,
 }
 
+impl<'de> Deserialize<'de> for AclAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let action = String::deserialize(deserializer)?;
+        match action.as_str() {
+            "accept" => Ok(Self::Accept),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid action {other:?}, must be \"accept\""
+            ))),
+        }
+    }
+}
+
 /// A single ACL rule. Sources and destinations name groups
 /// (`group:<name>`), explicit addresses (`oct...`), or the wildcard
-/// `*`. Ports follow the `<proto>/<port>` form (`tcp/22`, `udp/*`,
-/// `*/*`, also accepted: `*:tcp/22` for backward compatibility).
+/// `*`. Parsed HuJSON follows upstream and puts ports in `dst`
+/// entries (`*:22`, `tag:web:80,443`); the HuJSON entrypoint rejects
+/// a rule-level `ports` field. Internally, normalized ports use the
+/// `<proto>/<port>` form (`tcp/22`, `udp/*`, `*/*`; also accepted
+/// programmatically: `*:tcp/22`).
 ///
 /// `#[serde(deny_unknown_fields)]`: a misspelled rule field is a
 /// loud error, not a silently permissive ACL.
@@ -451,10 +467,77 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let stripped = strip_hujson(raw);
     let value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
+    let value = normalize_go_policy_top_level(value)?;
     let doc = serde_json::from_value::<AclDoc>(value)
         .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
     validate_policy(&doc).map_err(PolicyParseError::Schema)?;
     Ok(doc)
+}
+
+fn normalize_go_policy_top_level(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, PolicyParseError> {
+    let serde_json::Value::Object(object) = value else {
+        return Ok(value);
+    };
+
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in object {
+        let Some(canonical) = go_policy_field_name(&key) else {
+            return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
+        };
+        if canonical == "acls" {
+            reject_unknown_go_acl_fields(&value)?;
+        }
+        if normalized.insert(canonical.to_string(), value).is_some() {
+            return Err(PolicyParseError::Schema(format!(
+                "duplicate field {canonical:?}"
+            )));
+        }
+    }
+
+    Ok(serde_json::Value::Object(normalized))
+}
+
+fn go_policy_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "groups" => Some("groups"),
+        "hosts" => Some("hosts"),
+        "tagowners" => Some("tagOwners"),
+        "acls" => Some("acls"),
+        "autoapprovers" => Some("autoApprovers"),
+        "ssh" => Some("ssh"),
+        _ => None,
+    }
+}
+
+fn reject_unknown_go_acl_fields(value: &serde_json::Value) -> Result<(), PolicyParseError> {
+    let serde_json::Value::Array(rules) = value else {
+        return Ok(());
+    };
+
+    for rule in rules {
+        let serde_json::Value::Object(fields) = rule else {
+            continue;
+        };
+        for key in fields.keys().filter(|key| !key.starts_with('#')) {
+            if go_acl_field_name(key).is_none() {
+                return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn go_acl_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "action" => Some("action"),
+        "proto" => Some("proto"),
+        "src" => Some("src"),
+        "dst" => Some("dst"),
+        _ => None,
+    }
 }
 
 fn validate_policy(doc: &AclDoc) -> Result<(), String> {
@@ -2520,6 +2603,66 @@ mod tests {
     }
 
     #[test]
+    fn hujson_rejects_non_upstream_top_level_fields_like_headscale_go() {
+        for (field, raw) in [
+            ("version", r#"{"version":1,"acls":[]}"#),
+            ("rules", r#"{"rules":[]}"#),
+            (
+                "ipsets",
+                r#"{"ipsets":{"office":["10.0.0.0/8"]},"acls":[]}"#,
+            ),
+            (
+                "nodeAttrs",
+                r#"{"nodeAttrs":[{"target":["*"],"attr":["funnel"]}],"acls":[]}"#,
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).expect_err(field);
+            let msg = err.to_string();
+            assert!(
+                msg.contains(field) && msg.contains("unknown field"),
+                "{field} should be rejected as unknown, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn hujson_rejects_acl_deny_action_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "deny",
+                "src": ["*"],
+                "dst": ["*:*"]
+              }]
+            }"#,
+        )
+        .expect_err("deny action must reject")
+        .to_string();
+        assert!(err.contains("invalid action"));
+        assert!(err.contains("accept"));
+    }
+
+    #[test]
+    fn hujson_rejects_acl_ports_field_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["*"],
+                "dst": ["*"],
+                "ports": ["*/*"]
+              }]
+            }"#,
+        )
+        .expect_err("rule-level ports field must reject")
+        .to_string();
+        assert!(
+            err.contains("ports") && err.contains("unknown field"),
+            "ports should be rejected as unknown, got: {err}"
+        );
+    }
+
+    #[test]
     fn canonical_form_includes_new_fields() {
         let mut a = AclDoc {
             version: 1,
@@ -2657,9 +2800,8 @@ mod tests {
     fn hujson_parses_minimal_doc() {
         let raw = r#"{
             // tiny allow-all
-            "version": 1,
-            "rules": [
-                {"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]},
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["*:*"]},
             ]
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
@@ -2669,7 +2811,7 @@ mod tests {
 
     #[test]
     fn hujson_rejects_unknown_field() {
-        let raw = r#"{"version":1,"policy_owner":"oct1","rules":[]}"#;
+        let raw = r#"{"policy_owner":"oct1","acls":[]}"#;
         let err = parse_hujson_policy(raw).unwrap_err();
         let msg = format!("{err}");
         assert!(
@@ -2687,9 +2829,8 @@ mod tests {
     fn hujson_block_comments_and_trailing_commas() {
         let raw = r#"{
             /* block comment */
-            "version": 1,
-            "rules": [
-                {"action":"deny","src":["*"],"dst":["*"],},
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["*:*"],},
             ],
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
@@ -2699,9 +2840,8 @@ mod tests {
     #[test]
     fn hujson_strings_with_slashes_are_preserved() {
         let raw = r#"{
-            "version": 1,
             "groups": { "admins": ["oct://node1//net"] },
-            "rules": []
+            "acls": []
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(doc.groups["admins"], vec!["oct://node1//net"]);
@@ -2710,7 +2850,6 @@ mod tests {
     #[test]
     fn hujson_accepts_acls_alias() {
         let raw = r#"{
-            "version": 1,
             "acls": [{"action":"accept","src":["*"],"dst":["*"]}]
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();

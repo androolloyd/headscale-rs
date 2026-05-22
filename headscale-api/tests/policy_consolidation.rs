@@ -44,7 +44,7 @@ use headscale_api::policy::{
 #[test]
 fn raw_round_trip_preserves_hujson_byte_for_byte() {
     let store = PolicyStore::new();
-    let raw = "{\n  // an operator comment\n  \"version\": 1,\n  /* block */\n  \"rules\": [\n    {\"action\":\"accept\",\"src\":[\"*\"],\"dst\":[\"*\"],\"ports\":[\"tcp/22\"]},\n  ]\n}";
+    let raw = "{\n  // an operator comment\n  /* block */\n  \"acls\": [\n    {\"action\":\"accept\",\"proto\":\"tcp\",\"src\":[\"*\"],\"dst\":[\"*:22\"]},\n  ]\n}";
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
     let returned = store.raw().expect("raw is set");
@@ -58,7 +58,7 @@ fn raw_round_trip_preserves_url_with_double_slashes() {
     // handling. The canonical stripper must preserve `https://x//y`
     // inside a string literal verbatim.
     let store = PolicyStore::new();
-    let raw = r#"{"version":1,"groups":{"x":["https://example.com//path"]},"rules":[]}"#;
+    let raw = r#"{"groups":{"x":["https://example.com//path"]},"acls":[]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
     let returned = store.raw().expect("raw");
@@ -72,8 +72,7 @@ fn raw_round_trip_preserves_url_with_double_slashes() {
 #[test]
 fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let store = PolicyStore::new();
-    let raw =
-        r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+    let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc.clone(), raw.to_string());
     let store_rules = store.filter_rules();
@@ -89,15 +88,23 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     assert_eq!(store_rules[0].dst_ports[0].ports.last, 65535);
     assert_eq!(store_rules[0].dst_ports[1].ports.first, 0);
     assert_eq!(store_rules[0].dst_ports[1].ports.last, 65535);
-    assert!(store_rules[0].ip_proto.is_empty());
+    assert_eq!(store_rules[0].ip_proto, vec![6, 17]);
 }
 
 #[test]
 fn filter_rules_deny_only_yields_empty_list() {
     let store = PolicyStore::new();
-    let raw = r#"{"version":1,"rules":[{"action":"deny","src":["*"],"dst":["*"]}]}"#;
-    let doc = parse_hujson_policy(raw).unwrap();
-    store.set(doc, raw.to_string());
+    let doc = PolicyDoc {
+        version: 1,
+        rules: vec![PolicyRule {
+            action: PolicyAction::Deny,
+            src: vec!["*".into()],
+            dst: vec!["*".into()],
+            ports: vec![],
+        }],
+        ..Default::default()
+    };
+    store.set(doc, "programmatic-deny-only".to_string());
     assert!(
         store.filter_rules().is_empty(),
         "deny-only policy ⇒ empty FilterRule list (pre-consolidation behaviour)"
@@ -112,9 +119,8 @@ fn filter_rules_group_expansion_matches_pre_consolidation() {
     // ordering.
     let store = PolicyStore::new();
     let raw = r#"{
-        "version": 1,
         "groups": {"admins": ["100.64.0.10", "100.64.0.11"]},
-        "rules": [{"action":"accept","src":["group:admins"],"dst":["*"],"ports":["tcp/22"]}]
+        "acls": [{"action":"accept","proto":"tcp","src":["group:admins"],"dst":["*:22"]}]
     }"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
@@ -140,15 +146,17 @@ fn node_attrs_empty_until_policy_loaded() {
 #[test]
 fn node_attrs_for_collects_via_canonical_doc() {
     let store = PolicyStore::new();
-    let raw = r#"{
-        "version": 1,
-        "node_attrs": [
-            {"target":["*"],          "attr":["funnel"]},
-            {"target":["tag:exit"],  "attr":["exit-node"]}
-        ],
-        "rules": []
-    }"#;
-    let doc = parse_hujson_policy(raw).unwrap();
+    let raw = r#"
+        version = 1
+        [[node_attrs]]
+        target = ["*"]
+        attr = ["funnel"]
+
+        [[node_attrs]]
+        target = ["tag:exit"]
+        attr = ["exit-node"]
+    "#;
+    let doc = PolicyDoc::from_toml(raw).unwrap();
     store.set(doc, raw.to_string());
 
     let exit_tags = vec!["exit".to_string()];
@@ -171,10 +179,9 @@ fn node_can_have_tag_delegates_to_canonical_doc() {
     assert!(!store.node_can_have_tag(&alice, "tag:server"));
 
     let raw = r#"{
-        "version": 1,
         "groups": {"group:admins": ["alice@"]},
         "tagOwners": {"tag:server": ["group:admins"]},
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
@@ -203,16 +210,15 @@ fn auto_approve_helpers_false_when_no_policy() {
 fn auto_approve_route_matches_subprefix_via_tag() {
     let store = PolicyStore::new();
     let raw = r#"{
-        "version": 1,
-        "auto_approvers": {
+        "autoApprovers": {
             "routes": {"10.0.0.0/8": ["tag:router"]},
-            "exit_node": ["tag:exit"]
+            "exitNode": ["tag:exit"]
         },
-        "tag_owners": {
+        "tagOwners": {
             "tag:router": ["alice@"],
             "tag:exit": ["alice@"]
         },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
@@ -238,9 +244,8 @@ fn auto_approve_route_matches_subprefix_via_tag() {
 #[test]
 fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
     let raw = r#"{
-        "version": 1,
-        "tag_owners": {"tag:server": ["alice@"]},
-        "rules": [
+        "tagOwners": {"tag:server": ["alice@"]},
+        "acls": [
             {"action":"accept","src":["alice@"],"dst":["tag:server:*"]}
         ]
     }"#;
@@ -281,8 +286,7 @@ fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
 #[test]
 fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
     let raw = r#"{
-        "version": 1,
-        "rules": [
+        "acls": [
             {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16:*"]}
         ]
     }"#;
@@ -340,7 +344,7 @@ fn upstream_acls_alias_round_trips() {
     // both `rules` and `acls`. The canonical `AclDoc` keeps that
     // serde alias so an operator's upstream `juanfont/headscale`
     // policy file PUTs without renaming.
-    let raw = r#"{"version":1,"acls":[{"action":"accept","src":["*"],"dst":["*"]}]}"#;
+    let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     assert_eq!(doc.rules.len(), 1);
 }
@@ -363,7 +367,7 @@ async fn set_still_wakes_parked_long_pollers() {
     // Park the waiter, then push a doc — the existing #230 wake
     // semantics must survive the rewrite.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let raw = r#"{"version":1,"rules":[]}"#;
+    let raw = r#"{"acls":[]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
     waiter.await.unwrap();

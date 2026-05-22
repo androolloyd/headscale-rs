@@ -1,24 +1,16 @@
 // Modelled on juanfont/headscale@main:hscontrol/policy/v2/testdata/acl_results/acl-a01.hujson.
 // Carries the inner `policy` object only (without the test-capture
 // wrapper) since our parser consumes policy hujson directly. Schema is
-// hand-translated to our shape:
-//   - `acls` → `rules`
-//   - `autoApprovers.routes` keys are CIDRs → string→string-list table
-//   - `tagOwners` accepts both `tagOwners` and our `tag_owners`
 {
-    "version": 1,
-    // Upstream's field name is `acls`; our parser accepts both `acls`
-    // and `rules` via the serde alias. Operators porting an upstream
-    // policy file don't need to rename anything.
     "acls": [
-        {"action": "accept", "src": ["autogroup:member"], "dst": ["*"], "ports": ["*/*"]}
+        {"action": "accept", "src": ["autogroup:member"], "dst": ["*:*"]}
     ],
-    "auto_approvers": {
+    "autoApprovers": {
         "routes": {
             "0.0.0.0/0":    ["tag:exit"],
             "10.33.0.0/16": ["tag:router"]
         },
-        "exit_node": ["tag:exit"]
+        "exitNode": ["tag:exit"]
     },
     "groups": {
         "admins":     ["odin@example.com"],
@@ -32,7 +24,7 @@
         "subnet24":  "192.168.1.0/24",
         "webserver": "100.108.74.26/32"
     },
-    "tag_owners": {
+    "tagOwners": {
         "tag:client":     ["odin@example.com"],
         "tag:exit":       ["odin@example.com"],
         "tag:router":     ["odin@example.com"],

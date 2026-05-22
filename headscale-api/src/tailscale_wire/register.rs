@@ -1750,8 +1750,7 @@ mod tests {
     async fn register_auto_approves_policy_routes() {
         let (state, redeemer, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
-            "auto_approvers": {
+            "autoApprovers": {
                 "routes": {"10.30.0.0/16": ["alice@"]}
             }
         }"#;

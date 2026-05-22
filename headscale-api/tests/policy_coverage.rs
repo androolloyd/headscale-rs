@@ -22,8 +22,7 @@ use headscale_api::policy::{
 #[test]
 fn line_comment_at_eol_is_stripped() {
     let raw = r#"{
-        "version": 1, // trailing line comment
-        "rules": []
+        "acls": [] // trailing line comment
     }"#;
     let doc = parse_hujson_policy(raw).expect("parses with trailing line comment");
     assert_eq!(doc.version, 1);
@@ -31,7 +30,7 @@ fn line_comment_at_eol_is_stripped() {
 
 #[test]
 fn line_comment_at_eof_without_newline_is_stripped() {
-    let raw = "{\"version\":1,\"rules\":[]} // no newline";
+    let raw = "{\"acls\":[]} // no newline";
     let doc = parse_hujson_policy(raw).expect("parses with EOF line comment");
     assert_eq!(doc.version, 1);
 }
@@ -39,8 +38,7 @@ fn line_comment_at_eof_without_newline_is_stripped() {
 #[test]
 fn block_comment_inside_object_is_stripped() {
     let raw = r#"{
-        /* leading block */ "version": 1,
-        "rules": [/* inline */]
+        /* leading block */ "acls": [/* inline */]
     }"#;
     parse_hujson_policy(raw).expect("parses with inline block comments");
 }
@@ -50,7 +48,7 @@ fn unterminated_block_comment_is_swallowed_to_eof() {
     // The stripper consumes the unterminated `/* ...` to EOF then
     // serde_json fails on the truncated body. We just need to assert
     // we get a parse error (not a panic).
-    let raw = "{\"version\":1,\"rules\":[]} /* never closed";
+    let raw = "{\"acls\":[]} /* never closed";
     let _ = parse_hujson_policy(raw); // either Ok or Err — must NOT panic
 }
 
@@ -59,16 +57,15 @@ fn nested_block_comment_is_not_supported() {
     // Tailscale's hujson stripper matches the SHORTEST `*/` — nested
     // block comments would leak. We just document the behaviour: the
     // outer `*/` ends the outer comment, the trailing text trips serde.
-    let raw = r#"{ "version":1, "rules":[] /* outer /* inner */ leak */ }"#;
+    let raw = r#"{ "acls":[] /* outer /* inner */ leak */ }"#;
     let _ = parse_hujson_policy(raw); // accepted as garbage-on-trailer
 }
 
 #[test]
 fn trailing_comma_before_brace_and_bracket() {
     let raw = r#"{
-        "version": 1,
         "groups": { "admins": ["100.64.0.1",], },
-        "rules": [],
+        "acls": [],
     }"#;
     let doc = parse_hujson_policy(raw).expect("parses both trailing-comma styles");
     assert_eq!(doc.groups["admins"].len(), 1);
@@ -81,9 +78,8 @@ fn trailing_comma_before_brace_and_bracket() {
 #[test]
 fn escaped_quote_in_string_does_not_terminate_string() {
     let raw = r#"{
-        "version": 1,
         "groups": { "k": ["a\"b\"c"] },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).expect("escaped quote preserved");
     assert_eq!(doc.groups["k"], vec![r#"a"b"c"#]);
@@ -92,9 +88,8 @@ fn escaped_quote_in_string_does_not_terminate_string() {
 #[test]
 fn backslash_escapes_round_trip() {
     let raw = r#"{
-        "version": 1,
         "groups": { "k": ["c:\\users\\test"] },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).expect("backslash escape preserved");
     assert!(doc.groups["k"][0].contains('\\'));
@@ -103,9 +98,8 @@ fn backslash_escapes_round_trip() {
 #[test]
 fn double_slash_inside_string_is_not_a_comment() {
     let raw = r#"{
-        "version": 1,
         "groups": { "k": ["https://x.example.com/path//deep"] },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).expect("URL with // preserved");
     assert!(doc.groups["k"][0].contains("//deep"));
@@ -114,9 +108,8 @@ fn double_slash_inside_string_is_not_a_comment() {
 #[test]
 fn slash_star_inside_string_is_not_a_comment() {
     let raw = r#"{
-        "version": 1,
         "groups": { "k": ["regex: a/*b*/"] },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).expect("/* inside string preserved");
     assert!(doc.groups["k"][0].contains("/*"));
@@ -125,9 +118,8 @@ fn slash_star_inside_string_is_not_a_comment() {
 #[test]
 fn comma_inside_string_is_not_a_trailing_comma() {
     let raw = r#"{
-        "version": 1,
         "groups": { "k": ["a,b,c"] },
-        "rules": []
+        "acls": []
     }"#;
     let doc = parse_hujson_policy(raw).expect("comma inside string preserved");
     assert_eq!(doc.groups["k"][0], "a,b,c");
@@ -151,14 +143,14 @@ fn pure_comments_yields_json_error() {
 
 #[test]
 fn missing_version_defaults_to_headscale_go_policy_version() {
-    let raw = r#"{ "rules": [] }"#;
+    let raw = r#"{ "acls": [] }"#;
     let doc = parse_hujson_policy(raw).unwrap();
     assert_eq!(doc.version, 1);
 }
 
 #[test]
 fn unknown_top_level_field_is_schema_error() {
-    let raw = r#"{ "version": 1, "rules": [], "unknown_extra": true }"#;
+    let raw = r#"{ "acls": [], "unknown_extra": true }"#;
     let err = parse_hujson_policy(raw).unwrap_err();
     assert!(
         format!("{err}").contains("unknown_extra"),
@@ -169,8 +161,7 @@ fn unknown_top_level_field_is_schema_error() {
 #[test]
 fn rule_missing_action_is_schema_error() {
     let raw = r#"{
-        "version": 1,
-        "rules": [{"src":["*"],"dst":["*"]}]
+        "acls": [{"src":["*"],"dst":["*"]}]
     }"#;
     let err = parse_hujson_policy(raw).unwrap_err();
     let msg = format!("{err}");
@@ -183,8 +174,7 @@ fn rule_missing_action_is_schema_error() {
 #[test]
 fn rule_with_invalid_action_value_is_schema_error() {
     let raw = r#"{
-        "version": 1,
-        "rules": [{"action":"maybe","src":["*"],"dst":["*"]}]
+        "acls": [{"action":"maybe","src":["*"],"dst":["*"]}]
     }"#;
     assert!(parse_hujson_policy(raw).is_err());
 }
@@ -193,8 +183,7 @@ fn rule_with_invalid_action_value_is_schema_error() {
 fn unknown_rule_field_is_schema_error() {
     // PolicyRule is `deny_unknown_fields` (see src/policy/doc.rs).
     let raw = r#"{
-        "version": 1,
-        "rules": [{"action":"accept","src":["*"],"dst":["*"],"extra":1}]
+        "acls": [{"action":"accept","src":["*"],"dst":["*"],"extra":1}]
     }"#;
     let err = parse_hujson_policy(raw).unwrap_err();
     assert!(format!("{err}").contains("extra"));
@@ -352,8 +341,7 @@ fn store_default_is_unloaded() {
 fn store_set_caches_filter_rules() {
     let s = PolicyStore::new();
     let raw = r#"{
-        "version": 1,
-        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}]
+        "acls": [{"action":"accept","proto":"tcp","src":["*"],"dst":["*:22"]}]
     }"#;
     let doc = parse_hujson_policy(raw).unwrap();
     s.set(doc.clone(), raw.to_string());
@@ -369,12 +357,10 @@ fn store_set_caches_filter_rules() {
 fn store_second_set_recomputes_cached_filter_rules() {
     let s = PolicyStore::new();
     let raw_22 = r#"{
-        "version": 1,
-        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}]
+        "acls": [{"action":"accept","proto":"tcp","src":["*"],"dst":["*:22"]}]
     }"#;
     let raw_443 = r#"{
-        "version": 1,
-        "rules": [{"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/443"]}]
+        "acls": [{"action":"accept","proto":"tcp","src":["*"],"dst":["*:443"]}]
     }"#;
 
     s.set(parse_hujson_policy(raw_22).unwrap(), raw_22.to_string());
@@ -393,7 +379,7 @@ fn store_second_set_recomputes_cached_filter_rules() {
 #[test]
 fn store_set_preserves_raw_comments_verbatim() {
     let s = PolicyStore::new();
-    let raw = "{\n  // comments must survive\n  \"version\":1,\n  \"rules\":[]\n}";
+    let raw = "{\n  // comments must survive\n  \"acls\":[]\n}";
     let doc = parse_hujson_policy(raw).unwrap();
     s.set(doc, raw.to_string());
     assert_eq!(s.raw().unwrap(), raw, "raw bytes round-trip with comments");
@@ -402,7 +388,7 @@ fn store_set_preserves_raw_comments_verbatim() {
 #[test]
 fn store_set_at_preserves_supplied_update_timestamp() {
     let s = PolicyStore::new();
-    let raw = r#"{"version":1,"rules":[]}"#;
+    let raw = r#"{"acls":[]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     s.set_at(doc, raw.to_string(), 42);
     assert_eq!(s.raw().unwrap(), raw);
@@ -422,7 +408,7 @@ async fn store_set_wakes_parked_long_pollers() {
     });
     // Let the waiter park.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let raw = r#"{"version":1,"rules":[]}"#;
+    let raw = r#"{"acls":[]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     s.set(doc, raw.to_string());
     waiter.await.unwrap();

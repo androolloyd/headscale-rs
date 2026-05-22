@@ -3646,7 +3646,7 @@ mod tests {
         bob.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
         state.machines.upsert(bob.node_key_hex.clone(), bob);
 
-        let raw_policy = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+        let raw_policy = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
         let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
         state.policy.set(doc, raw_policy.to_string());
 
@@ -4188,13 +4188,12 @@ mod tests {
     async fn debug_filter_returns_loaded_policy_filter_rules() {
         let (state, _dir) = fixture_state();
         let raw_policy = r#"{
-          "version": 1,
-          "rules": [
+          "acls": [
             {
               "action": "accept",
+              "proto": "tcp",
               "src": ["100.64.0.1/32"],
-              "dst": ["100.64.0.2/32"],
-              "ports": ["tcp/22"]
+              "dst": ["100.64.0.2/32:22"]
             }
           ]
         }"#;
@@ -4234,9 +4233,8 @@ mod tests {
         let (state, _dir) = fixture_state();
         let raw_policy = r#"{
           // keep comments and whitespace byte-for-byte
-          "version": 1,
-          "rules": [
-            {"action": "accept", "src": ["*"], "dst": ["*"], "ports": ["*/*"]},
+          "acls": [
+            {"action": "accept", "src": ["*"], "dst": ["*:*"]},
           ],
         }"#;
         let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
@@ -4266,7 +4264,7 @@ mod tests {
     #[tokio::test]
     async fn debug_policy_honours_application_json_accept_header() {
         let (state, _dir) = fixture_state();
-        let raw_policy = r#"{"version":1,"rules":[{"action":"accept","src":["*"],"dst":["*"],"ports":["*/*"]}]}"#;
+        let raw_policy = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
         let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
         state.policy.set(doc, raw_policy.to_string());
 
@@ -4449,7 +4447,6 @@ mod tests {
     async fn debug_policy_manager_json_wraps_loaded_policy_state() {
         let (state, _dir) = fixture_state();
         let raw_policy = r#"{
-          "version": 1,
           "tagOwners": {
             "tag:server": ["group:admins"]
           },
@@ -4461,8 +4458,8 @@ mod tests {
               "10.0.0.0/24": ["group:admins"]
             }
           },
-          "rules": [
-            {"action": "accept", "src": ["group:admins"], "dst": ["tag:server"], "ports": ["tcp/22"]}
+          "acls": [
+            {"action": "accept", "proto": "tcp", "src": ["group:admins"], "dst": ["tag:server:22"]}
           ]
         }"#;
         let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();

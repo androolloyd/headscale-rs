@@ -118,6 +118,19 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
     (wire, admin)
 }
 
+fn allow_admin_tags(admin: &AdminState, tags: &[&str]) {
+    let owners = tags
+        .iter()
+        .map(|tag| format!(r#""{tag}":["alice@"]"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let raw = format!(r#"{{"tagOwners":{{{owners}}}}}"#);
+    admin.policy.set(
+        headscale_api::policy::parse_hujson_policy(&raw).unwrap(),
+        raw,
+    );
+}
+
 /// Send a `POST /api/v1/machines/{id}/<verb>` with the supplied JSON
 /// body. Returns the response status + decoded body. Bearer auth is
 /// always present.
@@ -371,6 +384,7 @@ async fn admin_set_tags_round_trip() {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert("11".repeat(32), mk_record(0x11, "node-tags", 16, false));
     let (_wire, admin) = fixture(reg.clone());
+    allow_admin_tags(&admin, &["tag:prod", "tag:web"]);
 
     let (s, _) = admin_post(
         &admin,
@@ -390,7 +404,7 @@ async fn admin_set_tags_round_trip() {
 }
 
 #[tokio::test]
-async fn admin_set_tags_empty_clears() {
+async fn admin_set_tags_empty_rejected() {
     let reg = Arc::new(MachineRegistry::new());
     let mut r = mk_record(0x22, "node-clear", 17, false);
     r.forced_tags = vec!["tag:old".into()];
@@ -404,14 +418,18 @@ async fn admin_set_tags_empty_clears() {
         serde_json::json!({ "tags": [] }),
     )
     .await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
-    assert!(reg.get(&"22".repeat(32)).unwrap().forced_tags.is_empty());
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        reg.get(&"22".repeat(32)).unwrap().forced_tags,
+        vec!["tag:old".to_string()]
+    );
 }
 
 #[tokio::test]
 async fn admin_verbs_on_unknown_id_return_404() {
     let reg = Arc::new(MachineRegistry::new());
     let (_wire, admin) = fixture(reg);
+    allow_admin_tags(&admin, &["tag:prod"]);
     let id = "99".repeat(32);
 
     let (s, _) = admin_post(&admin, &id, "expire", serde_json::json!({})).await;
@@ -426,7 +444,13 @@ async fn admin_verbs_on_unknown_id_return_404() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, _) = admin_post(&admin, &id, "tags", serde_json::json!({ "tags": [] })).await;
+    let (s, _) = admin_post(
+        &admin,
+        &id,
+        "tags",
+        serde_json::json!({ "tags": ["tag:prod"] }),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let s = admin_delete(&admin, &id).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -532,6 +556,7 @@ async fn forced_tags_override_registration() {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert("f0".repeat(32), mk_record(0xf0, "node-prod", 70, false));
     let (_wire, admin) = fixture(reg.clone());
+    allow_admin_tags(&admin, &["tag:override"]);
     let (s, _) = admin_post(
         &admin,
         &"f0".repeat(32),

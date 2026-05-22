@@ -2873,7 +2873,7 @@ mod upstream_tests {
         machines.upsert(node_key.clone(), rec);
 
         let raw = r#"{
-          "auto_approvers": {
+          "autoApprovers": {
             "routes": {"10.88.0.0/16": ["alice@"]}
           }
         }"#;

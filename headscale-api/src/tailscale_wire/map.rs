@@ -1381,8 +1381,7 @@ mod tests {
     async fn map_response_reduces_peers_when_policy_is_loaded() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
-            "tag_owners": {"tag:server": ["alice@"]},
+            "tagOwners": {"tag:server": ["alice@"]},
             "acls": [
                 {"action":"accept","src":["alice@"],"dst":["tag:server:*"]}
             ]
@@ -1497,10 +1496,9 @@ mod tests {
     async fn map_response_emits_reduced_base_packet_filter_for_target_node() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
             "tagOwners": {"tag:server": ["alice@"]},
             "acls": [
-                {"action":"accept","src":["alice@"],"dst":["tag:server"],"ports":["tcp/22"]}
+                {"action":"accept","proto":"tcp","src":["alice@"],"dst":["tag:server:22"]}
             ]
         }"#;
         state.policy.set(
@@ -1559,9 +1557,8 @@ mod tests {
     async fn map_response_base_packet_filter_keeps_served_routes() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
             "acls": [
-                {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16"],"ports":["*/*"]}
+                {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16:*"]}
             ]
         }"#;
         state.policy.set(
@@ -1609,7 +1606,6 @@ mod tests {
     async fn map_response_keeps_subnet_router_visible_when_policy_targets_route() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
             "acls": [
                 {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16:*"]}
             ]
@@ -1661,10 +1657,9 @@ mod tests {
     async fn map_request_auto_approves_policy_routes() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
-            "auto_approvers": {
+            "autoApprovers": {
                 "routes": {"10.20.0.0/16": ["alice@"]},
-                "exit_node": ["alice@"]
+                "exitNode": ["alice@"]
             }
         }"#;
         state.policy.set(
@@ -2489,11 +2484,10 @@ mod tests {
     async fn stream_true_route_update_emits_full_peer_delta_with_allowed_ips() {
         let (state, _dir) = fixture();
         let policy = r#"{
-            "version": 1,
             "acls": [
                 {"action":"accept","src":["alice@"],"dst":["10.30.0.0/16:*"]}
             ],
-            "auto_approvers": {
+            "autoApprovers": {
                 "routes": {"10.30.0.0/16": ["router@"]}
             }
         }"#;
@@ -3206,15 +3200,17 @@ mod tests {
         rec.forced_tags = vec!["tag:server".into()];
         state.machines.upsert(node_key.clone(), rec);
 
-        let raw_policy = r#"{
-            "tagOwners": {"tag:server": ["alice@"]},
-            "acls": [],
-            "nodeAttrs": [{
-                "target": ["tag:server"],
-                "attr": ["funnel", "ssh"]
-            }]
-        }"#;
-        let doc = crate::policy::parse_hujson_policy(raw_policy).unwrap();
+        let raw_policy = r#"
+            version = 1
+
+            [tag_owners]
+            "tag:server" = ["alice@"]
+
+            [[node_attrs]]
+            target = ["tag:server"]
+            attr = ["funnel", "ssh"]
+        "#;
+        let doc = crate::policy::PolicyDoc::from_toml(raw_policy).unwrap();
         state.policy.set(doc, raw_policy.to_string());
 
         let app = router(state);

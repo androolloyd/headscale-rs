@@ -1,9 +1,8 @@
 // Exercises `ssh` grant block round-trip — same shape upstream uses
 // in `hscontrol/policy/v2/testdata/ssh_results/*`.
 {
-    "version": 1,
-    "rules": [
-        {"action": "accept", "src": ["*"], "dst": ["*"], "ports": ["*/*"]}
+    "acls": [
+        {"action": "accept", "src": ["*"], "dst": ["*:*"]}
     ],
     "ssh": [
         {

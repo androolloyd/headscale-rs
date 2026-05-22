@@ -1,17 +1,12 @@
-// Exercises `auto_approvers` (routes + exit_node) with the camelCase
-// form upstream operators use. Mirrors the upstream
-// hscontrol/policy/v2/testdata/routes_results/* fixture shape.
+// Exercises upstream v0.28 `autoApprovers` (routes + exitNode).
 {
-    "version": 1,
-    "tag_owners": {
+    "tagOwners": {
         "tag:router": ["alice@example.com"],
         "tag:exit":   ["alice@example.com"]
     },
-    "rules": [
-        {"action": "accept", "src": ["*"], "dst": ["*"], "ports": ["*/*"]}
+    "acls": [
+        {"action": "accept", "src": ["*"], "dst": ["*:*"]}
     ],
-    // camelCase alias intentional — the parser must accept both
-    // `auto_approvers` and `autoApprovers`.
     "autoApprovers": {
         "routes": {
             "10.0.0.0/8":    ["tag:router"],

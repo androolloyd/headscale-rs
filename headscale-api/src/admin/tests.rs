@@ -511,8 +511,8 @@ fn req_post_text(uri: &str, body: &str, token: &str) -> Request<Body> {
 #[tokio::test]
 async fn policy_put_then_get_round_trip() {
     let (app, _) = app();
-    let raw = r#"{ "version":1, "rules":[
-        {"action":"accept","src":["*"],"dst":["*"],"ports":["tcp/22"]}
+    let raw = r#"{ "acls":[
+        {"action":"accept","proto":"tcp","src":["*"],"dst":["*:22"]}
     ]}"#;
     let resp = app
         .clone()
@@ -535,13 +535,14 @@ async fn policy_put_then_get_round_trip() {
     assert_eq!(v["loaded"], serde_json::Value::Bool(true));
     assert_eq!(v["policy"]["rules"][0]["action"], "accept");
     // Raw bytes round-trip verbatim.
-    assert!(v["raw"].as_str().unwrap().contains("tcp/22"));
+    assert!(v["raw"].as_str().unwrap().contains(r#""proto":"tcp""#));
+    assert!(v["raw"].as_str().unwrap().contains("*:22"));
 }
 
 #[tokio::test]
 async fn policy_put_rejects_invalid_doc() {
     let (app, _) = app();
-    let bad = r#"{"rules":[{"action":"bogus","src":["*"],"dst":["*"]}]}"#;
+    let bad = r#"{"acls":[{"action":"bogus","src":["*"],"dst":["*"]}]}"#;
     let resp = app
         .oneshot(req_put_text("/api/v1/policy", bad, &admin_token()))
         .await
@@ -558,7 +559,7 @@ async fn policy_put_rejects_invalid_doc() {
 async fn policy_validate_does_not_mutate() {
     let (app, state) = app();
     assert!(!state.policy.is_loaded(), "store starts empty");
-    let good = r#"{"version":1,"rules":[]}"#;
+    let good = r#"{"acls":[]}"#;
     let resp = app
         .clone()
         .oneshot(req_post_text(
@@ -588,7 +589,7 @@ async fn policy_endpoints_require_bearer() {
                 .method(Method::PUT)
                 .uri("/api/v1/policy")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"version":1,"rules":[]}"#))
+                .body(Body::from(r#"{"acls":[]}"#))
                 .unwrap(),
         )
         .await
@@ -601,7 +602,7 @@ async fn policy_endpoints_require_bearer() {
                 .method(Method::POST)
                 .uri("/api/v1/policy/validate")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"version":1,"rules":[]}"#))
+                .body(Body::from(r#"{"acls":[]}"#))
                 .unwrap(),
         )
         .await

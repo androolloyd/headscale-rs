@@ -969,6 +969,19 @@ struct ApiTagsBody {
     tags: Vec<String>,
 }
 
+fn validate_api_tag(tag: &str) -> Result<(), String> {
+    if !tag.starts_with("tag:") {
+        return Err("tag must start with the string 'tag:'".to_string());
+    }
+    if tag.to_lowercase() != tag {
+        return Err("tag should be lowercase".to_string());
+    }
+    if tag.split_whitespace().count() > 1 {
+        return Err("tag should not contains space".to_string());
+    }
+    Ok(())
+}
+
 async fn api_machines_tags(
     State(s): State<AdminState>,
     Path(id): Path<String>,
@@ -981,8 +994,39 @@ async fn api_machines_tags(
         Ok(v) => v,
         Err(r) => return r,
     };
+    if body.tags.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "cannot remove all tags from a node - tagged nodes must have at least one tag"})),
+        )
+            .into_response();
+    }
+    for tag in &body.tags {
+        if let Err(msg) = validate_api_tag(tag) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+        }
+    }
+    let invalid_tags = body
+        .tags
+        .iter()
+        .filter(|tag| !s.policy.tag_exists(tag))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid_tags.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!(
+                "requested tags [{}] are invalid or not permitted",
+                invalid_tags.join(" ")
+            )})),
+        )
+            .into_response();
+    }
     match s.machines.set_tags(&id, body.tags).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::BadRequest(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }

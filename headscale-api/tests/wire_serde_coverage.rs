@@ -10,7 +10,7 @@
 //! Companion to the in-module unit tests in `src/tailscale_wire/wire.rs`
 //! — we deliberately don't modify that file (in-flight ACL changes).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use headscale_api::tailscale_wire::MachineRecord;
 use headscale_api::tailscale_wire::wire::{
@@ -170,9 +170,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
             link_type: "wired".into(),
             derp_latency,
             firewall_mode: "nft-default".into(),
-            ..NetInfo::default()
         }),
-        ..HostInfo::default()
     };
     let v: Value = serde_json::to_value(&h).unwrap();
     assert_eq!(v["Hostname"], "h1");
@@ -267,7 +265,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(net_info.upnp, Some(true));
     assert_eq!(net_info.pmp, Some(false));
     assert_eq!(net_info.pcp, Some(true));
-    assert_eq!(net_info.derp_latency["900-v4"], 0.012);
+    assert!((net_info.derp_latency["900-v4"] - 0.012).abs() < f64::EPSILON);
     assert_eq!(net_info.firewall_mode, "nft-default");
 }
 
@@ -953,7 +951,7 @@ fn dns_config_preserves_legacy_and_temp_upstream_fields() {
             bootstrap_resolution: vec!["203.0.113.53".into()],
             use_with_exit_node: true,
         }],
-        routes: Default::default(),
+        routes: HashMap::default(),
         fallback_resolvers: Vec::new(),
         domains: vec!["tail.example".into()],
         proxied: true,
@@ -1091,7 +1089,7 @@ fn derp_region_and_node_preserve_extended_upstream_fields() {
     assert_eq!(n0["CanPort80"], true);
 
     let back: DerpRegion = serde_json::from_value(v).unwrap();
-    assert_eq!(back.latitude, 44.6488);
+    assert!((back.latitude - 44.6488).abs() < f64::EPSILON);
     assert!(back.no_measure_no_home);
     assert_eq!(back.nodes[0].cert_name, "sha256-raw:abc123");
     assert!(back.nodes[0].can_port80);
@@ -1114,7 +1112,7 @@ fn derp_map_preserves_home_params_region_scores() {
                 .into_iter()
                 .collect(),
         }),
-        regions: Default::default(),
+        regions: HashMap::default(),
         omit_default_regions: true,
     };
     let v = serde_json::to_value(&m).unwrap();

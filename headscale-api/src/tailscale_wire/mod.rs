@@ -109,7 +109,7 @@ pub enum WireError {
 /// Downstream impls of [`PreauthRedeemer`] map their native errors into
 /// these variants — the register handler turns each into a 401 with a
 /// canonical Tailscale-shape `{"error": "..."}` body.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
 pub enum RedeemError {
     /// Token doesn't match any minted key.
     #[error("preauth: unknown key")]
@@ -316,6 +316,7 @@ struct RegistrationEntry {
     notify: Notify,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum RegistrationOutcome {
     Registered(MachineRecord),
@@ -323,6 +324,7 @@ enum RegistrationOutcome {
 }
 
 /// Result of waiting for a pending web/CLI registration to finish.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RegistrationWaitOutcome {
     Registered(MachineRecord),
@@ -397,8 +399,8 @@ impl RegistrationCache {
             }
 
             tokio::select! {
-                _ = &mut notified => {}
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(entry.expires_at)) => {
+                () = &mut notified => {}
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(entry.expires_at)) => {
                     self.expire_if_current(registration_id, &entry);
                 }
             }
@@ -438,7 +440,8 @@ impl RegistrationCache {
             let mut inner = self.inner.write();
             let expired_ids = inner
                 .iter()
-                .filter_map(|(id, entry)| (now >= entry.expires_at).then(|| id.clone()))
+                .filter(|&(_id, entry)| now >= entry.expires_at)
+                .map(|(id, _entry)| id.clone())
                 .collect::<Vec<_>>();
 
             for id in expired_ids {
@@ -764,14 +767,17 @@ impl MachineRegistry {
         snapshot: &HashMap<String, MachineRecord>,
     ) {
         let now = Utc::now();
-        let _ = primary_routes.sync_routes(snapshot.iter().filter_map(|(node_key, rec)| {
-            (!rec.is_expired_at(now)).then(|| {
-                (
-                    stable_id_from_key(node_key),
-                    active_approved_routes(&rec.available_routes, &rec.approved_routes),
-                )
-            })
-        }));
+        let _ = primary_routes.sync_routes(
+            snapshot
+                .iter()
+                .filter(|&(_node_key, rec)| !rec.is_expired_at(now))
+                .map(|(node_key, rec)| {
+                    (
+                        stable_id_from_key(node_key),
+                        active_approved_routes(&rec.available_routes, &rec.approved_routes),
+                    )
+                }),
+        );
     }
 
     /// Start tracking one active streaming map-response connection for
@@ -822,6 +828,7 @@ impl MachineRegistry {
             .or_insert(0) += 1;
     }
 
+    #[allow(clippy::cast_precision_loss)]
     pub(crate) fn record_mapresponse_sent_for_node(
         &self,
         status: &str,
@@ -872,6 +879,7 @@ impl MachineRegistry {
             .observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn record_nodestore_batch(&self, size: usize, duration: Duration) {
         let seconds = duration.as_secs_f64();
         self.metrics
@@ -1020,14 +1028,14 @@ impl MachineRegistry {
     pub fn complete_web_registration(
         &self,
         mut pending: MachineRecord,
-        user: String,
+        user: &str,
         register_method: i32,
     ) -> MachineRecord {
-        pending.user = user.clone();
+        pending.user = user.to_string();
         pending.register_method = register_method;
 
         if let Some((old_node_key, existing)) =
-            self.get_by_machine_key_for_user(&pending.machine_key_hex, &user)
+            self.get_by_machine_key_for_user(&pending.machine_key_hex, user)
         {
             pending.ipv4 = existing.ipv4;
             pending.created_at = existing.created_at;
@@ -1731,7 +1739,7 @@ mod registry_tests {
         pending.available_routes = vec!["10.0.0.0/24".into(), "10.1.0.0/24".into()];
         pending.approved_routes = vec!["10.1.0.0/24".into()];
 
-        let registered = reg.complete_web_registration(pending, "alice".into(), 2);
+        let registered = reg.complete_web_registration(pending, "alice", 2);
         assert_eq!(registered.node_key_hex, "new-node");
         assert_eq!(registered.machine_key_hex, "same-machine");
         assert_eq!(registered.user, "alice");
@@ -1936,10 +1944,11 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             .machines
             .get_by_machine_key_for_user(&pending.machine_key_hex, &user_name)
             .is_none();
-        let registered =
-            self.state
-                .machines
-                .complete_web_registration(pending, user_name, REGISTER_METHOD_OIDC);
+        let registered = self.state.machines.complete_web_registration(
+            pending,
+            &user_name,
+            REGISTER_METHOD_OIDC,
+        );
         if self
             .state
             .registration_cache
@@ -2154,8 +2163,8 @@ fn prometheus_http_path(path: &str) -> Option<&'static str> {
         | "/derp/probe"
         | "/derp/latency-check"
         | "/bootstrap-dns"
-        | "/metrics" => None,
-        "/debug" => None,
+        | "/metrics"
+        | "/debug" => None,
         path if path.starts_with("/debug/") => None,
         "/robots.txt" => Some("/robots.txt"),
         "/health" => Some("/health"),

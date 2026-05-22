@@ -415,7 +415,7 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<PreauthKeyRow>> {
 }
 
 /// Errors returned by [`try_use`].
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
 pub enum UseError {
     #[error("preauth key not found")]
     NotFound,

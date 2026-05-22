@@ -313,10 +313,15 @@ fn peer_patch_if_only_endpoint_or_derp_changed(
 
     let previous_normalized = previous.clone();
     let mut current_normalized = current.clone();
-    current_normalized.endpoints = previous.endpoints.clone();
+    current_normalized.endpoints.clone_from(&previous.endpoints);
     current_normalized.home_derp = previous.home_derp;
-    current_normalized.legacy_derp_string = previous.legacy_derp_string.clone();
-    current_normalized.hostinfo.net_info = previous.hostinfo.net_info.clone();
+    current_normalized
+        .legacy_derp_string
+        .clone_from(&previous.legacy_derp_string);
+    current_normalized
+        .hostinfo
+        .net_info
+        .clone_from(&previous.hostinfo.net_info);
     current_normalized.last_seen = previous.last_seen;
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
@@ -923,7 +928,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         if res.is_err() {
                             (build_keepalive_chunk(), last_peer_state, last_self_node)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_self_node, &last_peer_state, &initial_peer_ids)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
@@ -1002,7 +1007,7 @@ fn rebuild_peer_delta_chunk(
     self_node_key: &str,
     dns: &Arc<DnsStore>,
     cap_version: u32,
-    last_self_node: &Option<MapNode>,
+    last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
@@ -1010,7 +1015,7 @@ fn rebuild_peer_delta_chunk(
         return (
             build_keepalive_chunk(),
             last_peer_state.clone(),
-            last_self_node.clone(),
+            last_self_node.cloned(),
         );
     }
     machines.record_mapresponse_generated("peers");
@@ -1042,8 +1047,7 @@ fn rebuild_peer_delta_chunk(
         (Some(current), Some(previous)) => {
             map_node_json_value(current) != map_node_json_value(previous)
         }
-        (Some(_), None) => true,
-        (None, Some(_)) => true,
+        (Some(_), None) | (None, Some(_)) => true,
         (None, None) => false,
     };
     let peers_changed = visible_peer_map_nodes(
@@ -2350,7 +2354,7 @@ mod tests {
                 .packet_filters
                 .get("base")
                 .and_then(|rules| rules.as_ref())
-                .map_or(true, Vec::is_empty),
+                .is_none_or(Vec::is_empty),
             "empty ACL still sends an empty packet filter"
         );
 
@@ -2372,7 +2376,7 @@ mod tests {
             mr.packet_filters
                 .get("base")
                 .and_then(|rules| rules.as_ref())
-                .map_or(true, Vec::is_empty),
+                .is_none_or(Vec::is_empty),
             "incremental empty-ACL updates must not loosen packet filters"
         );
     }

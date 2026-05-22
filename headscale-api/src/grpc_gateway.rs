@@ -99,7 +99,7 @@ async fn http_authentication_middleware(
     {
         Ok(()) => next.run(request).await,
         Err(status) if status.code() == Code::Unauthenticated => plain_unauthorized_response(),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -112,7 +112,7 @@ async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Respon
         Ok(response) => json_ok(json!({
             "databaseConnectivity": response.into_inner().database_connectivity,
         })),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -134,7 +134,7 @@ async fn create_user(
 ) -> Response {
     let body: CreateUserBody = match read_json(request).await {
         Ok(body) => body,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = tonic_request(
         &headers,
@@ -150,7 +150,7 @@ async fn create_user(
             let user = response.into_inner().user;
             json_ok(json!({ "user": optional_user_json(user.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -169,7 +169,7 @@ async fn list_users(
 ) -> Response {
     let query: ListUsersQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = tonic_request(
         &headers,
@@ -189,7 +189,7 @@ async fn list_users(
                 .collect::<Vec<_>>();
             json_ok(json!({ "users": users }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -200,7 +200,7 @@ async fn rename_user(
 ) -> Response {
     let old_id = match parse_path_u64("old_id", &old_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = tonic_request(&headers, RenameUserRequest { old_id, new_name });
     match state.service.rename_user(request).await {
@@ -208,7 +208,7 @@ async fn rename_user(
             let user = response.into_inner().user;
             json_ok(json!({ "user": optional_user_json(user.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -219,12 +219,12 @@ async fn delete_user(
 ) -> Response {
     let id = match parse_path_u64("id", &id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = tonic_request(&headers, DeleteUserRequest { id });
     match state.service.delete_user(request).await {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -235,18 +235,18 @@ async fn create_preauth_key(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = match create_preauth_request(&value) {
         Ok(body) => tonic_request(&headers, body),
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state.service.create_pre_auth_key(request).await {
         Ok(response) => {
             let pre_auth_key = response.into_inner().pre_auth_key;
             json_ok(json!({ "preAuthKey": optional_preauth_key_json(pre_auth_key.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -257,11 +257,11 @@ async fn expire_preauth_key(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let id = match u64_field(&value, &["id"], "id") {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -269,7 +269,7 @@ async fn expire_preauth_key(
         .await
     {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -286,7 +286,7 @@ async fn delete_preauth_key(
 ) -> Response {
     let query: IdQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -297,7 +297,7 @@ async fn delete_preauth_key(
         .await
     {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -316,7 +316,7 @@ async fn list_preauth_keys(State(state): State<GatewayState>, headers: HeaderMap
                 .collect::<Vec<_>>();
             json_ok(json!({ "preAuthKeys": pre_auth_keys }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -327,11 +327,11 @@ async fn create_api_key(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let expiration = match timestamp_field(&value, &["expiration"], "expiration") {
         Ok(expiration) => expiration,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -339,7 +339,7 @@ async fn create_api_key(
         .await
     {
         Ok(response) => json_ok(json!({ "apiKey": response.into_inner().api_key })),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -350,15 +350,15 @@ async fn expire_api_key(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let prefix = match string_field(&value, &["prefix"], "prefix") {
         Ok(prefix) => prefix,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let id = match u64_field(&value, &["id"], "id") {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -366,7 +366,7 @@ async fn expire_api_key(
         .await
     {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -385,7 +385,7 @@ async fn list_api_keys(State(state): State<GatewayState>, headers: HeaderMap) ->
                 .collect::<Vec<_>>();
             json_ok(json!({ "apiKeys": api_keys }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -397,7 +397,7 @@ async fn delete_api_key(
 ) -> Response {
     let query: IdQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -411,7 +411,7 @@ async fn delete_api_key(
         .await
     {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -422,18 +422,18 @@ async fn debug_create_node(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let request = match debug_create_node_request(&value) {
         Ok(body) => tonic_request(&headers, body),
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state.service.debug_create_node(request).await {
         Ok(response) => {
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -451,7 +451,7 @@ async fn register_node(
 ) -> Response {
     let query: RegisterNodeQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -468,7 +468,7 @@ async fn register_node(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -485,7 +485,7 @@ async fn list_nodes(
 ) -> Response {
     let query: ListNodesQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -504,7 +504,7 @@ async fn list_nodes(
                 .collect::<Vec<_>>();
             json_ok(json!({ "nodes": nodes }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -515,7 +515,7 @@ async fn get_node(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -526,7 +526,7 @@ async fn get_node(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -538,15 +538,15 @@ async fn set_tags(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let tags = match string_array_field(&value, &["tags"], "tags") {
         Ok(tags) => tags,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -557,7 +557,7 @@ async fn set_tags(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -569,15 +569,15 @@ async fn set_approved_routes(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let routes = match string_array_field(&value, &["routes"], "routes") {
         Ok(routes) => routes,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -591,7 +591,7 @@ async fn set_approved_routes(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -602,7 +602,7 @@ async fn delete_node(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -610,7 +610,7 @@ async fn delete_node(
         .await
     {
         Ok(_) => json_ok(json!({})),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -622,11 +622,11 @@ async fn expire_node(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let expiry = match query_timestamp(raw_query.as_deref(), "expiry") {
         Ok(expiry) => expiry,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -640,7 +640,7 @@ async fn expire_node(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -651,7 +651,7 @@ async fn rename_node(
 ) -> Response {
     let node_id = match parse_path_u64("node_id", &node_id) {
         Ok(id) => id,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -665,7 +665,7 @@ async fn rename_node(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -682,7 +682,7 @@ async fn backfill_node_ips(
 ) -> Response {
     let query: BackfillNodeIpsQuery = match parse_query(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -695,7 +695,7 @@ async fn backfill_node_ips(
         .await
     {
         Ok(response) => json_ok(json!({ "changes": response.into_inner().changes })),
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -712,7 +712,7 @@ async fn get_policy(State(state): State<GatewayState>, headers: HeaderMap) -> Re
                 "updatedAt": timestamp_json(response.updated_at.as_ref()),
             }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -723,11 +723,11 @@ async fn set_policy(
 ) -> Response {
     let value = match read_json_value(request).await {
         Ok(value) => value,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     let policy = match string_field(&value, &["policy"], "policy") {
         Ok(policy) => policy,
-        Err(status) => return status_response(status),
+        Err(status) => return status_response(&status),
     };
     match state
         .service
@@ -741,7 +741,7 @@ async fn set_policy(
                 "updatedAt": timestamp_json(response.updated_at.as_ref()),
             }))
         }
-        Err(status) => status_response(status),
+        Err(status) => status_response(&status),
     }
 }
 
@@ -893,59 +893,16 @@ fn go_parse_uint_error(value: &str, reason: &str) -> String {
     format!("strconv.ParseUint: parsing {value:?}: {reason}")
 }
 
-#[cfg(test)]
-mod parser_tests {
-    use super::*;
-
-    #[test]
-    fn parse_go_uint64_base0_matches_grpc_gateway_literals() {
-        for (input, expected) in [
-            ("0", 0),
-            ("42", 42),
-            ("1_000", 1000),
-            ("0x2a", 42),
-            ("0X2A", 42),
-            ("0x_2a", 42),
-            ("0b101010", 42),
-            ("0B10_1010", 42),
-            ("0o52", 42),
-            ("052", 42),
-            ("0_52", 42),
-            ("18446744073709551615", u64::MAX),
-        ] {
-            assert_eq!(parse_go_uint64_base0(input), Ok(expected), "{input}");
-        }
-    }
-
-    #[test]
-    fn parse_go_uint64_base0_reports_go_style_errors() {
-        for input in [
-            "", "+1", "-1", "_1", "1_", "1__0", "0x", "0x_", "08", "１２",
-        ] {
-            let err = parse_go_uint64_base0(input).unwrap_err();
-            assert_eq!(
-                err,
-                format!("strconv.ParseUint: parsing {input:?}: invalid syntax")
-            );
-        }
-
-        assert_eq!(
-            parse_go_uint64_base0("18446744073709551616").unwrap_err(),
-            "strconv.ParseUint: parsing \"18446744073709551616\": value out of range"
-        );
-    }
-}
-
 fn optional_user_json(user: Option<&User>) -> Value {
-    user.map(user_json).unwrap_or(Value::Null)
+    user.map_or(Value::Null, user_json)
 }
 
 fn optional_preauth_key_json(preauth_key: Option<&PreAuthKey>) -> Value {
-    preauth_key.map(preauth_key_json).unwrap_or(Value::Null)
+    preauth_key.map_or(Value::Null, preauth_key_json)
 }
 
 fn optional_node_json(node: Option<&Node>) -> Value {
-    node.map(node_json).unwrap_or(Value::Null)
+    node.map_or(Value::Null, node_json)
 }
 
 fn user_json(user: &User) -> Value {
@@ -1126,7 +1083,7 @@ fn u64_field(value: &Value, names: &[&str], display: &str) -> Result<u64, Status
         Some(Value::String(s)) if !s.is_empty() => s.parse::<u64>().map_err(|e| {
             Status::invalid_argument(format!("type mismatch, parameter: {display}, error: {e}"))
         }),
-        Some(Value::String(_)) | Some(Value::Null) | None => Ok(0),
+        Some(Value::String(_) | Value::Null) | None => Ok(0),
         Some(Value::Number(n)) => n.as_u64().ok_or_else(|| {
             Status::invalid_argument(format!("invalid value for uint64 field {display}"))
         }),
@@ -1187,7 +1144,7 @@ fn timestamp_field(
                 nanos: nanos as i32,
             }))
         }
-        Some(Value::String(_)) | Some(Value::Null) | None => Ok(None),
+        Some(Value::String(_) | Value::Null) | None => Ok(None),
         Some(_) => Err(Status::invalid_argument(format!(
             "invalid timestamp field {display}"
         ))),
@@ -1257,7 +1214,7 @@ fn json_ok(value: Value) -> Response {
     Json(value).into_response()
 }
 
-fn status_response(status: Status) -> Response {
+fn status_response(status: &Status) -> Response {
     if status.code() == Code::Unauthenticated {
         return plain_unauthorized_response();
     }
@@ -1282,21 +1239,18 @@ fn http_status_from_grpc(code: Code) -> StatusCode {
     match code {
         Code::Ok => StatusCode::OK,
         Code::Cancelled => StatusCode::from_u16(499).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        Code::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
-        Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        Code::Unknown | Code::Internal | Code::DataLoss => StatusCode::INTERNAL_SERVER_ERROR,
+        Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
+            StatusCode::BAD_REQUEST
+        }
         Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
         Code::NotFound => StatusCode::NOT_FOUND,
-        Code::AlreadyExists => StatusCode::CONFLICT,
+        Code::AlreadyExists | Code::Aborted => StatusCode::CONFLICT,
         Code::PermissionDenied => StatusCode::FORBIDDEN,
         Code::Unauthenticated => StatusCode::UNAUTHORIZED,
         Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
-        Code::FailedPrecondition => StatusCode::BAD_REQUEST,
-        Code::Aborted => StatusCode::CONFLICT,
-        Code::OutOfRange => StatusCode::BAD_REQUEST,
         Code::Unimplemented => StatusCode::NOT_IMPLEMENTED,
-        Code::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-        Code::DataLoss => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -1319,5 +1273,48 @@ fn grpc_code_number(code: Code) -> i32 {
         Code::Unavailable => 14,
         Code::DataLoss => 15,
         Code::Unauthenticated => 16,
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn parse_go_uint64_base0_matches_grpc_gateway_literals() {
+        for (input, expected) in [
+            ("0", 0),
+            ("42", 42),
+            ("1_000", 1000),
+            ("0x2a", 42),
+            ("0X2A", 42),
+            ("0x_2a", 42),
+            ("0b101010", 42),
+            ("0B10_1010", 42),
+            ("0o52", 42),
+            ("052", 42),
+            ("0_52", 42),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            assert_eq!(parse_go_uint64_base0(input), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn parse_go_uint64_base0_reports_go_style_errors() {
+        for input in [
+            "", "+1", "-1", "_1", "1_", "1__0", "0x", "0x_", "08", "１２",
+        ] {
+            let err = parse_go_uint64_base0(input).unwrap_err();
+            assert_eq!(
+                err,
+                format!("strconv.ParseUint: parsing {input:?}: invalid syntax")
+            );
+        }
+
+        assert_eq!(
+            parse_go_uint64_base0("18446744073709551616").unwrap_err(),
+            "strconv.ParseUint: parsing \"18446744073709551616\": value out of range"
+        );
     }
 }

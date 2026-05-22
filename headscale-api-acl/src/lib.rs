@@ -1317,10 +1317,10 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         let Some(peer) = peer else {
             return false;
         };
-        if let (Some(a), Some(b)) = (principal.addr, peer.addr) {
-            if a == b {
-                return true;
-            }
+        if let (Some(a), Some(b)) = (principal.addr, peer.addr)
+            && a == b
+        {
+            return true;
         }
         if let (Some(a), Some(b)) = (principal.user, peer.user) {
             return principal.tags.is_empty() && peer.tags.is_empty() && a == b;

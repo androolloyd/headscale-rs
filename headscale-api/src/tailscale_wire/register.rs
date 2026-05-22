@@ -159,17 +159,14 @@ async fn register_inner(
     let requested_tags = requested_tags_for_body(&body);
     let now = chrono::Utc::now();
 
-    if let Some(expiry) = body.expiry {
-        if expiry <= now {
-            if let Some(record) = state.machines.get(&node_key_hex) {
-                if let Err(resp) =
-                    validate_existing_machine_key(machine_key_hex.as_deref(), &record)
-                {
-                    return resp;
-                }
-                return logout_existing_node(&state, &node_key_hex, &record, expiry);
-            }
+    if let Some(expiry) = body.expiry
+        && expiry <= now
+        && let Some(record) = state.machines.get(&node_key_hex)
+    {
+        if let Err(resp) = validate_existing_machine_key(machine_key_hex.as_deref(), &record) {
+            return resp;
         }
+        return logout_existing_node(&state, &node_key_hex, &record, expiry);
     }
 
     if authkey.is_empty() {
@@ -293,10 +290,10 @@ async fn register_inner(
         }
     };
     let addr = ipv4.to_string();
-    let forced_tags = existing_machine
-        .as_ref()
-        .map(|(_, existing)| existing.forced_tags.clone())
-        .unwrap_or_else(|| redeemed.tags.clone());
+    let forced_tags = existing_machine.as_ref().map_or_else(
+        || redeemed.tags.clone(),
+        |(_, existing)| existing.forced_tags.clone(),
+    );
     let approved_routes = match auto_approved_routes_for_node(
         &state.policy,
         &addr,
@@ -332,22 +329,20 @@ async fn register_inner(
     let now = chrono::Utc::now();
     let created_at = existing_machine
         .as_ref()
-        .map(|(_, existing)| existing.created_at)
-        .unwrap_or(now);
+        .map_or(now, |(_, existing)| existing.created_at);
     let ephemeral = existing_machine
         .as_ref()
-        .map(|(_, existing)| existing.ephemeral)
-        .unwrap_or(redeemed.ephemeral);
-    let (disco_key, endpoints, home_derp) = existing_machine
-        .as_ref()
-        .map(|(_, existing)| {
-            (
-                existing.disco_key.clone(),
-                existing.endpoints.clone(),
-                existing.home_derp,
-            )
-        })
-        .unwrap_or((None, Vec::new(), 0));
+        .map_or(redeemed.ephemeral, |(_, existing)| existing.ephemeral);
+    let (disco_key, endpoints, home_derp) =
+        existing_machine
+            .as_ref()
+            .map_or((None, Vec::new(), 0), |(_, existing)| {
+                (
+                    existing.disco_key.clone(),
+                    existing.endpoints.clone(),
+                    existing.home_derp,
+                )
+            });
     let os = if requested_os.is_empty() {
         existing_machine
             .as_ref()
@@ -374,7 +369,7 @@ async fn register_inner(
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
-        user: user.clone(),
+        user,
         hostname,
         os,
         os_version,

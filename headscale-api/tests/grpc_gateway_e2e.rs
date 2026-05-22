@@ -655,7 +655,7 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
             Method::POST,
             &format!("/api/v1/node/register?user=exit-user&key={registration_key}"),
             Some(&token),
-            Body::from(r#"{}"#),
+            Body::from(r"{}"),
         ))
         .await
         .unwrap();
@@ -739,7 +739,7 @@ async fn grpc_gateway_node_approve_routes_persists_go_nodes_approved_routes() {
             Method::POST,
             &format!("/api/v1/node/register?user=persist-user&key={registration_key}"),
             Some(&token),
-            Body::from(r#"{}"#),
+            Body::from(r"{}"),
         ))
         .await
         .unwrap();

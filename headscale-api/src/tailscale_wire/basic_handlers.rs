@@ -179,9 +179,8 @@ pub async fn handle_metrics(State(state): State<WireState>) -> Response {
 }
 
 pub async fn handle_verify(State(state): State<WireState>, raw: Bytes) -> Response {
-    let req = match serde_json::from_slice::<DerpAdmitClientRequest>(&raw) {
-        Ok(req) => req,
-        Err(_) => return http_error(StatusCode::BAD_REQUEST, "Bad Request: invalid JSON"),
+    let Ok(req) = serde_json::from_slice::<DerpAdmitClientRequest>(&raw) else {
+        return http_error(StatusCode::BAD_REQUEST, "Bad Request: invalid JSON");
     };
     let DerpAdmitClientRequest {
         node_public,
@@ -318,7 +317,7 @@ pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
             "os": env::consts::OS,
             "arch": env::consts::ARCH,
             "available_parallelism": thread::available_parallelism()
-                .map(|n| n.get())
+                .map(std::num::NonZero::get)
                 .unwrap_or(1),
         },
         "headscale": {
@@ -539,7 +538,7 @@ pub struct DebugStringInfo {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugConfigInfo {
     #[serde(rename = "ServerURL")]
     pub server_url: String,
@@ -609,7 +608,7 @@ pub struct DebugLogConfig {
     pub level: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugDatabaseConfig {
     #[serde(rename = "Type")]
     pub database_type: String,
@@ -623,7 +622,7 @@ pub struct DebugDatabaseConfig {
     pub postgres: DebugPostgresConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugGormConfig {
     #[serde(rename = "Debug")]
     pub debug: bool,
@@ -669,7 +668,7 @@ pub struct DebugPostgresConfig {
     pub conn_max_idle_time_secs: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugDerpConfig {
     #[serde(rename = "ServerEnabled")]
     pub server_enabled: bool,
@@ -751,7 +750,7 @@ pub struct DebugNameservers {
     pub split: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugOidcConfig {
     #[serde(rename = "OnlyStartIfOIDCIsAvailable")]
     pub only_start_if_oidc_is_available: bool,
@@ -795,7 +794,7 @@ pub struct DebugEnabledConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugCliConfig {
     #[serde(rename = "Address")]
     pub address: String,
@@ -815,7 +814,7 @@ pub struct DebugPolicyConfig {
     pub mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugTuningConfig {
     #[serde(rename = "NotifierSendTimeout")]
     pub notifier_send_timeout: i64,
@@ -1145,12 +1144,7 @@ fn derp_admit_node_key_hex(node_public: &str) -> Result<&str, ()> {
     let Some(node_key_hex) = node_public.strip_prefix("nodekey:") else {
         return Err(());
     };
-    if node_key_hex.len() == 64
-        && node_key_hex
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if node_key_hex.len() == 64 && node_key_hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         Ok(node_key_hex)
     } else {
         Err(())
@@ -1499,21 +1493,21 @@ fn metrics_text(state: &WireState) -> String {
         "headscale_nodestore_batch_size",
         "Size of NodeStore write batches",
         NODESTORE_BATCH_SIZE_BUCKETS,
-        state.machines.nodestore_batch_size_metrics(),
+        &state.machines.nodestore_batch_size_metrics(),
     );
     append_histogram(
         &mut out,
         "headscale_nodestore_batch_duration_seconds",
         "Duration of NodeStore batch processing",
         PROMETHEUS_DEFAULT_BUCKETS,
-        state.machines.nodestore_batch_duration_metrics(),
+        &state.machines.nodestore_batch_duration_metrics(),
     );
     append_histogram(
         &mut out,
         "headscale_nodestore_snapshot_build_duration_seconds",
         "Duration of NodeStore snapshot building from nodes",
         PROMETHEUS_DEFAULT_BUCKETS,
-        state.machines.nodestore_snapshot_build_duration_metrics(),
+        &state.machines.nodestore_snapshot_build_duration_metrics(),
     );
     append_gauge(
         &mut out,
@@ -1526,7 +1520,7 @@ fn metrics_text(state: &WireState) -> String {
         "headscale_nodestore_peers_calculation_duration_seconds",
         "Duration of peers calculation in NodeStore",
         PROMETHEUS_DEFAULT_BUCKETS,
-        state
+        &state
             .machines
             .nodestore_peers_calculation_duration_metrics(),
     );
@@ -1731,7 +1725,7 @@ fn append_histogram(
     name: &str,
     help: &str,
     buckets: &[(f64, &str)],
-    sample: HistogramMetric,
+    sample: &HistogramMetric,
 ) {
     out.push_str("# HELP ");
     out.push_str(name);
@@ -1824,6 +1818,7 @@ fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNod
         .collect()
 }
 
+#[allow(clippy::cast_precision_loss, clippy::format_push_string)]
 fn debug_nodestore_string(state: &WireState) -> String {
     let snapshot = state.machines.snapshot();
     let mut out = String::from("=== NodeStore Debug Information ===\n\n");
@@ -1888,6 +1883,7 @@ fn debug_nodestore_string(state: &WireState) -> String {
     out
 }
 
+#[allow(clippy::format_push_string)]
 fn debug_policy_manager_string(state: &WireState) -> String {
     let version = state.policy.updated_at().unwrap_or(0);
     let mut out = format!("PolicyManager (v{version}):\n\n");
@@ -2112,6 +2108,7 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
     }
 }
 
+#[allow(clippy::format_push_string)]
 fn debug_overview_string(info: &DebugOverviewInfo) -> String {
     let mut out = String::from("=== Headscale State Overview ===\n\n");
 
@@ -2172,6 +2169,7 @@ fn debug_batcher_info(state: &WireState) -> DebugBatcherInfo {
     }
 }
 
+#[allow(clippy::format_push_string)]
 fn debug_batcher_string(info: &DebugBatcherInfo) -> String {
     let mut out = String::from("=== Batcher Connected Nodes ===\n\n");
     let mut connected_count = 0;
@@ -2241,6 +2239,7 @@ fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
     info
 }
 
+#[allow(clippy::format_push_string)]
 fn debug_derp_string(derp_map: &DerpMap) -> String {
     if !debug_derp_configured(derp_map) {
         return "DERP Map: not configured\n".to_string();
@@ -2350,7 +2349,7 @@ fn control_url(configured: Option<&str>, headers: &HeaderMap, uri: &Uri) -> Stri
         .get("x-forwarded-host")
         .and_then(|v| v.to_str().ok())
         .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()))
-        .or_else(|| uri.authority().map(|a| a.as_str()))
+        .or_else(|| uri.authority().map(http::uri::Authority::as_str))
         .unwrap_or("localhost")
         .split(',')
         .next()
@@ -2464,7 +2463,7 @@ fn debug_index_html() -> String {
 
 fn debug_pprof_index_html() -> String {
     let mut out = String::from(
-        r#"<html><head><title>/debug/pprof/</title></head><body><h1>/debug/pprof/</h1><p>Types of profiles available:</p><table>"#,
+        r"<html><head><title>/debug/pprof/</title></head><body><h1>/debug/pprof/</h1><p>Types of profiles available:</p><table>",
     );
     for profile in PPROF_PROFILE_NAMES {
         out.push_str(r#"<tr><td><a href=""#);
@@ -2485,7 +2484,7 @@ fn rust_pprof_profile_text(profile: &str) -> String {
         env::consts::OS,
         env::consts::ARCH,
         thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(1)
     )
 }

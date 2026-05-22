@@ -2,6 +2,7 @@
 //! upstream gRPC node slice and tailcfg map emission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::policy::{NodeView, PolicyStore};
@@ -156,15 +157,16 @@ impl PrimaryRouteState {
     pub fn debug_string(&self) -> String {
         let mut out = String::from("Available routes:\n");
         for (node_id, routes) in &self.routes {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "\nNode {node_id}: {}",
                 routes.iter().cloned().collect::<Vec<_>>().join(", ")
-            ));
+            );
         }
 
         out.push_str("\n\nCurrent primary routes:\n");
         for (route, node_id) in &self.primaries {
-            out.push_str(&format!("\nRoute {route}: {node_id}"));
+            let _ = write!(out, "\nRoute {route}: {node_id}");
         }
 
         out

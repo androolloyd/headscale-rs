@@ -7,7 +7,7 @@
 //! generation, auth URL construction, token exchange, and ID-token validation.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -268,7 +268,8 @@ impl OidcRegistrationCache {
             .inner
             .read()
             .iter()
-            .filter_map(|(state, entry)| (now >= entry.expires_at).then(|| state.clone()))
+            .filter(|&(_state, entry)| now >= entry.expires_at)
+            .map(|(state, _entry)| state.clone())
             .collect::<Vec<_>>();
         let mut inner = self.inner.write();
         let mut removed = 0;
@@ -741,8 +742,8 @@ pub async fn handle_register(runtime: OidcAuthRuntime, registration_id: String) 
         header::LOCATION,
         HeaderValue::from_str(&start.auth_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    append_cookie(response.headers_mut(), csrf_cookie("state", &start.state));
-    append_cookie(response.headers_mut(), csrf_cookie("nonce", &start.nonce));
+    append_cookie(response.headers_mut(), &csrf_cookie("state", &start.state));
+    append_cookie(response.headers_mut(), &csrf_cookie("nonce", &start.nonce));
     response
 }
 
@@ -851,7 +852,7 @@ pub async fn handle_callback(
                     return oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
                 }
             }
-        };
+        }
     }
 
     oidc_error_response(
@@ -1201,8 +1202,8 @@ fn csrf_cookie(base_name: &str, value: &str) -> String {
     )
 }
 
-fn append_cookie(headers: &mut HeaderMap, cookie: String) {
-    if let Ok(value) = HeaderValue::from_str(&cookie) {
+fn append_cookie(headers: &mut HeaderMap, cookie: &str) {
+    if let Ok(value) = HeaderValue::from_str(cookie) {
         headers.append(header::SET_COOKIE, value);
     }
 }
@@ -1376,7 +1377,9 @@ fn form_encode(value: &str) -> String {
                 out.push(byte as char);
             }
             b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{byte:02X}")),
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
         }
     }
     out

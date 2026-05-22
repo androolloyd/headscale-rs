@@ -446,7 +446,7 @@ fn normalize_filter_rule(rule: &mut FilterRule) {
             .then(a.ports.first.cmp(&b.ports.first))
             .then(a.ports.last.cmp(&b.ports.last))
     });
-    rule.ip_proto.sort();
+    rule.ip_proto.sort_unstable();
     rule.ip_proto.dedup();
 }
 

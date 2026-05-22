@@ -1179,11 +1179,11 @@ pub mod upstream {
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
         record.last_seen = last_seen;
-        record.os = machine.os.clone();
-        record.os_version = machine.version.clone();
-        record.forced_tags = machine.tags.clone();
-        record.available_routes = machine.routes.clone();
-        record.approved_routes = machine.approved_routes.clone();
+        record.os.clone_from(&machine.os);
+        record.os_version.clone_from(&machine.version);
+        record.forced_tags.clone_from(&machine.tags);
+        record.available_routes.clone_from(&machine.routes);
+        record.approved_routes.clone_from(&machine.approved_routes);
         record.register_method = machine.register_method;
         record
     }

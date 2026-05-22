@@ -64,6 +64,12 @@ use super::be_transport::{BeNoiseStream, BeTransport};
 use super::controlbase::{FrameHeader, Framed, MsgType};
 use super::{WireError, WireState};
 
+/// Machine key learned from the client's TS2021 Noise static key.
+/// Inner h2 requests carry this through axum extensions so `/register`
+/// can persist the real machine identity instead of an empty placeholder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoisePeerMachineKey(pub String);
+
 /// The Tailscale capability version we advertise in the Noise
 /// prologue. Pinned at 39 to match juanfont/headscale upstream
 /// (`hscontrol/handlers.go:NoiseCapabilityVersion`). Stock
@@ -491,6 +497,7 @@ where
     let _payload_len = responder
         .read_message(&init_body, &mut payload_buf)
         .map_err(noise_err)?;
+    let machine_key_hex = responder_remote_static_hex(&responder)?;
 
     // Step 3: write Reply.
     let mut reply_body = vec![0u8; 65535];
@@ -570,8 +577,11 @@ where
             }
         };
         let router_for_req = router.clone();
+        let machine_key_hex = machine_key_hex.clone();
         tokio::spawn(async move {
-            if let Err(e) = dispatch_h2_request(router_for_req, req, &mut respond).await {
+            if let Err(e) =
+                dispatch_h2_request(router_for_req, machine_key_hex, req, &mut respond).await
+            {
                 tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 dispatch failed");
             }
         });
@@ -592,6 +602,7 @@ where
 /// and stock `tailscale up` timed out 20s into its first map call.
 async fn dispatch_h2_request(
     router: Router,
+    machine_key_hex: String,
     req: http::Request<h2::RecvStream>,
     respond: &mut h2::server::SendResponse<bytes::Bytes>,
 ) -> Result<(), WireError> {
@@ -599,7 +610,7 @@ async fn dispatch_h2_request(
     use http_body::Body as HttpBody;
     use tower::ServiceExt;
 
-    let (parts, mut body) = req.into_parts();
+    let (mut parts, mut body) = req.into_parts();
 
     let req_method = parts.method.clone();
     let req_uri = parts.uri.clone();
@@ -624,6 +635,9 @@ async fn dispatch_h2_request(
 
     // Build the axum Request to drive through oneshot.
     let axum_body = Body::from(body_bytes);
+    parts
+        .extensions
+        .insert(NoisePeerMachineKey(machine_key_hex));
     let axum_req = http::Request::from_parts(parts, axum_body);
 
     let resp = router
@@ -807,6 +821,7 @@ where
     let _payload_len = responder
         .read_message(&init_body, &mut payload_buf)
         .map_err(noise_err)?;
+    let machine_key_hex = responder_remote_static_hex(&responder)?;
 
     // Step 3: write Reply frame.
     let mut reply_body = vec![0u8; 65535];
@@ -880,8 +895,11 @@ where
             }
         };
         let router_for_req = router.clone();
+        let machine_key_hex = machine_key_hex.clone();
         tokio::spawn(async move {
-            if let Err(e) = dispatch_h2_request(router_for_req, req, &mut respond).await {
+            if let Err(e) =
+                dispatch_h2_request(router_for_req, machine_key_hex, req, &mut respond).await
+            {
                 tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 dispatch failed");
             }
         });
@@ -895,6 +913,19 @@ where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     drive_ts2021_be_with_init(state, io, None).await
+}
+
+fn responder_remote_static_hex(responder: &snow::HandshakeState) -> Result<String, WireError> {
+    let remote = responder
+        .get_remote_static()
+        .ok_or_else(|| WireError::Noise("missing remote machine key in TS2021 IK".into()))?;
+    if remote.len() != 32 {
+        return Err(WireError::Noise(format!(
+            "remote machine key has length {}; expected 32",
+            remote.len()
+        )));
+    }
+    Ok(hex::encode(remote))
 }
 
 /// Decode a pre-fetched controlbase-framed Initiation (the bytes that

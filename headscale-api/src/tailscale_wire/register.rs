@@ -20,7 +20,7 @@
 //!   user-label rename.
 
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, State},
     http::StatusCode,
@@ -50,6 +50,7 @@ fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Re
     })
 }
 
+use super::noise::NoisePeerMachineKey;
 use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
@@ -67,6 +68,7 @@ struct ErrorBody {
 
 pub async fn handle_register(
     State(state): State<WireState>,
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
     Path(node_key_path): Path<String>,
     raw: Bytes,
 ) -> axum::response::Response {
@@ -92,7 +94,13 @@ pub async fn handle_register(
         )
             .into_response();
     }
-    register_inner(state, body_node_key_hex, body).await
+    register_inner(
+        state,
+        body_node_key_hex,
+        machine_key.map(|Extension(NoisePeerMachineKey(key))| key),
+        body,
+    )
+    .await
 }
 
 /// `POST /machine/register` (v1.78+ flat path).
@@ -104,6 +112,7 @@ pub async fn handle_register(
 /// for older clients and our own integration tests.
 pub async fn handle_register_flat(
     State(state): State<WireState>,
+    machine_key: Option<Extension<NoisePeerMachineKey>>,
     raw: Bytes,
 ) -> axum::response::Response {
     let body = match parse_register_body(&raw) {
@@ -123,7 +132,13 @@ pub async fn handle_register_flat(
         )
             .into_response();
     }
-    register_inner(state, body_node_key_hex, body).await
+    register_inner(
+        state,
+        body_node_key_hex,
+        machine_key.map(|Extension(NoisePeerMachineKey(key))| key),
+        body,
+    )
+    .await
 }
 
 /// Shared logic between the keyed and flat register handlers.
@@ -136,6 +151,7 @@ pub async fn handle_register_flat(
 async fn register_inner(
     state: WireState,
     node_key_hex: String,
+    machine_key_hex: Option<String>,
     body: RegisterRequest,
 ) -> axum::response::Response {
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
@@ -144,6 +160,11 @@ async fn register_inner(
     if let Some(expiry) = body.expiry {
         if expiry <= now {
             if let Some(record) = state.machines.get(&node_key_hex) {
+                if let Err(resp) =
+                    validate_existing_machine_key(machine_key_hex.as_deref(), &record)
+                {
+                    return resp;
+                }
                 return logout_existing_node(&state, &node_key_hex, &record, expiry);
             }
         }
@@ -151,6 +172,9 @@ async fn register_inner(
 
     if authkey.is_empty() {
         if let Some(record) = state.machines.get(&node_key_hex) {
+            if let Err(resp) = validate_existing_machine_key(machine_key_hex.as_deref(), &record) {
+                return resp;
+            }
             if record.is_expired_at(now) {
                 return Json(node_key_expired_response(false)).into_response();
             }
@@ -200,11 +224,11 @@ async fn register_inner(
                     return Json(register_response_for_record(&record)).into_response();
                 }
                 RegistrationWaitOutcome::Expired | RegistrationWaitOutcome::Missing => {
-                    return register_interactive(state, node_key_hex, body).await;
+                    return register_interactive(state, node_key_hex, machine_key_hex, body).await;
                 }
             }
         }
-        return register_interactive(state, node_key_hex, body).await;
+        return register_interactive(state, node_key_hex, machine_key_hex, body).await;
     }
 
     let redeemed = match state.preauth.redeem(authkey).await {
@@ -266,7 +290,7 @@ async fn register_inner(
     let now = chrono::Utc::now();
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
-        machine_key_hex: String::new(),
+        machine_key_hex: machine_key_hex.unwrap_or_default(),
         user: user.clone(),
         hostname,
         ipv4,
@@ -296,6 +320,7 @@ async fn register_inner(
 async fn register_interactive(
     state: WireState,
     node_key_hex: String,
+    machine_key_hex: Option<String>,
     body: RegisterRequest,
 ) -> axum::response::Response {
     let (hostname, available_routes) = match hostname_and_routes(&body) {
@@ -310,7 +335,7 @@ async fn register_interactive(
     let registration_id = new_registration_id();
     let record = MachineRecord {
         node_key_hex,
-        machine_key_hex: String::new(),
+        machine_key_hex: machine_key_hex.unwrap_or_default(),
         user: String::new(),
         hostname,
         ipv4,
@@ -384,6 +409,26 @@ fn logout_existing_node(
         updated
     });
     Json(register_response_for_record(&updated)).into_response()
+}
+
+fn validate_existing_machine_key(
+    presented_machine_key_hex: Option<&str>,
+    record: &MachineRecord,
+) -> Result<(), axum::response::Response> {
+    let Some(presented) = presented_machine_key_hex else {
+        return Ok(());
+    };
+    if record.machine_key_hex.is_empty() || record.machine_key_hex == presented {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorBody {
+            error: "node exist with different machine key".into(),
+        }),
+    )
+        .into_response())
 }
 
 fn allocate_register_ip(
@@ -568,7 +613,7 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         MachineRegistry, RedeemOk, WireState,
-        noise::ServerNoiseKey,
+        noise::{NoisePeerMachineKey, ServerNoiseKey},
         router,
         test_support::{MockIpAllocator, MockRedeemer},
     };
@@ -687,6 +732,107 @@ mod tests {
         assert_eq!(rec.hostname, "peer-a");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn authkey_register_persists_noise_machine_key() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-machine-key";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "35".repeat(32);
+        let machine_key_hex = "44".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.machine_key_hex, machine_key_hex);
+        let node = record_to_map_node(&rec, "example.test");
+        let expected_machine = format!("mkey:{machine_key_hex}");
+        assert_eq!(node.machine.as_deref(), Some(expected_machine.as_str()));
+    }
+
+    #[tokio::test]
+    async fn interactive_register_cache_persists_noise_machine_key() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        let app = router(state.clone());
+        let node_key_hex = "36".repeat(32);
+        let machine_key_hex = "55".repeat(32);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending-machine-key" },
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let registration_id = rr
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .unwrap();
+        let pending = state.registration_cache.get(registration_id).unwrap();
+        assert_eq!(pending.machine_key_hex, machine_key_hex);
+    }
+
+    #[tokio::test]
+    async fn existing_node_no_auth_rejects_mismatched_noise_machine_key() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-machine-key-mismatch";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "37".repeat(32);
+        let machine_key_hex = "66".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            state.machines.get(&node_key_hex).unwrap().machine_key_hex,
+            machine_key_hex
+        );
+
+        let restart_body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+        });
+        let mut restart = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&restart_body).unwrap(),
+            ))
+            .unwrap();
+        restart
+            .extensions_mut()
+            .insert(NoisePeerMachineKey("77".repeat(32)));
+        let resp = app.oneshot(restart).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "node exist with different machine key");
     }
 
     #[tokio::test]

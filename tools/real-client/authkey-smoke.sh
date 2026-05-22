@@ -8,6 +8,7 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
+login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
@@ -23,7 +24,22 @@ policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
-run_id="hsrs-authkey-$(date +%s)-$$"
+case "${login_mode}" in
+  authkey | web) ;;
+  *)
+    echo "REAL_CLIENT_LOGIN_MODE must be authkey or web, got ${login_mode}" >&2
+    exit 2
+    ;;
+esac
+up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
+if [[ -z "${up_timeout}" ]]; then
+  if [[ "${login_mode}" == "web" ]]; then
+    up_timeout="45s"
+  else
+    up_timeout="15s"
+  fi
+fi
+run_id="hsrs-${login_mode}-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
   *) work_dir="${repo_root}/${work_root}/${run_id}" ;;
@@ -133,6 +149,22 @@ run_with_timeout() {
   wait "${pid}"
 }
 
+wait_pid_with_timeout() {
+  local label="$1"
+  local pid="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 1
+  done
+  wait "${pid}"
+}
+
 tailscale_logged_in() {
   local client_name="$1"
   local status_json
@@ -159,6 +191,20 @@ tailscale_peer_count_matches() {
     peers = status["Peer"] || {}
     exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
   ' "${count}" <<<"${status_json}"
+}
+
+write_registration_id() {
+  local client_name="$1"
+  local output_path="$2"
+  local status_json
+  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    url = status["AuthURL"].to_s
+    match = url.match(%r{/register/([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    exit 1 unless match
+    File.write(ARGV.fetch(0), match[1])
+  ' "${output_path}" <<<"${status_json}"
 }
 
 dump_client_debug() {
@@ -207,21 +253,24 @@ if [[ -n "${policy_json}" ]]; then
   echo "::endgroup::"
 fi
 
-echo "::group::mint preauth key"
-preauth_body="$(
-  ruby -rjson -e '
-    tags = ARGV.fetch(0).split(",").reject(&:empty?)
-    puts JSON.generate({user: "alice", reusable: true, tags: tags})
-  ' "${preauth_tags}"
-)"
-preauth_json="$(
-  curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
-    -H 'content-type: application/json' \
-    -d "${preauth_body}"
-)"
-authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
-echo "minted ${authkey%%-*}-..."
-echo "::endgroup::"
+authkey=""
+if [[ "${login_mode}" == "authkey" ]]; then
+  echo "::group::mint preauth key"
+  preauth_body="$(
+    ruby -rjson -e '
+      tags = ARGV.fetch(0).split(",").reject(&:empty?)
+      puts JSON.generate({user: "alice", reusable: true, tags: tags})
+    ' "${preauth_tags}"
+  )"
+  preauth_json="$(
+    curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
+      -H 'content-type: application/json' \
+      -d "${preauth_body}"
+  )"
+  authkey="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("key")' <<<"${preauth_json}")"
+  echo "minted ${authkey%%-*}-..."
+  echo "::endgroup::"
+fi
 
 echo "::group::start stock tailscale client"
 for client_name in "${client_names[@]}"; do
@@ -246,13 +295,18 @@ for client_name in "${client_names[@]}"; do
     tailscale up
     "--login-server=https://host.docker.internal:${https_port}"
     "--hostname=${client_name}"
-    "--authkey=${authkey}"
-    --timeout=15s
+    "--timeout=${up_timeout}"
     --accept-routes=false
     --accept-dns=false
   )
+  if [[ "${login_mode}" == "authkey" ]]; then
+    up_args+=("--authkey=${authkey}")
+  fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  if [[ "${login_mode}" == "web" && -n "${preauth_tags}" ]]; then
+    up_args+=("--advertise-tags=${preauth_tags}")
   fi
   case "${advertise_exit_node}" in
     1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -260,8 +314,28 @@ for client_name in "${client_names[@]}"; do
       ;;
   esac
   up_status=0
-  run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
-    up_status="$?"
+  if [[ "${login_mode}" == "web" ]]; then
+    docker exec "${client_name}" "${up_args[@]}" \
+      >"${work_dir}/${client_name}.tailscale-up.stdout" \
+      2>"${work_dir}/${client_name}.tailscale-up.stderr" &
+    up_pid="$!"
+    registration_id_path="${work_dir}/${client_name}.registration-id"
+    if ! wait_for "web registration URL ${client_name}" \
+      "write_registration_id '${client_name}' '${registration_id_path}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    registration_id="$(cat "${registration_id_path}")"
+    curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/register/${registration_id}" \
+      -H 'content-type: application/json' \
+      -d '{"user":"alice"}' \
+      >"${work_dir}/${client_name}.registered.json"
+    wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}" ||
+      up_status="$?"
+  else
+    run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+      up_status="$?"
+  fi
   if ((up_status != 0)); then
     echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
   fi
@@ -311,6 +385,7 @@ ruby -rjson -e '
   expected_primary_route = ARGV.fetch(4)
   debug_routes_path = ARGV.fetch(5)
   expected_tags = ARGV.fetch(6).split(",").reject(&:empty?).sort
+  expected_hostname_prefix = ARGV.fetch(7)
 
   def stable_id_from_key(hex)
     h = 0xcbf29ce484222325
@@ -325,7 +400,7 @@ ruby -rjson -e '
   abort("expected #{expected_count} registered machines, got #{machines.length}") unless machines.length == expected_count
   machines.each do |machine|
     abort("expected user alice, got #{machine["user"].inspect}") unless machine["user"] == "alice"
-    abort("expected hostname prefix, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?("hsrs-authkey-")
+    abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
     abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
     available_routes = Array(machine["available_routes"]).sort
     unless expected_routes.empty? || available_routes == expected_routes
@@ -360,7 +435,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}"
+' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then
@@ -635,4 +710,4 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
   echo "::endgroup::"
 fi
 
-echo "auth-key real-client smoke passed"
+echo "${login_mode} real-client smoke passed"

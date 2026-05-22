@@ -442,7 +442,7 @@ async fn register_interactive(
         disco_key: None,
         endpoints: Vec::new(),
         home_derp: 0,
-        expiry: body.expiry,
+        expiry: effective_authkey_expiry(body.expiry, now),
         last_seen: now,
         ephemeral: body.ephemeral,
         created_at: now,
@@ -1743,6 +1743,7 @@ mod tests {
         let body = serde_json::json!({
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Hostinfo": { "Hostname": "pending-peer", "RoutableIPs": ["10.44.0.0/24"] },
+            "Expiry": "0001-01-01T00:00:00Z",
             "Ephemeral": true,
         });
         let resp = app
@@ -1773,6 +1774,7 @@ mod tests {
         assert_eq!(pending.node_key_hex, node_key_hex);
         assert_eq!(pending.hostname, "pending-peer");
         assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
+        assert!(pending.expiry.is_none());
         assert!(pending.ephemeral);
     }
 

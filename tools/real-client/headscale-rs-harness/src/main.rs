@@ -22,7 +22,7 @@ use axum::{
 use clap::Parser;
 use headscale_api::{
     dns::{DnsConfigSpec, DnsStore},
-    policy::{PolicyStore, parse_hujson_policy},
+    policy::{NodeView, PolicyStore, parse_hujson_policy},
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry,
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
@@ -75,6 +75,7 @@ struct AppState {
     redeemer: Arc<HarnessRedeemer>,
     machines: Arc<MachineRegistry>,
     policy: Arc<PolicyStore>,
+    registration_cache: Arc<RegistrationCache>,
 }
 
 #[derive(Default)]
@@ -189,6 +190,12 @@ struct SetApprovedRoutesRequest {
     routes: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RegisterPendingRequest {
+    #[serde(default = "default_user")]
+    user: String,
+}
+
 #[derive(Debug, Serialize)]
 struct StartupInfo {
     http: String,
@@ -245,6 +252,7 @@ async fn main() -> Result<()> {
         .public_url
         .unwrap_or_else(|| format!("https://{}", args.hostname));
 
+    let registration_cache = Arc::new(RegistrationCache::new());
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(&args.state_dir)?),
         preauth: redeemer.clone(),
@@ -255,13 +263,14 @@ async fn main() -> Result<()> {
         knock: KnockConfig::disabled(),
         dns,
         public_control_url: Some(public_url.clone()),
-        registration_cache: Arc::new(RegistrationCache::new()),
+        registration_cache: registration_cache.clone(),
     };
 
     let app_state = AppState {
         redeemer,
         machines,
         policy,
+        registration_cache,
     };
     let extra_routes = harness_router(app_state);
     let cfg = serve::ServeConfig {
@@ -287,6 +296,7 @@ async fn main() -> Result<()> {
                 "GET /harness/health",
                 "POST /harness/preauth",
                 "PUT /harness/policy",
+                "POST /harness/register/{registration_id}",
                 "GET /harness/machines",
                 "PUT /harness/machines/{node_key}/routes",
             ],
@@ -313,6 +323,7 @@ fn harness_router(state: AppState) -> Router {
         .route("/harness/health", get(health))
         .route("/harness/preauth", post(mint_preauth))
         .route("/harness/policy", put(set_policy))
+        .route("/harness/register/:registration_id", post(register_pending))
         .route("/harness/machines", get(list_machines))
         .route(
             "/harness/machines/:node_key/routes",
@@ -345,6 +356,33 @@ async fn set_policy(State(state): State<AppState>, body: Bytes) -> impl IntoResp
         Ok(()) => (StatusCode::NO_CONTENT, String::new()).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
+}
+
+async fn register_pending(
+    State(state): State<AppState>,
+    Path(registration_id): Path<String>,
+    Json(req): Json<RegisterPendingRequest>,
+) -> impl IntoResponse {
+    let Some(mut record) = state.registration_cache.get(&registration_id) else {
+        return (StatusCode::NOT_FOUND, "registration not found").into_response();
+    };
+    record.user = req.user;
+    record.register_method = 2;
+    if let Err(err) = apply_requested_tags(&state.policy, &mut record) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
+    state
+        .machines
+        .upsert(record.node_key_hex.clone(), record.clone());
+    if !state
+        .registration_cache
+        .complete(&registration_id, record.clone())
+    {
+        return (StatusCode::NOT_FOUND, "registration not found").into_response();
+    }
+
+    Json(machine_summary(&record)).into_response()
 }
 
 async fn list_machines(State(state): State<AppState>) -> Json<Vec<MachineSummary>> {
@@ -410,6 +448,44 @@ fn machine_summary(machine: &MachineRecord) -> MachineSummary {
         endpoints: machine.endpoints.clone(),
         disco_key: machine.disco_key.clone(),
     }
+}
+
+fn apply_requested_tags(policy: &PolicyStore, record: &mut MachineRecord) -> Result<(), String> {
+    if record.forced_tags.is_empty() {
+        return Ok(());
+    }
+
+    record.forced_tags.sort();
+    record.forced_tags.dedup();
+    let addr = record.ipv4.to_string();
+    let node = NodeView {
+        addr: Some(addr.as_str()),
+        user: Some(record.user.as_str()),
+        tags: &[],
+    };
+    let invalid_tags = record
+        .forced_tags
+        .iter()
+        .filter(|tag| !valid_tag(tag) || !policy.node_can_have_tag(&node, tag))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid_tags.is_empty() {
+        return Err(format!(
+            "requested tags [{}] are invalid or not permitted",
+            invalid_tags.join(" ")
+        ));
+    }
+
+    record.expiry = None;
+    Ok(())
+}
+
+fn valid_tag(tag: &str) -> bool {
+    tag.starts_with("tag:") && tag.to_lowercase() == tag && tag.split_whitespace().count() <= 1
+}
+
+fn default_user() -> String {
+    "alice".to_string()
 }
 
 fn next_authkey() -> String {

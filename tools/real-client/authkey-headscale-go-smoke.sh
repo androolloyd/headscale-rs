@@ -9,6 +9,7 @@ headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
+login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
@@ -24,7 +25,22 @@ policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
-run_id="hsgo-authkey-$(date +%s)-$$"
+case "${login_mode}" in
+  authkey | web) ;;
+  *)
+    echo "REAL_CLIENT_LOGIN_MODE must be authkey or web, got ${login_mode}" >&2
+    exit 2
+    ;;
+esac
+up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
+if [[ -z "${up_timeout}" ]]; then
+  if [[ "${login_mode}" == "web" ]]; then
+    up_timeout="45s"
+  else
+    up_timeout="15s"
+  fi
+fi
+run_id="hsgo-${login_mode}-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
   *) work_dir="${repo_root}/${work_root}/${run_id}" ;;
@@ -139,6 +155,22 @@ run_with_timeout() {
   wait "${pid}"
 }
 
+wait_pid_with_timeout() {
+  local label="$1"
+  local pid="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 1
+  done
+  wait "${pid}"
+}
+
 tailscale_logged_in() {
   local client_name="$1"
   local status_json
@@ -165,6 +197,20 @@ tailscale_peer_count_matches() {
     peers = status["Peer"] || {}
     exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
   ' "${count}" <<<"${status_json}"
+}
+
+write_registration_id() {
+  local client_name="$1"
+  local output_path="$2"
+  local status_json
+  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    url = status["AuthURL"].to_s
+    match = url.match(%r{/register/([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    exit 1 unless match
+    File.write(ARGV.fetch(0), match[1])
+  ' "${output_path}" <<<"${status_json}"
 }
 
 dump_client_debug() {
@@ -282,22 +328,29 @@ echo "headscale-go http=http://127.0.0.1:${http_port}"
 echo "headscale-go login=http://host.docker.internal:${http_port}"
 echo "::endgroup::"
 
-echo "::group::mint preauth key"
+echo "::group::create user"
 "${headscale_bin}" -c "${config_path}" -o json users create alice >"${work_dir}/user.json"
 user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-preauth_args=(
-  "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
-  --user "${user_id}" \
-  --reusable \
-  --expiration 1h
-)
-if [[ -n "${preauth_tags}" ]]; then
-  preauth_args+=(--tags "${preauth_tags}")
-fi
-"${preauth_args[@]}" >"${work_dir}/preauth.json"
-authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
-echo "minted ${authkey%%-*}-..."
+echo "created user ${user_id}"
 echo "::endgroup::"
+
+authkey=""
+if [[ "${login_mode}" == "authkey" ]]; then
+  echo "::group::mint preauth key"
+  preauth_args=(
+    "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
+    --user "${user_id}" \
+    --reusable \
+    --expiration 1h
+  )
+  if [[ -n "${preauth_tags}" ]]; then
+    preauth_args+=(--tags "${preauth_tags}")
+  fi
+  "${preauth_args[@]}" >"${work_dir}/preauth.json"
+  authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
+  echo "minted ${authkey%%-*}-..."
+  echo "::endgroup::"
+fi
 
 echo "::group::start stock tailscale client"
 for client_name in "${client_names[@]}"; do
@@ -321,13 +374,18 @@ for client_name in "${client_names[@]}"; do
     tailscale up
     "--login-server=http://host.docker.internal:${http_port}"
     "--hostname=${client_name}"
-    "--authkey=${authkey}"
-    --timeout=15s
+    "--timeout=${up_timeout}"
     --accept-routes=false
     --accept-dns=false
   )
+  if [[ "${login_mode}" == "authkey" ]]; then
+    up_args+=("--authkey=${authkey}")
+  fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  if [[ "${login_mode}" == "web" && -n "${preauth_tags}" ]]; then
+    up_args+=("--advertise-tags=${preauth_tags}")
   fi
   case "${advertise_exit_node}" in
     1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -335,8 +393,28 @@ for client_name in "${client_names[@]}"; do
       ;;
   esac
   up_status=0
-  run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
-    up_status="$?"
+  if [[ "${login_mode}" == "web" ]]; then
+    docker exec "${client_name}" "${up_args[@]}" \
+      >"${work_dir}/${client_name}.tailscale-up.stdout" \
+      2>"${work_dir}/${client_name}.tailscale-up.stderr" &
+    up_pid="$!"
+    registration_id_path="${work_dir}/${client_name}.registration-id"
+    if ! wait_for "web registration URL ${client_name}" \
+      "write_registration_id '${client_name}' '${registration_id_path}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    registration_id="$(cat "${registration_id_path}")"
+    "${headscale_bin}" -c "${config_path}" -o json nodes register \
+      --user alice \
+      --key "${registration_id}" \
+      >"${work_dir}/${client_name}.registered.json"
+    wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}" ||
+      up_status="$?"
+  else
+    run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+      up_status="$?"
+  fi
   if ((up_status != 0)); then
     echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
   fi
@@ -378,6 +456,7 @@ ruby -rjson -e '
   expected_count = Integer(ARGV.fetch(3))
   expected_primary_route = ARGV.fetch(4)
   expected_tags = ARGV.fetch(5).split(",").reject(&:empty?).sort
+  expected_hostname_prefix = ARGV.fetch(6)
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
@@ -390,7 +469,7 @@ ruby -rjson -e '
     approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
     expected_user = expected_tags.empty? ? "alice" : "tagged-devices"
     abort("expected user #{expected_user}, got #{user.inspect}") unless user_name == expected_user
-    abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
+    abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{given_name.inspect}") unless given_name.to_s.start_with?(expected_hostname_prefix)
     abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
     unless expected_routes.empty? || available_routes == expected_routes
       abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
@@ -417,7 +496,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({nodes: nodes, primary_nodes: primary_nodes})
   end
-' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}"
+' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then
@@ -646,4 +725,4 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
   echo "::endgroup::"
 fi
 
-echo "headscale-go auth-key real-client smoke passed"
+echo "headscale-go ${login_mode} real-client smoke passed"

@@ -19,6 +19,7 @@ It starts the headscale-rs Tailscale wire surface and adds harness-only routes:
 - `GET /harness/health`
 - `POST /harness/preauth`
 - `PUT /harness/policy`
+- `POST /harness/register/{registration_id}`
 - `GET /harness/machines`
 - `PUT /harness/machines/{node_key}/routes`
 
@@ -83,6 +84,8 @@ Useful knobs:
 - `TAILSCALE_IMAGE` defaults to `tailscale/tailscale:v1.94.1`.
 - `REAL_CLIENT_WORKDIR` defaults to `target/real-client/authkey-smoke`.
 - `REAL_CLIENT_TIMEOUT_SECS` defaults to `120`.
+- `REAL_CLIENT_LOGIN_MODE` defaults to `authkey`; `web` runs the same script
+  through the pending web-registration flow.
 
 The matching headscale-go v0.28.0 smoke is:
 
@@ -100,6 +103,24 @@ Additional knobs:
 
 - `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
+
+## Web Registration Smoke
+
+The web-registration scenario starts a stock client without an auth key, waits
+for the `/register/{registration_id}` AuthURL, approves the pending registration
+through the Rust harness or upstream `headscale nodes register`, and waits for
+the same client to complete login:
+
+```sh
+tools/real-client/web-register-smoke.sh
+tools/real-client/web-register-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_LOGIN_MODE=web` can be passed directly to the auth-key smoke
+  scripts for custom scenarios.
+- `REAL_CLIENT_TAILSCALE_UP_TIMEOUT` defaults to `45s` for web registration.
 
 ## Tagged Preauth Smoke
 

@@ -722,6 +722,8 @@ mod tests {
             node_attrs: Vec::new(),
             randomize_client_port: false,
             ssh: Vec::new(),
+            tests: Vec::new(),
+            ssh_tests: Vec::new(),
             rules,
         }
     }

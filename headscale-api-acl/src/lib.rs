@@ -209,6 +209,37 @@ pub struct SshRule {
     pub check_period: Option<String>,
 }
 
+/// One upstream `tests` entry. These are operator assertions checked
+/// against live nodes at the gRPC write/validate boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyTest {
+    pub src: String,
+    #[serde(default)]
+    pub proto: String,
+    #[serde(default)]
+    pub accept: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+/// One upstream `sshTests` entry. The parser validates shape, while
+/// `headscale-api` owns semantic evaluation because it needs live
+/// node state and compiled SSH policies.
+#[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshPolicyTest {
+    pub src: String,
+    #[serde(default)]
+    pub dst: Vec<String>,
+    #[serde(default)]
+    pub accept: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default)]
+    pub check: Vec<String>,
+}
+
 /// Top-level ACL document.
 ///
 /// `#[serde(deny_unknown_fields)]`: unknown top-level keys are
@@ -251,6 +282,12 @@ pub struct AclDoc {
     /// `headscale-api` into a wire SSHPolicy.
     #[serde(default)]
     pub ssh: Vec<SshRule>,
+    /// Upstream policy `tests` block.
+    #[serde(default)]
+    pub tests: Vec<PolicyTest>,
+    /// Upstream policy `sshTests` block.
+    #[serde(default, rename = "ssh_tests", alias = "sshTests")]
+    pub ssh_tests: Vec<SshPolicyTest>,
     /// Rule list. Upstream `juanfont/headscale` calls this field
     /// `acls`; OctraVPN calls it `rules`. The `alias = "acls"` makes
     /// either spelling acceptable.
@@ -421,6 +458,8 @@ impl AclDoc {
             },
             "node_attrs": node_attrs_sorted,
             "ssh": ssh_sorted,
+            "tests": self.tests,
+            "ssh_tests": self.ssh_tests,
             "rules": self.rules.iter().map(|r| {
                 let mut src = r.src.clone();
                 let mut dst = r.dst.clone();
@@ -517,6 +556,8 @@ fn go_policy_field_name(field: &str) -> Option<&'static str> {
         "autoapprovers" => Some("autoApprovers"),
         "randomizeclientport" => Some("randomizeClientPort"),
         "ssh" => Some("ssh"),
+        "tests" => Some("tests"),
+        "sshtests" => Some("sshTests"),
         _ => None,
     }
 }
@@ -559,6 +600,8 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     for ssh in &doc.ssh {
         validate_ssh_rule(doc, ssh, &mut errs);
     }
+    validate_policy_tests(doc, &doc.tests, &mut errs);
+    validate_ssh_tests(doc, &doc.ssh_tests, &mut errs);
     for owners in doc.tag_owners.values() {
         for owner in owners {
             validate_owner_ref(doc, owner, &mut errs);
@@ -662,6 +705,105 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         validate_tag_ref(doc, dst, errs);
     }
     validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
+}
+
+fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<String>) {
+    for (index, test) in tests.iter().enumerate() {
+        if test.accept.is_empty() && test.deny.is_empty() {
+            errs.push(format!(
+                "test {index}: tests entry must include at least one accept or deny assertion"
+            ));
+        }
+
+        let proto = test.proto.trim().to_ascii_lowercase();
+        if !proto.is_empty() && !matches!(proto.as_str(), "tcp" | "udp" | "sctp") {
+            errs.push(format!(
+                "test {index}: protocol {proto:?} is not allowed in policy tests"
+            ));
+        }
+
+        for dst in &test.accept {
+            if let Err(err) = validate_policy_test_destination(doc, dst) {
+                errs.push(format!("test {index}, accept {dst:?}: {err}"));
+            }
+        }
+        for dst in &test.deny {
+            if let Err(err) = validate_policy_test_destination(doc, dst) {
+                errs.push(format!("test {index}, deny {dst:?}: {err}"));
+            }
+        }
+    }
+}
+
+fn validate_policy_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> {
+    let (alias, port) = split_upstream_dst_ports(dst)?
+        .ok_or_else(|| "tests destination must include one explicit port".to_string())?;
+    if alias == "autogroup:internet" {
+        return Err("autogroup:internet is not allowed as a tests destination".to_string());
+    }
+    if alias.contains('/') {
+        return Err("CIDR ranges are not allowed as tests destinations".to_string());
+    }
+    if port == "*" || port.contains(',') || port.contains('-') {
+        return Err("tests destination must include exactly one port".to_string());
+    }
+    let parsed = parse_upstream_port(port)?;
+    if parsed == 0 {
+        return Err("first port must be >0, or use '*' for wildcard".to_string());
+    }
+    let host = alias.strip_prefix("host:").unwrap_or(alias);
+    if let Some(prefix) = doc.hosts.get(host)
+        && parse_cidr(prefix)
+            .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 })
+    {
+        return Err("host aliases used in tests must resolve to one address".to_string());
+    }
+    Ok(())
+}
+
+fn validate_ssh_tests(doc: &AclDoc, tests: &[SshPolicyTest], errs: &mut Vec<String>) {
+    for (index, test) in tests.iter().enumerate() {
+        if test.src.trim().is_empty() {
+            errs.push(format!(
+                "sshTest {index}: SSH tests entry must have a non-empty src"
+            ));
+        }
+        if test.dst.is_empty() {
+            errs.push(format!(
+                "sshTest {index}: SSH tests entry must have at least one dst"
+            ));
+        }
+        for dst in &test.dst {
+            if let Err(err) = validate_ssh_test_destination(doc, dst) {
+                errs.push(format!("sshTest {index}: {err}"));
+            }
+        }
+    }
+}
+
+fn validate_ssh_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> {
+    if split_upstream_dst_ports(dst)?.is_some() {
+        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
+    }
+    if dst == "autogroup:internet" {
+        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
+    }
+    if let Some(cidr) = parse_cidr(dst)
+        && cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 }
+    {
+        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
+    }
+    let host = dst.strip_prefix("host:").unwrap_or(dst);
+    if let Some(prefix) = doc.hosts.get(host)
+        && parse_cidr(prefix)
+            .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 })
+    {
+        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
+    }
+    if dst.starts_with("tag:") && !tag_defined(doc, dst) {
+        return Err(format!("SSH tests dst contains unknown tag {dst:?}"));
+    }
+    Ok(())
 }
 
 fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
@@ -1712,6 +1854,69 @@ mod tests {
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(doc.rules[0].dst, vec!["server"]);
         assert_eq!(doc.rules[0].ports, vec!["tcp/22"]);
+    }
+
+    #[test]
+    fn hujson_accepts_upstream_policy_tests_and_ssh_tests() {
+        let raw = r#"{
+            "tagOwners": {"tag:server": ["alice@"]},
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["alice@"],"dst":["tag:server:22"]}
+            ],
+            "tests": [
+                {"src":"alice@","proto":"tcp","accept":["tag:server:22"],"deny":["tag:server:80"]}
+            ],
+            "ssh": [
+                {"action":"accept","src":["alice@"],"dst":["autogroup:self"],"users":["root"]}
+            ],
+            "sshTests": [
+                {"src":"alice@","dst":["autogroup:self"],"accept":["root"],"deny":["ubuntu"],"check":["admin"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.tests.len(), 1);
+        assert_eq!(doc.tests[0].src, "alice@");
+        assert_eq!(doc.tests[0].accept, vec!["tag:server:22"]);
+        assert_eq!(doc.ssh_tests.len(), 1);
+        assert_eq!(doc.ssh_tests[0].dst, vec!["autogroup:self"]);
+        assert_eq!(doc.ssh_tests[0].check, vec!["admin"]);
+    }
+
+    #[test]
+    fn hujson_rejects_malformed_policy_tests() {
+        let raw = r#"{
+            "tests": [
+                {"src":"alice@","proto":"icmp","accept":["100.64.0.2:22"]},
+                {"src":"alice@","accept":["100.64.0.0/24:22"]},
+                {"src":"alice@","deny":["100.64.0.2:22,80"]},
+                {"src":"alice@"}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("protocol"));
+        assert!(msg.contains("CIDR"));
+        assert!(msg.contains("exactly one port"));
+        assert!(msg.contains("accept or deny"));
+    }
+
+    #[test]
+    fn hujson_rejects_malformed_ssh_tests() {
+        let raw = r#"{
+            "tagOwners": {"tag:server": ["alice@"]},
+            "sshTests": [
+                {"src":"","dst":["tag:missing"]},
+                {"src":"alice@","dst":["100.64.0.0/24"]},
+                {"src":"alice@","dst":["tag:server:22"]},
+                {"src":"alice@","dst":[]}
+            ]
+        }"#;
+        let err = parse_hujson_policy(raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("non-empty src"));
+        assert!(msg.contains("unknown tag"));
+        assert!(msg.contains("disallowed element"));
+        assert!(msg.contains("at least one dst"));
     }
 
     #[test]

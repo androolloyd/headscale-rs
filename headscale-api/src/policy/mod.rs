@@ -25,6 +25,7 @@
 //! daemons pick up the new `PacketFilter` on the next streamed chunk —
 //! < 1 s for the common case.
 
+pub mod check;
 pub mod doc;
 pub mod filter;
 pub mod hujson;
@@ -38,6 +39,7 @@ use std::{
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
+pub use check::{PolicyCheckNode, check_policy_semantics};
 pub use doc::{
     AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, PortRef, SshRule,
 };

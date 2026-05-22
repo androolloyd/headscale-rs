@@ -5,7 +5,7 @@ use headscale_api::admin::{PreauthAdminKey, PreauthMintRequest};
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::output::{OutputFormat, print_json, print_table};
+use super::output::{OutputFormat, print_structured, print_table};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
@@ -25,20 +25,19 @@ pub async fn create(
         tags,
     };
     let key: PreauthAdminKey = client.post_json("/preauthkeys", &body).await?;
-    match fmt {
-        OutputFormat::Json => print_json(&key)?,
-        OutputFormat::Table => {
-            // Mint flow is the one path that intentionally splashes
-            // the full secret — the operator hands it to the device
-            // and never sees it again.
-            println!("Minted preauth key for user '{}':", key.user);
-            println!("  {}", key.key);
-            println!("  expires_at: {}", key.expires_at);
-            println!("  reusable:   {}", key.reusable);
-            println!("  ephemeral:  {}", key.ephemeral);
-            if !key.tags.is_empty() {
-                println!("  tags:       {}", key.tags.join(","));
-            }
+    if fmt.is_structured() {
+        print_structured(fmt, &key)?;
+    } else {
+        // Mint flow is the one path that intentionally splashes
+        // the full secret — the operator hands it to the device
+        // and never sees it again.
+        println!("Minted preauth key for user '{}':", key.user);
+        println!("  {}", key.key);
+        println!("  expires_at: {}", key.expires_at);
+        println!("  reusable:   {}", key.reusable);
+        println!("  ephemeral:  {}", key.ephemeral);
+        if !key.tags.is_empty() {
+            println!("  tags:       {}", key.tags.join(","));
         }
     }
     Ok(())
@@ -53,9 +52,10 @@ pub async fn list(
     if let Some(u) = user_filter {
         keys.retain(|k| k.user == u);
     }
-    match fmt {
-        OutputFormat::Json => print_json(&keys)?,
-        OutputFormat::Table => render_keys(&keys),
+    if fmt.is_structured() {
+        print_structured(fmt, &keys)?;
+    } else {
+        render_keys(&keys);
     }
     Ok(())
 }

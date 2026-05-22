@@ -493,4 +493,14 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_output_selector() {
+        let parsed = Cli::try_parse_from(["headscale", "-o", "json-line", "users", "ls"]).unwrap();
+        assert_eq!(parsed.connect.output.as_deref(), Some("json-line"));
+        assert_eq!(
+            parsed.connect.fmt().unwrap(),
+            headscale_cli::admin::OutputFormat::JsonLine
+        );
+    }
 }

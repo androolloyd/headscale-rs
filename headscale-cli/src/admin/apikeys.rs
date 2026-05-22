@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::AdminError;
 use super::client::AdminClient;
 use super::duration::parse_duration_secs;
-use super::output::{OutputFormat, print_json, print_table};
+use super::output::{OutputFormat, print_structured, print_table};
 
 #[derive(Debug, Deserialize)]
 struct ApiKeyListResponse {
@@ -43,20 +43,20 @@ pub async fn create(
             },
         )
         .await?;
-    match fmt {
-        OutputFormat::Json => print_json(&key)?,
-        OutputFormat::Table => {
-            println!("{}", key.api_key);
-        }
+    if fmt.is_structured() {
+        print_structured(fmt, &key)?;
+    } else {
+        println!("{}", key.api_key);
     }
     Ok(())
 }
 
 pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let response: ApiKeyListResponse = client.get_json("/apikey").await?;
-    match fmt {
-        OutputFormat::Json => print_json(&response.api_keys)?,
-        OutputFormat::Table => render_keys(&response.api_keys),
+    if fmt.is_structured() {
+        print_structured(fmt, &response.api_keys)?;
+    } else {
+        render_keys(&response.api_keys);
     }
     Ok(())
 }

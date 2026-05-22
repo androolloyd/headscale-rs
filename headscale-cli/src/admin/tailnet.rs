@@ -8,13 +8,14 @@
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::output::{OutputFormat, print_json};
+use super::output::{OutputFormat, print_structured};
 
 pub async fn status(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let v: serde_json::Value = client.get_json("/tailnet").await?;
-    match fmt {
-        OutputFormat::Json => print_json(&v)?,
-        OutputFormat::Table => render(&v),
+    if fmt.is_structured() {
+        print_structured(fmt, &v)?;
+    } else {
+        render(&v);
     }
     Ok(())
 }

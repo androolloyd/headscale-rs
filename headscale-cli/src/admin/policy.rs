@@ -15,24 +15,23 @@ use std::path::Path;
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::output::{OutputFormat, print_json};
+use super::output::{OutputFormat, print_structured};
 
 pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let value: serde_json::Value = client.get_json("/policy").await?;
-    match fmt {
-        OutputFormat::Json => print_json(&value)?,
-        OutputFormat::Table => {
-            let loaded = value
-                .get("loaded")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            println!("Policy loaded: {loaded}");
-            if let Some(p) = value.get("policy")
-                && !p.is_null()
-            {
-                println!("---");
-                println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
-            }
+    if fmt.is_structured() {
+        print_structured(fmt, &value)?;
+    } else {
+        let loaded = value
+            .get("loaded")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        println!("Policy loaded: {loaded}");
+        if let Some(p) = value.get("policy")
+            && !p.is_null()
+        {
+            println!("---");
+            println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
         }
     }
     Ok(())
@@ -43,17 +42,16 @@ pub async fn set(client: &AdminClient, path: &Path, fmt: OutputFormat) -> Result
     // Local validation before sending — fail fast on garbage.
     check_policy_str(&body)?;
     let resp = client.put_text("/policy", body).await?;
-    match fmt {
-        OutputFormat::Json => print_json(&resp)?,
-        OutputFormat::Table => {
-            let applied = resp
-                .get("applied")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            println!("Policy applied: {applied}");
-            if let Some(note) = resp.get("note").and_then(serde_json::Value::as_str) {
-                println!("Note: {note}");
-            }
+    if fmt.is_structured() {
+        print_structured(fmt, &resp)?;
+    } else {
+        let applied = resp
+            .get("applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        println!("Policy applied: {applied}");
+        if let Some(note) = resp.get("note").and_then(serde_json::Value::as_str) {
+            println!("Note: {note}");
         }
     }
     Ok(())

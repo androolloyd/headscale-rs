@@ -11,7 +11,7 @@ use headscale_api::tailscale_wire::wire::stable_id_from_key;
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::output::{OutputFormat, print_json, print_table};
+use super::output::{OutputFormat, print_structured, print_table};
 
 pub async fn list(
     client: &AdminClient,
@@ -22,9 +22,10 @@ pub async fn list(
     if let Some(u) = user_filter {
         nodes.retain(|n| n.user == u);
     }
-    match fmt {
-        OutputFormat::Json => print_json(&nodes)?,
-        OutputFormat::Table => render_nodes(&nodes),
+    if fmt.is_structured() {
+        print_structured(fmt, &nodes)?;
+    } else {
+        render_nodes(&nodes);
     }
     Ok(())
 }
@@ -46,9 +47,10 @@ pub async fn list_routes(
             .await?
     };
     nodes.retain(|n| !n.routes.is_empty() || !n.approved_routes.is_empty());
-    match fmt {
-        OutputFormat::Json => print_json(&nodes)?,
-        OutputFormat::Table => render_routes(&nodes),
+    if fmt.is_structured() {
+        print_structured(fmt, &nodes)?;
+    } else {
+        render_routes(&nodes);
     }
     Ok(())
 }
@@ -73,9 +75,10 @@ pub async fn show(
         }
         Err(e) => return Err(e),
     };
-    match fmt {
-        OutputFormat::Json => print_json(&node)?,
-        OutputFormat::Table => render_one(&node),
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        render_one(&node);
     }
     Ok(())
 }
@@ -133,12 +136,11 @@ pub async fn approve_routes(
     let path = format!("/machines/{id}/routes");
     let body = serde_json::json!({ "routes": routes });
     let node: MachineAdminRecord = client.post_json(&path, &body).await?;
-    match fmt {
-        OutputFormat::Json => print_json(&node)?,
-        OutputFormat::Table => {
-            println!("Node updated");
-            render_routes(&[node]);
-        }
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Node updated");
+        render_routes(&[node]);
     }
     Ok(())
 }

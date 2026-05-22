@@ -207,4 +207,12 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn embedded_admin_accepts_upstream_output_selector() {
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "-o", "yaml", "users", "list"]).unwrap();
+        assert_eq!(parsed.connect.output.as_deref(), Some("yaml"));
+        assert_eq!(parsed.connect.fmt().unwrap(), OutputFormat::Yaml);
+    }
 }

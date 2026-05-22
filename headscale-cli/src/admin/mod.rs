@@ -95,7 +95,7 @@ impl AdminError {
 }
 
 /// Shared connection flags. Hoisted out of each subcommand so the same
-/// `--server` / `--token` / `--json` triplet works everywhere.
+/// `--server` / `--token` / output flags work everywhere.
 #[derive(Args, Debug, Clone)]
 pub struct ConnectArgs {
     /// Admin URL. Falls back to `$HEADSCALE_URL`. Trailing `/` is OK.
@@ -107,6 +107,14 @@ pub struct ConnectArgs {
     /// Emit raw JSON instead of the default table view.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Output format. Empty for human-readable, `json`, `json-line`, or `yaml`.
+    #[arg(
+        short = 'o',
+        long = "output",
+        global = true,
+        value_parser = ["json", "json-line", "yaml"]
+    )]
+    pub output: Option<String>,
 }
 
 impl ConnectArgs {
@@ -122,8 +130,8 @@ impl ConnectArgs {
         Ok(AdminClient::new(server, token))
     }
 
-    pub fn fmt(&self) -> OutputFormat {
-        OutputFormat::from_flag(self.json)
+    pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
+        OutputFormat::from_flags(self.json, self.output.as_deref())
     }
 }
 
@@ -317,25 +325,27 @@ pub enum TailnetCmd {
 
 pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
+    let fmt = conn.fmt()?;
     match cmd {
-        UsersCmd::Create { name } => users::create(&client, name, conn.fmt()).await,
-        UsersCmd::List => users::list(&client, conn.fmt()).await,
+        UsersCmd::Create { name } => users::create(&client, name, fmt).await,
+        UsersCmd::List => users::list(&client, fmt).await,
         UsersCmd::Delete { name } => users::delete(&client, name).await,
     }
 }
 
 pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
+    let fmt = conn.fmt()?;
     match cmd {
-        NodesCmd::List { user } => nodes::list(&client, user.as_deref(), conn.fmt()).await,
-        NodesCmd::ListRoutes { id } => nodes::list_routes(&client, id.as_deref(), conn.fmt()).await,
-        NodesCmd::Show { id_or_name } => nodes::show(&client, id_or_name, conn.fmt()).await,
+        NodesCmd::List { user } => nodes::list(&client, user.as_deref(), fmt).await,
+        NodesCmd::ListRoutes { id } => nodes::list_routes(&client, id.as_deref(), fmt).await,
+        NodesCmd::Show { id_or_name } => nodes::show(&client, id_or_name, fmt).await,
         NodesCmd::Expire { id, at } => nodes::expire(&client, id, at.as_deref()).await,
         NodesCmd::Logout { id } => nodes::logout(&client, id).await,
         NodesCmd::Rename { id, hostname } => nodes::rename(&client, id, hostname).await,
         NodesCmd::Tags { id, tags } => nodes::tags(&client, id, tags.clone()).await,
         NodesCmd::ApproveRoutes { id, routes } => {
-            nodes::approve_routes(&client, id, routes.clone(), conn.fmt()).await
+            nodes::approve_routes(&client, id, routes.clone(), fmt).await
         }
         NodesCmd::Delete { id } => nodes::delete(&client, id).await,
     }
@@ -343,6 +353,7 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
 
 pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
+    let fmt = conn.fmt()?;
     match cmd {
         PreauthKeysCmd::Create {
             user,
@@ -359,22 +370,21 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
                 *ephemeral,
                 tags.clone(),
                 secs,
-                conn.fmt(),
+                fmt,
             )
             .await
         }
-        PreauthKeysCmd::List { user } => {
-            preauthkeys::list(&client, user.as_deref(), conn.fmt()).await
-        }
+        PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
         PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
     }
 }
 
 pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
+    let fmt = conn.fmt()?;
     match cmd {
-        ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, conn.fmt()).await,
-        ApiKeysCmd::List => apikeys::list(&client, conn.fmt()).await,
+        ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, fmt).await,
+        ApiKeysCmd::List => apikeys::list(&client, fmt).await,
         ApiKeysCmd::Expire { prefix, id } => apikeys::expire(&client, prefix.as_deref(), *id).await,
         ApiKeysCmd::Delete { prefix, id } => apikeys::delete(&client, prefix.as_deref(), *id).await,
     }
@@ -385,19 +395,20 @@ pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), Admin
         PolicyCmd::Check { path } => policy::check(path),
         PolicyCmd::Get => {
             let client = conn.build_client()?;
-            policy::get(&client, conn.fmt()).await
+            policy::get(&client, conn.fmt()?).await
         }
         PolicyCmd::Set { path } => {
             let client = conn.build_client()?;
-            policy::set(&client, path, conn.fmt()).await
+            policy::set(&client, path, conn.fmt()?).await
         }
     }
 }
 
 pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
+    let fmt = conn.fmt()?;
     match cmd {
-        TailnetCmd::Status => tailnet::status(&client, conn.fmt()).await,
+        TailnetCmd::Status => tailnet::status(&client, fmt).await,
     }
 }
 
@@ -451,6 +462,7 @@ mod tests {
             server: None,
             token: Some("t".into()),
             json: false,
+            output: None,
         };
         let e = conn.build_client().unwrap_err();
         assert!(matches!(e, AdminError::Local(_)));
@@ -462,7 +474,19 @@ mod tests {
             server: Some("http://localhost:51822".into()),
             token: None,
             json: false,
+            output: None,
         };
         assert!(conn.build_client().is_ok());
+    }
+
+    #[test]
+    fn connect_args_accept_upstream_output_formats() {
+        let conn = ConnectArgs {
+            server: Some("http://localhost:51822".into()),
+            token: None,
+            json: false,
+            output: Some("json-line".into()),
+        };
+        assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
     }
 }

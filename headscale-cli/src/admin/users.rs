@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::output::{OutputFormat, print_json, print_table};
+use super::output::{OutputFormat, print_structured, print_table};
 
 /// `POST /api/v1/users` payload.
 #[derive(Serialize)]
@@ -19,21 +19,21 @@ struct CreateUserBody<'a> {
 pub async fn create(client: &AdminClient, name: &str, fmt: OutputFormat) -> Result<(), AdminError> {
     let body = CreateUserBody { name };
     let user: UserRecord = client.post_json("/users", &body).await?;
-    match fmt {
-        OutputFormat::Json => print_json(&user)?,
-        OutputFormat::Table => {
-            println!("Created user '{}'", user.name);
-            render_users(&[user]);
-        }
+    if fmt.is_structured() {
+        print_structured(fmt, &user)?;
+    } else {
+        println!("Created user '{}'", user.name);
+        render_users(&[user]);
     }
     Ok(())
 }
 
 pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let users: Vec<UserRecord> = client.get_json("/users").await?;
-    match fmt {
-        OutputFormat::Json => print_json(&users)?,
-        OutputFormat::Table => render_users(&users),
+    if fmt.is_structured() {
+        print_structured(fmt, &users)?;
+    } else {
+        render_users(&users);
     }
     Ok(())
 }

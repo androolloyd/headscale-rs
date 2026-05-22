@@ -11,29 +11,75 @@
 use std::io::Write;
 
 use serde::Serialize;
+use serde_json::ser::PrettyFormatter;
 
 use super::AdminError;
 
-/// Whether the operator passed `--json`.
-#[derive(Copy, Clone, Debug)]
+/// The upstream `headscale` CLI accepts an empty human-readable format
+/// plus `json`, `json-line`, and `yaml` through `-o/--output`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Table,
     Json,
+    JsonLine,
+    Yaml,
 }
 
 impl OutputFormat {
     pub fn from_flag(json: bool) -> Self {
         if json { Self::Json } else { Self::Table }
     }
+
+    pub fn from_flags(json: bool, output: Option<&str>) -> Result<Self, AdminError> {
+        match output {
+            Some("json") => Ok(Self::Json),
+            Some("json-line") => Ok(Self::JsonLine),
+            Some("yaml") => Ok(Self::Yaml),
+            Some(other) => Err(AdminError::Local(format!(
+                "unsupported output format '{other}' (valid: json, json-line, yaml)"
+            ))),
+            None => Ok(Self::from_flag(json)),
+        }
+    }
+
+    pub fn is_structured(self) -> bool {
+        !matches!(self, Self::Table)
+    }
 }
 
-/// Print `value` as pretty JSON to stdout. Used by every `--json`
-/// path so the format is uniform.
+/// Print `value` as pretty JSON to stdout. Used by legacy `--json`
+/// paths so the format is uniform.
 pub fn print_json<T: Serialize>(value: &T) -> Result<(), AdminError> {
-    let s = serde_json::to_string_pretty(value)
+    let mut buf = Vec::new();
+    let formatter = PrettyFormatter::with_indent(b"\t");
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value
+        .serialize(&mut ser)
         .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
+    let s =
+        String::from_utf8(buf).map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
     println!("{s}");
     Ok(())
+}
+
+/// Print `value` in one of the upstream machine-readable formats.
+pub fn print_structured<T: Serialize>(fmt: OutputFormat, value: &T) -> Result<(), AdminError> {
+    match fmt {
+        OutputFormat::Table => Ok(()),
+        OutputFormat::Json => print_json(value),
+        OutputFormat::JsonLine => {
+            let s = serde_json::to_string(value)
+                .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
+            println!("{s}");
+            Ok(())
+        }
+        OutputFormat::Yaml => {
+            let s = serde_yaml::to_string(value)
+                .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
+            print!("{s}");
+            Ok(())
+        }
+    }
 }
 
 /// Render a table of `rows` under `headers`. Each row must have the
@@ -135,6 +181,31 @@ mod tests {
             OutputFormat::from_flag(false),
             OutputFormat::Table
         ));
+    }
+
+    #[test]
+    fn output_format_from_upstream_output_selector() {
+        assert_eq!(
+            OutputFormat::from_flags(false, Some("json-line")).unwrap(),
+            OutputFormat::JsonLine
+        );
+        assert_eq!(
+            OutputFormat::from_flags(false, Some("yaml")).unwrap(),
+            OutputFormat::Yaml
+        );
+        assert_eq!(
+            OutputFormat::from_flags(true, Some("yaml")).unwrap(),
+            OutputFormat::Yaml
+        );
+        assert!(OutputFormat::from_flags(false, Some("xml")).is_err());
+    }
+
+    #[test]
+    fn prints_json_line_as_single_compact_line() {
+        let value = serde_json::json!({"name": "alice", "id": 1});
+        let s = serde_json::to_string(&value).unwrap();
+        assert_eq!(s, "{\"id\":1,\"name\":\"alice\"}");
+        assert!(!s.contains('\n'));
     }
 
     #[test]

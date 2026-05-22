@@ -121,6 +121,22 @@ Useful knobs:
 - `REAL_CLIENT_EXPECT_TAGS` defaults to the requested preauth tags.
 - `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.
 
+## MagicDNS Smoke
+
+The MagicDNS scenario starts two stock clients and asserts that each client
+reports the configured tailnet suffix plus peer DNS names in
+`tailscale status --json`:
+
+```sh
+tools/real-client/magicdns-smoke.sh
+tools/real-client/magicdns-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_CLIENT_COUNT` defaults to `2`.
+- `REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX` defaults to `tail.test`.
+
 ## Advertised Route Smoke
 
 The route-advertisement scenario reuses the auth-key setup and adds

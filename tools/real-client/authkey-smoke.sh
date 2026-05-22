@@ -20,6 +20,7 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
+expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -326,6 +327,42 @@ ruby -rjson -e '
   end
 ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}"
 echo "::endgroup::"
+
+if [[ -n "${expected_magic_dns_suffix}" ]]; then
+  echo "::group::assert MagicDNS client status"
+  magicdns_status_paths=()
+  for client_name in "${client_names[@]}"; do
+    status_path="${work_dir}/${client_name}.magicdns-status.json"
+    docker exec "${client_name}" tailscale status --json >"${status_path}"
+    magicdns_status_paths+=("${status_path}")
+  done
+  ruby -rjson -e '
+    expected_suffix = ARGV.fetch(0).sub(/\.\z/, "")
+    status_paths = ARGV.drop(1)
+    expected_peers = status_paths.length - 1
+
+    status_paths.each do |path|
+      status = JSON.parse(File.read(path))
+      self_node = status.fetch("Self")
+      suffix = status.fetch("MagicDNSSuffix").to_s.sub(/\.\z/, "")
+      abort("#{path}: expected MagicDNSSuffix #{expected_suffix.inspect}, got #{suffix.inspect}") unless suffix == expected_suffix
+
+      self_dns = self_node.fetch("DNSName").to_s.sub(/\.\z/, "")
+      expected_self_dns = "#{self_node.fetch("HostName")}.#{expected_suffix}"
+      abort("#{path}: expected self DNSName #{expected_self_dns.inspect}, got #{self_dns.inspect}") unless self_dns == expected_self_dns
+
+      peers = status["Peer"] || {}
+      abort("#{path}: expected #{expected_peers} peers, got #{peers.length}") unless peers.length == expected_peers
+      peers.each_value do |peer|
+        peer_dns = peer.fetch("DNSName").to_s.sub(/\.\z/, "")
+        expected_peer_dns = "#{peer.fetch("HostName")}.#{expected_suffix}"
+        abort("#{path}: expected peer DNSName #{expected_peer_dns.inspect}, got #{peer_dns.inspect}") unless peer_dns == expected_peer_dns
+      end
+    end
+    puts JSON.pretty_generate({magic_dns_suffix: expected_suffix, clients: status_paths.length})
+  ' "${expected_magic_dns_suffix}" "${magicdns_status_paths[@]}"
+  echo "::endgroup::"
+fi
 
 if [[ -n "${expected_primary_failover_route}" ]]; then
   echo "::group::assert primary route failover"

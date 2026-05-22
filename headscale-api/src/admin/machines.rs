@@ -367,9 +367,11 @@ impl PersistentMachineAdmin {
         for row in rows {
             let record = self.row_to_record(row).await;
             if record.id.trim().is_empty() {
-                continue;
+                return Err(MachineAdminError::BadRequest(
+                    "persisted node has empty node key".to_string(),
+                ));
             }
-            let wire = machine_admin_record_to_wire(&record);
+            let wire = machine_admin_record_to_wire(&record)?;
             registry.upsert(wire.node_key_hex.clone(), wire);
             hydrated += 1;
         }
@@ -614,7 +616,8 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             .create_or_update_auth_path(record, &self.policy)
             .await
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        let wire_record = machine_admin_record_to_wire(&result.record);
+        let wire_record = machine_admin_record_to_wire(&result.record)
+            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
         if let Some(registry) = &self.wire_registry {
             if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
                 registry.replace_node_key(
@@ -984,15 +987,22 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
     }
 }
 
-fn machine_admin_record_to_wire(machine: &MachineAdminRecord) -> MachineRecord {
-    let created_at =
-        chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now);
-    let last_seen =
-        chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at);
-    let ipv4 = machine
-        .ipv4
-        .parse()
-        .unwrap_or_else(|_| Ipv4Addr::new(100, 64, 0, 1));
+fn machine_admin_record_to_wire(
+    machine: &MachineAdminRecord,
+) -> Result<MachineRecord, MachineAdminError> {
+    if machine.id.trim().is_empty() {
+        return Err(MachineAdminError::BadRequest(
+            "persisted node has empty node key".to_string(),
+        ));
+    }
+    let created_at = unix_timestamp_for_record(machine.created_at, &machine.id, "created_at")?;
+    let last_seen = unix_timestamp_for_record(machine.last_seen, &machine.id, "last_seen")?;
+    let ipv4 = machine.ipv4.parse().map_err(|e| {
+        MachineAdminError::BadRequest(format!(
+            "persisted node {} has invalid IPv4 '{}': {e}",
+            machine.id, machine.ipv4
+        ))
+    })?;
     let mut record = MachineRecord::new_at(
         created_at,
         machine.id.clone(),
@@ -1004,7 +1014,8 @@ fn machine_admin_record_to_wire(machine: &MachineAdminRecord) -> MachineRecord {
     );
     record.expiry = machine
         .expiry
-        .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
+        .map(|expiry| unix_timestamp_for_record(expiry, &machine.id, "expiry"))
+        .transpose()?;
     record.last_seen = last_seen;
     record.os.clone_from(&machine.os);
     record.os_version.clone_from(&machine.version);
@@ -1012,7 +1023,24 @@ fn machine_admin_record_to_wire(machine: &MachineAdminRecord) -> MachineRecord {
     record.available_routes.clone_from(&machine.routes);
     record.approved_routes.clone_from(&machine.approved_routes);
     record.register_method = machine.register_method;
-    record
+    Ok(record)
+}
+
+fn unix_timestamp_for_record(
+    timestamp: u64,
+    node_key: &str,
+    field: &str,
+) -> Result<DateTime<Utc>, MachineAdminError> {
+    let timestamp = i64::try_from(timestamp).map_err(|_| {
+        MachineAdminError::BadRequest(format!(
+            "persisted node {node_key} has out-of-range {field} timestamp"
+        ))
+    })?;
+    chrono::DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+        MachineAdminError::BadRequest(format!(
+            "persisted node {node_key} has invalid {field} timestamp"
+        ))
+    })
 }
 
 fn oidc_user_name(user: &crate::oidc::OidcStoredUser) -> String {
@@ -1404,6 +1432,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_machine_admin_hydration_rejects_invalid_persisted_ip() {
+        let (admin, db, users) = persistent_fixture().await;
+        let user = users.get("alice").await.unwrap().unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: json!({"Hostname": "bad-ip-node"}),
+                ipv4: Some("not-an-ip".into()),
+                hostname: "bad-ip-node".into(),
+                given_name: "bad-ip-node".into(),
+                user_id: Some(user.id as i64),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let registry = MachineRegistry::new();
+
+        let err = admin.hydrate_wire_registry(&registry).await.unwrap_err();
+
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        assert!(err.to_string().contains("invalid IPv4"));
+        assert!(registry.is_empty());
+    }
+
+    #[tokio::test]
     async fn persistent_machine_admin_auth_path_reauth_updates_existing_row() {
         let (admin, db, _users) = persistent_fixture().await;
         let mut original = persistent_record();
@@ -1540,7 +1597,10 @@ mod tests {
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
-        registry.upsert(created.id.clone(), machine_admin_record_to_wire(&created));
+        registry.upsert(
+            created.id.clone(),
+            machine_admin_record_to_wire(&created).unwrap(),
+        );
 
         let mut pending = MachineRecord::new_at(
             Utc::now(),

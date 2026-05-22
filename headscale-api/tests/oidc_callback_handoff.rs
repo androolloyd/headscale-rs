@@ -199,6 +199,7 @@ fn wire_state() -> (WireState, TempDir) {
         dns: Arc::new(DnsStore::new()),
         public_control_url: Some("https://headscale.example".into()),
         registration_cache: Arc::new(RegistrationCache::new()),
+        pings: Arc::new(headscale_api::tailscale_wire::PingTracker::new()),
     };
     (state, dir)
 }

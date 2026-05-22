@@ -71,8 +71,8 @@ use super::register::record_to_map_node;
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
-    PeerChange, PortRange, UserProfile, is_supported_capability_version, stable_id_from_key,
-    strip_key_prefix, unsupported_client_error,
+    PeerChange, PingRequest, PortRange, UserProfile, is_supported_capability_version,
+    stable_id_from_key, strip_key_prefix, unsupported_client_error,
 };
 use super::{MachineRecord, WireState};
 
@@ -874,6 +874,7 @@ async fn map_inner(
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, &node_key_hex, allowed_peer_ids.as_ref());
     let resp = MapResponse {
+        ping_request: state.pings.pop_next_for_node(self_node_id),
         node: Some(own_node),
         peers,
         user_profiles,
@@ -959,6 +960,8 @@ async fn map_inner(
         let cap_version = req.version;
         let derp_map_for_stream = state.derp_map.clone();
         let dns_for_stream = state.dns.clone();
+        let pings = state.pings.clone();
+        let ping_rx = state.pings.subscribe();
         let connection_guard = super::MachineRegistry::track_stream_connection(
             machines.clone(),
             stable_id_from_key(&node_key_hex),
@@ -972,6 +975,8 @@ async fn map_inner(
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
+                pings,
+                ping_rx,
                 initial_self_node,
                 initial_peer_state,
                 initial_peer_ids,
@@ -987,6 +992,8 @@ async fn map_inner(
                 self_node_key,
                 machines_derp_map,
                 dns,
+                pings,
+                mut ping_rx,
                 last_self_node,
                 last_peer_state,
                 initial_peer_ids,
@@ -1005,6 +1012,31 @@ async fn map_inner(
                             self_node_key,
                             machines_derp_map,
                             dns,
+                            pings,
+                            ping_rx,
+                            last_self_node,
+                            last_peer_state,
+                            initial_peer_ids,
+                            connection_guard,
+                            cap_version,
+                            compression,
+                        ),
+                    ));
+                }
+                let self_node_id = stable_id_from_key(&self_node_key);
+                if let Some(request) = pings.pop_next_for_node(self_node_id) {
+                    return Some((
+                        Ok::<_, std::io::Error>(build_ping_request_chunk(request, compression)),
+                        (
+                            None,
+                            machines,
+                            gen_rx,
+                            policy,
+                            self_node_key,
+                            machines_derp_map,
+                            dns,
+                            pings,
+                            ping_rx,
                             last_self_node,
                             last_peer_state,
                             initial_peer_ids,
@@ -1065,6 +1097,19 @@ async fn map_inner(
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
+                    res = ping_rx.changed() => {
+                        if res.is_err() {
+                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                        } else if let Some(request) = pings.pop_next_for_node(self_node_id) {
+                            (
+                                build_ping_request_chunk(request, compression),
+                                last_peer_state,
+                                last_self_node,
+                            )
+                        } else {
+                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                        }
+                    }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
                         machines.record_mapresponse_sent_for_node(
                             "ok",
@@ -1085,6 +1130,8 @@ async fn map_inner(
                         self_node_key,
                         machines_derp_map,
                         dns,
+                        pings,
+                        ping_rx,
                         next_self_node,
                         next_peer_state,
                         initial_peer_ids,
@@ -1274,6 +1321,15 @@ fn rebuild_peer_delta_chunk(
     )
 }
 
+fn build_ping_request_chunk(request: PingRequest, compression: MapFrameCompression) -> Vec<u8> {
+    let mr = MapResponse {
+        ping_request: Some(request),
+        keep_alive: false,
+        ..MapResponse::default()
+    };
+    build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
+}
+
 /// Rebuild a full `MapResponse` chunk for an in-flight `Stream:true`
 /// `/machine/map` poller. Used for configuration-style wakes that
 /// still need the broader snapshot path. If the requesting node has
@@ -1433,6 +1489,7 @@ mod tests {
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
+            pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
         };
         (state, dir)
     }
@@ -2762,6 +2819,93 @@ mod tests {
         let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
         let metrics = String::from_utf8(metrics.to_vec()).unwrap();
         assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"done\"} 1\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_true_emits_ping_request_chunk_and_callback_completes() {
+        let (mut state, _dir) = fixture();
+        state.public_control_url = Some("https://control.example".into());
+        let a = "aa".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let public_app = public_router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(first_mr.ping_request.is_none());
+
+        let node_id = stable_id_from_key(&a);
+        let (ping_id, response) = state.register_ping(node_id);
+        let request = state.dispatch_ping_request(node_id, &ping_id, true, false);
+        assert_eq!(
+            request.url,
+            format!("https://control.example/machine/ping-response?id={ping_id}")
+        );
+        assert!(!request.url_is_noise);
+        assert!(request.log);
+
+        let frame = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("ping request map chunk")
+        .unwrap()
+        .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        let ping_request = mr.ping_request.expect("PingRequest chunk");
+        assert_eq!(
+            ping_request.url,
+            format!("https://control.example/machine/ping-response?id={ping_id}")
+        );
+        assert!(!ping_request.url_is_noise);
+        assert!(ping_request.log);
+        assert!(mr.node.is_none());
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+
+        let resp = public_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::HEAD)
+                    .uri(format!("/machine/ping-response?id={ping_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(body_bytes.is_empty());
+        let latency = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("ping callback completion")
+            .expect("ping response receiver");
+        assert!(latency <= Duration::from_secs(5));
     }
 
     /// Upstream always length-prefixes map stream frames, but only

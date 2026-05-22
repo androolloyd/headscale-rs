@@ -44,6 +44,7 @@
 //!     # dns: Arc::new(Default::default()),
 //!     # public_control_url: Some("https://headscale.example".into()),
 //!     # registration_cache: Arc::new(tailscale_wire::RegistrationCache::new()),
+//!     # pings: Arc::new(tailscale_wire::PingTracker::new()),
 //! };
 //! let admin_state = admin::AdminState::builder()
 //!     .bearer_token("op-secret-token")

@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json,
     body::to_bytes,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
@@ -268,9 +268,24 @@ pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Respon
         .into_response()
 }
 
-pub async fn handle_ping_response() -> Response {
+pub async fn handle_ping_response(
+    State(state): State<WireState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(ping_id) = query.get("id").filter(|id| !id.is_empty()) else {
+        return empty_ping_response(StatusCode::BAD_REQUEST);
+    };
+
+    if state.pings.complete(ping_id).is_none() {
+        return empty_ping_response(StatusCode::NOT_FOUND);
+    }
+
+    empty_ping_response(StatusCode::OK)
+}
+
+fn empty_ping_response(status: StatusCode) -> Response {
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .body(axum::body::Body::from_stream(
             futures_util::stream::empty::<Result<bytes::Bytes, std::convert::Infallible>>(),
         ))
@@ -2647,6 +2662,7 @@ mod tests {
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
+            pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
         };
         (state, dir)
     }

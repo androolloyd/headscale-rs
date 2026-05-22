@@ -25,8 +25,8 @@ use headscale_api::{
     policy::{NodeView, PolicyStore, parse_hujson_policy},
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry,
-        PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
-        derp_config, routes::normalize_routes, serve,
+        PingTracker, PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey,
+        WireState, derp_config, routes::normalize_routes, serve,
     },
 };
 use parking_lot::RwLock;
@@ -270,6 +270,7 @@ async fn main() -> Result<()> {
         dns,
         public_control_url: Some(public_url.clone()),
         registration_cache: registration_cache.clone(),
+        pings: Arc::new(PingTracker::new()),
     };
 
     let app_state = AppState {

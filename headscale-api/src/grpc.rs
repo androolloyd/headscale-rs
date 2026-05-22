@@ -2297,6 +2297,7 @@ mod upstream_tests {
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: Some("https://headscale.example".into()),
             registration_cache: registration_cache.clone(),
+            pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
         };
         let app = machine_router(state.clone());
         let node_key_hex = "77".repeat(32);

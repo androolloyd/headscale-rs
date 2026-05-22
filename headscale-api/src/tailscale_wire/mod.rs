@@ -32,6 +32,7 @@
 //! See the upstream OctraVPN module's decision log (preserved in git
 //! history) for the rationale behind each wire choice.
 
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,9 +47,8 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, oneshot, watch};
 
 use self::routes::{
     DebugRoutes, PrimaryRouteState, active_approved_routes, auto_approved_routes_for_node,
@@ -60,6 +60,9 @@ use self::wire::stable_id_from_key;
 pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60);
 /// Headscale-go default cleanup tick for the registration cache.
 pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
+const PING_ID_LENGTH: usize = 16;
+const PING_ID_URLSAFE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const REGISTER_METHOD_OIDC: i32 = 3;
 
 pub mod basic_handlers;
@@ -81,7 +84,7 @@ pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
     DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, NetInfo,
-    RegisterRequest, RegisterResponse,
+    PingRequest, RegisterRequest, RegisterResponse,
 };
 
 // Re-export the lifecycle helper so downstream crates can spawn the GC
@@ -348,6 +351,198 @@ pub struct WireState {
     /// browser/CLI approval complete the wire client's follow-up
     /// registration.
     pub registration_cache: Arc<RegistrationCache>,
+    /// Correlates outbound `MapResponse.PingRequest` callbacks with
+    /// public `HEAD /machine/ping-response?id=...` responses.
+    pub pings: Arc<PingTracker>,
+}
+
+impl WireState {
+    /// Register a pending ping for `node_id`. Callers should dispatch
+    /// the returned ID with [`Self::dispatch_ping_request`] and then
+    /// await the receiver with their own timeout.
+    pub fn register_ping(&self, node_id: u64) -> (String, oneshot::Receiver<Duration>) {
+        self.pings.register(node_id)
+    }
+
+    /// Queue a headscale-go style URL callback ping for the target node.
+    ///
+    /// The returned request is cloned into the outbound queue and is
+    /// provided for tests/debug callers that want to inspect the exact
+    /// wire shape.
+    pub fn dispatch_ping_request(
+        &self,
+        node_id: u64,
+        ping_id: &str,
+        log: bool,
+        url_is_noise: bool,
+    ) -> PingRequest {
+        let request = PingRequest {
+            url: self.ping_response_url(ping_id),
+            url_is_noise,
+            log,
+            ..PingRequest::default()
+        };
+        self.pings.enqueue(node_id, request.clone());
+        request
+    }
+
+    fn ping_response_url(&self, ping_id: &str) -> String {
+        match self.public_control_url.as_deref() {
+            Some(url) if !url.is_empty() => {
+                format!(
+                    "{}/machine/ping-response?id={ping_id}",
+                    url.trim_end_matches('/')
+                )
+            }
+            _ => format!("/machine/ping-response?id={ping_id}"),
+        }
+    }
+}
+
+/// Result metadata returned when a pending ping callback is correlated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingCompletion {
+    pub node_id: u64,
+    pub latency: Duration,
+}
+
+/// In-memory PingRequest tracker.
+///
+/// It mirrors headscale-go's bounded lifecycle for this parity slice:
+/// callers register an unguessable ID, enqueue a `PingRequest` to a
+/// node's map stream, and the public callback completes the matching ID.
+/// There is intentionally no server-side TTL yet; callers own timeout
+/// and cancellation just like upstream's `state.pingTracker`.
+pub struct PingTracker {
+    inner: Mutex<PingTrackerInner>,
+    gen_tx: Arc<watch::Sender<u64>>,
+}
+
+struct PingTrackerInner {
+    pending: BTreeMap<String, PendingPing>,
+    outbound: BTreeMap<u64, VecDeque<PingRequest>>,
+    generation: u64,
+}
+
+struct PendingPing {
+    node_id: u64,
+    start_time: Instant,
+    response_tx: oneshot::Sender<Duration>,
+}
+
+impl PingTracker {
+    pub fn new() -> Self {
+        let (gen_tx, _gen_rx) = watch::channel(0u64);
+        Self {
+            inner: Mutex::new(PingTrackerInner {
+                pending: BTreeMap::new(),
+                outbound: BTreeMap::new(),
+                generation: 0,
+            }),
+            gen_tx: Arc::new(gen_tx),
+        }
+    }
+
+    pub fn register(&self, node_id: u64) -> (String, oneshot::Receiver<Duration>) {
+        loop {
+            let ping_id = new_ping_id();
+            let (tx, rx) = oneshot::channel();
+            let mut inner = self.inner.lock();
+            if inner.pending.contains_key(&ping_id) {
+                continue;
+            }
+            inner.pending.insert(
+                ping_id.clone(),
+                PendingPing {
+                    node_id,
+                    start_time: Instant::now(),
+                    response_tx: tx,
+                },
+            );
+            return (ping_id, rx);
+        }
+    }
+
+    pub fn enqueue(&self, node_id: u64, request: PingRequest) {
+        let generation = {
+            let mut inner = self.inner.lock();
+            inner
+                .outbound
+                .entry(node_id)
+                .or_default()
+                .push_back(request);
+            bump_ping_generation(&mut inner)
+        };
+        let _ = self.gen_tx.send(generation);
+    }
+
+    pub fn complete(&self, ping_id: &str) -> Option<PingCompletion> {
+        let pending = self.inner.lock().pending.remove(ping_id)?;
+        let latency = pending.start_time.elapsed();
+        let _ = pending.response_tx.send(latency);
+        Some(PingCompletion {
+            node_id: pending.node_id,
+            latency,
+        })
+    }
+
+    pub fn cancel(&self, ping_id: &str) -> bool {
+        self.inner.lock().pending.remove(ping_id).is_some()
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.inner.lock().pending.len()
+    }
+
+    pub fn queued_len(&self) -> usize {
+        self.inner.lock().outbound.values().map(VecDeque::len).sum()
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.gen_tx.subscribe()
+    }
+
+    pub(crate) fn pop_next_for_node(&self, node_id: u64) -> Option<PingRequest> {
+        let (request, generation) = {
+            let mut inner = self.inner.lock();
+            let Some(queue) = inner.outbound.get_mut(&node_id) else {
+                return None;
+            };
+            let request = queue.pop_front();
+            let more_pending = !queue.is_empty();
+            if queue.is_empty() {
+                inner.outbound.remove(&node_id);
+            }
+            let generation = more_pending.then(|| bump_ping_generation(&mut inner));
+            (request, generation)
+        };
+
+        if let Some(generation) = generation {
+            let _ = self.gen_tx.send(generation);
+        }
+        request
+    }
+}
+
+impl Default for PingTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn bump_ping_generation(inner: &mut PingTrackerInner) -> u64 {
+    inner.generation = inner.generation.wrapping_add(1);
+    inner.generation
+}
+
+fn new_ping_id() -> String {
+    use rand_core::RngCore;
+
+    let mut raw = [0u8; PING_ID_LENGTH];
+    rand_core::OsRng.fill_bytes(&mut raw);
+    raw.into_iter()
+        .map(|b| PING_ID_URLSAFE[(b & 0b0011_1111) as usize] as char)
+        .collect()
 }
 
 /// Shared pending registration cache keyed by headscale-go's
@@ -1497,17 +1692,20 @@ mod registry_tests {
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
             registration_cache: Arc::new(RegistrationCache::new()),
+            pings: Arc::new(PingTracker::new()),
         }
     }
 
     #[tokio::test]
     async fn public_ping_response_head_route_is_successful() {
-        let app = router(test_state());
+        let state = test_state();
+        let (ping_id, response) = state.register_ping(42);
+        let app = router(state.clone());
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .method(axum::http::Method::HEAD)
-                    .uri("/machine/ping-response?id=ping-id")
+                    .uri(format!("/machine/ping-response?id={ping_id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -1527,6 +1725,45 @@ mod registry_tests {
         );
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert!(body.is_empty());
+        let latency = response.await.expect("ping response completed");
+        assert!(latency <= std::time::Duration::from_secs(5));
+        assert_eq!(state.pings.pending_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn public_ping_response_rejects_missing_and_unknown_ids() {
+        let app = router(test_state());
+
+        for (uri, status) in [
+            (
+                "/machine/ping-response",
+                axum::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/machine/ping-response?id=",
+                axum::http::StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/machine/ping-response?id=unknown",
+                axum::http::StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::HEAD)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), status, "{uri}");
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert!(body.is_empty(), "{uri}");
+        }
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ chrono.workspace = true
 axum = "0.7"
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
 tonic = { workspace = true, features = ["tls-native-roots"] }
+prost-types = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

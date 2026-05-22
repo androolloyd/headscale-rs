@@ -1,14 +1,18 @@
-//! `headscale apikeys {create,list,expire,delete}` — wraps
-//! `/api/v1/apikey`.
+//! `headscale apikeys {create,list,expire,delete}` over upstream-compatible
+//! gRPC, with a legacy `/api/v1/apikey` HTTP path kept for explicit
+//! `--server` use.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::{ApiKeyAdminKey, ApiKeyCreated, ApiKeyMintRequest};
+use headscale_api::generated::ApiKey as GrpcApiKey;
 use serde::{Deserialize, Serialize};
 
 use super::AdminError;
 use super::client::AdminClient;
 use super::duration::parse_duration_secs;
+use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured, print_table};
 
 #[derive(Debug, Deserialize)]
@@ -29,12 +33,7 @@ pub async fn create(
     expiration: &str,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let ttl_secs = parse_duration_secs(expiration).map_err(AdminError::Local)?;
-    let ttl_secs = i64::try_from(ttl_secs)
-        .map_err(|_| AdminError::Local(format!("duration '{expiration}' overflows i64")))?;
-    let expires_at = now_unix()
-        .checked_add(ttl_secs)
-        .ok_or_else(|| AdminError::Local(format!("duration '{expiration}' overflows unix time")))?;
+    let expires_at = expiration_unix(expiration)?;
     let key: ApiKeyCreated = client
         .post_json(
             "/apikey",
@@ -51,12 +50,43 @@ pub async fn create(
     Ok(())
 }
 
+pub async fn create_grpc(
+    client: &mut GrpcAdminClient,
+    expiration: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let api_key = client
+        .create_api_key(Some(expiration_unix(expiration)?))
+        .await?;
+    if fmt.is_structured() {
+        print_structured(fmt, &ApiKeyCreated { api_key })?;
+    } else {
+        println!("{api_key}");
+    }
+    Ok(())
+}
+
 pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let response: ApiKeyListResponse = client.get_json("/apikey").await?;
     if fmt.is_structured() {
         print_structured(fmt, &response.api_keys)?;
     } else {
         render_keys(&response.api_keys);
+    }
+    Ok(())
+}
+
+pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+    let keys: Vec<ApiKeyOutput> = client
+        .list_api_keys()
+        .await?
+        .into_iter()
+        .map(ApiKeyOutput::from)
+        .collect();
+    if fmt.is_structured() {
+        print_structured(fmt, &keys)?;
+    } else {
+        render_grpc_keys(&keys);
     }
     Ok(())
 }
@@ -72,6 +102,17 @@ pub async fn expire(
     Ok(())
 }
 
+pub async fn expire_grpc(
+    client: &mut GrpcAdminClient,
+    prefix: Option<&str>,
+    id: Option<u64>,
+) -> Result<(), AdminError> {
+    let body = identify(prefix, id)?;
+    client.expire_api_key(body.prefix, body.id).await?;
+    println!("Key expired");
+    Ok(())
+}
+
 pub async fn delete(
     client: &AdminClient,
     prefix: Option<&str>,
@@ -79,6 +120,17 @@ pub async fn delete(
 ) -> Result<(), AdminError> {
     let body = identify(prefix, id)?;
     client.delete_json_no_content("/apikey", &body).await?;
+    println!("Key deleted");
+    Ok(())
+}
+
+pub async fn delete_grpc(
+    client: &mut GrpcAdminClient,
+    prefix: Option<&str>,
+    id: Option<u64>,
+) -> Result<(), AdminError> {
+    let body = identify(prefix, id)?;
+    client.delete_api_key(body.prefix, body.id).await?;
     println!("Key deleted");
     Ok(())
 }
@@ -93,6 +145,15 @@ fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<
         )),
         (prefix, id) => Ok(ApiKeyIdentifyBody { prefix, id }),
     }
+}
+
+fn expiration_unix(expiration: &str) -> Result<i64, AdminError> {
+    let ttl_secs = parse_duration_secs(expiration).map_err(AdminError::Local)?;
+    let ttl_secs = i64::try_from(ttl_secs)
+        .map_err(|_| AdminError::Local(format!("duration '{expiration}' overflows i64")))?;
+    now_unix()
+        .checked_add(ttl_secs)
+        .ok_or_else(|| AdminError::Local(format!("duration '{expiration}' overflows unix time")))
 }
 
 fn render_keys(keys: &[ApiKeyAdminKey]) {
@@ -114,14 +175,80 @@ fn render_keys(keys: &[ApiKeyAdminKey]) {
     print_table(&["ID", "PREFIX", "EXPIRATION", "CREATED_AT"], &rows);
 }
 
+fn render_grpc_keys(keys: &[ApiKeyOutput]) {
+    if keys.is_empty() {
+        println!("No API keys.");
+        return;
+    }
+    let rows: Vec<Vec<String>> = keys
+        .iter()
+        .map(|k| {
+            vec![
+                k.id.to_string(),
+                k.prefix.clone(),
+                k.expiration_display.clone(),
+                k.created_display.clone(),
+                k.last_seen_display.clone(),
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "PREFIX", "EXPIRATION", "CREATED_AT", "LAST_SEEN"],
+        &rows,
+    );
+}
+
 fn format_optional_unix(v: Option<i64>) -> String {
     v.map_or_else(|| "-".into(), |ts| ts.to_string())
+}
+
+fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ApiKeyOutput {
+    id: u64,
+    prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expiration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_seen: Option<String>,
+    #[serde(skip)]
+    expiration_display: String,
+    #[serde(skip)]
+    created_display: String,
+    #[serde(skip)]
+    last_seen_display: String,
+}
+
+impl From<GrpcApiKey> for ApiKeyOutput {
+    fn from(key: GrpcApiKey) -> Self {
+        let expiration = timestamp_rfc3339(key.expiration.as_ref());
+        let created_at = timestamp_rfc3339(key.created_at.as_ref());
+        let last_seen = timestamp_rfc3339(key.last_seen.as_ref());
+        Self {
+            id: key.id,
+            prefix: key.prefix,
+            expiration_display: expiration.clone().unwrap_or_else(|| "-".into()),
+            created_display: created_at.clone().unwrap_or_else(|| "-".into()),
+            last_seen_display: last_seen.clone().unwrap_or_else(|| "-".into()),
+            expiration,
+            created_at,
+            last_seen,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +261,27 @@ mod tests {
         assert!(identify(Some("abc"), Some(1)).is_err());
         assert!(identify(Some("abc"), None).is_ok());
         assert!(identify(None, Some(1)).is_ok());
+    }
+
+    #[test]
+    fn grpc_api_key_output_formats_timestamps_as_rfc3339() {
+        let out = ApiKeyOutput::from(GrpcApiKey {
+            id: 7,
+            prefix: "hskey-api-abcdefghijkl-***".into(),
+            expiration: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_260,
+                nanos: 0,
+            }),
+            last_seen: None,
+        });
+        assert_eq!(out.id, 7);
+        assert_eq!(out.expiration.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(out.created_at.as_deref(), Some("2024-01-01T00:01:00Z"));
+        assert_eq!(out.last_seen, None);
+        assert_eq!(out.last_seen_display, "-");
     }
 }

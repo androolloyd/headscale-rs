@@ -513,13 +513,33 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
 }
 
 pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), AdminError> {
-    let client = conn.build_client()?;
     let fmt = conn.fmt()?;
+    if conn.should_use_legacy_http_for_migrated_commands() {
+        let client = conn.build_client()?;
+        return match cmd {
+            ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, fmt).await,
+            ApiKeysCmd::List => apikeys::list(&client, fmt).await,
+            ApiKeysCmd::Expire { prefix, id } => {
+                apikeys::expire(&client, prefix.as_deref(), *id).await
+            }
+            ApiKeysCmd::Delete { prefix, id } => {
+                apikeys::delete(&client, prefix.as_deref(), *id).await
+            }
+        };
+    }
+
+    let mut client = conn.build_grpc_client().await?;
     match cmd {
-        ApiKeysCmd::Create { expiration } => apikeys::create(&client, expiration, fmt).await,
-        ApiKeysCmd::List => apikeys::list(&client, fmt).await,
-        ApiKeysCmd::Expire { prefix, id } => apikeys::expire(&client, prefix.as_deref(), *id).await,
-        ApiKeysCmd::Delete { prefix, id } => apikeys::delete(&client, prefix.as_deref(), *id).await,
+        ApiKeysCmd::Create { expiration } => {
+            apikeys::create_grpc(&mut client, expiration, fmt).await
+        }
+        ApiKeysCmd::List => apikeys::list_grpc(&mut client, fmt).await,
+        ApiKeysCmd::Expire { prefix, id } => {
+            apikeys::expire_grpc(&mut client, prefix.as_deref(), *id).await
+        }
+        ApiKeysCmd::Delete { prefix, id } => {
+            apikeys::delete_grpc(&mut client, prefix.as_deref(), *id).await
+        }
     }
 }
 

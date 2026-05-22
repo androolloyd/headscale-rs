@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    CreateUserRequest, DeleteUserRequest, ListUsersRequest, RenameUserRequest, User,
+    ApiKey, CreateApiKeyRequest, CreateUserRequest, DeleteApiKeyRequest, DeleteUserRequest,
+    ExpireApiKeyRequest, ListApiKeysRequest, ListUsersRequest, RenameUserRequest, User,
     headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
@@ -86,6 +87,62 @@ impl GrpcAdminClient {
             .ok_or_else(|| AdminError::Decode("CreateUser response omitted user".into()))
     }
 
+    pub async fn create_api_key(&mut self, expiration: Option<i64>) -> Result<String, AdminError> {
+        let request = self.request(CreateApiKeyRequest {
+            expiration: expiration.map(unix_to_timestamp),
+        })?;
+        Ok(self
+            .client
+            .create_api_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner()
+            .api_key)
+    }
+
+    pub async fn list_api_keys(&mut self) -> Result<Vec<ApiKey>, AdminError> {
+        let request = self.request(ListApiKeysRequest {})?;
+        Ok(self
+            .client
+            .list_api_keys(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner()
+            .api_keys)
+    }
+
+    pub async fn expire_api_key(
+        &mut self,
+        prefix: Option<&str>,
+        id: Option<u64>,
+    ) -> Result<(), AdminError> {
+        let request = self.request(ExpireApiKeyRequest {
+            prefix: prefix.unwrap_or_default().to_string(),
+            id: id.unwrap_or_default(),
+        })?;
+        self.client
+            .expire_api_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
+    pub async fn delete_api_key(
+        &mut self,
+        prefix: Option<&str>,
+        id: Option<u64>,
+    ) -> Result<(), AdminError> {
+        let request = self.request(DeleteApiKeyRequest {
+            prefix: prefix.unwrap_or_default().to_string(),
+            id: id.unwrap_or_default(),
+        })?;
+        self.client
+            .delete_api_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
     pub async fn rename_user_by_id(&mut self, id: u64, new_name: &str) -> Result<User, AdminError> {
         let request = self.request(RenameUserRequest {
             old_id: id,
@@ -138,6 +195,10 @@ impl GrpcAdminClient {
         }
         Ok(request)
     }
+}
+
+fn unix_to_timestamp(seconds: i64) -> prost_types::Timestamp {
+    prost_types::Timestamp { seconds, nanos: 0 }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -323,7 +384,8 @@ mod tests {
     use std::sync::Arc;
 
     use headscale_api::admin::{
-        InMemoryPreauthAdmin, NoopApiKeyAdmin, UserRegistry, WireMachineAdmin,
+        InMemoryPreauthAdmin, NoopApiKeyAdmin, PersistentApiKeyAdmin, UserRegistry,
+        WireMachineAdmin,
     };
     use headscale_api::grpc::upstream::HeadscaleAdminService;
     use headscale_api::policy::PolicyStore;
@@ -449,6 +511,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_client_uses_local_unix_socket_for_api_key_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("headscale.sock");
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            Arc::new(UserRegistry::new()),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(InMemoryPreauthAdmin::new()),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let listener = UnixListener::bind(&socket).unwrap();
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await
+        });
+
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+            .await
+            .unwrap();
+        let expiration = current_unix_i64() + 3600;
+        let secret = client.create_api_key(Some(expiration)).await.unwrap();
+        assert!(secret.starts_with("hskey-api-"));
+
+        let listed = client.list_api_keys().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, 1);
+        assert!(listed[0].expiration.is_some());
+        assert!(listed[0].created_at.is_some());
+
+        client
+            .expire_api_key(None, Some(listed[0].id))
+            .await
+            .unwrap();
+        let expired = client.list_api_keys().await.unwrap();
+        assert_eq!(expired.len(), 1);
+
+        client
+            .delete_api_key(Some(&expired[0].prefix), None)
+            .await
+            .unwrap();
+        assert!(client.list_api_keys().await.unwrap().is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
     async fn grpc_client_insecure_remote_uses_tls_without_verifying_certificate() {
         let dir = tempfile::tempdir().unwrap();
         let material =
@@ -532,5 +646,11 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
             Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
         }
+    }
+
+    fn current_unix_i64() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64)
     }
 }

@@ -860,6 +860,7 @@ mod tests {
                 enabled: true,
                 method: crate::oidc::OidcPkceMethod::S256,
             },
+            policy: crate::oidc::OidcPolicyConfig::default(),
         })
     }
 

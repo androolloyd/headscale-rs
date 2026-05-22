@@ -240,6 +240,7 @@ mod tests {
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             extra_params: BTreeMap::new(),
             pkce: crate::oidc::OidcPkceConfig::default(),
+            policy: crate::oidc::OidcPolicyConfig::default(),
         })
     }
 

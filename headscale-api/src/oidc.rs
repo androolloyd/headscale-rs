@@ -79,6 +79,7 @@ pub struct OidcAuthConfig {
     pub scopes: Vec<String>,
     pub extra_params: BTreeMap<String, String>,
     pub pkce: OidcPkceConfig,
+    pub policy: OidcPolicyConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +268,8 @@ pub enum OidcRuntimeError {
     NonceCookieMissing,
     #[error("nonce did not match")]
     NonceCookieMismatch,
+    #[error(transparent)]
+    Authorization(#[from] OidcAuthorizationError),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -381,6 +384,14 @@ pub fn auth_config_from_core_oidc(
         pkce: OidcPkceConfig {
             enabled: oidc.pkce.enabled,
             method: oidc_pkce_method_from_str(&oidc.pkce.method)?,
+        },
+        policy: OidcPolicyConfig {
+            allowed_domains: oidc.allowed_domains.clone(),
+            allowed_users: oidc.allowed_users.clone(),
+            allowed_groups: oidc.allowed_groups.clone(),
+            email_verified_required: oidc.email_verified_required,
+            expiry: chrono::Duration::from_std(oidc.expiry).unwrap_or(chrono::Duration::MAX),
+            use_expiry_from_token: oidc.use_expiry_from_token,
         },
     })
 }
@@ -703,6 +714,16 @@ pub async fn handle_callback(
                 return oidc_error_response(status_for_runtime_error(&err), err.to_string());
             }
         }
+
+        let mut claims = id_token.claims;
+        let userinfo = fetch_userinfo(&runtime.config, &token).await;
+        merge_userinfo_claims(&mut claims, userinfo.as_ref());
+        if let Err(err) = authorize_claims(&runtime.config.policy, &claims) {
+            let err = OidcRuntimeError::Authorization(err);
+            return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+        }
+        let _node_expiry =
+            determine_node_expiry(&runtime.config.policy, id_token.expiry, Utc::now());
     }
 
     oidc_error_response(
@@ -714,6 +735,8 @@ pub async fn handle_callback(
 #[cfg(feature = "full")]
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
+    #[serde(default)]
+    access_token: String,
     #[serde(default)]
     id_token: String,
 }
@@ -779,6 +802,42 @@ async fn exchange_oauth2_token(
     }
 
     Err(OidcRuntimeError::InvalidCode)
+}
+
+#[cfg(feature = "full")]
+async fn fetch_userinfo(cfg: &OidcAuthConfig, token: &OidcTokenResponse) -> Option<OidcUserInfo> {
+    let endpoint = cfg.userinfo_endpoint.as_ref()?;
+    if token.access_token.is_empty() {
+        return None;
+    }
+
+    let response = match reqwest::Client::new()
+        .get(endpoint)
+        .bearer_auth(&token.access_token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not get OIDC userinfo; only using id_token claims");
+            return None;
+        }
+    };
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "could not get OIDC userinfo; only using id_token claims"
+        );
+        return None;
+    }
+
+    match response.json::<OidcUserInfo>().await {
+        Ok(userinfo) => Some(userinfo),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not decode OIDC userinfo; only using id_token claims");
+            None
+        }
+    }
 }
 
 #[cfg(feature = "full")]
@@ -1080,6 +1139,7 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
         | OidcRuntimeError::IdTokenVerificationFailed
         | OidcRuntimeError::NonceCookieMismatch => StatusCode::FORBIDDEN,
         OidcRuntimeError::RegistrationNotFound => StatusCode::NOT_FOUND,
+        OidcRuntimeError::Authorization(_) => StatusCode::UNAUTHORIZED,
     }
 }
 
@@ -1245,6 +1305,7 @@ mod tests {
             scopes: vec!["openid".into(), "profile".into(), "email".into()],
             extra_params: BTreeMap::from([("domain_hint".into(), "example.com".into())]),
             pkce,
+            policy: OidcPolicyConfig::default(),
         }
     }
 
@@ -1697,7 +1758,8 @@ mod tests {
     async fn oidc_callback_exchanges_code_verifies_id_token_and_nonce_before_completion() {
         let token = Arc::new(RwLock::new(String::new()));
         let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
-        let (_handle, base_url) = oidc_callback_fixture(token.clone(), captured_form.clone()).await;
+        let (_handle, base_url, _) =
+            oidc_callback_fixture(token.clone(), captured_form.clone()).await;
 
         let mut config = auth_config(OidcPkceConfig {
             enabled: true,
@@ -1764,7 +1826,7 @@ mod tests {
     async fn oidc_callback_rejects_missing_nonce_cookie_after_verified_id_token() {
         let token = Arc::new(RwLock::new(String::new()));
         let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
-        let (_handle, base_url) = oidc_callback_fixture(token.clone(), captured_form).await;
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
 
         let mut config = auth_config(OidcPkceConfig::default());
         config.token_endpoint = format!("{base_url}/token");
@@ -1800,7 +1862,7 @@ mod tests {
     async fn oidc_callback_rejects_unverified_id_token() {
         let token = Arc::new(RwLock::new("not-a-jwt".to_string()));
         let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
-        let (_handle, base_url) = oidc_callback_fixture(token, captured_form).await;
+        let (_handle, base_url, _) = oidc_callback_fixture(token, captured_form).await;
 
         let mut config = auth_config(OidcPkceConfig::default());
         config.token_endpoint = format!("{base_url}/token");
@@ -1828,6 +1890,103 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(response_body(response).await, "failed to verify id_token");
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_fetches_userinfo_and_authorizes_merged_claims() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, userinfo_auth) =
+            oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = Some(format!("{base_url}/userinfo"));
+        config.policy = OidcPolicyConfig {
+            allowed_groups: vec!["userinfo-group".into()],
+            allowed_domains: vec!["example.com".into()],
+            allowed_users: vec!["userinfo@example.com".into()],
+            ..OidcPolicyConfig::default()
+        };
+        let runtime = OidcAuthRuntime::new(config);
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(userinfo_auth.read().as_deref(), Some("Bearer access-token"));
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_rejects_claims_after_token_validation() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        config.policy = OidcPolicyConfig {
+            allowed_groups: vec!["missing-group".into()],
+            ..OidcPolicyConfig::default()
+        };
+        let runtime = OidcAuthRuntime::new(config);
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response_body(response).await, "unauthorised group");
     }
 
     #[test]
@@ -2043,13 +2202,19 @@ mod tests {
     async fn oidc_callback_fixture(
         token: Arc<RwLock<String>>,
         captured_form: Arc<RwLock<BTreeMap<String, String>>>,
-    ) -> (tokio::task::JoinHandle<()>, String) {
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        String,
+        Arc<RwLock<Option<String>>>,
+    ) {
         use axum::Json;
         use axum::extract::Form;
         use axum::routing::{get, post};
 
         let token_route = token.clone();
         let captured_route = captured_form.clone();
+        let captured_userinfo_auth = Arc::new(RwLock::new(None));
+        let captured_userinfo_auth_route = captured_userinfo_auth.clone();
         let app = axum::Router::new()
             .route(
                 "/token",
@@ -2075,6 +2240,27 @@ mod tests {
                 ),
             )
             .route(
+                "/userinfo",
+                get(move |headers: HeaderMap| {
+                    let captured_userinfo_auth = captured_userinfo_auth_route.clone();
+                    async move {
+                        *captured_userinfo_auth.write() = headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToOwned::to_owned);
+                        Json(serde_json::json!({
+                            "sub": "subject",
+                            "name": "User Info Name",
+                            "preferred_username": "userinfo",
+                            "email": "userinfo@example.com",
+                            "email_verified": true,
+                            "groups": ["userinfo-group"],
+                            "picture": "https://example.com/userinfo.png",
+                        }))
+                    }
+                }),
+            )
+            .route(
                 "/jwks",
                 get(|| async {
                     Json(serde_json::json!({
@@ -2095,7 +2281,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (handle, base_url)
+        (handle, base_url, captured_userinfo_auth)
     }
 
     #[cfg(feature = "full")]

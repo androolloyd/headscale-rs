@@ -937,6 +937,57 @@ impl MachineRegistry {
         result
     }
 
+    /// Look up a machine by the TS2021 machine key and user label.
+    ///
+    /// Headscale-go's registration state keeps a secondary
+    /// `(MachineKey, UserID)` index so a client that rotates its
+    /// NodeKey but proves the same MachineKey can update the existing
+    /// node instead of creating a duplicate. The in-memory registry is
+    /// small enough that a snapshot scan is sufficient until the
+    /// persisted node store becomes the default.
+    pub fn get_by_machine_key_for_user(
+        &self,
+        machine_key_hex: &str,
+        user: &str,
+    ) -> Option<(String, MachineRecord)> {
+        if machine_key_hex.is_empty() || user.is_empty() {
+            return None;
+        }
+
+        let start = Instant::now();
+        let result = self
+            .inner
+            .read()
+            .iter()
+            .find(|(_, rec)| rec.machine_key_hex == machine_key_hex && rec.user == user)
+            .map(|(node_key, rec)| (node_key.clone(), rec.clone()));
+        self.record_nodestore_operation("get_by_machine_key", start.elapsed());
+        result
+    }
+
+    /// Replace a record's node-key index while preserving the record
+    /// body. This is the wire-registry equivalent of headscale-go's
+    /// `UpdateNode` path during node-key rotation.
+    pub fn replace_node_key(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+    ) {
+        let key_changed = old_node_key_hex != new_node_key_hex;
+        self.update_with_operation("replace_key", |map| {
+            if key_changed {
+                map.remove(old_node_key_hex);
+            }
+            map.insert(new_node_key_hex, rec);
+        });
+        if key_changed {
+            self.active_connections
+                .write()
+                .remove(&stable_id_from_key(old_node_key_hex));
+        }
+    }
+
     /// Number of registered machines.
     pub fn len(&self) -> usize {
         self.inner.read().len()

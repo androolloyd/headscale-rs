@@ -29,6 +29,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::RngCore;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 /// Decode a `RegisterRequest` from a raw body without requiring the
@@ -253,21 +254,47 @@ async fn register_inner(
         }
     };
     let user = redeemed.user.clone();
+    let machine_key_hex = machine_key_hex.unwrap_or_default();
 
     let (hostname, available_routes) = match hostname_and_routes(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
-    let ipv4 = match allocate_register_ip(&state, &format!("{user}:{node_key_hex}")) {
-        Ok(ip) => ip,
-        Err(resp) => return resp,
+
+    let existing_machine = state
+        .machines
+        .get_by_machine_key_for_user(&machine_key_hex, &user);
+    if let Some((old_node_key_hex, _)) = existing_machine.as_ref()
+        && old_node_key_hex != &node_key_hex
+        && let Some(existing_target) = state.machines.get(&node_key_hex)
+        && (existing_target.machine_key_hex != machine_key_hex || existing_target.user != user)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "node key already exists".into(),
+            }),
+        )
+            .into_response();
+    }
+    let ipv4 = if let Some((_, existing)) = existing_machine.as_ref() {
+        existing.ipv4
+    } else {
+        match allocate_register_ip(&state, &format!("{user}:{node_key_hex}")) {
+            Ok(ip) => ip,
+            Err(resp) => return resp,
+        }
     };
     let addr = ipv4.to_string();
+    let forced_tags = existing_machine
+        .as_ref()
+        .map(|(_, existing)| existing.forced_tags.clone())
+        .unwrap_or_else(|| redeemed.tags.clone());
     let approved_routes = match auto_approved_routes_for_node(
         &state.policy,
         &addr,
         Some(&user),
-        &redeemed.tags,
+        &forced_tags,
         &[],
         &available_routes,
     ) {
@@ -282,33 +309,59 @@ async fn register_inner(
                 .into_response();
         }
     };
+    let approved_routes = match existing_machine.as_ref() {
+        Some((_, existing)) => merge_existing_approved_routes(
+            &existing.approved_routes,
+            &available_routes,
+            approved_routes,
+        ),
+        None => approved_routes,
+    };
     // P1 lifecycle: stamp `created_at` / `last_seen` at registration
     // time + propagate the preauth's `ephemeral` flag. `forced_tags`
     // adopts the preauth's tag list verbatim so the very first /map
     // call emits the operator's intended tags; later
     // `POST /api/v1/machines/{id}/tags` overrides on demand.
     let now = chrono::Utc::now();
+    let created_at = existing_machine
+        .as_ref()
+        .map(|(_, existing)| existing.created_at)
+        .unwrap_or(now);
+    let ephemeral = existing_machine
+        .as_ref()
+        .map(|(_, existing)| existing.ephemeral)
+        .unwrap_or(redeemed.ephemeral);
+    let (disco_key, endpoints) = existing_machine
+        .as_ref()
+        .map(|(_, existing)| (existing.disco_key.clone(), existing.endpoints.clone()))
+        .unwrap_or((None, Vec::new()));
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
-        machine_key_hex: machine_key_hex.unwrap_or_default(),
+        machine_key_hex,
         user: user.clone(),
         hostname,
         ipv4,
         // Wall 7: DiscoKey + Endpoints arrive on the `/map` call, not
-        // on register. Start empty; `map_inner` upserts a fresh record
-        // with the populated fields on the client's first map request.
-        disco_key: None,
-        endpoints: Vec::new(),
+        // on register. New registrations start empty; same-machine
+        // reauth preserves the last map-provided values.
+        disco_key,
+        endpoints,
         expiry: body.expiry,
         last_seen: now,
-        ephemeral: redeemed.ephemeral,
-        created_at: now,
-        forced_tags: redeemed.tags,
+        ephemeral,
+        created_at,
+        forced_tags,
         available_routes,
         approved_routes,
         register_method: 1,
     };
-    state.machines.upsert(node_key_hex.clone(), rec);
+    if let Some((old_node_key_hex, _)) = existing_machine {
+        state
+            .machines
+            .replace_node_key(&old_node_key_hex, node_key_hex.clone(), rec);
+    } else {
+        state.machines.upsert(node_key_hex.clone(), rec);
+    }
 
     let rec = state
         .machines
@@ -389,6 +442,21 @@ fn hostname_and_routes(
         })?
         .unwrap_or_default();
     Ok((hostname, available_routes))
+}
+
+fn merge_existing_approved_routes(
+    existing_approved_routes: &[String],
+    available_routes: &[String],
+    auto_approved_routes: Vec<String>,
+) -> Vec<String> {
+    let available: BTreeSet<&str> = available_routes.iter().map(String::as_str).collect();
+    let mut merged: BTreeSet<String> = existing_approved_routes
+        .iter()
+        .filter(|route| available.contains(route.as_str()))
+        .cloned()
+        .collect();
+    merged.extend(auto_approved_routes);
+    merged.into_iter().collect()
 }
 
 fn logout_existing_node(
@@ -759,6 +827,130 @@ mod tests {
         let node = record_to_map_node(&rec, "example.test");
         let expected_machine = format!("mkey:{machine_key_hex}");
         assert_eq!(node.machine.as_deref(), Some(expected_machine.as_str()));
+    }
+
+    #[tokio::test]
+    async fn authkey_register_same_machine_user_rotates_node_key_in_place() {
+        let (state, redeemer, _dir) = fixture();
+        let first_authkey = "hskey-auth-rotation-first";
+        let second_authkey = "hskey-auth-rotation-second";
+        redeemer.insert(first_authkey, "alice");
+        redeemer.insert(second_authkey, "alice");
+        let app = router(state.clone());
+        let first_node_key = "38".repeat(32);
+        let second_node_key = "39".repeat(32);
+        let machine_key_hex = "88".repeat(32);
+
+        let mut body = req_body(&first_node_key, first_authkey);
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.40.0.0/24"]);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{first_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.machines.len(), 1);
+
+        let mut first = state.machines.get(&first_node_key).unwrap();
+        let first_ipv4 = first.ipv4;
+        let first_created_at = first.created_at;
+        first.disco_key = Some("discokey:old".into());
+        first.endpoints = vec!["198.51.100.10:41641".into()];
+        first.approved_routes = vec!["10.40.0.0/24".into(), "10.41.0.0/24".into()];
+        state.machines.upsert(first_node_key.clone(), first);
+
+        let mut body = req_body(&second_node_key, second_authkey);
+        body["Hostinfo"]["Hostname"] = serde_json::json!("peer-rotated");
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.40.0.0/24", "10.42.0.0/24"]);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{second_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.machines.get(&first_node_key).is_none());
+        let rotated = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(rotated.node_key_hex, second_node_key);
+        assert_eq!(rotated.machine_key_hex, machine_key_hex);
+        assert_eq!(rotated.user, "alice");
+        assert_eq!(rotated.hostname, "peer-rotated");
+        assert_eq!(rotated.ipv4, first_ipv4);
+        assert_eq!(rotated.created_at, first_created_at);
+        assert_eq!(rotated.disco_key.as_deref(), Some("discokey:old"));
+        assert_eq!(rotated.endpoints, vec!["198.51.100.10:41641"]);
+        assert_eq!(
+            rotated.available_routes,
+            vec!["10.40.0.0/24", "10.42.0.0/24"]
+        );
+        assert_eq!(rotated.approved_routes, vec!["10.40.0.0/24"]);
+    }
+
+    #[tokio::test]
+    async fn authkey_machine_rekey_rejects_occupied_node_key() {
+        let (state, redeemer, _dir) = fixture();
+        redeemer.insert("hskey-auth-alice-first", "alice");
+        redeemer.insert("hskey-auth-bob", "bob");
+        redeemer.insert("hskey-auth-alice-rotate", "alice");
+        let app = router(state.clone());
+        let alice_node_key = "3a".repeat(32);
+        let bob_node_key = "3b".repeat(32);
+        let alice_machine_key = "8a".repeat(32);
+        let bob_machine_key = "8b".repeat(32);
+
+        for (node_key, machine_key, authkey) in [
+            (
+                &alice_node_key,
+                &alice_machine_key,
+                "hskey-auth-alice-first",
+            ),
+            (&bob_node_key, &bob_machine_key, "hskey-auth-bob"),
+        ] {
+            let body = req_body(node_key, authkey);
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/machine/nodekey:{node_key}/register"))
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            req.extensions_mut()
+                .insert(NoisePeerMachineKey(machine_key.clone()));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let body = req_body(&bob_node_key, "hskey-auth-alice-rotate");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{bob_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(alice_machine_key.clone()));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "node key already exists");
+        assert_eq!(state.machines.len(), 2);
+        assert_eq!(
+            state.machines.get(&bob_node_key).unwrap().machine_key_hex,
+            bob_machine_key
+        );
+        assert!(state.machines.get(&alice_node_key).is_some());
     }
 
     #[tokio::test]

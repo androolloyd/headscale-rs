@@ -184,7 +184,7 @@ pub mod upstream {
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
     };
     use crate::tailscale_wire::wire::stable_id_from_key;
-    use crate::tailscale_wire::{MachineRecord, MachineRegistry};
+    use crate::tailscale_wire::{IpAllocator, MachineRecord, MachineRegistry};
 
     const AUTH_PREFIX: &str = "Bearer ";
 
@@ -200,6 +200,7 @@ pub mod upstream {
         policy_mode: PolicyMode,
         registration_cache: Arc<crate::tailscale_wire::RegistrationCache>,
         wire_registry: Option<Arc<MachineRegistry>>,
+        ip_allocator: Option<Arc<dyn IpAllocator>>,
         primary_routes: Arc<Mutex<PrimaryRouteState>>,
         require_api_key_auth: bool,
     }
@@ -295,6 +296,7 @@ pub mod upstream {
                 policy_mode: PolicyMode::Memory,
                 registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
                 wire_registry: None,
+                ip_allocator: None,
                 primary_routes: Arc::new(Mutex::new(PrimaryRouteState::new())),
                 require_api_key_auth: false,
             }
@@ -383,6 +385,11 @@ pub mod upstream {
             self
         }
 
+        pub fn with_ip_allocator(mut self, ip_allocator: Arc<dyn IpAllocator>) -> Self {
+            self.ip_allocator = Some(ip_allocator);
+            self
+        }
+
         pub fn into_service_server(self) -> HeadscaleServiceServer<Self> {
             HeadscaleServiceServer::new(self)
         }
@@ -426,6 +433,7 @@ pub mod upstream {
             MachineAdminRecord {
                 node_id: 0,
                 ipv4: cgnat_ip_from_key(&node_key).to_string(),
+                ipv6: None,
                 id: node_key,
                 name: name.to_string(),
                 user: user.to_string(),
@@ -948,9 +956,12 @@ pub mod upstream {
             if !request.into_inner().confirmed {
                 return Err(Status::unknown("not confirmed, aborting"));
             }
-            Ok(Response::new(BackfillNodeIPsResponse {
-                changes: Vec::new(),
-            }))
+            let changes = self
+                .machines
+                .backfill_node_ips(self.ip_allocator.as_deref())
+                .await
+                .map_err(machine_error_to_status)?;
+            Ok(Response::new(BackfillNodeIPsResponse { changes }))
         }
 
         async fn create_api_key(
@@ -1329,6 +1340,7 @@ pub mod upstream {
             name: record.hostname,
             user: record.user,
             ipv4: record.ipv4.to_string(),
+            ipv6: None,
             online: !expired,
             last_seen: record.last_seen.timestamp().max(0) as u64,
             created_at: record.created_at.timestamp().max(0) as u64,
@@ -1363,7 +1375,7 @@ pub mod upstream {
             machine_key: prefix_key("mkey:", &machine.machine_key_hex),
             node_key: prefix_key("nodekey:", &machine.id),
             disco_key: String::new(),
-            ip_addresses: vec![machine.ipv4.clone()],
+            ip_addresses: node_ip_addresses(machine),
             name: machine.name.clone(),
             user,
             last_seen: nonzero_u64_timestamp(machine.last_seen),
@@ -1381,6 +1393,17 @@ pub mod upstream {
             subnet_routes: subnet_routes.to_vec(),
             tags: machine.tags.clone(),
         })
+    }
+
+    fn node_ip_addresses(machine: &MachineAdminRecord) -> Vec<String> {
+        let mut addresses = Vec::with_capacity(1 + usize::from(machine.ipv6.is_some()));
+        if !machine.ipv4.is_empty() {
+            addresses.push(machine.ipv4.clone());
+        }
+        if let Some(ipv6) = machine.ipv6.as_ref().filter(|ipv6| !ipv6.is_empty()) {
+            addresses.push(ipv6.clone());
+        }
+        addresses
     }
 
     fn machine_numeric_id(machine: &MachineAdminRecord) -> u64 {
@@ -2845,6 +2868,54 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn persistent_node_grpc_ip_addresses_emit_ipv4_then_ipv6() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: serde_json::json!({"Hostname": "dual-stack"}),
+                ipv4: Some("100.64.0.9".into()),
+                ipv6: Some("fd7a:115c:a1e0::9".into()),
+                hostname: "dual-stack".into(),
+                given_name: "dual-stack".into(),
+                user_id: Some(1),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let node = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .nodes
+            .pop()
+            .expect("node");
+
+        assert_eq!(
+            node.ip_addresses,
+            vec!["100.64.0.9".to_string(), "fd7a:115c:a1e0::9".to_string()]
+        );
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn upstream_node_grpc_list_get_rename_tags_expire_delete() {
         let (service, machines) = admin_service_with_machines().await;
         let node_key = "aa".repeat(32);
@@ -3082,6 +3153,7 @@ mod upstream_tests {
             name: "bob-laptop".into(),
             user: "bob".into(),
             ipv4: "100.64.0.7".into(),
+            ipv6: None,
             online: true,
             last_seen: 0,
             created_at: 0,
@@ -3295,6 +3367,54 @@ mod upstream_tests {
             .unwrap()
             .into_inner();
         assert!(ok.changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_node_grpc_backfill_assigns_missing_ipv4() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        let service = service.with_ip_allocator(Arc::new(MockIpAllocator));
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: serde_json::json!({"Hostname": "needs-ip"}),
+                ipv4: None,
+                ipv6: Some("fd7a:115c:a1e0::10".into()),
+                hostname: "needs-ip".into(),
+                given_name: "needs-ip".into(),
+                user_id: Some(1),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let changes = service
+            .backfill_node_i_ps(Request::new(BackfillNodeIPsRequest { confirmed: true }))
+            .await
+            .unwrap()
+            .into_inner()
+            .changes;
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].starts_with("assigned IPv4 \"100."));
+        assert!(row.ipv4.as_deref().unwrap_or_default().starts_with("100."));
+        assert_eq!(row.ipv6.as_deref(), Some("fd7a:115c:a1e0::10"));
+        db.close().await;
     }
 
     #[tokio::test]

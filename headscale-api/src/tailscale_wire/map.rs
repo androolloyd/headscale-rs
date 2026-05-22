@@ -66,7 +66,7 @@ use serde::Serialize;
 use super::register::record_to_map_node;
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
-    DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PortRange,
+    DebugConfig, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PortRange,
     stable_id_from_key, strip_key_prefix,
 };
 use super::{MachineRecord, WireState};
@@ -561,11 +561,17 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // sidecar (see `derp_config::load_derp_map`).
         derp_map: Some((*state.derp_map).clone()),
         domain: tailnet_domain,
+        collect_services: Some(false),
         // Headscale-go v0.28 sends the full per-node filter through
         // PacketFilters["base"], already reduced for this map
         // recipient.
         packet_filters: packet_filters_for_node(&state.policy, &packet_filter_nodes, self_node_id),
         ssh_policy: ssh_policy_for_snapshot(&state.policy, &snapshot, &node_key_hex),
+        control_time: Some(chrono::Utc::now()),
+        debug: Some(DebugConfig {
+            disable_log_tail: true,
+            ..DebugConfig::default()
+        }),
         // FULL MapResponse — NOT a keepalive. Upstream
         // `controlclient/direct.go::sendMapRequest` `continue`s past
         // the netmap-update handler when `KeepAlive=true`, which
@@ -819,8 +825,14 @@ fn rebuild_map_chunk(
         dns_config: Some(dns_config),
         derp_map: Some((**derp_map).clone()),
         domain: tailnet_domain,
+        collect_services: Some(false),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
         ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
+        control_time: Some(chrono::Utc::now()),
+        debug: Some(DebugConfig {
+            disable_log_tail: true,
+            ..DebugConfig::default()
+        }),
         keep_alive: false,
         node_key_expired: false,
         ..MapResponse::default()
@@ -1037,6 +1049,12 @@ mod tests {
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
         assert_eq!(mr.peers[0].name, "peer-b");
         assert_eq!(mr.domain, "");
+        assert_eq!(mr.collect_services, Some(false));
+        assert!(mr.control_time.is_some());
+        assert_eq!(
+            mr.debug.as_ref().map(|debug| debug.disable_log_tail),
+            Some(true)
+        );
         // Full MapResponse — must NOT be flagged as a keepalive.
         // Wall 5 regression: when `KeepAlive=true` the upstream client
         // skips the netmap-update handler and the daemon stays in

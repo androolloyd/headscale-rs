@@ -672,14 +672,8 @@ pub struct SimpleLogin {
 /// The upstream `tailcfg.MapRequest` carries ~15 fields. We model only
 /// the few that affect whether the client continues to poll. The
 /// `Stream` flag in particular is critical: when true, the client
-/// expects an HTTP chunked / NDJSON stream of map updates rather than
-/// a single response body.
-///
-/// **Decision:** we always return a single-response body (Stream=false
-/// behaviour) regardless of the request flag. This is wrong long-term
-/// — the stock client *does* set Stream=true — but it lets us return
-/// a usable MapResponse for the interop test without spinning a
-/// streaming-writer task. Marked as a follow-up in the blocker doc.
+/// expects an HTTP stream of length-prefixed map updates rather than a
+/// single response body.
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapRequest {
@@ -687,11 +681,14 @@ pub struct MapRequest {
     #[serde(default)]
     pub version: u32,
     /// Whether the client wants the long-poll stream. We ignore this
-    /// (see note above) but accept it on the wire.
+    /// only for non-streaming test paths; runtime map handling emits
+    /// upstream-style framed chunks when this is true.
     #[serde(default)]
     pub stream: bool,
     /// Whether the client wants the response in compressed form.
-    /// Currently ignored.
+    /// Upstream currently recognizes `"zstd"`; absent or unknown values
+    /// still use the length-prefixed frame but leave the JSON body
+    /// uncompressed.
     #[serde(default)]
     pub compress: String,
     /// Whether the server should include keepalive frames in a stream.

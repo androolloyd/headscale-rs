@@ -9,24 +9,26 @@
 //!
 //! ## Decision log
 //!
-//! - **`Stream=true` framing: `[u32 LE size][zstd(JSON)]`.** Discovered
-//!   while diagnosing Wall 5 in `docs/tailscale-interop-blocker.md`.
+//! - **`Stream=true` framing: `[u32 LE size][body]`, with optional
+//!   `zstd(JSON)`.** Discovered while diagnosing Wall 5 in
+//!   `docs/tailscale-interop-blocker.md`.
 //!   Upstream's `tailscale/control/controlclient/direct.go::sendMapRequest`
-//!   reads bytes with `binary.LittleEndian.Uint32(siz[:4])` then
-//!   `zstdframe.AppendDecode(...)`. The framing is NOT newline-delimited,
-//!   the body is NOT plaintext JSON, and the stream is NOT terminated
-//!   naturally — the client expects keepalive frames carrying
-//!   `zstd({"KeepAlive":true})` every <120 s (`watchdogTimeout`).
+//!   reads bytes with `binary.LittleEndian.Uint32(siz[:4])`, then
+//!   only zstd-decodes when `MapRequest.Compress == "zstd"`. The
+//!   framing is NOT newline-delimited, and the stream is NOT
+//!   terminated naturally — the client expects keepalive frames
+//!   carrying `{"KeepAlive":true}` in the same compression mode every
+//!   <120 s (`watchdogTimeout`).
 //!   Our `Stream=false` test path emits a single plaintext JSON
 //!   `MapResponse` for the non-noise direct-router tests; the prod
-//!   `Stream=true` path emits the framed/compressed stream.
+//!   `Stream=true` path emits the upstream framed stream.
 //! - **Long-poll wake via `tokio::sync::Notify` on the registry.**
 //!   Cheaper than a watch channel for the 2-peer test and the
 //!   correctness story is simpler — every register notifies, every
 //!   waiter wakes and recomputes the snapshot.
 //! - **Keepalive interval = 30s.** Upstream watchdog is 120s, so this
 //!   leaves 4x headroom for slow links. Keepalive bytes are
-//!   `zstd_frame({"KeepAlive":true})`, NOT a bare newline.
+//!   a framed `{"KeepAlive":true}` payload, NOT a bare newline.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -76,6 +78,32 @@ use super::{MachineRecord, WireState};
 
 use crate::dns::{DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
+
+const MAP_COMPRESSION_ZSTD: &str = "zstd";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MapFrameCompression {
+    None,
+    Zstd,
+}
+
+impl MapFrameCompression {
+    fn from_request(compress: &str) -> Self {
+        if compress == MAP_COMPRESSION_ZSTD {
+            Self::Zstd
+        } else {
+            Self::None
+        }
+    }
+
+    fn encode(self, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        match self {
+            Self::None => Ok(bytes.to_vec()),
+            Self::Zstd => zstd::bulk::compress(bytes, 3)
+                .map_err(|e| std::io::Error::other(format!("zstd encode: {e}"))),
+        }
+    }
+}
 
 /// Snapshot the registry into MagicDNS-record shape and ask the
 /// operator-configured [`DnsStore`] to build the `DnsConfig` for this
@@ -873,12 +901,13 @@ async fn map_inner(
         ..MapResponse::default()
     };
     if req.stream {
-        // Stream:true — emit length-prefixed zstd-compressed
-        // MapResponse JSON chunks. See module decision log for the
-        // wire-format details. The first chunk goes out immediately;
-        // registry wakes use incremental peer deltas, configuration
-        // wakes rebuild the broader snapshot, and keepalive ticks emit
-        // a compact `{"KeepAlive":true}` frame.
+        // Stream:true — emit length-prefixed MapResponse JSON chunks,
+        // zstd-compressed only when the request negotiated it. See
+        // module decision log for the wire-format details. The first
+        // chunk goes out immediately; registry wakes use incremental
+        // peer deltas, configuration wakes rebuild the broader
+        // snapshot, and keepalive ticks emit a compact
+        // `{"KeepAlive":true}` frame in the same compression mode.
         //
         // Per `docs/tailscale-interop-blocker.md` "Wall 5":
         // the body must NOT terminate naturally — the client expects
@@ -886,7 +915,8 @@ async fn map_inner(
         let initial_self_node = resp.node.clone();
         let initial_peer_state = peer_state_from_nodes(&resp.peers);
         let initial_peer_ids = peer_ids_from_snapshot(&snapshot, &node_key_hex);
-        let first = match build_framed_chunk(&resp) {
+        let compression = MapFrameCompression::from_request(&req.compress);
+        let first = match build_framed_chunk(&resp, compression) {
             Ok(v) => v,
             Err(e) => {
                 return (
@@ -941,6 +971,7 @@ async fn map_inner(
                 initial_peer_ids,
                 connection_guard,
                 cap_version,
+                compression,
             ),
             move |(
                 first_opt,
@@ -955,6 +986,7 @@ async fn map_inner(
                 initial_peer_ids,
                 connection_guard,
                 cap_version,
+                compression,
             )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
@@ -972,6 +1004,7 @@ async fn map_inner(
                             initial_peer_ids,
                             connection_guard,
                             cap_version,
+                            compression,
                         ),
                     ));
                 }
@@ -1001,9 +1034,9 @@ async fn map_inner(
                         // keepalive frame and let the next iteration
                         // (or stream end) handle teardown.
                         if res.is_err() {
-                            (build_keepalive_chunk(), last_peer_state, last_self_node)
+                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, compression, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
@@ -1011,7 +1044,7 @@ async fn map_inner(
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "policy"),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "policy"),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
@@ -1021,7 +1054,7 @@ async fn map_inner(
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "config"),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "config"),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
@@ -1032,7 +1065,7 @@ async fn map_inner(
                             "keepalive",
                             stable_id_from_key(&self_node_key),
                         );
-                        (build_keepalive_chunk(), last_peer_state, last_self_node)
+                        (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                     }
                     }
                 };
@@ -1051,6 +1084,7 @@ async fn map_inner(
                         initial_peer_ids,
                         connection_guard,
                         cap_version,
+                        compression,
                     ),
                 ))
             },
@@ -1136,13 +1170,14 @@ fn rebuild_peer_delta_chunk(
     self_node_key: &str,
     dns: &Arc<DnsStore>,
     cap_version: u32,
+    compression: MapFrameCompression,
     last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
     if machines.get(self_node_key).is_none() {
         return (
-            build_keepalive_chunk(),
+            build_keepalive_chunk(compression),
             last_peer_state.clone(),
             last_self_node.cloned(),
         );
@@ -1230,7 +1265,7 @@ fn rebuild_peer_delta_chunk(
         ..MapResponse::default()
     };
     (
-        build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk()),
+        build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
         current_peer_state,
         current_self_node,
     )
@@ -1249,10 +1284,11 @@ fn rebuild_map_chunk(
     derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
     dns: &Arc<DnsStore>,
     cap_version: u32,
+    compression: MapFrameCompression,
     response_type: &str,
 ) -> Vec<u8> {
     if machines.get(self_node_key).is_none() {
-        return build_keepalive_chunk();
+        return build_keepalive_chunk(compression);
     }
     machines.record_mapresponse_generated(response_type);
     let snapshot = machines.snapshot();
@@ -1273,7 +1309,7 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
     ) else {
-        return build_keepalive_chunk();
+        return build_keepalive_chunk(compression);
     };
     let peers = visible_peer_map_nodes(
         &snapshot,
@@ -1306,43 +1342,40 @@ fn rebuild_map_chunk(
         keep_alive: false,
         ..MapResponse::default()
     };
-    build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
+    build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
 }
 
 /// Encode a MapResponse into the wire framing the streaming
-/// `/machine/map` endpoint uses: `[u32 LE total size][zstd(JSON)]`.
-/// The Go upstream encoder is `klauspost/compress/zstd`'s default
-/// frame mode (`zstdframe.AppendEncode`); our `zstd::bulk::compress`
-/// with default level produces frame-mode output that the upstream
-/// decoder accepts without any custom dictionary.
-pub(crate) fn build_framed_chunk(mr: &MapResponse) -> Result<Vec<u8>, std::io::Error> {
+/// `/machine/map` endpoint uses: `[u32 LE total size][body]`. The body
+/// is plaintext JSON unless `MapRequest.Compress == "zstd"`, matching
+/// headscale-go's `poll.go::writeMap`.
+pub(crate) fn build_framed_chunk(
+    mr: &MapResponse,
+    compression: MapFrameCompression,
+) -> Result<Vec<u8>, std::io::Error> {
     let json_bytes =
         serde_json::to_vec(mr).map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
-    let compressed = zstd::bulk::compress(&json_bytes, 3)
-        .map_err(|e| std::io::Error::other(format!("zstd encode: {e}")))?;
-    let mut out = Vec::with_capacity(4 + compressed.len());
-    let len = compressed.len() as u32;
+    let body = compression.encode(&json_bytes)?;
+    let mut out = Vec::with_capacity(4 + body.len());
+    let len = body.len() as u32;
     out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&compressed);
+    out.extend_from_slice(&body);
     Ok(out)
 }
 
-/// Build the keepalive frame: `[u32 LE size][zstd({"KeepAlive":true})]`.
-/// Cached on the upstream side as `keepAliveZ` for the fast-path
-/// compare — caching here is unnecessary because the responder
-/// re-uses the same body bytes for every keepalive emission, and the
-/// upstream still hashes the compressed bytes for its own cache.
-pub(crate) fn build_keepalive_chunk() -> Vec<u8> {
+/// Build the keepalive frame in the negotiated map compression mode.
+pub(crate) fn build_keepalive_chunk(compression: MapFrameCompression) -> Vec<u8> {
     // `tailscale/control/controlclient/direct.go::justKeepAliveStr`
-    // = `{"KeepAlive":true}` — matched byte-for-byte so the upstream
-    // fast-path on cached compressed-bytes lights up.
+    // = `{"KeepAlive":true}` — matched byte-for-byte before optional
+    // compression so the upstream fast-path sees the expected body.
     const KEEPALIVE_JSON: &[u8] = b"{\"KeepAlive\":true}";
-    let compressed =
-        zstd::bulk::compress(KEEPALIVE_JSON, 3).expect("zstd compress of static bytes never fails");
-    let mut out = Vec::with_capacity(4 + compressed.len());
-    let len = compressed.len() as u32;
+    let body = compression
+        .encode(KEEPALIVE_JSON)
+        .expect("encoding static keepalive bytes never fails");
+    let mut out = Vec::with_capacity(4 + body.len());
+    let len = body.len() as u32;
     out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&compressed);
+    out.extend_from_slice(&body);
     out
 }
 
@@ -2449,10 +2482,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// Decode a single `[u32 LE size][zstd(JSON)]` framed chunk back
-    /// into the original JSON bytes. Mirrors what upstream
-    /// `controlclient/direct.go::decodeMsg` does on the wire.
-    fn decode_framed(bytes: &[u8]) -> Vec<u8> {
+    /// Return the body from a single `[u32 LE size][body]` frame.
+    fn framed_body(bytes: &[u8]) -> &[u8] {
         assert!(
             bytes.len() >= 4,
             "framed chunk too short: {} bytes",
@@ -2465,7 +2496,14 @@ mod tests {
             "frame size mismatch: header says {size}, body has {}",
             bytes.len() - 4
         );
-        zstd::bulk::decompress(&bytes[4..], 16 * 1024 * 1024).expect("valid zstd frame")
+        &bytes[4..]
+    }
+
+    /// Decode a single `[u32 LE size][zstd(JSON)]` framed chunk back
+    /// into the original JSON bytes. Mirrors what upstream
+    /// `controlclient/direct.go::decodeMsg` does when Compress=zstd.
+    fn decode_framed(bytes: &[u8]) -> Vec<u8> {
+        zstd::bulk::decompress(framed_body(bytes), 16 * 1024 * 1024).expect("valid zstd frame")
     }
 
     /// Stream:true: notify_waiters on the registry produces a follow-up
@@ -2482,7 +2520,7 @@ mod tests {
 
         let app = router(state.clone());
         let public_app = public_router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -2500,7 +2538,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // First chunk: a single-peer MapResponse (no peers yet),
-        // length-prefixed + zstd-framed.
+        // length-prefixed + zstd-compressed.
         let mut body = resp.into_body();
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
@@ -2581,6 +2619,48 @@ mod tests {
         assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"done\"} 1\n"));
     }
 
+    /// Upstream always length-prefixes map stream frames, but only
+    /// zstd-compresses the frame body when the request asks for it.
+    #[tokio::test]
+    async fn stream_true_without_compress_emits_plain_framed_json() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = framed_body(&chunk);
+        let mr: MapResponse = serde_json::from_slice(decoded).unwrap();
+        assert_eq!(mr.peers.len(), 1);
+        assert!(
+            zstd::bulk::decompress(decoded, 16 * 1024 * 1024).is_err(),
+            "unnegotiated stream frame should not be zstd-compressed"
+        );
+    }
+
     /// audit-2 C-1: a registry change fired **before** the unfold
     /// re-parks on `changed()` MUST still wake the next chunk.
     ///
@@ -2600,7 +2680,7 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2671,7 +2751,7 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2740,7 +2820,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2789,7 +2869,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2862,7 +2942,7 @@ mod tests {
         );
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -2966,7 +3046,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -3054,7 +3134,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -3149,7 +3229,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -3249,7 +3329,7 @@ mod tests {
 
         let app = router(state.clone());
         let public_app = public_router(state);
-        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
             .oneshot(
@@ -3314,7 +3394,7 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state);
-        let req_body = serde_json::json!({ "Stream": true, "Version": 133 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 133, "Compress": "zstd" });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -3682,14 +3762,8 @@ mod tests {
         assert!(node.cap_map.contains_key("randomize-client-port"));
     }
 
-    /// Compatibility sample: a hand-built MapResponse, run through
-    /// `build_framed_chunk`, must round-trip through the upstream
-    /// decoding rule — `[u32 LE size][zstd(JSON)]` → `Node` present.
-    /// Pins the framing against accidental regressions in
-    /// `build_framed_chunk`.
-    #[test]
-    fn framed_chunk_matches_upstream_decoder_shape() {
-        let mr = MapResponse {
+    fn framed_chunk_fixture() -> MapResponse {
+        MapResponse {
             node: Some(MapNode {
                 id: 42,
                 stable_id: "n42".into(),
@@ -3725,8 +3799,18 @@ mod tests {
             packet_filter: allow_all_packet_filter(),
             ssh_policy: None,
             ..MapResponse::default()
-        };
-        let bytes = build_framed_chunk(&mr).expect("framed chunk encodes");
+        }
+    }
+
+    /// Compatibility sample: a hand-built MapResponse, run through
+    /// `build_framed_chunk`, must round-trip through the upstream
+    /// decoding rule when `MapRequest.Compress == "zstd"`:
+    /// `[u32 LE size][zstd(JSON)]` -> `Node` present.
+    #[test]
+    fn framed_chunk_matches_upstream_zstd_decoder_shape() {
+        let mr = framed_chunk_fixture();
+        let bytes =
+            build_framed_chunk(&mr, MapFrameCompression::Zstd).expect("framed chunk encodes");
         // Decode the way upstream does.
         let size = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         assert_eq!(bytes.len(), 4 + size);
@@ -3743,6 +3827,25 @@ mod tests {
                 .get("User")
                 .and_then(serde_json::Value::as_u64),
             Some(7)
+        );
+    }
+
+    /// If `MapRequest.Compress` is absent or unknown, headscale-go
+    /// still frames the chunk but leaves the JSON body uncompressed.
+    #[test]
+    fn framed_chunk_without_compression_is_plain_json() {
+        let mr = framed_chunk_fixture();
+        let bytes =
+            build_framed_chunk(&mr, MapFrameCompression::None).expect("framed chunk encodes");
+        let body = framed_body(&bytes);
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert!(
+            v.get("Node").is_some(),
+            "Node field present after framed encode"
+        );
+        assert!(
+            zstd::bulk::decompress(body, 16 * 1024 * 1024).is_err(),
+            "plain framed body should not be zstd-compressed"
         );
     }
 }

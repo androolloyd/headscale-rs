@@ -768,8 +768,8 @@ pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMa
     }
 }
 
-pub async fn handle_debug_registration_cache() -> Response {
-    match serde_json::to_string_pretty(&debug_registration_cache_info()) {
+pub async fn handle_debug_registration_cache(State(state): State<WireState>) -> Response {
+    match serde_json::to_string_pretty(&debug_registration_cache_info(&state)) {
         Ok(body) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
@@ -2124,12 +2124,27 @@ fn debug_derp_string(derp_map: &DerpMap) -> String {
     out
 }
 
-fn debug_registration_cache_info() -> DebugRegistrationCacheInfo {
+fn debug_registration_cache_info(state: &WireState) -> DebugRegistrationCacheInfo {
     DebugRegistrationCacheInfo {
         cache_type: "zcache".to_string(),
-        expiration: "15m0s".to_string(),
-        cleanup: "20m0s".to_string(),
+        expiration: go_duration_string(state.registration_cache.expiration()),
+        cleanup: go_duration_string(state.registration_cache.cleanup_interval()),
         status: "active".to_string(),
+    }
+}
+
+fn go_duration_string(duration: std::time::Duration) -> String {
+    let total = duration.as_secs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 

@@ -716,7 +716,7 @@ pub mod upstream {
                 .ok_or_else(|| Status::not_found("user not found"))?;
             let mut record = self
                 .registration_cache
-                .remove(&body.key)
+                .get(&body.key)
                 .map(wire_record_to_machine_admin)
                 .ok_or_else(|| Status::not_found("registration not found"))?;
             record.user = user.name;
@@ -727,6 +727,8 @@ pub mod upstream {
                 .create(record)
                 .await
                 .map_err(machine_error_to_status)?;
+            self.registration_cache
+                .complete(&body.key, machine_admin_to_wire_record(&node));
             Ok(Response::new(RegisterNodeResponse {
                 node: Some(machine_to_node(&node, &self.users).await?),
             }))
@@ -1875,6 +1877,33 @@ mod upstream_tests {
         assert_eq!(registration_id.len(), 24);
         assert_eq!(registration_cache.len(), 1);
 
+        let followup_body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": pending_response.auth_url,
+        });
+        let followup_task = {
+            let app = app.clone();
+            let node_key_hex = node_key_hex.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                        .body(axum::body::Body::from(
+                            serde_json::to_vec(&followup_body).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !followup_task.is_finished(),
+            "follow-up register should wait for CLI approval"
+        );
+
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
@@ -1892,22 +1921,9 @@ mod upstream_tests {
         assert!(registration_cache.is_empty());
         assert_eq!(machines.get(&node_key_hex).unwrap().user, "alice");
 
-        let followup_body = serde_json::json!({
-            "NodeKey": format!("nodekey:{node_key_hex}"),
-            "Followup": pending_response.auth_url,
-        });
-        let followup_resp = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
-                    .body(axum::body::Body::from(
-                        serde_json::to_vec(&followup_body).unwrap(),
-                    ))
-                    .unwrap(),
-            )
+        let followup_resp = followup_task
             .await
-            .unwrap();
+            .expect("follow-up task should not panic");
         assert_eq!(followup_resp.status(), axum::http::StatusCode::OK);
         let raw = to_bytes(followup_resp.into_body(), 8192).await.unwrap();
         let followup_response: crate::tailscale_wire::RegisterResponse =

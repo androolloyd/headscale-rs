@@ -44,13 +44,19 @@ use axum::{
     routing::{any, get, post},
 };
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 
 use self::routes::{DebugRoutes, PrimaryRouteState, active_approved_routes};
 use self::wire::stable_id_from_key;
+
+/// Headscale-go default: pending interactive registrations are valid
+/// for 15 minutes before the registration cache can evict them.
+pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60);
+/// Headscale-go default cleanup tick for the registration cache.
+pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
 
 pub mod basic_handlers;
 pub mod be_transport;
@@ -277,41 +283,217 @@ pub struct WireState {
 
 /// Shared pending registration cache keyed by headscale-go's
 /// 24-character registration ID.
-#[derive(Default)]
 pub struct RegistrationCache {
-    inner: RwLock<BTreeMap<String, MachineRecord>>,
+    inner: RwLock<BTreeMap<String, Arc<RegistrationEntry>>>,
+    expiration: Duration,
+    cleanup: Duration,
+}
+
+#[derive(Debug)]
+struct RegistrationEntry {
+    record: MachineRecord,
+    expires_at: Instant,
+    outcome: Mutex<Option<RegistrationOutcome>>,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone)]
+enum RegistrationOutcome {
+    Registered(MachineRecord),
+    Expired,
+}
+
+/// Result of waiting for a pending web/CLI registration to finish.
+#[derive(Debug, Clone)]
+pub enum RegistrationWaitOutcome {
+    Registered(MachineRecord),
+    Expired,
+    Missing,
 }
 
 impl RegistrationCache {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_tuning(REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_CLEANUP)
+    }
+
+    pub fn with_tuning(expiration: Duration, cleanup: Duration) -> Self {
+        Self {
+            inner: RwLock::new(BTreeMap::new()),
+            expiration,
+            cleanup,
+        }
     }
 
     pub fn insert(&self, registration_id: String, record: MachineRecord) {
-        self.inner.write().insert(registration_id, record);
+        self.prune_expired();
+        let entry = Arc::new(RegistrationEntry::new(record, self.expiration));
+        if let Some(old) = self.inner.write().insert(registration_id, entry) {
+            old.expire();
+        }
     }
 
     pub fn get(&self, registration_id: &str) -> Option<MachineRecord> {
-        self.inner.read().get(registration_id).cloned()
+        self.get_entry(registration_id)
+            .map(|entry| entry.record.clone())
     }
 
     pub fn remove(&self, registration_id: &str) -> Option<MachineRecord> {
-        self.inner.write().remove(registration_id)
+        let entry = self.inner.write().remove(registration_id)?;
+        entry.expire();
+        Some(entry.record.clone())
+    }
+
+    pub fn complete(&self, registration_id: &str, registered: MachineRecord) -> bool {
+        let entry = self.inner.write().remove(registration_id);
+        match entry {
+            Some(entry) => {
+                entry.complete(registered);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub async fn wait_for_registration(&self, registration_id: &str) -> RegistrationWaitOutcome {
+        let Some(entry) = self.get_entry(registration_id) else {
+            return RegistrationWaitOutcome::Missing;
+        };
+
+        loop {
+            let notified = entry.notify.notified();
+            tokio::pin!(notified);
+
+            match entry.outcome() {
+                Some(RegistrationOutcome::Registered(record)) => {
+                    return RegistrationWaitOutcome::Registered(record);
+                }
+                Some(RegistrationOutcome::Expired) => return RegistrationWaitOutcome::Expired,
+                None => {}
+            }
+
+            let now = Instant::now();
+            if now >= entry.expires_at {
+                self.expire_if_current(registration_id, &entry);
+                continue;
+            }
+
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(entry.expires_at)) => {
+                    self.expire_if_current(registration_id, &entry);
+                }
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
+        self.prune_expired();
         self.inner.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
+        self.prune_expired();
         self.inner.read().is_empty()
     }
 
     pub fn contains_node_key(&self, node_key_hex: &str) -> bool {
+        self.prune_expired();
         self.inner
             .read()
             .values()
-            .any(|record| record.node_key_hex == node_key_hex)
+            .any(|entry| entry.record.node_key_hex == node_key_hex)
+    }
+
+    pub fn expiration(&self) -> Duration {
+        self.expiration
+    }
+
+    pub fn cleanup_interval(&self) -> Duration {
+        self.cleanup
+    }
+
+    pub fn prune_expired(&self) -> usize {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        {
+            let mut inner = self.inner.write();
+            let expired_ids = inner
+                .iter()
+                .filter_map(|(id, entry)| (now >= entry.expires_at).then(|| id.clone()))
+                .collect::<Vec<_>>();
+
+            for id in expired_ids {
+                if let Some(entry) = inner.remove(&id) {
+                    expired.push(entry);
+                }
+            }
+        }
+
+        let count = expired.len();
+        for entry in expired {
+            entry.expire();
+        }
+        count
+    }
+
+    fn get_entry(&self, registration_id: &str) -> Option<Arc<RegistrationEntry>> {
+        self.prune_expired();
+        self.inner.read().get(registration_id).cloned()
+    }
+
+    fn expire_if_current(&self, registration_id: &str, target: &Arc<RegistrationEntry>) -> bool {
+        let removed = {
+            let mut inner = self.inner.write();
+            match inner.get(registration_id) {
+                Some(current) if Arc::ptr_eq(current, target) => inner.remove(registration_id),
+                _ => None,
+            }
+        };
+
+        match removed {
+            Some(entry) => {
+                entry.expire();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Default for RegistrationCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RegistrationEntry {
+    fn new(record: MachineRecord, expiration: Duration) -> Self {
+        Self {
+            record,
+            expires_at: Instant::now() + expiration,
+            outcome: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    fn outcome(&self) -> Option<RegistrationOutcome> {
+        self.outcome.lock().clone()
+    }
+
+    fn complete(&self, record: MachineRecord) {
+        let mut outcome = self.outcome.lock();
+        if outcome.is_none() {
+            *outcome = Some(RegistrationOutcome::Registered(record));
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn expire(&self) {
+        let mut outcome = self.outcome.lock();
+        if outcome.is_none() {
+            *outcome = Some(RegistrationOutcome::Expired);
+            self.notify.notify_waiters();
+        }
     }
 }
 
@@ -1038,6 +1220,58 @@ mod registry_tests {
             approved_routes: Vec::new(),
             register_method: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn registration_cache_completion_notifies_waiting_followups() {
+        let cache = Arc::new(RegistrationCache::with_tuning(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+        ));
+        let registration_id = "a".repeat(24);
+        cache.insert(registration_id.clone(), mk_record(1));
+
+        let waiter = {
+            let cache = cache.clone();
+            let registration_id = registration_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&registration_id).await })
+        };
+        tokio::task::yield_now().await;
+
+        let mut registered = mk_record(2);
+        registered.user = "alice".into();
+        registered.register_method = 2;
+        assert!(cache.complete(&registration_id, registered));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be notified")
+            .expect("waiter task should not panic");
+        match outcome {
+            RegistrationWaitOutcome::Registered(record) => {
+                assert_eq!(record.user, "alice");
+                assert_eq!(record.register_method, 2);
+            }
+            other => panic!("expected registered outcome, got {other:?}"),
+        }
+        assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn registration_cache_expiry_notifies_waiting_followups() {
+        let cache =
+            RegistrationCache::with_tuning(Duration::from_millis(10), Duration::from_millis(20));
+        let registration_id = "b".repeat(24);
+        cache.insert(registration_id.clone(), mk_record(1));
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.wait_for_registration(&registration_id),
+        )
+        .await
+        .expect("waiter should finish at cache expiry");
+        assert!(matches!(outcome, RegistrationWaitOutcome::Expired));
+        assert!(cache.is_empty());
     }
 
     #[test]

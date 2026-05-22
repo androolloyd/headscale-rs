@@ -55,9 +55,10 @@ use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
     stable_id_from_key, strip_key_prefix,
 };
-use super::{MachineRecord, RedeemError, WireState};
+use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
+const REGISTRATION_ID_LENGTH: usize = 24;
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -146,6 +147,36 @@ async fn register_inner(
         {
             if let Some(record) = state.machines.get(&node_key_hex) {
                 return Json(register_response_for_record(&record)).into_response();
+            }
+
+            let registration_id = match registration_id_from_followup(
+                body.followup
+                    .as_deref()
+                    .expect("checked non-empty followup"),
+            ) {
+                Ok(registration_id) => registration_id,
+                Err(error) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ErrorBody {
+                            error: error.to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+
+            match state
+                .registration_cache
+                .wait_for_registration(&registration_id)
+                .await
+            {
+                RegistrationWaitOutcome::Registered(record) => {
+                    return Json(register_response_for_record(&record)).into_response();
+                }
+                RegistrationWaitOutcome::Expired | RegistrationWaitOutcome::Missing => {
+                    return register_interactive(state, node_key_hex, body).await;
+                }
             }
         }
         return register_interactive(state, node_key_hex, body).await;
@@ -368,6 +399,23 @@ fn auth_url_for_registration(state: &WireState, registration_id: &str) -> String
     }
 }
 
+fn registration_id_from_followup(followup: &str) -> Result<String, &'static str> {
+    let without_query = followup.split_once('?').map_or(followup, |(path, _)| path);
+    let path = without_query
+        .split_once('#')
+        .map_or(without_query, |(path, _)| path);
+    let marker = "/register/";
+    let Some((_, registration_id)) = path.rsplit_once(marker) else {
+        return Err("invalid followup URL");
+    };
+
+    if registration_id.contains('/') || registration_id.len() != REGISTRATION_ID_LENGTH {
+        return Err("invalid registration ID");
+    }
+
+    Ok(registration_id.to_string())
+}
+
 fn new_registration_id() -> String {
     let mut raw = [0u8; REGISTRATION_ID_RANDOM_BYTES];
     rand_core::OsRng.fill_bytes(&mut raw);
@@ -461,7 +509,7 @@ mod tests {
         test_support::{MockIpAllocator, MockRedeemer},
     };
     use axum::body::to_bytes;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -514,6 +562,22 @@ mod tests {
             node.hostinfo.routable_ips,
             vec!["10.0.0.0/24", "fd7a:115c:a1e0::/48"]
         );
+    }
+
+    #[test]
+    fn followup_registration_id_parses_relative_and_absolute_urls() {
+        let id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
+        assert_eq!(
+            registration_id_from_followup(&format!("/register/{id}")).unwrap(),
+            id
+        );
+        assert_eq!(
+            registration_id_from_followup(&format!("https://headscale.example/register/{id}"))
+                .unwrap(),
+            id
+        );
+        assert!(registration_id_from_followup("/register/short").is_err());
+        assert!(registration_id_from_followup("https://headscale.example/oidc/callback").is_err());
     }
 
     #[tokio::test]
@@ -663,6 +727,64 @@ mod tests {
         assert_eq!(pending.hostname, "pending-peer");
         assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
         assert!(pending.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn expired_followup_restarts_web_registration_flow() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        state.registration_cache = Arc::new(crate::tailscale_wire::RegistrationCache::with_tuning(
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+        ));
+        let app = router(state.clone());
+        let node_key_hex = "dd".repeat(32);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending-peer" },
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let first: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+
+        let followup_body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": first.auth_url,
+            "Hostinfo": { "Hostname": "pending-peer" },
+        });
+        let followup_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&followup_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(followup_resp.status(), StatusCode::OK);
+        let raw = to_bytes(followup_resp.into_body(), 8192).await.unwrap();
+        let restarted: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!restarted.machine_authorized);
+        assert_ne!(restarted.auth_url, first.auth_url);
+        assert!(
+            restarted
+                .auth_url
+                .starts_with("https://headscale.example/register/")
+        );
+        assert_eq!(state.registration_cache.len(), 1);
     }
 
     /// Flat v1.78+ path: NodeKey lives in the body, not the URL.

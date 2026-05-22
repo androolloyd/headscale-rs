@@ -285,6 +285,8 @@ struct MapRequestSummary {
     tka_head: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     debug_flags: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    connection_handle_for_test: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     hostinfo: Option<HostInfoSummary>,
 }
@@ -1515,6 +1517,7 @@ fn summarize_map_request(req: MapRequest) -> MapRequestSummary {
         read_only: req.read_only,
         tka_head: req.tka_head,
         debug_flags,
+        connection_handle_for_test: req.connection_handle_for_test,
         hostinfo: req.hostinfo.map(summarize_hostinfo),
     }
 }

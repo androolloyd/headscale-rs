@@ -195,6 +195,7 @@ type mapRequestSummary struct {
 	ReadOnly                                 bool             `json:"read_only,omitempty"`
 	TKAHead                                  string           `json:"tka_head,omitempty"`
 	DebugFlags                               []string         `json:"debug_flags,omitempty"`
+	ConnectionHandleForTest                  string           `json:"connection_handle_for_test,omitempty"`
 	Hostinfo                                 *hostInfoSummary `json:"hostinfo,omitempty"`
 }
 
@@ -847,6 +848,7 @@ func summarizeMapRequest(req *tailcfg.MapRequest) *mapRequestSummary {
 		ReadOnly:                                 req.ReadOnly,
 		TKAHead:                                  req.TKAHead,
 		DebugFlags:                               append([]string(nil), req.DebugFlags...),
+		ConnectionHandleForTest:                  req.ConnectionHandleForTest,
 	}
 	if !req.NodeKey.IsZero() {
 		out.NodeKey = req.NodeKey.String()

@@ -1,0 +1,28 @@
+{
+  "name": "wire-map-request-connection-handle",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "map_request": {
+      "Version": 96,
+      "Stream": true,
+      "KeepAlive": true,
+      "Compress": "zstd",
+      "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "DiscoKey": "discokey:3434343434343434343434343434343434343434343434343434343434343434",
+      "Hostinfo": {
+        "Hostname": "connection-handle-peer",
+        "OS": "linux",
+        "OSVersion": "6.12"
+      },
+      "MapSessionHandle": "session-connection-handle",
+      "MapSessionSeq": 17,
+      "Endpoints": ["198.51.100.10:41641"],
+      "EndpointTypes": [1],
+      "TKAHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "DebugFlags": ["warn-router-unhealthy"],
+      "ConnectionHandleForTest": "conn-test-0001"
+    }
+  }
+}

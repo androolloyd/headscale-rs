@@ -260,6 +260,7 @@ fn map_request_disco_key_round_trip() {
         read_only: true,
         tka_head: String::new(),
         debug_flags: Vec::new(),
+        connection_handle_for_test: "conn-test-1".into(),
     };
     let j = serde_json::to_string(&r).unwrap();
     // PascalCase + explicit `DiscoKey` rename.
@@ -267,11 +268,13 @@ fn map_request_disco_key_round_trip() {
     assert!(j.contains("\"Endpoints\":[\"198.51.100.1:41641\"]"));
     assert!(j.contains("\"MapSessionHandle\":\"session-1\""));
     assert!(j.contains("\"EndpointTypes\":[1]"));
+    assert!(j.contains("\"ConnectionHandleForTest\":\"conn-test-1\""));
     let back: MapRequest = serde_json::from_str(&j).unwrap();
     assert_eq!(back.disco_key.as_deref(), Some("discokey:beef"));
     assert_eq!(back.endpoints.as_ref().unwrap().len(), 1);
     assert_eq!(back.endpoint_types, vec![1]);
     assert_eq!(back.map_session_seq, 7);
+    assert_eq!(back.connection_handle_for_test, "conn-test-1");
 }
 
 #[test]
@@ -295,6 +298,7 @@ fn map_request_disco_key_skipped_when_none() {
         read_only: false,
         tka_head: String::new(),
         debug_flags: Vec::new(),
+        connection_handle_for_test: String::new(),
     };
     let j = serde_json::to_string(&r).unwrap();
     // `skip_serializing_if = "Option::is_none"` ⇒ no field emitted.

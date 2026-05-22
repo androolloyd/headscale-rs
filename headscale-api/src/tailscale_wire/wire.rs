@@ -511,6 +511,11 @@ pub struct MapRequest {
     /// Debug/development feature flags sent by the client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_flags: Vec<String>,
+    /// Test/debug connection handle carried by upstream clients. It has
+    /// no control-plane semantics, but accepting and preserving it keeps
+    /// the map request shape aligned with tailcfg.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub connection_handle_for_test: String,
 }
 
 /// Response to `/machine/{node_key}/map`.

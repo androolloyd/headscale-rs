@@ -131,8 +131,24 @@ async fn body_json(resp: Response) -> Value {
     })
 }
 
+async fn assert_plain_unauthorized(resp: Response) {
+    assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/plain; charset=utf-8")
+    );
+    assert!(
+        resp.headers().get(header::WWW_AUTHENTICATE).is_none(),
+        "headscale-go HTTP auth middleware does not emit WWW-Authenticate"
+    );
+    let body = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+    assert_eq!(body.as_ref(), b"Unauthorized");
+}
+
 #[tokio::test]
-async fn grpc_gateway_health_requires_bearer_and_returns_protojson_status() {
+async fn grpc_gateway_health_missing_auth_returns_plain_unauthorized() {
     let (app, token) = fixture().await;
 
     let resp = app
@@ -140,17 +156,7 @@ async fn grpc_gateway_health_requires_bearer_and_returns_protojson_status() {
         .oneshot(req(Method::GET, "/api/v1/health", None, Body::empty()))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401);
-    assert_eq!(
-        resp.headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok()),
-        Some("Authorization token is not supplied")
-    );
-    let body = body_json(resp).await;
-    assert_eq!(body["code"], 16);
-    assert_eq!(body["message"], "Authorization token is not supplied");
-    assert_eq!(body["details"].as_array().unwrap().len(), 0);
+    assert_plain_unauthorized(resp).await;
 
     let resp = app
         .oneshot(req(
@@ -164,6 +170,66 @@ async fn grpc_gateway_health_requires_bearer_and_returns_protojson_status() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     assert_eq!(body["databaseConnectivity"], true);
+}
+
+#[tokio::test]
+async fn grpc_gateway_health_bad_bearer_returns_plain_unauthorized() {
+    let (app, _token) = fixture().await;
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/health",
+            Some("definitely-invalid"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_plain_unauthorized(resp).await;
+}
+
+#[tokio::test]
+async fn grpc_gateway_auth_runs_before_path_parser_errors() {
+    let (app, _token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::DELETE,
+            "/api/v1/user/not-a-uint64",
+            None,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_plain_unauthorized(resp).await;
+
+    let resp = app
+        .oneshot(req(
+            Method::DELETE,
+            "/api/v1/user/not-a-uint64",
+            Some("definitely-invalid"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_plain_unauthorized(resp).await;
+}
+
+#[tokio::test]
+async fn grpc_gateway_auth_runs_before_unmatched_api_routes() {
+    let (app, _token) = fixture().await;
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/not-implemented-yet",
+            None,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_plain_unauthorized(resp).await;
 }
 
 #[tokio::test]

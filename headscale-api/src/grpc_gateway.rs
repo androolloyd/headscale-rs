@@ -11,13 +11,14 @@ use axum::{
     body::to_bytes,
     extract::{Path, RawQuery, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tonic::{Code, Request as TonicRequest, Status};
+use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
 use crate::generated::{
@@ -36,6 +37,7 @@ const BODY_LIMIT: usize = 1024 * 1024;
 #[derive(Clone)]
 struct GatewayState {
     service: HeadscaleAdminService,
+    auth_service: HeadscaleAdminService,
 }
 
 /// Build a grpc-gateway-compatible router for implemented upstream RPCs.
@@ -45,7 +47,8 @@ struct GatewayState {
 /// unauthenticated local gRPC socket.
 pub fn router(service: HeadscaleAdminService) -> Router {
     let state = GatewayState {
-        service: service.require_api_key_auth(),
+        service: service.clone(),
+        auth_service: service.require_api_key_auth(),
     };
 
     Router::new()
@@ -76,7 +79,28 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/node/:node_id/expire", post(expire_node))
         .route("/api/v1/node/:node_id/rename/:new_name", post(rename_node))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            http_authentication_middleware,
+        ))
         .with_state(state)
+}
+
+async fn http_authentication_middleware(
+    State(state): State<GatewayState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let metadata = authorization_metadata(request.headers());
+    match state
+        .auth_service
+        .authorize_api_key_metadata(&metadata)
+        .await
+    {
+        Ok(()) => next.run(request).await,
+        Err(status) if status.code() == Code::Unauthenticated => plain_unauthorized_response(),
+        Err(status) => status_response(status),
+    }
 }
 
 async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
@@ -723,13 +747,24 @@ async fn set_policy(
 
 fn tonic_request<T>(headers: &HeaderMap, body: T) -> TonicRequest<T> {
     let mut request = TonicRequest::new(body);
-    if let Some(value) = headers.get(header::AUTHORIZATION)
-        && let Ok(value) = value.to_str()
-        && let Ok(value) = value.parse()
+    if let Some(value) = authorization_metadata(headers)
+        .get("authorization")
+        .cloned()
     {
         request.metadata_mut().insert("authorization", value);
     }
     request
+}
+
+fn authorization_metadata(headers: &HeaderMap) -> MetadataMap {
+    let mut metadata = MetadataMap::new();
+    if let Some(value) = headers.get(header::AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Ok(value) = value.parse()
+    {
+        metadata.insert("authorization", value);
+    }
+    metadata
 }
 
 async fn read_json<T>(request: Request) -> Result<T, Status>
@@ -1223,8 +1258,12 @@ fn json_ok(value: Value) -> Response {
 }
 
 fn status_response(status: Status) -> Response {
+    if status.code() == Code::Unauthenticated {
+        return plain_unauthorized_response();
+    }
+
     let status_code = http_status_from_grpc(status.code());
-    let mut response = (
+    (
         status_code,
         Json(json!({
             "code": grpc_code_number(status.code()),
@@ -1232,15 +1271,11 @@ fn status_response(status: Status) -> Response {
             "details": [],
         })),
     )
-        .into_response();
-    if status.code() == Code::Unauthenticated {
-        if let Ok(value) = status.message().parse() {
-            response
-                .headers_mut()
-                .insert(header::WWW_AUTHENTICATE, value);
-        }
-    }
-    response
+        .into_response()
+}
+
+fn plain_unauthorized_response() -> Response {
+    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
 fn http_status_from_grpc(code: Code) -> StatusCode {

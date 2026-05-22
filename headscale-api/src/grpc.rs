@@ -346,6 +346,21 @@ pub mod upstream {
             Ok(true)
         }
 
+        pub async fn authorize_api_key_metadata(
+            &self,
+            metadata: &MetadataMap,
+        ) -> Result<(), Status> {
+            if !self.require_api_key_auth {
+                return Ok(());
+            }
+            let token = bearer_token(metadata)?.to_string();
+            if self.api_keys.validate(&token).await {
+                Ok(())
+            } else {
+                Err(Status::unauthenticated("invalid token"))
+            }
+        }
+
         pub fn require_api_key_auth(mut self) -> Self {
             self.require_api_key_auth = true;
             self
@@ -379,15 +394,7 @@ pub mod upstream {
         }
 
         async fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-            if !self.require_api_key_auth {
-                return Ok(());
-            }
-            let token = bearer_token(request.metadata())?.to_string();
-            if self.api_keys.validate(&token).await {
-                Ok(())
-            } else {
-                Err(Status::unauthenticated("invalid token"))
-            }
+            self.authorize_api_key_metadata(request.metadata()).await
         }
 
         async fn machine_by_id(&self, node_id: u64) -> Result<MachineAdminRecord, Status> {

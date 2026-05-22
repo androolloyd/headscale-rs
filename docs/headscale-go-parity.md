@@ -18,9 +18,11 @@ Current-head audit overlay, refreshed 2026-05-22:
   and Noise placeholder route/body-limit parity in `c002804`, `/verify`
   4 KiB request-body limit in `72bb5f8`, and DB user/preauth delete
   semantics in `d076c8e`; CLI `auth` plus `preauthkeys delete`
-  command parity in `56d4de6`.
-- Active P0 implementation lanes: unsupported client capability
-  rejection and Noise register error-envelope parity.
+  command parity in `56d4de6`; unsupported client capability
+  rejection and Noise register error-envelope parity in `004098d`.
+- Active P0 implementation lanes from the 2026-05-22 current-head
+  audit: none; remaining work is P1/P2 plus broader full-parity
+  verification.
 - Remaining P1 current-head gaps from the audit: Hostinfo/NetInfo
   preservation, IPv6 node identities, online/LastSeen poll lifecycle,
   map compression/framing negotiation, config schema drift, semantic

@@ -592,6 +592,9 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // update is O(n) in registry size; the perf concern is documented
     // on `MachineRegistry::touch_last_seen` itself.
     state.machines.touch_last_seen(&node_key_hex);
+    if let Some(touched) = state.machines.get(&node_key_hex) {
+        own.last_seen = touched.last_seen;
+    }
 
     // Wall 7: persist client-provided DiscoKey, Endpoints, and
     // Hostinfo.NetInfo.PreferredDERP from `MapRequest` into the
@@ -687,6 +690,44 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     }
     if record_changed {
         state.machines.upsert(node_key_hex.clone(), own.clone());
+    }
+    if let Some(store) = &state.registration_store {
+        let current = if record_changed {
+            own.clone()
+        } else {
+            state
+                .machines
+                .get(&node_key_hex)
+                .unwrap_or_else(|| own.clone())
+        };
+        let saved = match store
+            .sync_runtime_machine_state(current, state.policy.as_ref())
+            .await
+        {
+            Ok(saved) => saved,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody {
+                        error: format!("persisting map node update failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        if record_changed {
+            if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
+                state.machines.replace_node_key(
+                    old_node_key_hex,
+                    saved.record.node_key_hex.clone(),
+                    saved.record,
+                );
+            } else {
+                state
+                    .machines
+                    .upsert(saved.record.node_key_hex.clone(), saved.record);
+            }
+        }
     }
 
     if req.omit_peers && !req.stream {
@@ -1818,6 +1859,122 @@ mod tests {
             map_node.hostinfo.ssh_host_keys,
             vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkey"]
         );
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn map_request_persists_runtime_state_to_go_nodes() {
+        use crate::admin::machines::PersistentMachineAdmin;
+        use crate::admin::users::{PersistentUserAdmin, UserAdmin};
+
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let preauth = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users));
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "f1".repeat(32),
+            "f2".repeat(32),
+            "alice".into(),
+            "old-host".into(),
+            Ipv4Addr::new(100, 64, 0, 44),
+            false,
+        );
+        record.register_method = 1;
+        machines
+            .create_or_update_auth_key_path(
+                record.clone(),
+                &crate::policy::PolicyStore::new(),
+                Some(preauth.row.id),
+            )
+            .await
+            .unwrap();
+
+        let (mut state, _dir) = fixture();
+        state
+            .machines
+            .upsert(record.node_key_hex.clone(), record.clone());
+        state.registration_store = Some(machines.clone());
+        let app = router(state.clone());
+        let disco_key = format!("discokey:{}", "aa".repeat(32));
+        let endpoints = vec![
+            "198.51.100.10:41641".to_string(),
+            "[2001:db8::1]:41641".to_string(),
+        ];
+        let ssh_host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIpersisted";
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{}/map", record.node_key_hex))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "OmitPeers": true,
+                            "DiscoKey": disco_key,
+                            "Endpoints": endpoints,
+                            "Hostinfo": {
+                                "Hostname": "persisted-host",
+                                "OS": "linux",
+                                "OSVersion": "6.8",
+                                "RoutableIPs": ["10.70.0.0/24"],
+                                "sshHostKeys": [ssh_host_key],
+                                "NetInfo": {
+                                    "PreferredDERP": 901
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{}", record.node_key_hex),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.auth_key_id, Some(preauth.row.id));
+        assert_eq!(row.disco_key, disco_key);
+        assert_eq!(row.endpoint_list(), endpoints);
+        let host_info = row.host_info_value();
+        assert_eq!(host_info["Hostname"], "persisted-host");
+        assert_eq!(host_info["OS"], "linux");
+        assert_eq!(host_info["OSVersion"], "6.8");
+        assert_eq!(host_info["RoutableIPs"][0], "10.70.0.0/24");
+        assert_eq!(host_info["NetInfo"]["PreferredDERP"], 901);
+        assert_eq!(host_info["sshHostKeys"][0], ssh_host_key);
+
+        let hydrated = MachineRegistry::new();
+        machines.hydrate_wire_registry(&hydrated).await.unwrap();
+        let wire = hydrated.get(&record.node_key_hex).unwrap();
+        assert_eq!(wire.hostname, "persisted-host");
+        assert_eq!(wire.os, "linux");
+        assert_eq!(wire.os_version, "6.8");
+        assert_eq!(wire.disco_key.as_deref(), Some(disco_key.as_str()));
+        assert_eq!(wire.endpoints, endpoints);
+        assert_eq!(wire.home_derp, 901);
+        assert_eq!(wire.available_routes, vec!["10.70.0.0/24"]);
+        assert_eq!(wire.ssh_host_keys, vec![ssh_host_key]);
     }
 
     #[tokio::test]

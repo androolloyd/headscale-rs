@@ -260,6 +260,17 @@ pub trait MachineRegistrationStore: Send + Sync {
         policy: &crate::policy::PolicyStore,
         auth_key_id: Option<i64>,
     ) -> Result<PersistedMachineRegistration, String>;
+
+    async fn sync_runtime_machine_state(
+        &self,
+        record: MachineRecord,
+        _policy: &crate::policy::PolicyStore,
+    ) -> Result<PersistedMachineRegistration, String> {
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: None,
+        })
+    }
 }
 
 /// Shared state for every handler under [`router`].

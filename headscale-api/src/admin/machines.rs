@@ -367,13 +367,7 @@ impl PersistentMachineAdmin {
             .map_err(|e| db_error_to_machine(e, "nodes"))?;
         let mut hydrated = 0usize;
         for row in rows {
-            let record = self.row_to_record(row).await;
-            if record.id.trim().is_empty() {
-                return Err(MachineAdminError::BadRequest(
-                    "persisted node has empty node key".to_string(),
-                ));
-            }
-            let wire = machine_admin_record_to_wire(&record)?;
+            let wire = self.row_to_wire_record(row).await?;
             registry.upsert(wire.node_key_hex.clone(), wire);
             hydrated += 1;
         }
@@ -624,6 +618,76 @@ impl PersistentMachineAdmin {
             expired,
         }
     }
+
+    async fn row_to_wire_record(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<MachineRecord, MachineAdminError> {
+        let host_info = row.host_info_value();
+        let node_key = key_without_prefix("nodekey:", &row.node_key);
+        if node_key.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "persisted node has empty node key".to_string(),
+            ));
+        }
+        let created_at =
+            unix_timestamp_for_record(row.created_at.max(0) as u64, &node_key, "created_at")?;
+        let last_seen = unix_timestamp_for_record(
+            row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+            &node_key,
+            "last_seen",
+        )?;
+        let ipv4 = row
+            .ipv4
+            .as_deref()
+            .unwrap_or_default()
+            .parse()
+            .map_err(|e| {
+                MachineAdminError::BadRequest(format!(
+                    "persisted node {node_key} has invalid IPv4 '{}': {e}",
+                    row.ipv4.as_deref().unwrap_or_default()
+                ))
+            })?;
+        let name = if row.given_name.is_empty() {
+            row.hostname.clone()
+        } else {
+            row.given_name.clone()
+        };
+        let mut record = MachineRecord::new_at(
+            created_at,
+            node_key.clone(),
+            key_without_prefix("mkey:", &row.machine_key),
+            self.user_name_for_row(&row).await,
+            name,
+            ipv4,
+            false,
+        );
+        record.disco_key = (!row.disco_key.is_empty()).then_some(row.disco_key.clone());
+        record.endpoints = row.endpoint_list();
+        record.home_derp = preferred_derp_from_host_info(&host_info);
+        record.expiry = row
+            .expiry
+            .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
+            .transpose()?;
+        record.last_seen = last_seen;
+        record.os = host_info
+            .get("OS")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        record.os_version = host_info
+            .get("OSVersion")
+            .or_else(|| host_info.get("App"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        record.ssh_host_keys = ssh_host_keys_from_host_info(&host_info);
+        record.forced_tags = row.tag_list();
+        record.available_routes = routes_from_host_info(&host_info);
+        record.approved_routes = row.approved_route_list();
+        record.register_method = register_method_from_db(&row.register_method);
+        Ok(record)
+    }
 }
 
 #[async_trait]
@@ -690,6 +754,36 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
         Ok(PersistedMachineRegistration {
             record,
             replaced_node_key_hex: result.replaced_node_key_hex,
+        })
+    }
+
+    async fn sync_runtime_machine_state(
+        &self,
+        record: MachineRecord,
+        _policy: &PolicyStore,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
+        let row = headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let user_id = self
+            .user_id_for_record(&machine_admin_record_from_wire(&record))
+            .await
+            .map_err(|err| err.to_string())?;
+        let row = headscale_db::headscale_nodes::update_from_auth_path(
+            &self.pool,
+            row.id,
+            create_params_for_wire_record(&record, user_id, row.auth_key_id),
+        )
+        .await
+        .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let record = self
+            .row_to_wire_record(row)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: None,
         })
     }
 }
@@ -1024,6 +1118,19 @@ fn create_params_for_record_with_auth_key(
     }
 }
 
+fn create_params_for_wire_record(
+    record: &MachineRecord,
+    user_id: Option<i64>,
+    auth_key_id: Option<i64>,
+) -> headscale_db::headscale_nodes::CreateParams {
+    let admin = machine_admin_record_from_wire(record);
+    let mut params = create_params_for_record_with_auth_key(&admin, user_id, auth_key_id);
+    params.disco_key = record.disco_key.clone().unwrap_or_default();
+    params.endpoints = record.endpoints.clone();
+    params.host_info = host_info_for_wire_record(record);
+    params
+}
+
 fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord {
     let expired = record.is_expired_at(Utc::now());
     MachineAdminRecord {
@@ -1154,6 +1261,26 @@ fn routes_from_host_info(host_info: &Value) -> Vec<String> {
         .collect()
 }
 
+fn ssh_host_keys_from_host_info(host_info: &Value) -> Vec<String> {
+    host_info
+        .get("sshHostKeys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn preferred_derp_from_host_info(host_info: &Value) -> i32 {
+    host_info
+        .get("NetInfo")
+        .and_then(|net_info| net_info.get("PreferredDERP"))
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or_default()
+}
+
 fn host_info_for_record(record: &MachineAdminRecord) -> Value {
     json!({
         "Hostname": record.name,
@@ -1161,6 +1288,52 @@ fn host_info_for_record(record: &MachineAdminRecord) -> Value {
         "OSVersion": record.version,
         "RoutableIPs": record.routes,
     })
+}
+
+fn host_info_for_wire_record(record: &MachineRecord) -> Value {
+    let mut host_info = json!({
+        "Hostname": record.hostname,
+        "OS": record.os,
+        "OSVersion": record.os_version,
+        "RoutableIPs": record.available_routes,
+    });
+    let Some(fields) = host_info.as_object_mut() else {
+        return host_info;
+    };
+    if record.hostname.is_empty() {
+        fields.remove("Hostname");
+    }
+    if record.os.is_empty() {
+        fields.remove("OS");
+    }
+    if record.os_version.is_empty() {
+        fields.remove("OSVersion");
+    }
+    if record.available_routes.is_empty() {
+        fields.remove("RoutableIPs");
+    }
+    if record.home_derp != 0 {
+        fields.insert(
+            "NetInfo".into(),
+            json!({
+                "PreferredDERP": record.home_derp,
+            }),
+        );
+    }
+    if !record.ssh_host_keys.is_empty() {
+        fields.insert(
+            "sshHostKeys".into(),
+            Value::Array(
+                record
+                    .ssh_host_keys
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    host_info
 }
 
 fn db_error_to_machine(e: headscale_db::DbError, subject: &str) -> MachineAdminError {

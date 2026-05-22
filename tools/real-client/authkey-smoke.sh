@@ -22,6 +22,9 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
+reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
+reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
+expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -65,11 +68,45 @@ if ((expect_set_tags_failure)) && [[ -z "${set_tags_after_login}" ]]; then
   echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE requires REAL_CLIENT_SET_TAGS_AFTER_LOGIN" >&2
   exit 2
 fi
+case "${reauth_after_login}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    do_reauth_after_login=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    do_reauth_after_login=0
+    ;;
+  *)
+    echo "REAL_CLIENT_REAUTH_AFTER_LOGIN must be true or false, got ${reauth_after_login}" >&2
+    exit 2
+    ;;
+esac
 expected_tags_default="${preauth_tags}"
+if ((do_reauth_after_login)); then
+  expected_tags_default="${reauth_tags}"
+fi
 if [[ -n "${set_tags_after_login}" ]] && ((expect_set_tags_failure == 0)); then
   expected_tags_default="${set_tags_after_login}"
 fi
 expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
+if [[ -z "${expected_tags_exact}" ]]; then
+  if ((do_reauth_after_login)); then
+    expected_tags_exact=true
+  else
+    expected_tags_exact=false
+  fi
+fi
+case "${expected_tags_exact}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_tags_exact=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_tags_exact=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_TAGS_EXACT must be true or false, got ${expected_tags_exact}" >&2
+    exit 2
+    ;;
+esac
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -407,6 +444,61 @@ for client_name in "${client_names[@]}"; do
 done
 echo "::endgroup::"
 
+if ((do_reauth_after_login)); then
+  echo "::group::force web reauth"
+  for client_name in "${client_names[@]}"; do
+    reauth_args=(
+      tailscale up
+      "--login-server=https://host.docker.internal:${https_port}"
+      "--hostname=${client_name}"
+      "--timeout=${up_timeout}"
+      --accept-routes=false
+      --accept-dns=false
+      --force-reauth
+      --reset
+    )
+    if [[ -n "${reauth_tags}" ]]; then
+      reauth_args+=("--advertise-tags=${reauth_tags}")
+    fi
+    up_status=0
+    docker exec "${client_name}" "${reauth_args[@]}" \
+      >"${work_dir}/${client_name}.reauth-up.stdout" \
+      2>"${work_dir}/${client_name}.reauth-up.stderr" &
+    up_pid="$!"
+    registration_id_path="${work_dir}/${client_name}.reauth-registration-id"
+    if ! wait_for "reauth web registration URL ${client_name}" \
+      "write_registration_id '${client_name}' '${registration_id_path}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    registration_id="$(cat "${registration_id_path}")"
+    register_status=0
+    curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/register/${registration_id}" \
+      -H 'content-type: application/json' \
+      -d '{"user":"alice"}' \
+      >"${work_dir}/${client_name}.reauth-registered.json" \
+      2>"${work_dir}/${client_name}.reauth-registered.err" ||
+      register_status="$?"
+    if ((register_status != 0)); then
+      cat "${work_dir}/${client_name}.reauth-registered.err" >&2 || true
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      exit "${register_status}"
+    fi
+    wait_pid_with_timeout "tailscale reauth ${client_name}" "${up_pid}" ||
+      up_status="$?"
+    if ((up_status != 0)); then
+      echo "tailscale reauth ${client_name} returned ${up_status}; verifying logged-in netmap"
+    fi
+    if ! wait_for "tailscale logged-in netmap after reauth ${client_name}" "tailscale_logged_in '${client_name}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.reauth-tailscale-status.json"
+  done
+  echo "::endgroup::"
+fi
+
 if ((expect_register_failure)); then
   echo "::group::assert rejected web registration"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines.json"
@@ -494,6 +586,7 @@ ruby -rjson -e '
   debug_routes_path = ARGV.fetch(5)
   expected_tags = ARGV.fetch(6).split(",").reject(&:empty?).sort
   expected_hostname_prefix = ARGV.fetch(7)
+  expect_tags_exact = ARGV.fetch(8) == "true"
 
   def stable_id_from_key(hex)
     h = 0xcbf29ce484222325
@@ -519,7 +612,7 @@ ruby -rjson -e '
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
     end
     forced_tags = Array(machine["forced_tags"]).sort
-    unless expected_tags.empty? || forced_tags == expected_tags
+    unless (!expect_tags_exact && expected_tags.empty?) || forced_tags == expected_tags
       abort("expected forced tags #{expected_tags.inspect}, got #{forced_tags.inspect}")
     end
   end
@@ -543,7 +636,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}"
+' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then

@@ -23,6 +23,10 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
+reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
+reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
+expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
+headscale_go_tls="${REAL_CLIENT_HEADSCALE_GO_TLS:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -66,11 +70,64 @@ if ((expect_set_tags_failure)) && [[ -z "${set_tags_after_login}" ]]; then
   echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE requires REAL_CLIENT_SET_TAGS_AFTER_LOGIN" >&2
   exit 2
 fi
+case "${reauth_after_login}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    do_reauth_after_login=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    do_reauth_after_login=0
+    ;;
+  *)
+    echo "REAL_CLIENT_REAUTH_AFTER_LOGIN must be true or false, got ${reauth_after_login}" >&2
+    exit 2
+    ;;
+esac
 expected_tags_default="${preauth_tags}"
+if ((do_reauth_after_login)); then
+  expected_tags_default="${reauth_tags}"
+fi
 if [[ -n "${set_tags_after_login}" ]] && ((expect_set_tags_failure == 0)); then
   expected_tags_default="${set_tags_after_login}"
 fi
 expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
+if [[ -z "${expected_tags_exact}" ]]; then
+  if ((do_reauth_after_login)); then
+    expected_tags_exact=true
+  else
+    expected_tags_exact=false
+  fi
+fi
+case "${expected_tags_exact}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_tags_exact=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_tags_exact=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_TAGS_EXACT must be true or false, got ${expected_tags_exact}" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${headscale_go_tls}" ]]; then
+  if ((do_reauth_after_login)); then
+    headscale_go_tls=true
+  else
+    headscale_go_tls=false
+  fi
+fi
+case "${headscale_go_tls}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    use_headscale_go_tls=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    use_headscale_go_tls=0
+    ;;
+  *)
+    echo "REAL_CLIENT_HEADSCALE_GO_TLS must be true or false, got ${headscale_go_tls}" >&2
+    exit 2
+    ;;
+esac
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -262,10 +319,30 @@ need curl
 need docker
 need go
 need ruby
+if ((use_headscale_go_tls)); then
+  need openssl
+fi
 
 http_port="$(free_port)"
 grpc_port="$(free_port)"
 metrics_port="$(free_port)"
+control_scheme="http"
+health_curl_opts="-fsS"
+if ((use_headscale_go_tls)); then
+  control_scheme="https"
+  health_curl_opts="-fsSk"
+  echo "::group::generate headscale-go TLS certificate"
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+    -keyout "${work_dir}/tls.key" \
+    -out "${work_dir}/tls.crt" \
+    -subj "/CN=host.docker.internal" \
+    -addext "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1" \
+    >"${work_dir}/openssl.stdout" \
+    2>"${work_dir}/openssl.stderr"
+  echo "::endgroup::"
+fi
+control_url="${control_scheme}://host.docker.internal:${http_port}"
+local_control_url="${control_scheme}://127.0.0.1:${http_port}"
 
 echo "::group::build headscale-go ${headscale_go_version}"
 if [[ -z "${HEADSCALE_GO_BIN:-}" ]]; then
@@ -276,7 +353,7 @@ cat "${work_dir}/headscale-version.txt"
 echo "::endgroup::"
 
 cat >"${config_path}" <<EOF
-server_url: http://host.docker.internal:${http_port}
+server_url: ${control_url}
 listen_addr: 0.0.0.0:${http_port}
 metrics_listen_addr: 127.0.0.1:${metrics_port}
 grpc_listen_addr: 127.0.0.1:${grpc_port}
@@ -317,6 +394,14 @@ log:
   level: info
   format: text
 EOF
+
+if ((use_headscale_go_tls)); then
+  cat >>"${config_path}" <<EOF
+
+tls_cert_path: ${work_dir}/tls.crt
+tls_key_path: ${work_dir}/tls.key
+EOF
+fi
 
 cat >"${work_dir}/derp.yaml" <<EOF
 regions:
@@ -360,11 +445,11 @@ echo "::group::start headscale-go"
 server_pid="$!"
 
 wait_for "headscale-go health" \
-  "curl -fsS 'http://127.0.0.1:${http_port}/health' >/dev/null"
+  "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
 wait_for "headscale-go gRPC" \
   "'${headscale_bin}' -c '${config_path}' health >/dev/null 2>&1"
-echo "headscale-go http=http://127.0.0.1:${http_port}"
-echo "headscale-go login=http://host.docker.internal:${http_port}"
+echo "headscale-go control=${local_control_url}"
+echo "headscale-go login=${control_url}"
 echo "::endgroup::"
 
 echo "::group::create user"
@@ -393,13 +478,21 @@ fi
 
 echo "::group::start stock tailscale client"
 for client_name in "${client_names[@]}"; do
-  docker run -d \
+  docker_args=(
+    docker run -d
     --name "${client_name}" \
     --hostname "${client_name}" \
     --add-host host.docker.internal:host-gateway \
-    --entrypoint /bin/sh \
-    "${image}" \
-    -ceu 'tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
+    --entrypoint /bin/sh
+  )
+  client_entry='tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
+  if ((use_headscale_go_tls)); then
+    docker_args+=(-v "${work_dir}/tls.crt:/usr/local/share/ca-certificates/headscale-go.crt:ro")
+    client_entry='update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
+  fi
+  docker_args+=("${image}")
+  "${docker_args[@]}" \
+    -ceu "${client_entry}" \
     >/dev/null
 
   wait_for "tailscaled local socket ${client_name}" \
@@ -411,7 +504,7 @@ echo "::group::tailscale up"
 for client_name in "${client_names[@]}"; do
   up_args=(
     tailscale up
-    "--login-server=http://host.docker.internal:${http_port}"
+    "--login-server=${control_url}"
     "--hostname=${client_name}"
     "--timeout=${up_timeout}"
     --accept-routes=false
@@ -485,6 +578,61 @@ for client_name in "${client_names[@]}"; do
   docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
 done
 echo "::endgroup::"
+
+if ((do_reauth_after_login)); then
+  echo "::group::force headscale-go web reauth"
+  for client_name in "${client_names[@]}"; do
+    reauth_args=(
+      tailscale up
+      "--login-server=${control_url}"
+      "--hostname=${client_name}"
+      "--timeout=${up_timeout}"
+      --accept-routes=false
+      --accept-dns=false
+      --force-reauth
+      --reset
+    )
+    if [[ -n "${reauth_tags}" ]]; then
+      reauth_args+=("--advertise-tags=${reauth_tags}")
+    fi
+    up_status=0
+    docker exec "${client_name}" "${reauth_args[@]}" \
+      >"${work_dir}/${client_name}.reauth-up.stdout" \
+      2>"${work_dir}/${client_name}.reauth-up.stderr" &
+    up_pid="$!"
+    registration_id_path="${work_dir}/${client_name}.reauth-registration-id"
+    if ! wait_for "reauth web registration URL ${client_name}" \
+      "write_registration_id '${client_name}' '${registration_id_path}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    registration_id="$(cat "${registration_id_path}")"
+    register_status=0
+    "${headscale_bin}" -c "${config_path}" -o json nodes register \
+      --user alice \
+      --key "${registration_id}" \
+      >"${work_dir}/${client_name}.reauth-registered.json" \
+      2>"${work_dir}/${client_name}.reauth-registered.err" ||
+      register_status="$?"
+    if ((register_status != 0)); then
+      cat "${work_dir}/${client_name}.reauth-registered.err" >&2 || true
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      exit "${register_status}"
+    fi
+    wait_pid_with_timeout "tailscale reauth ${client_name}" "${up_pid}" ||
+      up_status="$?"
+    if ((up_status != 0)); then
+      echo "tailscale reauth ${client_name} returned ${up_status}; verifying logged-in netmap"
+    fi
+    if ! wait_for "tailscale logged-in netmap after reauth ${client_name}" "tailscale_logged_in '${client_name}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.reauth-tailscale-status.json"
+  done
+  echo "::endgroup::"
+fi
 
 if ((expect_register_failure)); then
   echo "::group::assert rejected headscale-go web registration"
@@ -566,6 +714,7 @@ ruby -rjson -e '
   expected_primary_route = ARGV.fetch(4)
   expected_tags = ARGV.fetch(5).split(",").reject(&:empty?).sort
   expected_hostname_prefix = ARGV.fetch(6)
+  expect_tags_exact = ARGV.fetch(7) == "true"
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
@@ -587,7 +736,7 @@ ruby -rjson -e '
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
     end
     tags = Array(node["tags"] || node["Tags"]).sort
-    unless expected_tags.empty? || tags == expected_tags
+    unless (!expect_tags_exact && expected_tags.empty?) || tags == expected_tags
       abort("expected tags #{expected_tags.inspect}, got #{tags.inspect}")
     end
   end
@@ -605,7 +754,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({nodes: nodes, primary_nodes: primary_nodes})
   end
-' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}"
+' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then

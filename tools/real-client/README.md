@@ -181,11 +181,26 @@ tools/real-client/tag-update-invalid-smoke.sh
 tools/real-client/tag-update-invalid-headscale-go-smoke.sh
 ```
 
+The reauth-clear variant logs in with `tag:server`, forces a web reauth with
+no advertised tags, and asserts that the existing same-machine node is rekeyed
+back to user-owned state with an empty tag set instead of duplicated:
+
+```sh
+tools/real-client/tag-reauth-clear-smoke.sh
+tools/real-client/tag-reauth-clear-headscale-go-smoke.sh
+```
+
 Useful knobs:
 
 - `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server`.
 - `REAL_CLIENT_SET_TAGS_AFTER_LOGIN` defaults to `tag:prod`.
 - `REAL_CLIENT_EXPECT_TAGS` defaults to the post-update tags.
+- `REAL_CLIENT_REAUTH_AFTER_LOGIN=true` forces a second web registration after
+  the initial login.
+- `REAL_CLIENT_REAUTH_TAGS` sets the advertised tags for that reauth; empty
+  means the final node is expected to have no forced tags.
+- `REAL_CLIENT_EXPECT_TAGS_EXACT=true` asserts the tag set exactly, including
+  an empty set.
 - `REAL_CLIENT_EXPECT_SET_TAGS_FAILURE=true` asserts rejection for custom
   negative tag-update cases.
 - `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.

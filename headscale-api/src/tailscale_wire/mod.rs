@@ -1004,6 +1004,60 @@ impl MachineRegistry {
         }
     }
 
+    /// Complete a web/CLI registration for `user`.
+    ///
+    /// If the pending record proves the same MachineKey as an existing
+    /// node for that user, update that node in-place and move it to the
+    /// pending NodeKey. This mirrors headscale-go reauth: web auth with
+    /// empty `Hostinfo.RequestTags` clears a tagged node back to a
+    /// user-owned node instead of creating a duplicate.
+    pub fn complete_web_registration(
+        &self,
+        mut pending: MachineRecord,
+        user: String,
+        register_method: i32,
+    ) -> MachineRecord {
+        pending.user = user.clone();
+        pending.register_method = register_method;
+
+        if let Some((old_node_key, existing)) =
+            self.get_by_machine_key_for_user(&pending.machine_key_hex, &user)
+        {
+            pending.ipv4 = existing.ipv4;
+            pending.created_at = existing.created_at;
+            pending.ephemeral = existing.ephemeral;
+            pending.disco_key = existing.disco_key;
+            pending.endpoints = existing.endpoints;
+            pending.home_derp = existing.home_derp;
+            if pending.hostname.is_empty() {
+                pending.hostname = existing.hostname;
+            }
+            if pending.os.is_empty() {
+                pending.os = existing.os;
+            }
+            if pending.os_version.is_empty() {
+                pending.os_version = existing.os_version;
+            }
+
+            let available = pending
+                .available_routes
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            pending.approved_routes = existing
+                .approved_routes
+                .into_iter()
+                .filter(|route| available.contains(route))
+                .collect();
+
+            self.replace_node_key(&old_node_key, pending.node_key_hex.clone(), pending.clone());
+        } else {
+            self.upsert(pending.node_key_hex.clone(), pending.clone());
+        }
+
+        pending
+    }
+
     /// Number of registered machines.
     pub fn len(&self) -> usize {
         self.inner.read().len()
@@ -1496,6 +1550,45 @@ mod registry_tests {
         // Empty list clears.
         assert!(reg.set_forced_tags("nk-a", Vec::new()));
         assert!(reg.get("nk-a").unwrap().forced_tags.is_empty());
+    }
+
+    #[test]
+    fn complete_web_registration_rekeys_same_machine_and_clears_tags() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(8);
+        existing.node_key_hex = "old-node".into();
+        existing.machine_key_hex = "same-machine".into();
+        existing.user = "alice".into();
+        existing.forced_tags = vec!["tag:server".into()];
+        existing.approved_routes = vec!["10.0.0.0/24".into(), "10.99.0.0/24".into()];
+        existing.available_routes = vec!["10.0.0.0/24".into(), "10.99.0.0/24".into()];
+        let old_ip = existing.ipv4;
+        let old_created_at = existing.created_at;
+        reg.upsert("old-node".to_string(), existing);
+
+        let mut pending = mk_record(9);
+        pending.node_key_hex = "new-node".into();
+        pending.machine_key_hex = "same-machine".into();
+        pending.user = String::new();
+        pending.forced_tags = Vec::new();
+        pending.available_routes = vec!["10.0.0.0/24".into()];
+        pending.approved_routes = Vec::new();
+
+        let registered = reg.complete_web_registration(pending, "alice".into(), 2);
+        assert_eq!(registered.node_key_hex, "new-node");
+        assert_eq!(registered.machine_key_hex, "same-machine");
+        assert_eq!(registered.user, "alice");
+        assert!(registered.forced_tags.is_empty());
+        assert_eq!(registered.ipv4, old_ip);
+        assert_eq!(registered.created_at, old_created_at);
+        assert_eq!(registered.approved_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(registered.register_method, 2);
+
+        assert_eq!(reg.len(), 1, "reauth must not duplicate the node");
+        assert!(reg.get("old-node").is_none());
+        let stored = reg.get("new-node").unwrap();
+        assert!(stored.forced_tags.is_empty());
+        assert_eq!(stored.ipv4, old_ip);
     }
 
     /// `gc_ephemeral` only collects ephemeral rows where last_seen is

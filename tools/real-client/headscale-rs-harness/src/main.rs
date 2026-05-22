@@ -373,15 +373,13 @@ async fn register_pending(
     let Some(mut record) = state.registration_cache.get(&registration_id) else {
         return (StatusCode::NOT_FOUND, "registration not found").into_response();
     };
-    record.user = req.user;
-    record.register_method = 2;
+    let user = req.user;
+    record.user = user.clone();
     if let Err(err) = apply_requested_tags(&state.policy, &mut record) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    state
-        .machines
-        .upsert(record.node_key_hex.clone(), record.clone());
+    let record = state.machines.complete_web_registration(record, user, 2);
     if !state
         .registration_cache
         .complete(&registration_id, record.clone())

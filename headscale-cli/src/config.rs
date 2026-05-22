@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use headscale_api::dns::DnsConfigSpec;
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,9 @@ pub(crate) struct CliConfig {
     pub node: Option<NodeConfig>,
     /// Logging configuration
     pub logging: Option<LoggingConfig>,
+    /// Top-level headscale-compatible DNS configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsConfigSpec>,
     /// OpenID Connect configuration
     #[serde(default, skip_serializing_if = "oidc_config_is_default")]
     pub oidc: OidcConfig,
@@ -393,6 +397,44 @@ grpc_allow_insecure = true
     }
 
     #[test]
+    fn loads_top_level_upstream_dns_toml() {
+        let source = r#"
+[dns]
+magic_dns = true
+base_domain = "tail.example.org"
+search_domains = ["corp.example.org"]
+extra_records = [
+  { name = "ops.tail.example.org", type = "A", value = "100.64.0.50" },
+]
+
+[dns.nameservers]
+global = ["1.1.1.1", "https://dns.example/dns-query"]
+
+[dns.nameservers.split]
+"corp.example.org" = ["10.0.0.53"]
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let dns = config.dns.unwrap();
+
+        assert!(dns.magic_dns);
+        assert_eq!(dns.base_domain, "tail.example.org");
+        assert_eq!(
+            dns.nameservers,
+            [
+                "1.1.1.1".to_string(),
+                "https://dns.example/dns-query".to_string()
+            ]
+        );
+        assert_eq!(
+            dns.restricted_nameservers.get("corp.example.org").unwrap(),
+            &vec!["10.0.0.53".to_string()]
+        );
+        assert_eq!(dns.search_domains, ["corp.example.org"]);
+        assert_eq!(dns.extra_records[0].name, "ops.tail.example.org");
+    }
+
+    #[test]
     fn loads_embedded_derp_runtime_fields() {
         let source = r#"
 [server]
@@ -474,6 +516,39 @@ oidc:
         assert_eq!(config.oidc.allowed_domains, ["example.com"]);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
         assert!(config.oidc.only_start_if_oidc_is_available);
+    }
+
+    #[test]
+    fn loads_top_level_upstream_dns_yaml() {
+        let source = r"
+dns:
+  magic_dns: true
+  base_domain: tail.example.org
+  override_local_dns: false
+  nameservers:
+    global:
+      - 1.1.1.1
+    split:
+      corp.example.org:
+        - 10.0.0.53
+  search_domains:
+    - corp.example.org
+  extra_records:
+    - name: ops.tail.example.org
+      type: A
+      value: 100.64.0.50
+";
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let dns = config.dns.unwrap();
+
+        assert_eq!(dns.base_domain, "tail.example.org");
+        assert_eq!(dns.nameservers, ["1.1.1.1"]);
+        assert_eq!(
+            dns.restricted_nameservers.get("corp.example.org").unwrap(),
+            &vec!["10.0.0.53".to_string()]
+        );
+        assert_eq!(dns.extra_records[0].value, "100.64.0.50");
     }
 
     #[test]

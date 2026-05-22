@@ -246,6 +246,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     }),
                 embedded_derp: server_config
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
+                dns: config.as_ref().and_then(|c| c.dns.clone()),
             };
             server::run_server(run_config)
                 .await

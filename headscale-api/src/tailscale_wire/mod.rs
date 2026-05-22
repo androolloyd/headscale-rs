@@ -1539,17 +1539,30 @@ mod registry_tests {
             "Auth": { "AuthKey": "hskey-auth-public-route-regression" },
         });
 
-        for uri in [
-            format!("/machine/nodekey:{node_key_hex}/register"),
-            "/machine/register".to_string(),
-            format!("/machine/nodekey:{node_key_hex}/map"),
-            "/machine/map".to_string(),
+        for (method, uri) in [
+            (
+                axum::http::Method::POST,
+                format!("/machine/nodekey:{node_key_hex}/register"),
+            ),
+            (axum::http::Method::POST, "/machine/register".to_string()),
+            (
+                axum::http::Method::POST,
+                format!("/machine/nodekey:{node_key_hex}/map"),
+            ),
+            (axum::http::Method::POST, "/machine/map".to_string()),
+            (axum::http::Method::GET, "/machine/whoami".to_string()),
+            (axum::http::Method::POST, "/machine/set-dns".to_string()),
+            (
+                axum::http::Method::PATCH,
+                "/machine/set-device-attr".to_string(),
+            ),
+            (axum::http::Method::POST, "/machine".to_string()),
         ] {
             let resp = app
                 .clone()
                 .oneshot(
                     axum::http::Request::builder()
-                        .method(axum::http::Method::POST)
+                        .method(method)
                         .uri(uri)
                         .header(axum::http::header::CONTENT_TYPE, "application/json")
                         .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1558,18 +1571,36 @@ mod registry_tests {
                 .await
                 .unwrap();
 
-            assert_eq!(resp.status(), axum::http::StatusCode::OK);
-            assert_eq!(
-                resp.headers()
-                    .get(axum::http::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/html; charset=utf-8")
-            );
+            assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
             let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-            assert_eq!(
-                &body[..],
-                b"<html lang=\"en\"><head><meta charset=\"UTF-8\"><link rel=\"icon\" href=\"/favicon.ico\"></head><body></body></html>"
-            );
+            assert!(body.is_empty());
+        }
+
+        assert!(state.machines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inner_flat_machine_routes_require_noise_machine_key() {
+        let state = test_state();
+        let app = super::noise::inner_router(state.clone());
+
+        for uri in ["/machine/register", "/machine/map"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri(uri)
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "missing Noise machine key");
         }
 
         assert!(state.machines.is_empty());

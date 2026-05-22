@@ -269,7 +269,12 @@ pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Respon
 }
 
 pub async fn handle_fallback(uri: Uri) -> Response {
-    if uri.path() == "/k" || uri.path().starts_with(super::knock::KNOCK_PATH_PREFIX) {
+    let path = uri.path();
+    if path == "/k"
+        || path.starts_with(super::knock::KNOCK_PATH_PREFIX)
+        || path == "/machine"
+        || path.starts_with("/machine/")
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     handle_blank().await

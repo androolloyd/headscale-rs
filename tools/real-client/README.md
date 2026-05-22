@@ -20,6 +20,7 @@ It starts the headscale-rs Tailscale wire surface and adds harness-only routes:
 - `POST /harness/preauth`
 - `PUT /harness/policy`
 - `GET /harness/machines`
+- `PUT /harness/machines/{node_key}/routes`
 
 Mint an auth key for a stock client:
 
@@ -139,3 +140,18 @@ Additional knobs:
 - `REAL_CLIENT_APPROVE_ROUTES` defaults to `REAL_CLIENT_ROUTE` in the approval
   wrappers.
 - `REAL_CLIENT_EXPECT_APPROVED_ROUTES` defaults to the approved routes.
+
+The exit-node scenario advertises the default-route pair with
+`tailscale up --advertise-exit-node`, approves both routes, and checks that
+the control server reports them as available and approved:
+
+```sh
+tools/real-client/route-exit-node-smoke.sh
+tools/real-client/route-exit-node-headscale-go-smoke.sh
+```
+
+Additional knobs:
+
+- `REAL_CLIENT_EXIT_ROUTES` defaults to `0.0.0.0/0,::/0`.
+- `REAL_CLIENT_ADVERTISE_EXIT_NODE` defaults to `true` in the exit-node
+  wrappers.

@@ -9,6 +9,7 @@ headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
@@ -240,6 +241,11 @@ up_args=(
 if [[ -n "${advertise_routes}" ]]; then
   up_args+=("--advertise-routes=${advertise_routes}")
 fi
+case "${advertise_exit_node}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    up_args+=(--advertise-exit-node)
+    ;;
+esac
 up_status=0
 run_with_timeout "tailscale up" docker exec "${client_name}" "${up_args[@]}" ||
   up_status="$?"

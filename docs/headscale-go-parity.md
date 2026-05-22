@@ -124,6 +124,18 @@ repo evidence, not claims about uninspected code.
 These streams are independent enough to run in separate worktrees. Keep
 file ownership narrow when splitting them across agents.
 
+### Active Task Board
+
+| Lane | Status | Owner scope | Next handoff |
+| --- | --- | --- | --- |
+| CLI node/debug/health gRPC client plumbing | In flight | `headscale-cli/src/admin/grpc_client.rs` | Use the client helpers to migrate `nodes`, then wire `debug create-node` and `health` CLI commands |
+| CI/fuzz/coverage gates | In flight | `.github/workflows/**`, `scripts/**` | Review all-target test coverage, stale fuzz-corpus checks, and coverage floor before enabling heavier real-client gates |
+| CLI nodes command migration | Ready next | `headscale-cli/src/admin/nodes.rs`, `headscale-cli/src/admin/mod.rs`, focused CLI tests | Preserve explicit `--server` legacy HTTP behavior; default to upstream gRPC like users/API keys/preauth/policy |
+| CLI config and snapshots | Ready next | `headscale-cli/src/main.rs`, `headscale-cli/src/config.rs`, CLI snapshot tests | Merge upstream `cli.*` config into gRPC connection args and snapshot help/output/error text |
+| Runtime/auth parity | Ready next | `headscale-api/proto/auth.proto`, `headscale-api/src/grpc.rs`, `headscale-api/src/grpc_gateway.rs`, wire registration tests | Decide baseline before expanding beyond the pinned v0.28 registration cache into current-upstream auth-request semantics |
+| Persistent runtime smokes | Ready next | `tools/real-client/**`, server/runtime tests | Add production-process restart and mutation smokes for web/CLI/OIDC registration, routes, tags, and maps |
+| DB import matrix | Ready next | `headscale-db/tests/**`, fixture DBs, migration guard | Add fixture imports for supported headscale-go releases and define the SQLite/Postgres support boundary |
+
 | Stream | Scope | Primary files | Exit criteria |
 | --- | --- | --- | --- |
 | Control-plane topology | Add optional remote TCP gRPC serving with API-key auth, TLS/insecure config, and reflection; keep the local Unix socket unauthenticated and permission-protected like upstream. | `headscale-cli/src/server.rs`, `headscale-cli/src/config.rs`, `headscale-cli/src/main.rs`, `headscale-api/src/grpc.rs` | Remote helper tests prove API-key-authenticated `Health` plus reflection, config parses upstream-shaped gRPC fields, and local Unix health remains bearerless; still add CLI-over-gRPC and broader production-process smokes. |

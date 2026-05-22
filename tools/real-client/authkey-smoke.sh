@@ -9,6 +9,8 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
+approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
+expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 run_id="hsrs-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -176,10 +178,29 @@ fi
 docker exec "${client_name}" tailscale status --json >"${work_dir}/tailscale-status.json"
 echo "::endgroup::"
 
+if [[ -n "${approve_routes}" ]]; then
+  echo "::group::approve routes"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-approve.json"
+  node_key="$(
+    ruby -rjson -e '
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      abort("expected one registered machine, got #{machines.length}") unless machines.length == 1
+      puts machines.fetch(0).fetch("node_key")
+    ' "${work_dir}/machines-before-approve.json"
+  )"
+  routes_json="$(ruby -rjson -e 'puts JSON.generate({routes: ARGV.fetch(0).split(",").reject(&:empty?)})' "${approve_routes}")"
+  curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${node_key}/routes" \
+    -H 'content-type: application/json' \
+    -d "${routes_json}" \
+    >"${work_dir}/approved-routes.json"
+  echo "::endgroup::"
+fi
+
 echo "::group::assert harness machine state"
 curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines.json"
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
+  expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
   machines = JSON.parse(File.read(ARGV.fetch(0)))
   abort("expected one registered machine, got #{machines.length}") unless machines.length == 1
   machine = machines.fetch(0)
@@ -190,8 +211,12 @@ ruby -rjson -e '
   unless expected_routes.empty? || available_routes == expected_routes
     abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
   end
+  approved_routes = Array(machine["approved_routes"]).sort
+  unless expected_approved.empty? || approved_routes == expected_approved
+    abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+  end
   puts JSON.pretty_generate(machine)
-' "${work_dir}/machines.json" "${expected_available_routes}"
+' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}"
 echo "::endgroup::"
 
 echo "auth-key real-client smoke passed"

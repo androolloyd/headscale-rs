@@ -119,3 +119,23 @@ Useful knobs:
 
 - `REAL_CLIENT_ADVERTISE_ROUTES` defaults to `10.77.0.0/24`.
 - `REAL_CLIENT_EXPECT_AVAILABLE_ROUTES` defaults to the advertised routes.
+
+The route-approval scenario advertises the same route, approves it through the
+control server, and asserts that the route is present in both available and
+approved route state:
+
+```sh
+tools/real-client/route-approve-smoke.sh
+tools/real-client/route-approve-headscale-go-smoke.sh
+```
+
+For headscale-rs the approval call uses a harness-only route that updates the
+shared wire `MachineRegistry`; for headscale-go it uses the upstream
+`headscale nodes approve-routes` CLI.
+
+Additional knobs:
+
+- `REAL_CLIENT_ROUTE` defaults to `10.77.0.0/24` for the wrapper scripts.
+- `REAL_CLIENT_APPROVE_ROUTES` defaults to `REAL_CLIENT_ROUTE` in the approval
+  wrappers.
+- `REAL_CLIENT_EXPECT_APPROVED_ROUTES` defaults to the approved routes.

@@ -10,6 +10,8 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
+approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
+expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 run_id="hsgo-authkey-$(date +%s)-$$"
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -252,10 +254,29 @@ fi
 docker exec "${client_name}" tailscale status --json >"${work_dir}/tailscale-status.json"
 echo "::endgroup::"
 
+if [[ -n "${approve_routes}" ]]; then
+  echo "::group::approve routes"
+  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-before-approve.json"
+  node_id="$(
+    ruby -rjson -e '
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      abort("expected one registered node, got #{nodes.length}") unless nodes.length == 1
+      puts nodes.fetch(0).fetch("id")
+    ' "${work_dir}/nodes-before-approve.json"
+  )"
+  "${headscale_bin}" -c "${config_path}" -o json nodes approve-routes \
+    --identifier "${node_id}" \
+    --routes "${approve_routes}" \
+    >"${work_dir}/approved-routes.json"
+  echo "::endgroup::"
+fi
+
 echo "::group::assert headscale-go node state"
 "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
 ruby -rjson -e '
   expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
+  expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
   payload = JSON.parse(File.read(ARGV.fetch(0)))
   nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
   abort("expected one registered node, got #{nodes.length}") unless nodes.length == 1
@@ -265,14 +286,18 @@ ruby -rjson -e '
   given_name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
   addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
   available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
+  approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
   abort("expected user alice, got #{user.inspect}") unless user_name == "alice"
   abort("expected hostname prefix, got #{given_name.inspect}") unless given_name.to_s.start_with?("hsgo-authkey-")
   abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
   unless expected_routes.empty? || available_routes == expected_routes
     abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
   end
+  unless expected_approved.empty? || approved_routes == expected_approved
+    abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
+  end
   puts JSON.pretty_generate(node)
-' "${work_dir}/nodes.json" "${expected_available_routes}"
+' "${work_dir}/nodes.json" "${expected_available_routes}" "${expected_approved_routes}"
 echo "::endgroup::"
 
 echo "headscale-go auth-key real-client smoke passed"

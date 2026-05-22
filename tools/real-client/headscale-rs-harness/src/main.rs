@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
@@ -26,7 +26,7 @@ use headscale_api::{
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry,
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
-        derp_config, serve,
+        derp_config, routes::normalize_routes, serve,
     },
 };
 use parking_lot::RwLock;
@@ -184,6 +184,11 @@ struct MachineSummary {
     disco_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SetApprovedRoutesRequest {
+    routes: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct StartupInfo {
     http: String,
@@ -283,6 +288,7 @@ async fn main() -> Result<()> {
                 "POST /harness/preauth",
                 "PUT /harness/policy",
                 "GET /harness/machines",
+                "PUT /harness/machines/{node_key}/routes",
             ],
         })?
     );
@@ -308,6 +314,10 @@ fn harness_router(state: AppState) -> Router {
         .route("/harness/preauth", post(mint_preauth))
         .route("/harness/policy", put(set_policy))
         .route("/harness/machines", get(list_machines))
+        .route(
+            "/harness/machines/:node_key/routes",
+            put(set_machine_routes),
+        )
         .with_state(state)
 }
 
@@ -346,6 +356,26 @@ async fn list_machines(State(state): State<AppState>) -> Json<Vec<MachineSummary
         .collect::<Vec<_>>();
     machines.sort_by(|a, b| a.node_key.cmp(&b.node_key));
     Json(machines)
+}
+
+async fn set_machine_routes(
+    State(state): State<AppState>,
+    Path(node_key): Path<String>,
+    Json(req): Json<SetApprovedRoutesRequest>,
+) -> impl IntoResponse {
+    let routes = match normalize_routes(req.routes) {
+        Ok(routes) => routes,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let node_key_hex = node_key.strip_prefix("nodekey:").unwrap_or(&node_key);
+    if !state.machines.set_approved_routes(node_key_hex, routes) {
+        return (StatusCode::NOT_FOUND, "machine not found").into_response();
+    }
+
+    match state.machines.get(node_key_hex) {
+        Some(machine) => Json(machine_summary(&machine)).into_response(),
+        None => (StatusCode::NOT_FOUND, "machine not found").into_response(),
+    }
 }
 
 fn load_policy(policy: &PolicyStore, raw: String) -> Result<()> {

@@ -32,7 +32,7 @@ use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::SanConfig;
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    RegistrationCache, ServerNoiseKey, WireState, serve,
+    PingTracker, RegistrationCache, ServerNoiseKey, WireState, serve,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -275,6 +275,7 @@ async fn build_persistent_wire_runtime_with_dns(
         dns,
         public_control_url: Some(server_url.to_string()),
         registration_cache,
+        pings: Arc::new(PingTracker::new()),
     };
 
     Ok(PersistentWireRuntime {

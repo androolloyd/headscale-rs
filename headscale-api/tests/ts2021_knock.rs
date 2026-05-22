@@ -71,6 +71,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
         public_control_url: None,
         registration_cache: Arc::new(tailscale_wire::RegistrationCache::new()),
+        pings: Arc::new(tailscale_wire::PingTracker::new()),
     };
     (state, dir)
 }

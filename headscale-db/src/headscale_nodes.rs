@@ -308,6 +308,105 @@ pub async fn get_by_machine_key(pool: &SqlitePool, machine_key: &str) -> Result<
         .map_err(map_not_found)
 }
 
+pub async fn get_by_machine_key_and_user(
+    pool: &SqlitePool,
+    machine_key: &str,
+    user_id: i64,
+) -> Result<HeadscaleNodeRow> {
+    let query = node_select(
+        "WHERE machine_key = ? AND user_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+    );
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(machine_key)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(map_not_found)
+}
+
+pub async fn update_from_auth_path(
+    pool: &SqlitePool,
+    id: i64,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    if !params.given_name.is_empty() {
+        validate_given_name(&params.given_name)?;
+    }
+
+    let duplicate_given_name_count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM nodes
+        WHERE given_name = ? AND id != ? AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.given_name)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    if duplicate_given_name_count > 0 {
+        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
+    }
+
+    let endpoints = json_array(&params.endpoints)?;
+    let host_info = json_object_or_value(&params.host_info)?;
+    let tags = json_array(&normalize_tags(params.tags))?;
+    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            machine_key = NULLIF(?, ''),
+            node_key = NULLIF(?, ''),
+            disco_key = NULLIF(?, ''),
+            endpoints = ?,
+            host_info = ?,
+            ipv4 = ?,
+            ipv6 = ?,
+            hostname = NULLIF(?, ''),
+            given_name = NULLIF(?, ''),
+            user_id = ?,
+            register_method = NULLIF(?, ''),
+            tags = ?,
+            auth_key_id = ?,
+            expiry = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            last_seen = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            approved_routes = ?,
+            updated_at = datetime(?, 'unixepoch')
+        WHERE id = ? AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.machine_key)
+    .bind(&params.node_key)
+    .bind(&params.disco_key)
+    .bind(&endpoints)
+    .bind(&host_info)
+    .bind(&params.ipv4)
+    .bind(&params.ipv6)
+    .bind(&params.hostname)
+    .bind(&params.given_name)
+    .bind(params.user_id)
+    .bind(&params.register_method)
+    .bind(&tags)
+    .bind(params.auth_key_id)
+    .bind(params.expiry)
+    .bind(params.expiry)
+    .bind(params.last_seen)
+    .bind(params.last_seen)
+    .bind(&approved_routes)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
     let query = node_select("WHERE deleted_at IS NULL ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -710,6 +809,53 @@ mod tests {
         assert_eq!(raw.get::<i64, _>("expiry"), 4_102_444_800);
         assert_eq!(raw.get::<i64, _>("last_seen"), 1_700_000_000);
         assert!(raw.get::<Option<String>, _>("deleted_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn update_from_auth_path_rekeys_existing_node() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let original = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+        let mut params = node_params(user_id, auth_key_id);
+        params.node_key = "nodekey:def".into();
+        params.disco_key = "discokey:def".into();
+        params.endpoints = vec!["198.51.100.10:41641".into()];
+        params.hostname = "alice-reauth".into();
+        params.given_name = "alice-reauth".into();
+        params.register_method = REGISTER_METHOD_OIDC.into();
+        params.tags = Vec::new();
+        params.auth_key_id = None;
+        params.expiry = Some(4_102_444_800);
+        params.last_seen = Some(1_800_000_000);
+        params.approved_routes = vec!["::/0".into()];
+
+        let updated = update_from_auth_path(db.pool(), original.id, params)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.machine_key, "mkey:abc");
+        assert_eq!(updated.node_key, "nodekey:def");
+        assert_eq!(updated.disco_key, "discokey:def");
+        assert_eq!(updated.endpoint_list(), vec!["198.51.100.10:41641"]);
+        assert_eq!(updated.given_name, "alice-reauth");
+        assert_eq!(updated.user_id, Some(user_id));
+        assert_eq!(updated.auth_key_id, None);
+        assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
+        assert!(updated.tag_list().is_empty());
+        assert_eq!(updated.approved_route_list(), vec!["::/0", "0.0.0.0/0"]);
+        assert_eq!(updated.created_at, original.created_at);
+        assert!(updated.updated_at >= original.updated_at);
+        assert_eq!(
+            get_by_machine_key_and_user(db.pool(), "mkey:abc", user_id)
+                .await
+                .unwrap()
+                .node_key,
+            "nodekey:def"
+        );
     }
 
     #[tokio::test]

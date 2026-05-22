@@ -56,10 +56,14 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::policy::PolicyStore;
-use crate::tailscale_wire::{MachineRegistry, routes::auto_approved_routes_for_node};
+use crate::tailscale_wire::{
+    MachineRecord, MachineRegistry, RegistrationCache, routes::auto_approved_routes_for_node,
+};
 
 use super::auth::now_unix;
 use super::users::UserAdmin;
+
+const REGISTER_METHOD_OIDC: i32 = 3;
 
 /// Admin-side view of one registered machine.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,6 +307,34 @@ pub struct PersistentMachineAdmin {
     users: Option<Arc<dyn UserAdmin>>,
 }
 
+#[derive(Clone)]
+pub struct PersistentOidcRegistrationHandler {
+    registration_cache: Arc<RegistrationCache>,
+    machines: Arc<PersistentMachineAdmin>,
+    policy: Arc<PolicyStore>,
+    wire_registry: Option<Arc<MachineRegistry>>,
+}
+
+impl PersistentOidcRegistrationHandler {
+    pub fn new(
+        registration_cache: Arc<RegistrationCache>,
+        machines: Arc<PersistentMachineAdmin>,
+        policy: Arc<PolicyStore>,
+    ) -> Self {
+        Self {
+            registration_cache,
+            machines,
+            policy,
+            wire_registry: None,
+        }
+    }
+
+    pub fn with_wire_registry(mut self, wire_registry: Arc<MachineRegistry>) -> Self {
+        self.wire_registry = Some(wire_registry);
+        self
+    }
+}
+
 impl PersistentMachineAdmin {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool, users: None }
@@ -315,6 +347,97 @@ impl PersistentMachineAdmin {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn create_or_update_auth_path(
+        &self,
+        mut record: MachineAdminRecord,
+        policy: &PolicyStore,
+    ) -> Result<(MachineAdminRecord, bool), MachineAdminError> {
+        if record.id.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "node key must not be empty".into(),
+            ));
+        }
+        record
+            .ipv4
+            .parse::<Ipv4Addr>()
+            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        let user_id = self.user_id_for_record(&record).await?;
+        let node_key = key_with_prefix("nodekey:", record.id.trim());
+        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
+
+        let existing_for_user = match user_id {
+            Some(user_id) => match headscale_db::headscale_nodes::get_by_machine_key_and_user(
+                &self.pool,
+                &machine_key,
+                user_id,
+            )
+            .await
+            {
+                Ok(row) => Some(row),
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            },
+            None => None,
+        };
+        let existing_for_machine =
+            match headscale_db::headscale_nodes::get_by_machine_key(&self.pool, &machine_key).await
+            {
+                Ok(row) => Some(row),
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            };
+        let existing = existing_for_user.or_else(|| {
+            existing_for_machine
+                .as_ref()
+                .filter(|row| !row.tag_list().is_empty())
+                .cloned()
+        });
+
+        if let Some(existing) = existing {
+            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
+                Ok(row) if row.id != existing.id => {
+                    return Err(MachineAdminError::BadRequest("node already exists".into()));
+                }
+                Ok(_) | Err(headscale_db::DbError::NotFound(_)) => {}
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            }
+            if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
+                record.ipv4.clone_from(ipv4);
+            }
+            let mut approved = existing.approved_route_list();
+            approved.extend(record.approved_routes.clone());
+            record.approved_routes = auto_approved_routes_for_node(
+                policy,
+                &record.ipv4,
+                Some(&record.user),
+                &record.tags,
+                &approved,
+                &record.routes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+
+            let row = headscale_db::headscale_nodes::update_from_auth_path(
+                &self.pool,
+                existing.id,
+                create_params_for_record(&record, user_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            Ok((self.row_to_record(row).await, false))
+        } else {
+            record.approved_routes = auto_approved_routes_for_node(
+                policy,
+                &record.ipv4,
+                Some(&record.user),
+                &record.tags,
+                &record.approved_routes,
+                &record.routes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+            self.create(record).await.map(|record| (record, true))
+        }
     }
 
     async fn row_by_slug(
@@ -420,6 +543,43 @@ impl PersistentMachineAdmin {
 }
 
 #[async_trait]
+impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler {
+    async fn complete_oidc_registration(
+        &self,
+        registration_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+        node_expiry: DateTime<Utc>,
+    ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
+        let pending = self
+            .registration_cache
+            .get(registration_id)
+            .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        let mut record = machine_admin_record_from_wire(&pending);
+        record.user = oidc_user_name(user);
+        record.expiry = Some(node_expiry.timestamp().max(0) as u64);
+        record.register_method = REGISTER_METHOD_OIDC;
+
+        let (created, new_node) = self
+            .machines
+            .create_or_update_auth_path(record, &self.policy)
+            .await
+            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
+        let wire_record = machine_admin_record_to_wire(&created);
+        if let Some(registry) = &self.wire_registry {
+            registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+        }
+        if self
+            .registration_cache
+            .complete(registration_id, wire_record)
+        {
+            Ok(crate::oidc::OidcRegistrationResult { new_node })
+        } else {
+            Err(crate::oidc::OidcRegistrationError::SessionExpired)
+        }
+    }
+}
+
+#[async_trait]
 impl MachineAdmin for PersistentMachineAdmin {
     async fn list(&self) -> Vec<MachineAdminRecord> {
         match headscale_db::headscale_nodes::list(&self.pool).await {
@@ -470,24 +630,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         let user_id = self.user_id_for_record(&record).await?;
         let row = headscale_db::headscale_nodes::create(
             &self.pool,
-            headscale_db::headscale_nodes::CreateParams {
-                machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
-                node_key,
-                disco_key: String::new(),
-                endpoints: Vec::new(),
-                host_info: host_info_for_record(&record),
-                ipv4: Some(record.ipv4.clone()),
-                ipv6: None,
-                hostname: record.name.clone(),
-                given_name: record.name.clone(),
-                user_id,
-                register_method: register_method_to_db(record.register_method),
-                tags: record.tags.clone(),
-                auth_key_id: None,
-                expiry: record.expiry.map(|expiry| expiry as i64),
-                last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
-                approved_routes: record.approved_routes.clone(),
-            },
+            create_params_for_record(&record, user_id),
         )
         .await
         .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -734,6 +877,94 @@ impl MachineAdmin for WireMachineAdmin {
     }
 }
 
+fn create_params_for_record(
+    record: &MachineAdminRecord,
+    user_id: Option<i64>,
+) -> headscale_db::headscale_nodes::CreateParams {
+    headscale_db::headscale_nodes::CreateParams {
+        machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
+        node_key: key_with_prefix("nodekey:", &record.id),
+        disco_key: String::new(),
+        endpoints: Vec::new(),
+        host_info: host_info_for_record(record),
+        ipv4: Some(record.ipv4.clone()),
+        ipv6: None,
+        hostname: record.name.clone(),
+        given_name: record.name.clone(),
+        user_id,
+        register_method: register_method_to_db(record.register_method),
+        tags: record.tags.clone(),
+        auth_key_id: None,
+        expiry: record.expiry.map(|expiry| expiry as i64),
+        last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
+        approved_routes: record.approved_routes.clone(),
+    }
+}
+
+fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord {
+    let expired = record.is_expired_at(Utc::now());
+    MachineAdminRecord {
+        node_id: 0,
+        id: record.node_key_hex.clone(),
+        name: record.hostname.clone(),
+        user: record.user.clone(),
+        ipv4: record.ipv4.to_string(),
+        online: !expired,
+        last_seen: record.last_seen.timestamp().max(0) as u64,
+        created_at: record.created_at.timestamp().max(0) as u64,
+        expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
+        machine_key_hex: record.machine_key_hex.clone(),
+        os: nonempty_or_unknown(&record.os),
+        version: nonempty_or_unknown(&record.os_version),
+        tags: record.forced_tags.clone(),
+        routes: record.available_routes.clone(),
+        approved_routes: record.approved_routes.clone(),
+        register_method: record.register_method,
+        expired,
+    }
+}
+
+fn machine_admin_record_to_wire(machine: &MachineAdminRecord) -> MachineRecord {
+    let created_at =
+        chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now);
+    let last_seen =
+        chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at);
+    let ipv4 = machine
+        .ipv4
+        .parse()
+        .unwrap_or_else(|_| Ipv4Addr::new(100, 64, 0, 1));
+    let mut record = MachineRecord::new_at(
+        created_at,
+        machine.id.clone(),
+        machine.machine_key_hex.clone(),
+        machine.user.clone(),
+        machine.name.clone(),
+        ipv4,
+        false,
+    );
+    record.expiry = machine
+        .expiry
+        .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
+    record.last_seen = last_seen;
+    record.os = machine.os.clone();
+    record.os_version = machine.version.clone();
+    record.forced_tags = machine.tags.clone();
+    record.available_routes = machine.routes.clone();
+    record.approved_routes = machine.approved_routes.clone();
+    record.register_method = machine.register_method;
+    record
+}
+
+fn oidc_user_name(user: &crate::oidc::OidcStoredUser) -> String {
+    if !user.name.is_empty() {
+        user.name.clone()
+    } else if !user.email.is_empty() {
+        user.email.clone()
+    } else {
+        user.provider_identifier.clone()
+    }
+}
+
 fn key_with_prefix(prefix: &str, value: &str) -> String {
     if value.is_empty() || value.starts_with(prefix) {
         value.to_string()
@@ -800,7 +1031,9 @@ fn db_error_to_machine(e: headscale_db::DbError, subject: &str) -> MachineAdminE
 mod tests {
     use super::super::users::PersistentUserAdmin;
     use super::*;
+    use crate::oidc::OidcRegistrationHandler;
     use crate::tailscale_wire::{MachineRecord, MachineRegistry};
+    use chrono::TimeZone;
     use headscale_db::Database;
     use std::net::Ipv4Addr;
 
@@ -1083,6 +1316,134 @@ mod tests {
             created.node_id
         );
         assert_eq!(admin.get("1").await.unwrap().id, "aa".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_auth_path_reauth_updates_existing_row() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let mut original = persistent_record();
+        original.approved_routes = vec!["10.0.0.0/24".into()];
+        let created = admin.create(original).await.unwrap();
+
+        let mut pending = persistent_record();
+        pending.id = "cc".repeat(32);
+        pending.machine_key_hex = created.machine_key_hex.clone();
+        pending.register_method = REGISTER_METHOD_OIDC;
+        pending.routes = vec!["10.0.0.0/24".into(), "10.1.0.0/24".into()];
+        pending.approved_routes = vec!["10.1.0.0/24".into()];
+        pending.ipv4 = "100.64.99.99".into();
+        pending.expiry = Some(4_102_444_800);
+
+        let (updated, new_node) = admin
+            .create_or_update_auth_path(pending, &PolicyStore::new())
+            .await
+            .unwrap();
+
+        assert!(!new_node);
+        assert_eq!(updated.node_id, created.node_id);
+        assert_eq!(updated.id, "cc".repeat(32));
+        assert_eq!(updated.machine_key_hex, created.machine_key_hex);
+        assert_eq!(updated.ipv4, created.ipv4, "reauth keeps existing IP");
+        assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(updated.expiry, Some(4_102_444_800));
+        assert_eq!(updated.approved_routes, vec!["10.0.0.0/24", "10.1.0.0/24"]);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let raw = headscale_db::headscale_nodes::get_by_id(db.pool(), created.node_id as i64)
+            .await
+            .unwrap();
+        assert_eq!(raw.node_key, format!("nodekey:{}", "cc".repeat(32)));
+        assert_eq!(
+            raw.register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_writes_db_and_completes_cache() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "dd".repeat(32),
+            "ee".repeat(32),
+            String::new(),
+            "alice-oidc".into(),
+            Ipv4Addr::new(100, 64, 0, 55),
+            false,
+        );
+        pending.available_routes = vec!["10.20.0.0/24".into()];
+        let registration_id = "p".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+        let waiter = {
+            let cache = cache.clone();
+            let registration_id = registration_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&registration_id).await })
+        };
+        tokio::task::yield_now().await;
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin.clone(),
+            Arc::new(PolicyStore::new()),
+        )
+        .with_wire_registry(registry.clone());
+        let expiry = Utc.timestamp_opt(4_102_444_800, 0).unwrap();
+        let result = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 1,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                expiry,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        assert!(cache.get(&registration_id).is_none());
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(stored.expiry, Some(4_102_444_800));
+        assert_eq!(stored.routes, vec!["10.20.0.0/24"]);
+        assert_eq!(
+            headscale_db::headscale_nodes::get_by_node_key(
+                db.pool(),
+                &format!("nodekey:{}", pending.node_key_hex)
+            )
+            .await
+            .unwrap()
+            .register_method,
+            headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+        );
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.expiry, Some(expiry));
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        match outcome {
+            crate::tailscale_wire::RegistrationWaitOutcome::Registered(record) => {
+                assert_eq!(record.user, "alice");
+                assert_eq!(record.register_method, REGISTER_METHOD_OIDC);
+            }
+            other => panic!("unexpected registration outcome: {other:?}"),
+        }
     }
 
     #[tokio::test]

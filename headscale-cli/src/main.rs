@@ -1,7 +1,7 @@
 //! Headscale-rs CLI
 //!
 //! Command-line interface for running headscale mesh nodes and control planes.
-//! The admin subcommands (`users`, `nodes`, `preauthkeys`, `policy`,
+//! The admin subcommands (`users`, `nodes`, `auth`, `preauthkeys`, `policy`,
 //! `apikeys`, `tailnet`) are being migrated to the upstream gRPC admin API.
 //! Migrated groups default to the local Unix socket; unmigrated groups still
 //! use the legacy `/api/v1/*` GUI surface.
@@ -20,8 +20,8 @@ mod server;
 
 use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
-    self, AdminError, ApiKeysCmd, ConnectArgs, DebugCmd, NodesCmd, PolicyCmd, PreauthKeysCmd,
-    TailnetCmd, UsersCmd,
+    self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, NodesCmd, PolicyCmd,
+    PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
 /// Headscale-rs: WireGuard mesh networking with resource accounting.
@@ -105,6 +105,11 @@ enum Commands {
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
+    },
+    /// Manage node authentication and approval.
+    Auth {
+        #[command(subcommand)]
+        action: AuthCmd,
     },
     /// Manage API keys.
     #[command(alias = "apikey", alias = "api")]
@@ -362,6 +367,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
         Commands::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action)
             .await
             .map_err(Into::into),
+        Commands::Auth { action } => admin::run_auth(&connect, &action).await.map_err(Into::into),
         Commands::Apikeys { action } => admin::run_apikeys(&connect, &action)
             .await
             .map_err(Into::into),
@@ -799,6 +805,35 @@ mod tests {
             parsed.command,
             Commands::Preauthkeys {
                 action: PreauthKeysCmd::Create { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_auth_commands_from_upstream() {
+        let parsed = Cli::try_parse_from([
+            "headscale",
+            "auth",
+            "register",
+            "--user",
+            "alice",
+            "--auth-id",
+            "hskey-authreq-abcdefghijklmnopqrstuvwx",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Auth {
+                action: AuthCmd::Register { .. }
+            }
+        ));
+
+        let parsed =
+            Cli::try_parse_from(["headscale", "preauthkeys", "delete", "--id", "42"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Preauthkeys {
+                action: PreauthKeysCmd::Delete { id: 42 }
             }
         ));
     }

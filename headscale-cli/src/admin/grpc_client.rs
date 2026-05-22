@@ -6,14 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CheckPolicyRequest,
-    CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DebugCreateNodeRequest,
-    DeleteApiKeyRequest, DeleteNodeRequest, DeleteUserRequest, ExpireApiKeyRequest,
-    ExpireNodeRequest, ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest,
-    GetPolicyResponse, HealthRequest, HealthResponse, ListApiKeysRequest, ListNodesRequest,
-    ListPreAuthKeysRequest, ListUsersRequest, Node, PreAuthKey, RegisterNodeRequest,
-    RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
-    SetPolicyResponse, SetTagsRequest, User, headscale_service_client::HeadscaleServiceClient,
+    ApiKey, AuthApproveRequest, AuthRegisterRequest, AuthRejectRequest, BackfillNodeIPsRequest,
+    BackfillNodeIPsResponse, CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest,
+    CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest,
+    DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest,
+    ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, GetPolicyResponse, HealthRequest,
+    HealthResponse, ListApiKeysRequest, ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest,
+    Node, PreAuthKey, RegisterNodeRequest, RenameNodeRequest, RenameUserRequest,
+    SetApprovedRoutesRequest, SetPolicyRequest, SetPolicyResponse, SetTagsRequest, User,
+    headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpStream, UnixStream};
@@ -162,6 +163,15 @@ impl GrpcAdminClient {
         Ok(())
     }
 
+    pub async fn delete_pre_auth_key(&mut self, id: u64) -> Result<(), AdminError> {
+        let request = self.request(DeletePreAuthKeyRequest { id })?;
+        self.client
+            .delete_pre_auth_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
     pub async fn get_policy(&mut self) -> Result<GetPolicyResponse, AdminError> {
         let request = self.request(GetPolicyRequest {})?;
         Ok(self
@@ -227,6 +237,42 @@ impl GrpcAdminClient {
             .map_err(|status| status_to_admin_error(&status))?
             .into_inner();
         required_node(response.node, "RegisterNode")
+    }
+
+    pub async fn auth_register(&mut self, user: &str, auth_id: &str) -> Result<Node, AdminError> {
+        let request = self.request(AuthRegisterRequest {
+            user: user.to_string(),
+            auth_id: auth_id.to_string(),
+        })?;
+        let response = self
+            .client
+            .auth_register(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        required_node(response.node, "AuthRegister")
+    }
+
+    pub async fn auth_approve(&mut self, auth_id: &str) -> Result<(), AdminError> {
+        let request = self.request(AuthApproveRequest {
+            auth_id: auth_id.to_string(),
+        })?;
+        self.client
+            .auth_approve(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
+    pub async fn auth_reject(&mut self, auth_id: &str) -> Result<(), AdminError> {
+        let request = self.request(AuthRejectRequest {
+            auth_id: auth_id.to_string(),
+        })?;
+        self.client
+            .auth_reject(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
     }
 
     pub async fn debug_create_node(
@@ -847,6 +893,8 @@ mod tests {
         assert_eq!(listed[0].id, key.id);
 
         client.expire_pre_auth_key(key.id).await.unwrap();
+        client.delete_pre_auth_key(key.id).await.unwrap();
+        assert!(client.list_pre_auth_keys().await.unwrap().is_empty());
 
         handle.abort();
         let _ = handle.await;
@@ -928,11 +976,40 @@ mod tests {
             vec!["10.10.0.0/24".to_string()]
         );
 
+        let auth_registration_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
+        client
+            .debug_create_node("alice", auth_registration_id, "auth-node", Vec::new())
+            .await
+            .unwrap();
+        let auth_registered = client
+            .auth_register("alice", &format!("hskey-authreq-{auth_registration_id}"))
+            .await
+            .unwrap();
+        assert_eq!(auth_registered.name, "auth-node");
+
+        let approve_id = "cccccccccccccccccccccccc";
+        client
+            .debug_create_node("alice", approve_id, "approve-node", Vec::new())
+            .await
+            .unwrap();
+        client.auth_approve(approve_id).await.unwrap();
+
+        let reject_id = "dddddddddddddddddddddddd";
+        client
+            .debug_create_node("alice", reject_id, "reject-node", Vec::new())
+            .await
+            .unwrap();
+        client
+            .auth_reject(&format!("hskey-authreq-{reject_id}"))
+            .await
+            .unwrap();
+
         let listed = client.list_nodes(None).await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, registered.id);
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|node| node.id == registered.id));
+        assert!(listed.iter().any(|node| node.id == auth_registered.id));
         let filtered = client.list_nodes(Some("alice")).await.unwrap();
-        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered.len(), 2);
         let fetched = client.get_node(registered.id).await.unwrap();
         assert_eq!(fetched.id, registered.id);
 
@@ -967,6 +1044,7 @@ mod tests {
         assert_eq!(renamed.name, "node-renamed");
 
         client.delete_node(registered.id).await.unwrap();
+        client.delete_node(auth_registered.id).await.unwrap();
         assert!(client.list_nodes(None).await.unwrap().is_empty());
         assert!(matches!(
             client.get_node(registered.id).await,

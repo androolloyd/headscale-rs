@@ -138,6 +138,33 @@ pub async fn expire_grpc(client: &mut GrpcAdminClient, prefix: &str) -> Result<(
     Ok(())
 }
 
+pub async fn delete_grpc(
+    client: &mut GrpcAdminClient,
+    id: u64,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    if id == 0 {
+        return Err(AdminError::Local("missing --id parameter".into()));
+    }
+    client.delete_pre_auth_key(id).await?;
+    print_result(fmt, "Key deleted")
+}
+
+fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
+    #[derive(Serialize)]
+    struct ResultOutput<'a> {
+        #[serde(rename = "Result")]
+        result: &'a str,
+    }
+
+    if fmt.is_structured() {
+        print_structured(fmt, &ResultOutput { result: message })
+    } else {
+        println!("{message}");
+        Ok(())
+    }
+}
+
 async fn resolve_user_id(client: &mut GrpcAdminClient, user: &str) -> Result<u64, AdminError> {
     let users = client
         .list_users(UserSelector {

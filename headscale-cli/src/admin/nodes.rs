@@ -753,10 +753,10 @@ fn is_expired(expiry: Option<&prost_types::Timestamp>) -> bool {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct NodeOutput {
+pub(crate) struct NodeOutput {
     id: u64,
-    name: String,
-    given_name: String,
+    pub(crate) name: String,
+    pub(crate) given_name: String,
     user: String,
     machine_key: String,
     node_key: String,

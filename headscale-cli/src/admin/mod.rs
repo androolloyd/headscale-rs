@@ -25,6 +25,7 @@
 //! | 6    | other server-side failure (4xx / 5xx / decode) |
 
 pub mod apikeys;
+pub mod auth;
 pub mod client;
 pub mod duration;
 pub mod grpc_client;
@@ -375,6 +376,38 @@ pub enum PreauthKeysCmd {
         #[arg(value_name = "PREFIX")]
         prefix: String,
     },
+    /// Delete a preauth key by numeric ID.
+    #[command(alias = "del", alias = "rm", alias = "d")]
+    Delete {
+        /// Authkey ID.
+        #[arg(short = 'i', long = "id")]
+        id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthCmd {
+    /// Register a node to your network.
+    Register {
+        /// User.
+        #[arg(short = 'u', long = "user")]
+        user: String,
+        /// Auth ID.
+        #[arg(long = "auth-id")]
+        auth_id: String,
+    },
+    /// Approve a pending authentication request.
+    Approve {
+        /// Auth ID.
+        #[arg(long = "auth-id")]
+        auth_id: String,
+    },
+    /// Reject a pending authentication request.
+    Reject {
+        /// Auth ID.
+        #[arg(long = "auth-id")]
+        auth_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -665,6 +698,9 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             }
             PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
             PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+            PreauthKeysCmd::Delete { .. } => Err(AdminError::Local(
+                "preauthkeys delete requires the upstream gRPC transport".into(),
+            )),
         };
     }
 
@@ -693,6 +729,25 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             preauthkeys::list_grpc(&mut client, user.as_deref(), fmt).await
         }
         PreauthKeysCmd::Expire { prefix } => preauthkeys::expire_grpc(&mut client, prefix).await,
+        PreauthKeysCmd::Delete { id } => preauthkeys::delete_grpc(&mut client, *id, fmt).await,
+    }
+}
+
+pub async fn run_auth(conn: &ConnectArgs, cmd: &AuthCmd) -> Result<(), AdminError> {
+    let fmt = conn.fmt()?;
+    if conn.should_use_legacy_http_for_migrated_commands() {
+        return Err(AdminError::Local(
+            "auth commands require the upstream gRPC transport".into(),
+        ));
+    }
+
+    let mut client = conn.build_grpc_client().await?;
+    match cmd {
+        AuthCmd::Register { user, auth_id } => {
+            auth::register_grpc(&mut client, user, auth_id, fmt).await
+        }
+        AuthCmd::Approve { auth_id } => auth::approve_grpc(&mut client, auth_id, fmt).await,
+        AuthCmd::Reject { auth_id } => auth::reject_grpc(&mut client, auth_id, fmt).await,
     }
 }
 
@@ -839,6 +894,18 @@ mod tests {
     struct DebugHarness {
         #[command(subcommand)]
         action: DebugCmd,
+    }
+
+    #[derive(Parser)]
+    struct PreauthKeysHarness {
+        #[command(subcommand)]
+        action: PreauthKeysCmd,
+    }
+
+    #[derive(Parser)]
+    struct AuthHarness {
+        #[command(subcommand)]
+        action: AuthCmd,
     }
 
     #[test]
@@ -1205,5 +1272,51 @@ mod tests {
         assert_eq!(select_debug_user(None, Some("alice")).unwrap(), "alice");
         assert!(select_debug_user(Some("alice"), Some("legacy")).is_err());
         assert!(select_debug_user(None, None).is_err());
+    }
+
+    #[test]
+    fn preauthkeys_accepts_upstream_delete_by_id() {
+        assert!(matches!(
+            PreauthKeysHarness::try_parse_from(["headscale", "delete", "--id", "42"])
+                .unwrap()
+                .action,
+            PreauthKeysCmd::Delete { id: 42 }
+        ));
+        assert!(matches!(
+            PreauthKeysHarness::try_parse_from(["headscale", "del", "-i", "43"])
+                .unwrap()
+                .action,
+            PreauthKeysCmd::Delete { id: 43 }
+        ));
+    }
+
+    #[test]
+    fn auth_accepts_upstream_command_shapes() {
+        assert!(matches!(
+            AuthHarness::try_parse_from([
+                "headscale",
+                "register",
+                "--user",
+                "alice",
+                "--auth-id",
+                "hskey-authreq-abcdefghijklmnopqrstuvwx",
+            ])
+            .unwrap()
+            .action,
+            AuthCmd::Register { user, auth_id }
+                if user == "alice" && auth_id == "hskey-authreq-abcdefghijklmnopqrstuvwx"
+        ));
+        assert!(matches!(
+            AuthHarness::try_parse_from(["headscale", "approve", "--auth-id", "pending-id"])
+                .unwrap()
+                .action,
+            AuthCmd::Approve { auth_id } if auth_id == "pending-id"
+        ));
+        assert!(matches!(
+            AuthHarness::try_parse_from(["headscale", "reject", "--auth-id", "pending-id"])
+                .unwrap()
+                .action,
+            AuthCmd::Reject { auth_id } if auth_id == "pending-id"
+        ));
     }
 }

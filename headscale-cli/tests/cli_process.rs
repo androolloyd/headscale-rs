@@ -37,6 +37,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "users",
         "nodes",
         "preauthkeys",
+        "auth",
         "apikeys",
         "policy",
         "debug",
@@ -48,6 +49,26 @@ fn top_level_help_exposes_upstream_operator_commands() {
     ] {
         assert!(out.contains(command), "missing {command} in help:\n{out}");
     }
+}
+
+#[test]
+fn auth_and_preauth_delete_help_are_accepted() {
+    let auth = headscale(&["auth", "--help"]);
+    assert!(auth.status.success(), "stderr: {}", stderr(&auth));
+    let out = stdout(&auth);
+    assert!(out.contains("register"));
+    assert!(out.contains("approve"));
+    assert!(out.contains("reject"));
+
+    let register = headscale(&["auth", "register", "--help"]);
+    assert!(register.status.success(), "stderr: {}", stderr(&register));
+    let out = stdout(&register);
+    assert!(out.contains("--user"));
+    assert!(out.contains("--auth-id"));
+
+    let delete = headscale(&["preauthkeys", "delete", "--help"]);
+    assert!(delete.status.success(), "stderr: {}", stderr(&delete));
+    assert!(stdout(&delete).contains("--id"));
 }
 
 #[test]

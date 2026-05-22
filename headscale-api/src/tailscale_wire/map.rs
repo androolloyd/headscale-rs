@@ -668,22 +668,23 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         if res.is_err() {
                             build_keepalive_chunk()
                         } else {
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "peers")
                         }
                     }
                     () = &mut policy_changed => {
                         // Policy edited via admin PUT — every parked
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "policy")
                     }
                     () = &mut dns_changed => {
                         // Extra-records file edited (or DnsStore.set_spec
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns)
+                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "config")
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
+                        machines.record_mapresponse_sent("ok", "keepalive");
                         build_keepalive_chunk()
                     }
                     }
@@ -731,10 +732,12 @@ fn rebuild_map_chunk(
     self_node_key: &str,
     derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
     dns: &Arc<DnsStore>,
+    response_type: &str,
 ) -> Vec<u8> {
     let Some(own) = machines.get(self_node_key) else {
         return build_keepalive_chunk();
     };
+    machines.record_mapresponse_generated(response_type);
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
@@ -1553,6 +1556,7 @@ mod tests {
         let app = router(state.clone());
         let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -1611,6 +1615,37 @@ mod tests {
             "second chunk should include the newly-registered peer"
         );
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
+
+        let metrics_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics.contains("headscale_mapresponse_generated_total{response_type=\"peers\"} 1\n")
+        );
+
+        drop(body);
+
+        let metrics_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"done\"} 1\n"));
     }
 
     /// audit-2 C-1: a registry change fired **before** the unfold
@@ -1700,6 +1735,7 @@ mod tests {
         let app = router(state);
         let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -1735,6 +1771,22 @@ mod tests {
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
+
+        let metrics_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics
+                .contains("headscale_mapresponse_sent_total{status=\"ok\",type=\"keepalive\"} 1\n")
+        );
     }
 
     /// First MapResponse chunk must carry the upstream-required `Node`

@@ -326,8 +326,11 @@ pub struct MachineRegistry {
 }
 
 #[derive(Default)]
-pub struct WireMetrics {
+struct WireMetrics {
     mapresponse_endpoint_updates: RwLock<BTreeMap<String, u64>>,
+    mapresponse_ended: RwLock<BTreeMap<String, u64>>,
+    mapresponse_generated: RwLock<BTreeMap<String, u64>>,
+    mapresponse_sent: RwLock<BTreeMap<(String, String), u64>>,
 }
 
 impl Default for MachineRegistry {
@@ -487,8 +490,37 @@ impl MachineRegistry {
         *updates.entry(status.to_string()).or_insert(0) += 1;
     }
 
+    pub(crate) fn record_mapresponse_ended(&self, reason: &str) {
+        let mut ended = self.metrics.mapresponse_ended.write();
+        *ended.entry(reason.to_string()).or_insert(0) += 1;
+    }
+
+    pub(crate) fn record_mapresponse_generated(&self, response_type: &str) {
+        let mut generated = self.metrics.mapresponse_generated.write();
+        *generated.entry(response_type.to_string()).or_insert(0) += 1;
+    }
+
+    pub(crate) fn record_mapresponse_sent(&self, status: &str, response_type: &str) {
+        let mut sent = self.metrics.mapresponse_sent.write();
+        *sent
+            .entry((status.to_string(), response_type.to_string()))
+            .or_insert(0) += 1;
+    }
+
     pub fn mapresponse_endpoint_update_metrics(&self) -> BTreeMap<String, u64> {
         self.metrics.mapresponse_endpoint_updates.read().clone()
+    }
+
+    pub fn mapresponse_ended_metrics(&self) -> BTreeMap<String, u64> {
+        self.metrics.mapresponse_ended.read().clone()
+    }
+
+    pub fn mapresponse_generated_metrics(&self) -> BTreeMap<String, u64> {
+        self.metrics.mapresponse_generated.read().clone()
+    }
+
+    pub fn mapresponse_sent_metrics(&self) -> BTreeMap<(String, String), u64> {
+        self.metrics.mapresponse_sent.read().clone()
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -701,6 +733,7 @@ pub(crate) struct StreamConnectionGuard {
 impl Drop for StreamConnectionGuard {
     fn drop(&mut self) {
         self.machines.release_stream_connection(self.node_id);
+        self.machines.record_mapresponse_ended("done");
     }
 }
 

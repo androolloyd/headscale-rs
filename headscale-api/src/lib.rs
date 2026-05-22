@@ -41,6 +41,7 @@ pub mod policy;
 // (§MagicDNS). Lives in the wire-default feature set: a wire-only
 // embedder still needs the DnsStore to emit MagicDNS records.
 pub mod dns;
+pub mod oidc;
 
 // Admin GUI v0 — Tailscale-admin-equivalent web panel + JSON API.
 // Gated behind the `admin` feature (default-on); downstream wire-only

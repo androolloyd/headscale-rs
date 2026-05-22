@@ -42,6 +42,7 @@ clap = { workspace = true }
 
 # Config file support
 toml = { workspace = true }
+serde_yaml = { workspace = true }
 
 # HTTP client for node mode + admin API client.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

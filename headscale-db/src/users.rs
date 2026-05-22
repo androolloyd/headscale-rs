@@ -89,6 +89,15 @@ pub struct CreateParams {
     pub profile_pic_url: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OidcUserParams {
+    pub name: String,
+    pub display_name: String,
+    pub email: String,
+    pub provider_identifier: String,
+    pub profile_pic_url: String,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UserError {
     #[error("user name invalid: {0}")]
@@ -99,6 +108,8 @@ pub enum UserError {
     NotFound,
     #[error("cannot edit OIDC user")]
     CannotChangeOidcUser,
+    #[error("OIDC provider_identifier is required")]
+    MissingOidcProviderIdentifier,
 }
 
 fn now_unix() -> i64 {
@@ -109,6 +120,10 @@ fn now_unix() -> i64 {
 
 fn normalize_provider_identifier(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
+}
+
+fn normalize_oidc_provider_identifier(value: String) -> std::result::Result<String, UserError> {
+    normalize_provider_identifier(Some(value)).ok_or(UserError::MissingOidcProviderIdentifier)
 }
 
 pub fn validate_hostname(name: &str) -> std::result::Result<(), UserError> {
@@ -166,6 +181,44 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<UserRow> 
     .bind(&params.email)
     .bind(&provider_identifier)
     .bind(&params.provider)
+    .bind(&params.profile_pic_url)
+    .bind(now)
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx_err)?;
+    get_by_id(pool, id).await
+}
+
+pub async fn create_or_update_oidc_user(
+    pool: &SqlitePool,
+    params: OidcUserParams,
+) -> Result<UserRow> {
+    let provider_identifier = normalize_oidc_provider_identifier(params.provider_identifier)
+        .map_err(|e| DbError::General(e.to_string()))?;
+    let now = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO users
+            (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'), datetime(?, 'unixepoch'), NULL)
+        ON CONFLICT(provider_identifier) WHERE provider_identifier IS NOT NULL DO UPDATE SET
+            name = CASE WHEN excluded.name != '' THEN excluded.name ELSE users.name END,
+            display_name = excluded.display_name,
+            email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
+            provider_identifier = excluded.provider_identifier,
+            provider = excluded.provider,
+            profile_pic_url = excluded.profile_pic_url,
+            updated_at = excluded.updated_at
+        WHERE users.deleted_at IS NULL
+        RETURNING id
+        ",
+    )
+    .bind(&params.name)
+    .bind(&params.display_name)
+    .bind(&params.email)
+    .bind(&provider_identifier)
+    .bind(REGISTER_METHOD_OIDC)
     .bind(&params.profile_pic_url)
     .bind(now)
     .bind(now)
@@ -461,6 +514,105 @@ mod tests {
             user.id
         );
         assert!(rename(db.pool(), user.id, "new-name").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oidc_upsert_creates_user_without_hostname_name() {
+        let db = fresh_db().await;
+        let user = create_or_update_oidc_user(
+            db.pool(),
+            OidcUserParams {
+                email: "oidc@example.com".into(),
+                display_name: "OIDC User".into(),
+                provider_identifier: "https://issuer/sub".into(),
+                profile_pic_url: "https://example.com/oidc.png".into(),
+                ..OidcUserParams::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(user.name, "");
+        assert_eq!(user.username(), "oidc@example.com");
+        assert_eq!(user.display(), "OIDC User");
+        assert_eq!(user.email, "oidc@example.com");
+        assert_eq!(
+            user.provider_identifier.as_deref(),
+            Some("https://issuer/sub")
+        );
+        assert_eq!(user.provider, REGISTER_METHOD_OIDC);
+        assert_eq!(user.profile_pic_url, "https://example.com/oidc.png");
+        assert_eq!(
+            get_by_oidc_identifier(db.pool(), "https://issuer/sub")
+                .await
+                .unwrap()
+                .id,
+            user.id
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_upsert_updates_profile_like_headscale_go_from_claim() {
+        let db = fresh_db().await;
+        let original = create_or_update_oidc_user(
+            db.pool(),
+            OidcUserParams {
+                name: "oidc-user".into(),
+                email: "old@example.com".into(),
+                display_name: "Old Name".into(),
+                provider_identifier: "issuer/sub".into(),
+                profile_pic_url: "https://example.com/old.png".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = create_or_update_oidc_user(
+            db.pool(),
+            OidcUserParams {
+                display_name: "New Name".into(),
+                provider_identifier: "issuer/sub".into(),
+                ..OidcUserParams::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.name, "oidc-user");
+        assert_eq!(updated.email, "old@example.com");
+        assert_eq!(updated.display_name, "New Name");
+        assert_eq!(updated.profile_pic_url, "");
+        assert_eq!(updated.provider_identifier.as_deref(), Some("issuer/sub"));
+        assert_eq!(updated.provider, REGISTER_METHOD_OIDC);
+        assert!(updated.updated_at >= original.updated_at);
+        assert_eq!(list(db.pool()).await.unwrap().len(), 1);
+
+        let cleared_profile = create_or_update_oidc_user(
+            db.pool(),
+            OidcUserParams {
+                provider_identifier: "issuer/sub".into(),
+                ..OidcUserParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared_profile.id, original.id);
+        assert_eq!(cleared_profile.name, "oidc-user");
+        assert_eq!(cleared_profile.email, "old@example.com");
+        assert_eq!(cleared_profile.display_name, "");
+        assert_eq!(cleared_profile.profile_pic_url, "");
+    }
+
+    #[tokio::test]
+    async fn oidc_upsert_requires_provider_identifier() {
+        let db = fresh_db().await;
+        assert!(matches!(
+            create_or_update_oidc_user(db.pool(), OidcUserParams::default())
+                .await
+                .unwrap_err(),
+            DbError::General(_)
+        ));
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
+expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
@@ -32,6 +33,22 @@ case "${login_mode}" in
     exit 2
     ;;
 esac
+case "${expected_register_failure}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_register_failure=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_register_failure=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE must be true or false, got ${expected_register_failure}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
+  echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
+  exit 2
+fi
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -405,10 +422,30 @@ for client_name in "${client_names[@]}"; do
       exit 1
     fi
     registration_id="$(cat "${registration_id_path}")"
+    register_status=0
     "${headscale_bin}" -c "${config_path}" -o json nodes register \
       --user alice \
       --key "${registration_id}" \
-      >"${work_dir}/${client_name}.registered.json"
+      >"${work_dir}/${client_name}.registered.json" \
+      2>"${work_dir}/${client_name}.registered.err" ||
+      register_status="$?"
+    if ((expect_register_failure)); then
+      if ((register_status == 0)); then
+        echo "expected web registration to fail for ${client_name}" >&2
+        kill "${up_pid}" >/dev/null 2>&1 || true
+        wait "${up_pid}" >/dev/null 2>&1 || true
+        exit 1
+      fi
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      continue
+    fi
+    if ((register_status != 0)); then
+      cat "${work_dir}/${client_name}.registered.err" >&2 || true
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      exit "${register_status}"
+    fi
     wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}" ||
       up_status="$?"
   else
@@ -426,6 +463,21 @@ for client_name in "${client_names[@]}"; do
   docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
 done
 echo "::endgroup::"
+
+if ((expect_register_failure)); then
+  echo "::group::assert rejected headscale-go web registration"
+  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
+    expected_count = Integer(ARGV.fetch(1))
+    abort("expected #{expected_count} registered nodes after rejected registration, got #{nodes.length}") unless nodes.length == expected_count
+    puts JSON.pretty_generate({nodes: nodes.length})
+  ' "${work_dir}/nodes.json" "${expected_machine_count}"
+  echo "::endgroup::"
+  echo "headscale-go ${login_mode} rejected-registration real-client smoke passed"
+  exit 0
+fi
 
 if [[ -n "${approve_routes}" ]]; then
   echo "::group::approve routes"

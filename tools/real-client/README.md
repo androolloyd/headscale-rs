@@ -125,11 +125,24 @@ tools/real-client/web-register-tags-smoke.sh
 tools/real-client/web-register-tags-headscale-go-smoke.sh
 ```
 
+The unowned-tag variant asks for `tag:blocked` while the loaded policy only
+permits `tag:server`, then asserts that the CLI/web approval is rejected and no
+node is registered:
+
+```sh
+tools/real-client/web-register-unowned-tag-smoke.sh
+tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
+```
+
 Useful knobs:
 
 - `REAL_CLIENT_LOGIN_MODE=web` can be passed directly to the auth-key smoke
   scripts for custom scenarios.
 - `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server` in the tagged variant.
+- `REAL_CLIENT_UNOWNED_TAG` defaults to `tag:blocked` in the unowned-tag
+  variant.
+- `REAL_CLIENT_EXPECT_REGISTER_FAILURE=true` asserts rejection for custom
+  negative web-registration cases.
 - `REAL_CLIENT_TAILSCALE_UP_TIMEOUT` defaults to `45s` for web registration.
 
 ## Tagged Preauth Smoke

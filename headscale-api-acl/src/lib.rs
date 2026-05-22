@@ -54,7 +54,7 @@
 //! * `nodeAttrs` ↔ `node_attrs`.
 //! * `autoApprovers` ↔ `auto_approvers`; `exitNode` ↔ `exit_node`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
@@ -471,6 +471,7 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
             validate_owner_ref(doc, owner, &mut errs);
         }
     }
+    validate_tag_owner_graph(doc, &mut errs);
     for approvers in doc.auto_approvers.routes.values() {
         for approver in approvers {
             validate_approver_ref(doc, approver, &mut errs);
@@ -595,6 +596,56 @@ fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
     if owner.starts_with("tag:") {
         validate_tag_ref(doc, owner, errs);
     }
+}
+
+fn validate_tag_owner_graph(doc: &AclDoc, errs: &mut Vec<String>) {
+    for tag in doc.tag_owners.keys() {
+        let mut visiting = BTreeSet::new();
+        let mut chain = Vec::new();
+        validate_tag_owner_chain(doc, tag, &mut visiting, &mut chain, errs);
+    }
+}
+
+fn validate_tag_owner_chain(
+    doc: &AclDoc,
+    tag: &str,
+    visiting: &mut BTreeSet<String>,
+    chain: &mut Vec<String>,
+    errs: &mut Vec<String>,
+) {
+    if visiting.contains(tag) {
+        let cycle_start = chain.iter().position(|entry| entry == tag).unwrap_or(0);
+        let mut cycle = chain[cycle_start..].to_vec();
+        cycle.sort();
+        errs.push(format!(
+            "circular reference detected: {}",
+            cycle.join(" -> ")
+        ));
+        return;
+    }
+
+    let Some(owners) = doc.tag_owners.get(tag) else {
+        return;
+    };
+    visiting.insert(tag.to_string());
+    chain.push(tag.to_string());
+
+    for owner in owners {
+        let Some(owner_tag) = owner.strip_prefix("tag:") else {
+            continue;
+        };
+        let owner_tag = format!("tag:{owner_tag}");
+        if !doc.tag_owners.contains_key(&owner_tag) {
+            errs.push(format!(
+                "tag {tag:?} references undefined tag {owner_tag:?}"
+            ));
+            continue;
+        }
+        validate_tag_owner_chain(doc, &owner_tag, visiting, chain, errs);
+    }
+
+    chain.pop();
+    visiting.remove(tag);
 }
 
 fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
@@ -964,12 +1015,18 @@ impl AclDoc {
         let Some(owners) = self.tag_owners.get(tag) else {
             return false;
         };
+        let mut visiting = BTreeSet::new();
         owners
             .iter()
-            .any(|owner| self.tag_owner_matches(node, owner))
+            .any(|owner| self.tag_owner_matches(node, owner, &mut visiting))
     }
 
-    fn tag_owner_matches(&self, node: &NodeView<'_>, owner: &str) -> bool {
+    fn tag_owner_matches(
+        &self,
+        node: &NodeView<'_>,
+        owner: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
         if owner.contains('@') {
             return node.user.is_some_and(|user| user_matches(owner, user));
         }
@@ -979,7 +1036,20 @@ impl AclDoc {
             };
             return members
                 .iter()
-                .any(|member| self.tag_owner_matches(node, member));
+                .any(|member| self.tag_owner_matches(node, member, visiting));
+        }
+        if let Some(tag) = owner.strip_prefix("tag:") {
+            let owner_tag = format!("tag:{tag}");
+            if !visiting.insert(owner_tag.clone()) {
+                return false;
+            }
+            let result = self.tag_owners.get(&owner_tag).is_some_and(|owners| {
+                owners
+                    .iter()
+                    .any(|owner| self.tag_owner_matches(node, owner, visiting))
+            });
+            visiting.remove(&owner_tag);
+            return result;
         }
         false
     }
@@ -2721,6 +2791,81 @@ mod tests {
         };
 
         assert!(d.node_can_have_tag(&node, "tag:db"));
+    }
+
+    #[test]
+    fn node_can_have_tag_flattens_nested_tag_owners() {
+        let mut d = AclDoc::empty();
+        d.groups.insert("group:ops".into(), vec!["carol@".into()]);
+        d.tag_owners
+            .insert("tag:base".into(), vec!["alice@".into()]);
+        d.tag_owners
+            .insert("tag:derived".into(), vec!["tag:base".into()]);
+        d.tag_owners
+            .insert("tag:deep".into(), vec!["tag:derived".into()]);
+        d.tag_owners.insert(
+            "tag:mixed".into(),
+            vec!["bob@".into(), "tag:derived".into(), "group:ops".into()],
+        );
+
+        let alice = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &[],
+        };
+        let bob = NodeView {
+            addr: None,
+            user: Some("bob"),
+            tags: &[],
+        };
+        let carol = NodeView {
+            addr: None,
+            user: Some("carol"),
+            tags: &[],
+        };
+        let dave = NodeView {
+            addr: None,
+            user: Some("dave"),
+            tags: &[],
+        };
+
+        assert!(d.node_can_have_tag(&alice, "tag:derived"));
+        assert!(d.node_can_have_tag(&alice, "tag:deep"));
+        assert!(d.node_can_have_tag(&alice, "tag:mixed"));
+        assert!(d.node_can_have_tag(&bob, "tag:mixed"));
+        assert!(d.node_can_have_tag(&carol, "tag:mixed"));
+        assert!(!d.node_can_have_tag(&dave, "tag:derived"));
+    }
+
+    #[test]
+    fn parsing_rejects_tag_owner_cycles() {
+        let err = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:a": ["tag:b"],
+                "tag:b": ["tag:a"]
+              }
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("circular reference detected: tag:a -> tag:b"));
+    }
+
+    #[test]
+    fn parsing_rejects_undefined_nested_tag_owner() {
+        let err = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:a": ["tag:missing"]
+              }
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(r#"tag "tag:a" references undefined tag "tag:missing""#));
     }
 
     #[test]

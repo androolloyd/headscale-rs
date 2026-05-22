@@ -1,0 +1,11 @@
+{
+  "name": "tagowners-validation-circular-tag-owner",
+  "expect_policy_error": "circular reference detected",
+  "policy": {
+    "tagOwners": {
+      "tag:a": ["tag:b"],
+      "tag:b": ["tag:a"]
+    },
+    "acls": []
+  }
+}

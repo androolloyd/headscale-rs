@@ -1,0 +1,10 @@
+{
+  "name": "tagowners-validation-undefined-tag-owner",
+  "expect_policy_error": "references undefined tag",
+  "policy": {
+    "tagOwners": {
+      "tag:a": ["tag:missing"]
+    },
+    "acls": []
+  }
+}

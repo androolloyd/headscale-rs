@@ -1,0 +1,56 @@
+{
+  "name": "tagowners-nested-tag-owner",
+  "policy": {
+    "groups": {
+      "group:ops": ["carol@"]
+    },
+    "tagOwners": {
+      "tag:base": ["alice@"],
+      "tag:derived": ["tag:base"],
+      "tag:deep": ["tag:derived"],
+      "tag:mixed": ["bob@", "tag:derived", "group:ops"],
+      "tag:empty": []
+    },
+    "acls": []
+  },
+  "users": [
+    { "id": 1, "name": "alice" },
+    { "id": 2, "name": "bob" },
+    { "id": 3, "name": "carol" },
+    { "id": 4, "name": "dave" }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-laptop",
+      "ipv4": "100.64.0.1"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "bob-laptop",
+      "ipv4": "100.64.0.2"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "carol-laptop",
+      "ipv4": "100.64.0.3"
+    },
+    {
+      "id": 4,
+      "user_id": 4,
+      "hostname": "dave-laptop",
+      "ipv4": "100.64.0.4"
+    }
+  ],
+  "tag_checks": [
+    { "name": "alice-can-claim-derived-through-base", "node_id": 1, "tag": "tag:derived" },
+    { "name": "alice-can-claim-deep-through-chain", "node_id": 1, "tag": "tag:deep" },
+    { "name": "bob-can-claim-mixed-directly", "node_id": 2, "tag": "tag:mixed" },
+    { "name": "carol-can-claim-mixed-through-group", "node_id": 3, "tag": "tag:mixed" },
+    { "name": "dave-cannot-claim-derived", "node_id": 4, "tag": "tag:derived" },
+    { "name": "alice-cannot-claim-empty", "node_id": 1, "tag": "tag:empty" }
+  ]
+}

@@ -684,9 +684,14 @@ fn run_tag_checks(
                     check.name, check.node_id
                 )
             })?;
+        let view = NodeView {
+            addr: node.addrs.first().map(String::as_str),
+            user: node.user.as_deref(),
+            tags: &node.tags,
+        };
         out.push(TagCheckOut {
             name: check.name.clone(),
-            allowed: node_can_have_tag(doc, node, &check.tag),
+            allowed: doc.node_can_have_tag(&view, &check.tag),
         });
     }
     Ok(out)
@@ -991,36 +996,6 @@ fn node_addr_prefixes(node: &FilterNode) -> Vec<String> {
         .filter_map(|addr| parse_ip_net(addr))
         .map(|net| net.to_string())
         .collect()
-}
-
-fn node_can_have_tag(doc: &PolicyDoc, node: &FilterNode, tag: &str) -> bool {
-    let Some(owners) = doc.tag_owners.get(tag) else {
-        return false;
-    };
-    owners
-        .iter()
-        .any(|owner| tag_owner_matches(doc, node, owner))
-}
-
-fn tag_owner_matches(doc: &PolicyDoc, node: &FilterNode, owner: &str) -> bool {
-    if owner.contains('@') {
-        return node
-            .user
-            .as_deref()
-            .is_some_and(|user| user_matches(owner, user));
-    }
-    if let Some(group) = owner.strip_prefix("group:") {
-        let Some(members) = doc.groups.get(owner).or_else(|| doc.groups.get(group)) else {
-            return false;
-        };
-        return members
-            .iter()
-            .any(|member| tag_owner_matches(doc, node, member));
-    }
-    if owner.strip_prefix("tag:").is_some() {
-        return false;
-    }
-    false
 }
 
 fn reduce_filter_rules_for_node(

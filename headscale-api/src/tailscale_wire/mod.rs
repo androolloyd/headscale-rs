@@ -369,6 +369,8 @@ struct RegistrationEntry {
 #[derive(Debug, Clone)]
 enum RegistrationOutcome {
     Registered(MachineRecord),
+    ApprovedWithoutNode,
+    Rejected(String),
     Expired,
 }
 
@@ -377,6 +379,8 @@ enum RegistrationOutcome {
 #[derive(Debug, Clone)]
 pub enum RegistrationWaitOutcome {
     Registered(MachineRecord),
+    ApprovedWithoutNode,
+    Rejected(String),
     Expired,
     Missing,
 }
@@ -424,6 +428,28 @@ impl RegistrationCache {
         }
     }
 
+    pub fn approve_without_node(&self, registration_id: &str) -> bool {
+        let entry = self.inner.write().remove(registration_id);
+        match entry {
+            Some(entry) => {
+                entry.approve_without_node();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn reject(&self, registration_id: &str, reason: impl Into<String>) -> bool {
+        let entry = self.inner.write().remove(registration_id);
+        match entry {
+            Some(entry) => {
+                entry.reject(reason.into());
+                true
+            }
+            None => false,
+        }
+    }
+
     pub async fn wait_for_registration(&self, registration_id: &str) -> RegistrationWaitOutcome {
         let Some(entry) = self.get_entry(registration_id) else {
             return RegistrationWaitOutcome::Missing;
@@ -436,6 +462,12 @@ impl RegistrationCache {
             match entry.outcome() {
                 Some(RegistrationOutcome::Registered(record)) => {
                     return RegistrationWaitOutcome::Registered(record);
+                }
+                Some(RegistrationOutcome::ApprovedWithoutNode) => {
+                    return RegistrationWaitOutcome::ApprovedWithoutNode;
+                }
+                Some(RegistrationOutcome::Rejected(reason)) => {
+                    return RegistrationWaitOutcome::Rejected(reason);
                 }
                 Some(RegistrationOutcome::Expired) => return RegistrationWaitOutcome::Expired,
                 None => {}
@@ -555,6 +587,22 @@ impl RegistrationEntry {
         let mut outcome = self.outcome.lock();
         if outcome.is_none() {
             *outcome = Some(RegistrationOutcome::Registered(record));
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn approve_without_node(&self) {
+        let mut outcome = self.outcome.lock();
+        if outcome.is_none() {
+            *outcome = Some(RegistrationOutcome::ApprovedWithoutNode);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn reject(&self, reason: String) {
+        let mut outcome = self.outcome.lock();
+        if outcome.is_none() {
+            *outcome = Some(RegistrationOutcome::Rejected(reason));
             self.notify.notify_waiters();
         }
     }

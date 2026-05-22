@@ -22,13 +22,14 @@ use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
 use crate::generated::{
-    ApiKey, BackfillNodeIPsRequest, CheckPolicyRequest, CreateApiKeyRequest,
-    CreatePreAuthKeyRequest, CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest,
-    DeleteNodeRequest, DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest,
-    ExpireNodeRequest, ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest,
-    ListApiKeysRequest, ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest, Node,
-    PreAuthKey, RegisterMethod, RegisterNodeRequest, RenameNodeRequest, RenameUserRequest,
-    SetApprovedRoutesRequest, SetPolicyRequest, SetTagsRequest, User,
+    ApiKey, AuthApproveRequest, AuthRegisterRequest, AuthRejectRequest, BackfillNodeIPsRequest,
+    CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
+    DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest, DeletePreAuthKeyRequest,
+    DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest, ExpirePreAuthKeyRequest,
+    GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListNodesRequest,
+    ListPreAuthKeysRequest, ListUsersRequest, Node, PreAuthKey, RegisterMethod,
+    RegisterNodeRequest, RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest,
+    SetPolicyRequest, SetTagsRequest, User,
 };
 use crate::grpc::upstream::HeadscaleAdminService;
 
@@ -78,6 +79,9 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         )
         .route("/api/v1/node/:node_id/expire", post(expire_node))
         .route("/api/v1/node/:node_id/rename/:new_name", post(rename_node))
+        .route("/api/v1/auth/register", post(auth_register))
+        .route("/api/v1/auth/approve", post(auth_approve))
+        .route("/api/v1/auth/reject", post(auth_reject))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
         .route("/api/v1/policy/check", post(check_policy))
         .layer(middleware::from_fn_with_state(
@@ -469,6 +473,85 @@ async fn register_node(
             let node = response.into_inner().node;
             json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
         }
+        Err(status) => status_response(&status),
+    }
+}
+
+async fn auth_register(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
+    let user = match string_field(&value, &["user"], "user") {
+        Ok(user) => user,
+        Err(status) => return status_response(&status),
+    };
+    let auth_id = match string_field(&value, &["authId", "auth_id"], "authId") {
+        Ok(auth_id) => auth_id,
+        Err(status) => return status_response(&status),
+    };
+    match state
+        .service
+        .auth_register(tonic_request(
+            &headers,
+            AuthRegisterRequest { user, auth_id },
+        ))
+        .await
+    {
+        Ok(response) => {
+            let node = response.into_inner().node;
+            json_ok(json!({ "node": optional_node_json(node.as_ref()) }))
+        }
+        Err(status) => status_response(&status),
+    }
+}
+
+async fn auth_approve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
+    let auth_id = match string_field(&value, &["authId", "auth_id"], "authId") {
+        Ok(auth_id) => auth_id,
+        Err(status) => return status_response(&status),
+    };
+    match state
+        .service
+        .auth_approve(tonic_request(&headers, AuthApproveRequest { auth_id }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
+        Err(status) => status_response(&status),
+    }
+}
+
+async fn auth_reject(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
+    let auth_id = match string_field(&value, &["authId", "auth_id"], "authId") {
+        Ok(auth_id) => auth_id,
+        Err(status) => return status_response(&status),
+    };
+    match state
+        .service
+        .auth_reject(tonic_request(&headers, AuthRejectRequest { auth_id }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
         Err(status) => status_response(&status),
     }
 }

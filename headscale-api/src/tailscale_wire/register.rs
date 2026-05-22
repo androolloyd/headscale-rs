@@ -226,8 +226,14 @@ async fn register_inner(
                 RegistrationWaitOutcome::Registered(record) => {
                     return Json(register_response_for_record(&record)).into_response();
                 }
-                RegistrationWaitOutcome::Expired | RegistrationWaitOutcome::Missing => {
+                RegistrationWaitOutcome::ApprovedWithoutNode
+                | RegistrationWaitOutcome::Expired
+                | RegistrationWaitOutcome::Missing => {
                     return register_interactive(state, node_key_hex, machine_key_hex, body).await;
+                }
+                RegistrationWaitOutcome::Rejected(reason) => {
+                    return (StatusCode::UNAUTHORIZED, Json(ErrorBody { error: reason }))
+                        .into_response();
                 }
             }
         }

@@ -906,6 +906,100 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
+    let (app, token) = fixture().await;
+    let register_key = "g".repeat(24);
+    let approve_key = "h".repeat(24);
+    let reject_key = "i".repeat(24);
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"auth-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    for (key, name) in [
+        (&register_key, "auth-register"),
+        (&approve_key, "auth-approve"),
+        (&reject_key, "auth-reject"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/debug/node",
+                Some(&token),
+                Body::from(format!(
+                    r#"{{"user":"auth-user","key":"{key}","name":"{name}","routes":[]}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/register",
+            Some(&token),
+            Body::from(format!(
+                r#"{{"user":"auth-user","authId":"hskey-authreq-{register_key}"}}"#
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["name"], "auth-register");
+    assert_eq!(body["node"]["registerMethod"], "REGISTER_METHOD_CLI");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/approve",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{approve_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/reject",
+            Some(&token),
+            Body::from(format!(r#"{{"auth_id":"{reject_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/reject",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"{reject_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_status_json(resp, 404, 5, "no pending auth session", "auth reject").await;
+}
+
+#[tokio::test]
 async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
     let (app, token) = fixture().await;
     let registration_key = "exitrouteabcdefghijklmno";

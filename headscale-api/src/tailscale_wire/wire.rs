@@ -61,11 +61,11 @@ pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
 /// | `ForcedTags []string`                            | `forced_tags`      |
 /// | `Hostinfo.Hostname/OS/OSVersion`                 | `hostname`/`os`/`os_version` |
 ///
-/// `Expiry` is checked on every `/map` request: an elapsed expiry
-/// causes the server to emit a logout response (upstream behaviour at
-/// `hscontrol/poll.go::handlePoll`). `LastSeen` is refreshed on every
-/// `/map` arrival so the ephemeral GC sweep can identify abandoned
-/// devices.
+/// `Expiry` is reflected into map-node `KeyExpiry`/`Expired` state.
+/// Stock clients derive their own `NeedsLogin` transition from the
+/// self node's expired key state, while `LastSeen` is refreshed on
+/// every `/map` arrival so the ephemeral GC sweep can identify
+/// abandoned devices.
 #[derive(Clone, Debug)]
 pub struct MachineRecord {
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
@@ -108,10 +108,11 @@ pub struct MachineRecord {
     /// and `PeerChange.DERPRegion` like headscale-go.
     pub home_derp: i32,
     /// P1 (lifecycle): node-key expiry. When `Some(t)` and `t <=
-    /// now()`, the `/map` handler MUST return a logout response
-    /// (mirrors upstream `Node.IsExpired()` semantics). `None` means
-    /// "never expires" — the default for fresh registrations from
-    /// non-ephemeral preauth keys.
+    /// now()`, map responses expose this through the self node's
+    /// `KeyExpiry`/`Expired` fields (mirrors upstream
+    /// `Node.IsExpired()` semantics). `None` means "never expires" —
+    /// the default for fresh registrations from non-ephemeral preauth
+    /// keys.
     pub expiry: Option<DateTime<Utc>>,
     /// P1 (lifecycle): last `/map` arrival timestamp. Touched at the
     /// top of every map handler so the ephemeral GC sweep can find
@@ -813,19 +814,6 @@ pub struct MapResponse {
     /// data in HostInfo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect_services: Option<bool>,
-    /// P1 lifecycle: mirrors `tailcfg.MapResponse.NodeKeyExpired`. When
-    /// `true` the stock daemon treats the response as a forced
-    /// logout — it tears down its session and falls back to a fresh
-    /// register/login flow. We emit `true` here only when the server
-    /// detected an elapsed `MachineRecord.expiry` at the top of the
-    /// `/map` handler; the normal happy path stays `false` (omitted by
-    /// `skip_serializing_if`).
-    #[serde(
-        default,
-        rename = "NodeKeyExpired",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub node_key_expired: bool,
     /// Wall 7 (post-Wall-6): `tailcfg.MapResponse.PacketFilter`. Stock
     /// `tailscale` v1.78+ default-denies inter-peer traffic if this
     /// list is empty/null — the daemon reports "unknown peer" on

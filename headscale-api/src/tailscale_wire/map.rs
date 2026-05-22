@@ -195,6 +195,55 @@ fn peer_ids_from_snapshot(
         .collect()
 }
 
+fn self_map_node_from_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    tailnet_domain: &str,
+    primary_routes: &HashMap<String, Vec<String>>,
+    exit_routes: &HashMap<String, Vec<String>>,
+    policy: &PolicyStore,
+    cap_version: u32,
+) -> Option<MapNode> {
+    let own = snapshot.get(self_node_key)?;
+    let mut own_node = record_to_map_node(own, tailnet_domain);
+    own_node.cap = cap_version;
+    apply_routes_to_map_node(
+        &mut own_node,
+        primary_routes
+            .get(self_node_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        exit_routes
+            .get(self_node_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    apply_policy_attrs_to_map_node(&mut own_node, own, policy);
+    Some(own_node)
+}
+
+fn self_map_node_for_registry(
+    machines: &crate::tailscale_wire::MachineRegistry,
+    policy: &PolicyStore,
+    dns: &DnsStore,
+    self_node_key: &str,
+    cap_version: u32,
+) -> Option<MapNode> {
+    let snapshot = machines.snapshot();
+    let tailnet_domain = tailnet_domain(dns);
+    let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
+    let exit_routes = exit_routes_for_snapshot(&snapshot);
+    self_map_node_from_snapshot(
+        &snapshot,
+        self_node_key,
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        policy,
+        cap_version,
+    )
+}
+
 fn visible_peer_state_for_registry(
     machines: &crate::tailscale_wire::MachineRegistry,
     policy: &PolicyStore,
@@ -539,16 +588,6 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // on `MachineRegistry::touch_last_seen` itself.
     state.machines.touch_last_seen(&node_key_hex);
 
-    // P1 lifecycle: if `expiry` is set and elapsed, return a logout
-    // response so the client tears down its session and re-registers.
-    // Upstream behaviour at `hscontrol/poll.go::handlePoll` — a
-    // `MapResponse` carrying `NodeKeyExpired: true` (plus the same
-    // fields a fresh map would have, sans peers) tells stock
-    // `tailscale` to fall back to its login flow.
-    if own.is_expired_at(chrono::Utc::now()) {
-        return logout_map_response(&own, &node_key_hex, &state.dns, req.version);
-    }
-
     // Wall 7: persist client-provided DiscoKey, Endpoints, and
     // Hostinfo.NetInfo.PreferredDERP from `MapRequest` into the
     // `MachineRecord` so subsequent map calls for OTHER peers see them
@@ -685,20 +724,23 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
     let self_node_id = stable_id_from_key(&node_key_hex);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
-    let mut own_node = record_to_map_node(&own, &tailnet_domain);
-    own_node.cap = req.version;
-    apply_routes_to_map_node(
-        &mut own_node,
-        primary_routes
-            .get(&node_key_hex)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        exit_routes
-            .get(&node_key_hex)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-    );
-    apply_policy_attrs_to_map_node(&mut own_node, &own, &state.policy);
+    let Some(own_node) = self_map_node_from_snapshot(
+        &snapshot,
+        &node_key_hex,
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        &state.policy,
+        req.version,
+    ) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: "machine not registered".into(),
+            }),
+        )
+            .into_response();
+    };
     // #238: `snapshot()` returns `Arc<HashMap<…>>` — one Arc clone
     // total. Iterating borrows the map; we never clone individual
     // records. `record_to_map_node` takes `&MachineRecord` so the
@@ -748,7 +790,6 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // [`build_keepalive_chunk`]'s separate `{"KeepAlive":true}`
         // payload — never inlined here.
         keep_alive: false,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     if req.stream {
@@ -762,6 +803,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // Per `docs/tailscale-interop-blocker.md` "Wall 5":
         // the body must NOT terminate naturally — the client expects
         // to long-poll until it closes the connection itself.
+        let initial_self_node = resp.node.clone();
         let initial_peer_state = peer_state_from_nodes(&resp.peers);
         let initial_peer_ids = peer_ids_from_snapshot(&snapshot, &node_key_hex);
         let first = match build_framed_chunk(&resp) {
@@ -814,6 +856,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
+                initial_self_node,
                 initial_peer_state,
                 initial_peer_ids,
                 connection_guard,
@@ -827,6 +870,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 machines_derp_map,
                 dns,
+                last_self_node,
                 last_peer_state,
                 initial_peer_ids,
                 connection_guard,
@@ -843,6 +887,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             self_node_key,
                             machines_derp_map,
                             dns,
+                            last_self_node,
                             last_peer_state,
                             initial_peer_ids,
                             connection_guard,
@@ -860,7 +905,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 // returns immediately rather than parking. That's the
                 // load-bearing property that closes the audit-2 C-1
                 // race — see the registry's `wake_waiters` doc.
-                let (chunk, next_peer_state) = {
+                let (chunk, next_peer_state, next_self_node) = {
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
                     let dns_for_wait = dns.clone();
@@ -876,9 +921,9 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         // keepalive frame and let the next iteration
                         // (or stream end) handle teardown.
                         if res.is_err() {
-                            (build_keepalive_chunk(), last_peer_state)
+                            (build_keepalive_chunk(), last_peer_state, last_self_node)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_peer_state, &initial_peer_ids)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, &last_self_node, &last_peer_state, &initial_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
@@ -888,6 +933,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         (
                             rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "policy"),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
                     () = &mut dns_changed => {
@@ -897,6 +943,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         (
                             rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, "config"),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
@@ -905,7 +952,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             "keepalive",
                             stable_id_from_key(&self_node_key),
                         );
-                        (build_keepalive_chunk(), last_peer_state)
+                        (build_keepalive_chunk(), last_peer_state, last_self_node)
                     }
                     }
                 };
@@ -919,6 +966,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         self_node_key,
                         machines_derp_map,
                         dns,
+                        next_self_node,
                         next_peer_state,
                         initial_peer_ids,
                         connection_guard,
@@ -954,11 +1002,16 @@ fn rebuild_peer_delta_chunk(
     self_node_key: &str,
     dns: &Arc<DnsStore>,
     cap_version: u32,
+    last_self_node: &Option<MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
-) -> (Vec<u8>, BTreeMap<u64, MapNode>) {
+) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
     if machines.get(self_node_key).is_none() {
-        return (build_keepalive_chunk(), last_peer_state.clone());
+        return (
+            build_keepalive_chunk(),
+            last_peer_state.clone(),
+            last_self_node.clone(),
+        );
     }
     machines.record_mapresponse_generated("peers");
     let snapshot = machines.snapshot();
@@ -976,6 +1029,23 @@ fn rebuild_peer_delta_chunk(
     );
     let self_node_id = stable_id_from_key(self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
+    let current_self_node = self_map_node_from_snapshot(
+        &snapshot,
+        self_node_key,
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        policy,
+        cap_version,
+    );
+    let self_node_changed = match (&current_self_node, last_self_node) {
+        (Some(current), Some(previous)) => {
+            map_node_json_value(current) != map_node_json_value(previous)
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => true,
+        (None, None) => false,
+    };
     let peers_changed = visible_peer_map_nodes(
         &snapshot,
         self_node_key,
@@ -1007,6 +1077,11 @@ fn rebuild_peer_delta_chunk(
     }
 
     let mr = MapResponse {
+        node: if self_node_changed {
+            current_self_node.clone()
+        } else {
+            None
+        },
         peers_changed: full_peers_changed,
         peers_removed,
         peers_changed_patch: peer_patches,
@@ -1019,12 +1094,12 @@ fn rebuild_peer_delta_chunk(
         ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
         control_time: Some(chrono::Utc::now()),
         keep_alive: false,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     (
         build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk()),
         current_peer_state,
+        current_self_node,
     )
 }
 
@@ -1043,9 +1118,9 @@ fn rebuild_map_chunk(
     cap_version: u32,
     response_type: &str,
 ) -> Vec<u8> {
-    let Some(own) = machines.get(self_node_key) else {
+    if machines.get(self_node_key).is_none() {
         return build_keepalive_chunk();
-    };
+    }
     machines.record_mapresponse_generated(response_type);
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -1056,20 +1131,17 @@ fn rebuild_map_chunk(
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
     let self_node_id = stable_id_from_key(self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
-    let mut own_node = record_to_map_node(&own, &tailnet_domain);
-    own_node.cap = cap_version;
-    apply_routes_to_map_node(
-        &mut own_node,
-        primary_routes
-            .get(self_node_key)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        exit_routes
-            .get(self_node_key)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-    );
-    apply_policy_attrs_to_map_node(&mut own_node, &own, policy);
+    let Some(own_node) = self_map_node_from_snapshot(
+        &snapshot,
+        self_node_key,
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        policy,
+        cap_version,
+    ) else {
+        return build_keepalive_chunk();
+    };
     let peers = visible_peer_map_nodes(
         &snapshot,
         self_node_key,
@@ -1099,40 +1171,9 @@ fn rebuild_map_chunk(
             ..DebugConfig::default()
         }),
         keep_alive: false,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk())
-}
-
-/// P1 lifecycle: emit a `MapResponse` flagged as a forced logout. The
-/// stock daemon reads `NodeKeyExpired: true` and falls back to its
-/// register/login flow. We strip peers + packet_filter to keep the
-/// payload minimal — the client only needs the expired bit.
-fn logout_map_response(
-    rec: &crate::tailscale_wire::MachineRecord,
-    node_key_hex: &str,
-    dns: &DnsStore,
-    cap_version: u32,
-) -> Response {
-    let tailnet_domain = tailnet_domain(dns);
-    let mut node = super::register::record_to_map_node(rec, &tailnet_domain);
-    node.cap = cap_version;
-    let mr = MapResponse {
-        node: Some(node),
-        peers: Vec::new(),
-        user_profiles: Vec::new(),
-        dns_config: Some(DnsConfig::default()),
-        derp_map: Some(crate::tailscale_wire::wire::DerpMap::default()),
-        domain: tailnet_domain,
-        packet_filter: Vec::new(),
-        ssh_policy: None,
-        keep_alive: false,
-        node_key_expired: true,
-        ..MapResponse::default()
-    };
-    let _ = node_key_hex; // node_key_hex is part of the caller's context — pin for future logging.
-    Json(mr).into_response()
 }
 
 /// Encode a MapResponse into the wire framing the streaming
@@ -2391,6 +2432,60 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_self_expiry_update_emits_self_node_key_expiry() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+        assert!(!first_mr.node.as_ref().unwrap().expired);
+
+        let expiry = chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert!(state.machines.set_expiry(&a, Some(expiry)));
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        let self_node = mr.node.as_ref().expect("self node update present");
+        assert_eq!(self_node.key_expiry, Some(expiry));
+        assert!(self_node.expired);
+        assert!(!self_node.machine_authorized);
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_route_update_emits_full_peer_delta_with_allowed_ips() {
         let (state, _dir) = fixture();
         let policy = r#"{
@@ -3184,7 +3279,6 @@ mod tests {
             keep_alive: true,
             packet_filter: allow_all_packet_filter(),
             ssh_policy: None,
-            node_key_expired: false,
             ..MapResponse::default()
         };
         let bytes = build_framed_chunk(&mr).expect("framed chunk encodes");

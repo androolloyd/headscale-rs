@@ -668,7 +668,6 @@ fn map_response_emits_all_caps_derp_and_dns() {
         keep_alive: true,
         packet_filter: vec![],
         ssh_policy: None,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     let v: Value = serde_json::to_value(&r).unwrap();
@@ -705,7 +704,6 @@ fn map_response_packet_filter_populated_when_nonempty() {
             ip_proto: vec![],
         }],
         ssh_policy: None,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     let v: Value = serde_json::to_value(&r).unwrap();
@@ -739,7 +737,6 @@ fn map_response_user_profiles_round_trip() {
         keep_alive: true,
         packet_filter: vec![],
         ssh_policy: None,
-        node_key_expired: false,
         ..MapResponse::default()
     };
     let v: Value = serde_json::to_value(&r).unwrap();
@@ -800,7 +797,6 @@ fn map_response_emits_ssh_policy_all_caps_name() {
         keep_alive: true,
         packet_filter: vec![],
         ssh_policy: Some(SshPolicy { rules: Vec::new() }),
-        node_key_expired: false,
         ..MapResponse::default()
     };
     let v: Value = serde_json::to_value(&r).unwrap();

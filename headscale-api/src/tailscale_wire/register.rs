@@ -778,10 +778,11 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         tags: rec.forced_tags.clone(),
         last_seen: Some(rec.last_seen),
         online: Some(!expired),
-        // Any record in [`MachineRegistry`] passed
-        // [`PreauthRedeemer::redeem`]; mirror the bit into the
-        // netmap so the daemon advances past `NeedsMachineAuth`.
-        machine_authorized: true,
+        // Any non-expired record in [`MachineRegistry`] passed
+        // [`PreauthRedeemer::redeem`]; expired self nodes must carry
+        // the upstream unauthorized/expired combination so stock
+        // clients transition back to `NeedsLogin`.
+        machine_authorized: !expired,
         capabilities: Vec::new(),
         cap_map: std::collections::BTreeMap::new(),
         expired,

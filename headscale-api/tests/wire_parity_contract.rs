@@ -105,7 +105,6 @@ fn map_response_emits_required_stock_client_fields() {
         derp_map: Some(DerpMap::default()),
         domain: "octra.test".into(),
         keep_alive: true,
-        node_key_expired: false,
         packet_filter: Vec::new(),
         ssh_policy: None,
         ..MapResponse::default()

@@ -386,7 +386,6 @@ fn mapresponse_omits_default_dnsconfig_field() {
         derp_map: Some(DerpMap::default()),
         domain: "headscale.test".into(),
         keep_alive: false,
-        node_key_expired: false,
         packet_filter: vec![],
         ssh_policy: None,
         ..MapResponse::default()

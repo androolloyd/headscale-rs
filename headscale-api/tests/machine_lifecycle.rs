@@ -10,7 +10,7 @@
 //!
 //! | upstream Go test                              | Rust counterpart                                  |
 //! |-----------------------------------------------|---------------------------------------------------|
-//! | `TestSetExpiry`                               | `admin_expire_then_map_returns_logout`            |
+//! | `TestSetExpiry`                               | `admin_expire_then_full_map_marks_self_expired`   |
 //! | `TestNodeLogout`                              | `admin_logout_clears_keys_and_expires_now`        |
 //! | `TestNodeRename`                              | `admin_rename_round_trip`                         |
 //! | `TestDeleteNode`                              | `admin_delete_removes_from_list_and_wire`         |
@@ -156,23 +156,36 @@ async fn admin_delete(admin: &AdminState, id: &str) -> StatusCode {
     resp.status()
 }
 
-/// `POST /machine/nodekey:{hex}/map` returning the decoded JSON
-/// response when the node is expired. Healthy `OmitPeers` requests
-/// are headscale-go-style lite endpoint updates and return an empty
-/// 200 body.
-async fn wire_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
+/// `POST /machine/nodekey:{hex}/map` returning the decoded JSON body
+/// or `Null` for headscale-go-style empty lite responses.
+async fn wire_map_body(
+    wire: &WireState,
+    node_key_hex: &str,
+    body: &'static str,
+) -> (StatusCode, serde_json::Value) {
     let router = wire_router(wire.clone());
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("/machine/nodekey:{node_key_hex}/map"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"OmitPeers":true}"#))
+        .body(Body::from(body))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+/// Non-streaming lite endpoint update. Upstream returns 200 with no
+/// map body, including for nodes whose key has expired.
+async fn wire_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
+    wire_map_body(wire, node_key_hex, r#"{"OmitPeers":true}"#).await
+}
+
+/// Full non-streaming map snapshot.
+async fn wire_full_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
+    wire_map_body(wire, node_key_hex, "{}").await
 }
 
 /// `GET /api/v1/machines/{id}` returning the decoded JSON.
@@ -191,12 +204,12 @@ async fn admin_get(admin: &AdminState, id: &str) -> (StatusCode, serde_json::Val
 }
 
 #[tokio::test]
-async fn admin_expire_then_map_returns_logout() {
+async fn admin_expire_then_full_map_marks_self_expired() {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert("aa".repeat(32), mk_record(0xaa, "node-1", 10, false));
     let (wire, admin) = fixture(reg.clone());
 
-    // Pre-expire /map happy path — no NodeKeyExpired bit.
+    // Pre-expire lite /map happy path returns headscale-go's empty 200.
     let (s, v) = wire_map(&wire, &"aa".repeat(32)).await;
     assert_eq!(s, StatusCode::OK);
     assert!(v.is_null());
@@ -205,10 +218,20 @@ async fn admin_expire_then_map_returns_logout() {
     let (s, _) = admin_post(&admin, &"aa".repeat(32), "expire", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 
-    // Next /map carries `NodeKeyExpired: true`.
+    // Expired lite updates still return an empty 200; the full map
+    // carries expiry through the upstream `Node` fields, not a
+    // non-upstream MapResponse.NodeKeyExpired bit.
     let (s, v) = wire_map(&wire, &"aa".repeat(32)).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["NodeKeyExpired"], serde_json::Value::Bool(true));
+    assert!(v.is_null());
+
+    reg.upsert("ad".repeat(32), mk_record(0xad, "peer-1", 13, false));
+    let (s, v) = wire_full_map(&wire, &"aa".repeat(32)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v.get("NodeKeyExpired").is_none());
+    assert_eq!(v["Node"]["Expired"], serde_json::Value::Bool(true));
+    assert!(v["Node"]["KeyExpiry"].is_string());
+    assert!(v["Node"].get("MachineAuthorized").is_none());
 }
 
 #[tokio::test]
@@ -259,9 +282,12 @@ async fn admin_logout_clears_keys_and_expires_now() {
     assert!(rec.machine_key_hex.is_empty());
     assert!(rec.expiry.is_some());
 
-    // /map sees the logout bit.
-    let (_, v) = wire_map(&wire, &"bb".repeat(32)).await;
-    assert_eq!(v["NodeKeyExpired"], serde_json::Value::Bool(true));
+    // Full /map sees the upstream expired self-node state.
+    reg.upsert("be".repeat(32), mk_record(0xbe, "peer-2", 14, false));
+    let (_, v) = wire_full_map(&wire, &"bb".repeat(32)).await;
+    assert!(v.get("NodeKeyExpired").is_none());
+    assert_eq!(v["Node"]["Expired"], serde_json::Value::Bool(true));
+    assert!(v["Node"].get("MachineAuthorized").is_none());
 }
 
 #[tokio::test]

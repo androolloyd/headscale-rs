@@ -723,7 +723,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         &self,
         registration_id: &str,
         user: &crate::oidc::OidcStoredUser,
-        node_expiry: DateTime<Utc>,
+        node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
         let pending = self
             .registration_cache
@@ -731,7 +731,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
         let mut record = machine_admin_record_from_wire(&pending);
         record.user = oidc_user_name(user);
-        record.expiry = Some(node_expiry.timestamp().max(0) as u64);
+        record.expiry = node_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
         record.register_method = REGISTER_METHOD_OIDC;
 
         let result = self
@@ -2157,7 +2157,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                expiry,
+                Some(expiry),
             )
             .await
             .unwrap();
@@ -2249,7 +2249,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                expiry,
+                Some(expiry),
             )
             .await
             .unwrap();
@@ -2383,7 +2383,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap();
@@ -2445,7 +2445,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap();
@@ -2509,7 +2509,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap_err();

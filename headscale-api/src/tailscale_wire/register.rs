@@ -562,22 +562,24 @@ fn node_key_expired_response(machine_authorized: bool) -> RegisterResponse {
 }
 
 fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
-    let user_id = stable_id_from_key(&record.user);
+    let profile = record.tailscale_user_profile();
     RegisterResponse {
         user: SimpleUser {
-            id: user_id,
-            login_name: record.user.clone(),
-            display_name: record.user.clone(),
+            id: profile.id,
+            login_name: profile.login_name.clone(),
+            display_name: profile.display_name.clone(),
         },
         login: SimpleLogin {
-            id: user_id,
-            provider: if record.register_method == 2 {
+            id: profile.id,
+            provider: if record.is_tagged() {
+                String::new()
+            } else if record.register_method == 2 {
                 "cli".into()
             } else {
                 "octravpn-preauth".into()
             },
-            login_name: record.user.clone(),
-            display_name: record.user.clone(),
+            login_name: profile.login_name,
+            display_name: profile.display_name,
         },
         node_key_expired: record.is_expired_at(chrono::Utc::now()),
         auth_url: String::new(),
@@ -642,11 +644,10 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
     };
     let id = stable_id_from_key(&rec.node_key_hex);
     let stable_id = format!("n{id}");
-    // `User` mirrors upstream `tailcfg.Node.User`. We synthesise the
-    // UserID by hashing the preauth user label the same way
-    // `RegisterResponse.User.ID` does. Empty label ⇒ id 0; the
-    // interop test always presents a non-empty user.
-    let user = stable_id_from_key(&rec.user);
+    // `User` mirrors upstream `tailcfg.Node.User`; tagged nodes use
+    // headscale-go's synthetic TaggedDevices user instead of their
+    // registering preauth-key user.
+    let user = rec.tailscale_user_id();
     let machine = if rec.machine_key_hex.is_empty() {
         None
     } else {
@@ -761,6 +762,27 @@ mod tests {
     }
 
     #[test]
+    fn record_to_map_node_uses_tagged_devices_user_for_tagged_records() {
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "cc".repeat(32),
+            "dd".repeat(32),
+            "alice".into(),
+            "server".into(),
+            Ipv4Addr::new(100, 64, 0, 9),
+            false,
+        );
+        record.forced_tags = vec!["tag:server".into()];
+
+        let node = record_to_map_node(&record, "octra.test");
+
+        assert_eq!(
+            node.user,
+            crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
+        );
+    }
+
+    #[test]
     fn followup_registration_id_parses_relative_and_absolute_urls() {
         let id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
         assert_eq!(
@@ -847,6 +869,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            rr.user.id,
+            crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
+        );
+        assert_eq!(rr.user.login_name, "tagged-devices");
+        assert_eq!(rr.user.display_name, "Tagged Devices");
+        assert_eq!(rr.login.provider, "");
+        assert_eq!(rr.login.login_name, "tagged-devices");
+        assert_eq!(rr.login.display_name, "Tagged Devices");
 
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(rec.forced_tags, vec!["tag:server", "tag:prod"]);

@@ -67,7 +67,7 @@ use super::register::record_to_map_node;
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PortRange,
-    stable_id_from_key, strip_key_prefix,
+    UserProfile, stable_id_from_key, strip_key_prefix,
 };
 use super::{MachineRecord, WireState};
 
@@ -178,6 +178,21 @@ fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str) -> bool {
         Some(ids) => ids.contains(&stable_id_from_key(node_key)),
         None => true,
     }
+}
+
+fn user_profiles_for_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    allowed_ids: Option<&BTreeSet<u64>>,
+) -> Vec<UserProfile> {
+    let mut profiles = BTreeMap::new();
+    for (node_key, rec) in snapshot {
+        if node_key == self_node_key || peer_allowed(allowed_ids, node_key) {
+            let profile = rec.tailscale_user_profile();
+            profiles.entry(profile.id).or_insert(profile);
+        }
+    }
+    profiles.into_values().collect()
 }
 
 fn apply_routes_to_map_node(node: &mut MapNode, primary_routes: &[String], exit_routes: &[String]) {
@@ -550,10 +565,12 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     peers.sort_by_key(|n| n.id);
 
     let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
+    let user_profiles =
+        user_profiles_for_snapshot(&snapshot, &node_key_hex, allowed_peer_ids.as_ref());
     let resp = MapResponse {
         node: Some(own_node),
         peers,
-        user_profiles: Vec::new(),
+        user_profiles,
         dns_config: Some(dns_config),
         // Wall 6: serve whatever DERP map the embedder loaded at
         // startup. Empty for non-interop deployments; the interop test
@@ -818,10 +835,12 @@ fn rebuild_map_chunk(
         .collect();
     peers.sort_by_key(|n| n.id);
     let dns_config = build_dns_for_snapshot(dns, &snapshot);
+    let user_profiles =
+        user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
     let mr = MapResponse {
         node: Some(own_node),
         peers,
-        user_profiles: Vec::new(),
+        user_profiles,
         dns_config: Some(dns_config),
         derp_map: Some((**derp_map).clone()),
         domain: tailnet_domain,
@@ -1055,6 +1074,10 @@ mod tests {
             mr.debug.as_ref().map(|debug| debug.disable_log_tail),
             Some(true)
         );
+        assert_eq!(mr.user_profiles.len(), 1);
+        assert_eq!(mr.user_profiles[0].id, stable_id_from_key("u"));
+        assert_eq!(mr.user_profiles[0].login_name, "u");
+        assert_eq!(mr.user_profiles[0].display_name, "u");
         // Full MapResponse — must NOT be flagged as a keepalive.
         // Wall 5 regression: when `KeepAlive=true` the upstream client
         // skips the netmap-update handler and the daemon stays in
@@ -1118,6 +1141,64 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let peer_names: Vec<_> = mr.peers.iter().map(|peer| peer.name.as_str()).collect();
         assert_eq!(peer_names, vec!["alice"]);
+    }
+
+    #[tokio::test]
+    async fn map_response_user_profiles_include_tagged_devices_identity() {
+        let (state, _dir) = fixture();
+        let alice = "aa".repeat(32);
+        let server = "bb".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            server.clone(),
+            policy_record(
+                &server,
+                "server",
+                11,
+                "server-owner",
+                vec!["tag:server".into()],
+            ),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{server}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+        assert_eq!(
+            node.user,
+            crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
+        );
+
+        let profiles = mr
+            .user_profiles
+            .iter()
+            .map(|profile| (profile.id, profile))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let tagged = profiles
+            .get(&crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID)
+            .expect("tagged devices profile present");
+        assert_eq!(tagged.login_name, "tagged-devices");
+        assert_eq!(tagged.display_name, "Tagged Devices");
+        let alice_profile = profiles
+            .get(&stable_id_from_key("alice"))
+            .expect("alice profile present");
+        assert_eq!(alice_profile.login_name, "alice");
+        assert_eq!(alice_profile.display_name, "alice");
     }
 
     #[tokio::test]

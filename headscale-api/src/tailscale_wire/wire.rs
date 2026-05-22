@@ -37,6 +37,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Headscale-go special user ID used for tagged nodes in Tailscale
+/// protocol responses.
+pub const TAGGED_DEVICES_USER_ID: u64 = 2_147_455_555;
+pub const TAGGED_DEVICES_LOGIN_NAME: &str = "tagged-devices";
+pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
+
 /// One registered machine's state, kept in the in-memory
 /// `MachineRegistry` after a successful `register`.
 ///
@@ -128,6 +134,43 @@ pub struct MachineRecord {
 }
 
 impl MachineRecord {
+    /// True when the node is owned by tags instead of its registering user.
+    pub fn is_tagged(&self) -> bool {
+        !self.forced_tags.is_empty()
+    }
+
+    /// User ID to place in `tailcfg.Node.User`.
+    ///
+    /// Headscale-go uses a special synthetic user for tagged nodes;
+    /// tags are the node identity and the original preauth user should
+    /// not appear as the owner in the Tailscale protocol.
+    pub fn tailscale_user_id(&self) -> u64 {
+        if self.is_tagged() {
+            TAGGED_DEVICES_USER_ID
+        } else {
+            stable_id_from_key(&self.user)
+        }
+    }
+
+    /// User profile row referenced by `MapNode.User`.
+    pub fn tailscale_user_profile(&self) -> UserProfile {
+        if self.is_tagged() {
+            UserProfile {
+                id: TAGGED_DEVICES_USER_ID,
+                login_name: TAGGED_DEVICES_LOGIN_NAME.to_string(),
+                display_name: TAGGED_DEVICES_DISPLAY_NAME.to_string(),
+                profile_pic_url: String::new(),
+            }
+        } else {
+            UserProfile {
+                id: self.tailscale_user_id(),
+                login_name: self.user.clone(),
+                display_name: self.user.clone(),
+                profile_pic_url: String::new(),
+            }
+        }
+    }
+
     /// True if `expiry` is set and has elapsed against `now`. Mirrors
     /// upstream `Node.IsExpired()` from
     /// `juanfont/headscale@main:hscontrol/types/node.go`.

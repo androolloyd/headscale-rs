@@ -29,7 +29,7 @@
 //!   `zstd_frame({"KeepAlive":true})`, NOT a bare newline.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::Duration,
 };
@@ -72,7 +72,7 @@ use super::wire::{
 use super::{MachineRecord, WireState};
 
 use crate::dns::{DnsStore, MachineDnsRecord};
-use crate::policy::{NodeView, PeerMapNode, PolicyStore, SshPolicyNode};
+use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
 
 /// Snapshot the registry into MagicDNS-record shape and ask the
 /// operator-configured [`DnsStore`] to build the `DnsConfig` for this
@@ -132,6 +132,22 @@ fn peer_map_nodes_from_snapshot(
             id: stable_id_from_key(node_key),
             addr: rec.ipv4.to_string(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
+            tags: rec.forced_tags.clone(),
+            routes: active_routes.get(node_key).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn packet_filter_nodes_from_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    active_routes: &HashMap<String, Vec<String>>,
+) -> Vec<PacketFilterNode> {
+    snapshot
+        .iter()
+        .map(|(node_key, rec)| PacketFilterNode {
+            id: stable_id_from_key(node_key),
+            user: (!rec.user.is_empty()).then(|| rec.user.clone()),
+            addrs: vec![rec.ipv4.to_string()],
             tags: rec.forced_tags.clone(),
             routes: active_routes.get(node_key).cloned().unwrap_or_default(),
         })
@@ -261,6 +277,17 @@ pub(crate) fn packet_filter_for(policy: &crate::policy::PolicyStore) -> Vec<Filt
     } else {
         allow_all_packet_filter()
     }
+}
+
+fn packet_filters_for_node(
+    policy: &crate::policy::PolicyStore,
+    nodes: &[PacketFilterNode],
+    self_node_id: u64,
+) -> BTreeMap<String, Option<Vec<FilterRule>>> {
+    let base = policy
+        .filter_rules_for_node(nodes, self_node_id)
+        .unwrap_or_else(allow_all_packet_filter);
+    BTreeMap::from([("base".to_string(), Some(base))])
 }
 
 fn ssh_policy_nodes_from_snapshot(
@@ -479,6 +506,8 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
+    let self_node_id = stable_id_from_key(&node_key_hex);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
     apply_routes_to_map_node(
         &mut own_node,
@@ -532,12 +561,10 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // sidecar (see `derp_config::load_derp_map`).
         derp_map: Some((*state.derp_map).clone()),
         domain: tailnet_domain,
-        // Packet filter from the live `PolicyStore`. Falls back to
-        // `allow_all_packet_filter` when no policy has been pushed —
-        // preserves the Wall 7 default for the interop test, while
-        // operator-managed deployments serve the cached
-        // `FilterRule` list translated from the ACL doc.
-        packet_filter: packet_filter_for(&state.policy),
+        // Headscale-go v0.28 sends the full per-node filter through
+        // PacketFilters["base"], already reduced for this map
+        // recipient.
+        packet_filters: packet_filters_for_node(&state.policy, &packet_filter_nodes, self_node_id),
         ssh_policy: ssh_policy_for_snapshot(&state.policy, &snapshot, &node_key_hex),
         // FULL MapResponse — NOT a keepalive. Upstream
         // `controlclient/direct.go::sendMapRequest` `continue`s past
@@ -551,8 +578,6 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         node_key_expired: false,
         ..MapResponse::default()
     };
-    let _ = stable_id_from_key(&node_key_hex); // tickle import-used assertion
-
     if req.stream {
         // Stream:true — emit length-prefixed zstd-compressed
         // MapResponse JSON chunks. See module decision log for the
@@ -749,6 +774,8 @@ fn rebuild_map_chunk(
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+    let self_node_id = stable_id_from_key(self_node_key);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let mut own_node = record_to_map_node(&own, &tailnet_domain);
     apply_routes_to_map_node(
         &mut own_node,
@@ -792,7 +819,7 @@ fn rebuild_map_chunk(
         dns_config: Some(dns_config),
         derp_map: Some((**derp_map).clone()),
         domain: tailnet_domain,
-        packet_filter: packet_filter_for(policy),
+        packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
         ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
         keep_alive: false,
         node_key_expired: false,
@@ -1073,6 +1100,118 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let peer_names: Vec<_> = mr.peers.iter().map(|peer| peer.name.as_str()).collect();
         assert_eq!(peer_names, vec!["alice"]);
+    }
+
+    #[tokio::test]
+    async fn map_response_emits_reduced_base_packet_filter_for_target_node() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "tagOwners": {"tag:server": ["alice@"]},
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["tag:server"],"ports":["tcp/22"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "aa".repeat(32);
+        let server = "bb".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            server.clone(),
+            policy_record(
+                &server,
+                "server",
+                11,
+                "server-owner",
+                vec!["tag:server".into()],
+            ),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{server}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(mr.packet_filter.is_empty(), "upstream uses PacketFilters");
+        let base = mr
+            .packet_filters
+            .get("base")
+            .and_then(|rules| rules.as_ref())
+            .expect("PacketFilters.base present");
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].src_ips, vec!["100.64.0.10/32"]);
+        assert_eq!(base[0].ip_proto, vec![6]);
+        assert_eq!(base[0].dst_ports.len(), 1);
+        assert_eq!(base[0].dst_ports[0].ip, "100.64.0.11/32");
+        assert_eq!(base[0].dst_ports[0].ports.first, 22);
+        assert_eq!(base[0].dst_ports[0].ports.last, 22);
+    }
+
+    #[tokio::test]
+    async fn map_response_base_packet_filter_keeps_served_routes() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.10.0.0/16"],"ports":["*/*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "ad".repeat(32);
+        let router_key = "be".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            routed_record(&router_key, "router", 11, vec!["10.10.1.0/24".into()]),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{router_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let base = mr
+            .packet_filters
+            .get("base")
+            .and_then(|rules| rules.as_ref())
+            .expect("PacketFilters.base present");
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].src_ips, vec!["100.64.0.10/32"]);
+        assert_eq!(base[0].dst_ports[0].ip, "10.10.0.0/16");
     }
 
     #[tokio::test]

@@ -41,8 +41,23 @@
 //! this layer and enforced only by the on-host
 //! `headscale-api-acl` evaluator.
 
+use std::net::IpAddr;
+
+use ipnet::IpNet;
+
 use super::{PolicyAction, PolicyDoc};
 use crate::tailscale_wire::wire::{FilterRule, NetPortRange, PortRange};
+
+/// Node facts needed to compile/reduce a headscale-go-style packet
+/// filter for one map recipient.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacketFilterNode {
+    pub id: u64,
+    pub user: Option<String>,
+    pub addrs: Vec<String>,
+    pub tags: Vec<String>,
+    pub routes: Vec<String>,
+}
 
 /// Translate a parsed [`PolicyDoc`] into the on-wire
 /// `tailcfg.FilterRule` list the stock Tailscale daemon consumes.
@@ -106,6 +121,452 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
         }
     }
     out
+}
+
+/// Compile the `PacketFilters["base"]` rules for `node_id`.
+///
+/// Headscale-go does not send the global policy filter verbatim in a
+/// map response. It resolves users/tags against the current node set
+/// and reduces the result to destinations relevant to the receiving
+/// node.
+pub fn acl_to_filter_rules_for_node(
+    doc: &PolicyDoc,
+    nodes: &[PacketFilterNode],
+    node_id: u64,
+) -> Vec<FilterRule> {
+    let Some(self_node) = nodes.iter().find(|node| node.id == node_id) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    for rule in &doc.rules {
+        if !matches!(rule.action, PolicyAction::Accept) {
+            continue;
+        }
+
+        let src_ips = resolve_principals(doc, &rule.src, nodes, None);
+        if src_ips.is_empty() {
+            continue;
+        }
+
+        let mut self_dsts = Vec::new();
+        let mut other_dsts = Vec::new();
+        for dst in &rule.dst {
+            if dst == "autogroup:self" {
+                self_dsts.push(dst.clone());
+            } else {
+                other_dsts.push(dst.clone());
+            }
+        }
+
+        if !self_dsts.is_empty() && self_node.tags.is_empty() {
+            let same_user = same_user_untagged_nodes(nodes, self_node);
+            let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+            let self_dst = same_user
+                .iter()
+                .flat_map(|node| node_addr_prefixes(node))
+                .collect::<Vec<_>>();
+            append_filter_rules(&mut out, &self_src, &self_dst, &rule.ports);
+        }
+
+        if !other_dsts.is_empty() {
+            let dst_ips = resolve_principals(doc, &other_dsts, nodes, Some(self_node));
+            append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
+        }
+    }
+
+    reduce_filter_rules_for_node(out, self_node)
+}
+
+fn append_filter_rules(
+    out: &mut Vec<FilterRule>,
+    src_ips: &[String],
+    dst_ips: &[String],
+    ports: &[String],
+) {
+    if src_ips.is_empty() || dst_ips.is_empty() {
+        return;
+    }
+    for (ip_proto, port_ranges) in compile_port_groups(ports) {
+        let mut dst_ports = Vec::new();
+        for ip in dst_ips {
+            for range in &port_ranges {
+                dst_ports.push(NetPortRange {
+                    ip: ip.clone(),
+                    ports: range.clone(),
+                });
+            }
+        }
+        let mut rule = FilterRule {
+            src_ips: src_ips.to_vec(),
+            dst_ports,
+            ip_proto,
+        };
+        normalize_filter_rule(&mut rule);
+        out.push(rule);
+    }
+}
+
+fn resolve_principals(
+    doc: &PolicyDoc,
+    tokens: &[String],
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in tokens {
+        for value in resolve_principal(doc, token, nodes, self_node) {
+            push_unique_string(&mut out, value);
+        }
+    }
+    aggregate_prefixes(out)
+}
+
+fn resolve_principal(
+    doc: &PolicyDoc,
+    token: &str,
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) -> Vec<String> {
+    if token == "*" {
+        return headscale_api_acl::wildcard_filter_cidrs();
+    }
+    if token.contains('@') {
+        return nodes
+            .iter()
+            .filter(|node| node.tags.is_empty())
+            .filter(|node| {
+                node.user
+                    .as_deref()
+                    .is_some_and(|user| user_matches(token, user))
+            })
+            .flat_map(node_addr_prefixes)
+            .collect();
+    }
+    if let Some(group) = token.strip_prefix("group:") {
+        let Some(members) = doc.groups.get(token).or_else(|| doc.groups.get(group)) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for member in members {
+            for value in resolve_principal(doc, member, nodes, self_node) {
+                push_unique_string(&mut out, value);
+            }
+        }
+        return out;
+    }
+    if let Some(tag) = token.strip_prefix("tag:") {
+        return nodes
+            .iter()
+            .filter(|node| node.tags.iter().any(|node_tag| tag_matches(node_tag, tag)))
+            .flat_map(node_addr_prefixes)
+            .collect();
+    }
+    if let Some(kind) = token.strip_prefix("autogroup:") {
+        return match kind {
+            "internet" => headscale_api_acl::wildcard_filter_cidrs(),
+            "member" => nodes
+                .iter()
+                .filter(|node| node.tags.is_empty())
+                .flat_map(node_addr_prefixes)
+                .collect(),
+            "tagged" => nodes
+                .iter()
+                .filter(|node| !node.tags.is_empty())
+                .flat_map(node_addr_prefixes)
+                .collect(),
+            "self" => self_node
+                .filter(|node| node.tags.is_empty())
+                .map(|node| same_user_untagged_nodes(nodes, node))
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|node| node_addr_prefixes(node))
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+    if let Some(host) = token.strip_prefix("host:") {
+        return doc
+            .hosts
+            .get(host)
+            .map(|prefix| resolve_prefix(prefix, nodes, true))
+            .unwrap_or_default();
+    }
+    if let Some(ipset) = token.strip_prefix("ipset:") {
+        return doc.ipsets.get(ipset).cloned().unwrap_or_default();
+    }
+    if let Some(prefix) = doc.hosts.get(token) {
+        return resolve_prefix(prefix, nodes, true);
+    }
+    if parse_ip_net(token).is_some() {
+        return resolve_prefix(token, nodes, false);
+    }
+    Vec::new()
+}
+
+fn same_user_untagged_nodes<'a>(
+    nodes: &'a [PacketFilterNode],
+    node: &PacketFilterNode,
+) -> Vec<&'a PacketFilterNode> {
+    nodes
+        .iter()
+        .filter(|candidate| candidate.tags.is_empty())
+        .filter(|candidate| candidate.user == node.user)
+        .collect()
+}
+
+fn nodes_matching_prefixes(nodes: &[&PacketFilterNode], prefixes: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        if node.addrs.iter().any(|addr| {
+            prefixes
+                .iter()
+                .any(|prefix| prefix_contains_addr(prefix, addr))
+        }) {
+            for addr in node_addr_prefixes(node) {
+                push_unique_string(&mut out, addr);
+            }
+        }
+    }
+    out.sort();
+    aggregate_prefixes(out)
+}
+
+fn resolve_prefix(
+    prefix: &str,
+    nodes: &[PacketFilterNode],
+    include_nodes_inside: bool,
+) -> Vec<String> {
+    let Some(net) = parse_ip_net(prefix) else {
+        return Vec::new();
+    };
+    let mut out = vec![net.to_string()];
+    for node in nodes {
+        let node_matches = node.addrs.iter().any(|addr| {
+            net_contains_addr(&net, addr) && (include_nodes_inside || is_single_ip(&net))
+        });
+        if node_matches {
+            for addr in node_addr_prefixes(node) {
+                push_unique_string(&mut out, addr);
+            }
+        }
+    }
+    aggregate_prefixes(out)
+}
+
+fn node_addr_prefixes(node: &PacketFilterNode) -> Vec<String> {
+    node.addrs
+        .iter()
+        .filter_map(|addr| parse_ip_net(addr))
+        .map(|net| net.to_string())
+        .collect()
+}
+
+fn reduce_filter_rules_for_node(
+    rules: Vec<FilterRule>,
+    node: &PacketFilterNode,
+) -> Vec<FilterRule> {
+    let mut out = Vec::new();
+    for mut rule in rules {
+        rule.dst_ports.retain(|dst| {
+            node.addrs
+                .iter()
+                .any(|addr| prefix_contains_addr(&dst.ip, addr))
+                || node
+                    .routes
+                    .iter()
+                    .any(|route| prefixes_overlap(&dst.ip, route))
+        });
+        if rule.dst_ports.is_empty() {
+            continue;
+        }
+        normalize_filter_rule(&mut rule);
+        out.push(rule);
+    }
+    out
+}
+
+fn parse_ip_net(s: &str) -> Option<IpNet> {
+    if let Ok(net) = s.parse::<IpNet>() {
+        return Some(net);
+    }
+    let addr = s.parse::<IpAddr>().ok()?;
+    IpNet::new(addr, if addr.is_ipv4() { 32 } else { 128 }).ok()
+}
+
+fn prefix_contains_addr(prefix: &str, addr: &str) -> bool {
+    parse_ip_net(prefix).is_some_and(|net| net_contains_addr(&net, addr))
+}
+
+fn prefixes_overlap(a: &str, b: &str) -> bool {
+    match (parse_ip_net(a), parse_ip_net(b)) {
+        (Some(a), Some(b)) => nets_overlap(&a, &b),
+        _ => false,
+    }
+}
+
+fn net_contains_addr(net: &IpNet, addr: &str) -> bool {
+    let Ok(addr) = addr.parse::<IpAddr>() else {
+        return false;
+    };
+    match (net, addr) {
+        (IpNet::V4(v4), IpAddr::V4(addr)) => v4.contains(&addr),
+        (IpNet::V6(v6), IpAddr::V6(addr)) => v6.contains(&addr),
+        _ => false,
+    }
+}
+
+fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
+    let (a_bits, a_start, a_end) = ipnet_interval(a);
+    let (b_bits, b_start, b_end) = ipnet_interval(b);
+    a_bits == b_bits && a_start <= b_end && b_start <= a_end
+}
+
+fn is_single_ip(net: &IpNet) -> bool {
+    match net {
+        IpNet::V4(v4) => v4.prefix_len() == 32,
+        IpNet::V6(v6) => v6.prefix_len() == 128,
+    }
+}
+
+fn user_matches(entry: &str, user: &str) -> bool {
+    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
+}
+
+fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
+    node_tag == policy_tag_without_prefix
+        || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
+}
+
+fn normalize_filter_rule(rule: &mut FilterRule) {
+    rule.src_ips.sort();
+    rule.src_ips.dedup();
+    rule.dst_ports.sort_by(|a, b| {
+        a.ip.cmp(&b.ip)
+            .then(a.ports.first.cmp(&b.ports.first))
+            .then(a.ports.last.cmp(&b.ports.last))
+    });
+    rule.ip_proto.sort();
+    rule.ip_proto.dedup();
+}
+
+fn aggregate_prefixes(values: Vec<String>) -> Vec<String> {
+    let mut passthrough = Vec::new();
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+
+    for value in values {
+        let Some(net) = parse_ip_net(&value) else {
+            push_unique_string(&mut passthrough, value);
+            continue;
+        };
+        match ipnet_interval(&net) {
+            (32, start, end) => v4.push((start, end)),
+            (128, start, end) => v6.push((start, end)),
+            _ => passthrough.push(value),
+        }
+    }
+
+    let mut out = passthrough;
+    out.extend(intervals_to_cidrs(v4, 32));
+    out.extend(intervals_to_cidrs(v6, 128));
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn ipnet_interval(net: &IpNet) -> (u8, u128, u128) {
+    match net {
+        IpNet::V4(v4) => {
+            let start = u32::from(v4.network()) as u128;
+            let host_bits = 32 - v4.prefix_len();
+            let size = 1u128 << host_bits;
+            (32, start, start + size - 1)
+        }
+        IpNet::V6(v6) => {
+            let start = u128::from(v6.network());
+            if v6.prefix_len() == 0 {
+                (128, 0, u128::MAX)
+            } else {
+                let host_bits = 128 - v6.prefix_len();
+                let size = 1u128 << host_bits;
+                (128, start, start + size - 1)
+            }
+        }
+    }
+}
+
+fn intervals_to_cidrs(mut intervals: Vec<(u128, u128)>, bits: u8) -> Vec<String> {
+    if intervals.is_empty() {
+        return Vec::new();
+    }
+    intervals.sort_by_key(|(start, _)| *start);
+
+    let mut merged: Vec<(u128, u128)> = Vec::new();
+    for (start, end) in intervals {
+        if let Some((_, last_end)) = merged.last_mut()
+            && start <= last_end.saturating_add(1)
+        {
+            if end > *last_end {
+                *last_end = end;
+            }
+            continue;
+        }
+        merged.push((start, end));
+    }
+
+    let mut out = Vec::new();
+    for (mut start, end) in merged {
+        if bits == 128 && start == 0 && end == u128::MAX {
+            out.push("::/0".to_string());
+            continue;
+        }
+        while start <= end {
+            let mut chosen_prefix = bits;
+            for prefix_len in 0..=bits {
+                let Some(size) = block_size(bits, prefix_len) else {
+                    continue;
+                };
+                if start % size == 0 && start.saturating_add(size - 1) <= end {
+                    chosen_prefix = prefix_len;
+                    break;
+                }
+            }
+            let size = block_size(bits, chosen_prefix).unwrap_or(1);
+            out.push(interval_prefix_string(start, bits, chosen_prefix));
+            if end - start < size {
+                break;
+            }
+            start += size;
+        }
+    }
+    out
+}
+
+fn block_size(bits: u8, prefix_len: u8) -> Option<u128> {
+    let host_bits = bits - prefix_len;
+    if host_bits == 128 {
+        None
+    } else {
+        Some(1u128 << host_bits)
+    }
+}
+
+fn interval_prefix_string(start: u128, bits: u8, prefix_len: u8) -> String {
+    let addr = if bits == 32 {
+        IpAddr::V4((start as u32).into())
+    } else {
+        IpAddr::V6(start.into())
+    };
+    IpNet::new(addr, prefix_len)
+        .expect("valid aggregate prefix")
+        .to_string()
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !out.contains(&value) {
+        out.push(value);
+    }
 }
 
 /// Map an ACL port pattern (`tcp/22`, `udp/*`, `*/*`, or the legacy

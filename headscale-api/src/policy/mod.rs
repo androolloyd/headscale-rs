@@ -41,7 +41,7 @@ use tokio::sync::Notify;
 pub use doc::{
     AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, PortRef, SshRule,
 };
-pub use filter::acl_to_filter_rules;
+pub use filter::{PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node};
 pub use hujson::{PolicyParseError, parse_hujson_policy};
 pub use ssh::{SshPolicyNode, compile_ssh_policy};
 
@@ -122,6 +122,25 @@ impl PolicyStore {
     /// to `allow_all_packet_filter`).
     pub fn filter_rules(&self) -> Vec<FilterRule> {
         self.inner.state.read().filters.clone()
+    }
+
+    /// Snapshot packet-filter rules for a specific map recipient.
+    ///
+    /// Returns `None` when no policy is loaded so callers can apply
+    /// their no-policy compatibility default. A loaded deny-all policy
+    /// returns `Some(vec![])`, which is distinct and must stay empty on
+    /// the wire.
+    pub fn filter_rules_for_node(
+        &self,
+        nodes: &[PacketFilterNode],
+        node_id: u64,
+    ) -> Option<Vec<FilterRule>> {
+        self.inner
+            .state
+            .read()
+            .doc
+            .as_ref()
+            .map(|doc| acl_to_filter_rules_for_node(doc, nodes, node_id))
     }
 
     /// Return the raw hujson bytes the operator most recently pushed,

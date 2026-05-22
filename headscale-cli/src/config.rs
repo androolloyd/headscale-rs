@@ -32,6 +32,18 @@ pub(crate) struct ServerConfig {
     /// Mesh network CIDR
     #[serde(default = "default_mesh_cidr")]
     pub mesh_cidr: String,
+    /// Public control server URL used for client helper pages and OIDC redirects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    /// State directory for the Tailscale wire noise key and TLS material.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
+    /// Optional HTTPS bind address for the Tailscale wire listener.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_listen: Option<String>,
+    /// Optional TLS certificate DNS SAN. Defaults to the host in `server_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_hostname: Option<String>,
     /// DERP relay servers
     #[serde(default)]
     pub derp_servers: Vec<DerpServerConfig>,
@@ -176,6 +188,10 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("/var/lib/headscale/db.sqlite")
 }
 
+fn default_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/headscale")
+}
+
 fn default_mesh_cidr() -> String {
     "100.64.0.0/10".to_string()
 }
@@ -210,6 +226,10 @@ impl Default for ServerConfig {
             listen: default_listen(),
             db_path: default_db_path(),
             mesh_cidr: default_mesh_cidr(),
+            server_url: None,
+            state_dir: default_state_dir(),
+            https_listen: None,
+            tls_hostname: None,
             derp_servers: Vec::new(),
         }
     }
@@ -302,15 +322,39 @@ method = "plain"
     }
 
     #[test]
-    fn loads_upstream_oidc_yaml_with_defaults() {
+    fn loads_server_wire_runtime_fields() {
         let source = r#"
+[server]
+listen = "127.0.0.1:51821"
+https_listen = "0.0.0.0:443"
+server_url = "https://headscale.example"
+state_dir = "/srv/headscale"
+tls_hostname = "headscale.example"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let server = config.server.unwrap();
+
+        assert_eq!(server.listen, "127.0.0.1:51821");
+        assert_eq!(server.https_listen.as_deref(), Some("0.0.0.0:443"));
+        assert_eq!(
+            server.server_url.as_deref(),
+            Some("https://headscale.example")
+        );
+        assert_eq!(server.state_dir, PathBuf::from("/srv/headscale"));
+        assert_eq!(server.tls_hostname.as_deref(), Some("headscale.example"));
+    }
+
+    #[test]
+    fn loads_upstream_oidc_yaml_with_defaults() {
+        let source = r"
 oidc:
   issuer: https://issuer.example
   client_id: yaml-client
   expiry: 14d
   allowed_domains:
     - example.com
-"#;
+";
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 

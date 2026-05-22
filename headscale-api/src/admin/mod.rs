@@ -92,7 +92,8 @@ pub use api_keys::{
 };
 pub use auth::{AdminAuth, AuthOutcome, SESSION_COOKIE, SESSION_TTL_SECS};
 pub use machines::{
-    MachineAdmin, MachineAdminError, MachineAdminRecord, PersistentMachineAdmin, WireMachineAdmin,
+    MachineAdmin, MachineAdminError, MachineAdminRecord, PersistentMachineAdmin,
+    PersistentOidcRegistrationHandler, WireMachineAdmin,
 };
 pub use preauth::{
     InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,

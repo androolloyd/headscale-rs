@@ -16,7 +16,7 @@ mod config;
 mod node;
 mod server;
 
-use config::CliConfig;
+use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
     self, AdminError, ApiKeysCmd, ConnectArgs, NodesCmd, PolicyCmd, PreauthKeysCmd, TailnetCmd,
     UsersCmd,
@@ -226,19 +226,23 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             db_path,
             mesh_cidr,
         } => {
-            let listen = config
-                .as_ref()
-                .and_then(|c| c.server.as_ref())
-                .map_or(listen, |s| s.listen.clone());
-            let db_path = config
-                .as_ref()
-                .and_then(|c| c.server.as_ref())
-                .map_or(db_path, |s| s.db_path.clone());
-            let mesh_cidr = config
-                .as_ref()
-                .and_then(|c| c.server.as_ref())
-                .map_or(mesh_cidr, |s| s.mesh_cidr.clone());
-            server::run_server(&listen, &db_path, &mesh_cidr)
+            let server_config = config.as_ref().and_then(|c| c.server.as_ref());
+            let defaults = ServerConfig::default();
+            let run_config = server::RunServerConfig {
+                listen: server_config.map_or(listen, |s| s.listen.clone()),
+                db_path: server_config.map_or(db_path, |s| s.db_path.clone()),
+                mesh_cidr: server_config.map_or(mesh_cidr, |s| s.mesh_cidr.clone()),
+                server_url: server_config.and_then(|s| s.server_url.clone()),
+                state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
+                https_listen: server_config.and_then(|s| s.https_listen.clone()),
+                tls_hostname: server_config.and_then(|s| s.tls_hostname.clone()),
+                oidc: config
+                    .as_ref()
+                    .map_or_else(headscale_core::config::OidcConfig::default, |c| {
+                        c.oidc.clone()
+                    }),
+            };
+            server::run_server(run_config)
                 .await
                 .map_err(MainError::Other)
         }
@@ -399,6 +403,11 @@ async fn init_config(output: &PathBuf) -> Result<()> {
 listen = "0.0.0.0:8080"
 db_path = "/var/lib/headscale/db.sqlite"
 mesh_cidr = "100.64.0.0/10"
+# Required when [oidc] is configured; used for /oidc/callback and helper URLs.
+# server_url = "https://headscale.example"
+# state_dir = "/var/lib/headscale"
+# https_listen = "0.0.0.0:443"
+# tls_hostname = "headscale.example"
 
 # DERP relay servers for NAT traversal
 [[server.derp_servers]]
@@ -427,6 +436,14 @@ seed = false
 [logging]
 level = "info"
 format = "pretty"  # pretty, json, compact
+
+# OpenID Connect registration. When oidc.issuer is set, `headscale server`
+# starts the Tailscale wire-compatible public control surface and completes
+# OIDC callbacks through the persistent users/nodes tables.
+#[oidc]
+#issuer = "https://issuer.example"
+#client_id = "headscale"
+#client_secret = "change-me"
 "#;
 
     std::fs::write(output, example_config)?;

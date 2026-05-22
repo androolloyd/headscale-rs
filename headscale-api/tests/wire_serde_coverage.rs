@@ -88,12 +88,45 @@ fn stable_id_distinct_for_distinct_inputs() {
 #[test]
 fn hostinfo_emits_pascal_case_with_all_caps_os() {
     let h = HostInfo {
+        ipn_version: "1.94.1".into(),
+        frontend_log_id: "frontend-log-1".into(),
+        backend_log_id: "backend-log-1".into(),
         hostname: "h1".into(),
         os: "linux".into(),
         os_version: "6.6".into(),
+        env: "kn".into(),
+        distro: "ubuntu".into(),
+        distro_version: "24.04".into(),
+        distro_code_name: "noble".into(),
+        app: "tsnet-app".into(),
+        package: "apt".into(),
+        device_model: "vm".into(),
+        push_device_token: "push-token-1".into(),
+        shields_up: true,
+        sharee_node: true,
+        no_logs_no_support: true,
+        wire_ingress: true,
+        ingress_enabled: true,
+        allows_update: true,
+        machine: "x86_64".into(),
+        go_arch: "amd64".into(),
+        go_arch_var: "v3".into(),
+        go_version: "go1.25.5".into(),
         routable_ips: vec!["10.0.0.0/24".into()],
         request_tags: vec!["tag:server".into()],
-        net_info: Some(NetInfo { preferred_derp: 7 }),
+        wol_macs: vec!["00:11:22:33:44:55".into()],
+        ssh_host_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey".into()],
+        cloud: "aws".into(),
+        services_hash: "services-hash-1".into(),
+        exit_node_id: "n99".into(),
+        net_info: Some(NetInfo {
+            preferred_derp: 7,
+            have_port_map: true,
+            link_type: "wired".into(),
+            firewall_mode: "nft-default".into(),
+            ..NetInfo::default()
+        }),
+        ..HostInfo::default()
     };
     let v: Value = serde_json::to_value(&h).unwrap();
     assert_eq!(v["Hostname"], "h1");
@@ -105,7 +138,32 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["RoutableIPs"], serde_json::json!(["10.0.0.0/24"]));
     assert_eq!(v["RequestTags"], serde_json::json!(["tag:server"]));
     assert_eq!(v["NetInfo"]["PreferredDERP"], 7);
+    assert_eq!(v["IPNVersion"], "1.94.1");
+    assert_eq!(v["FrontendLogID"], "frontend-log-1");
+    assert_eq!(v["BackendLogID"], "backend-log-1");
+    assert_eq!(v["WoLMACs"], serde_json::json!(["00:11:22:33:44:55"]));
+    assert_eq!(
+        v["sshHostKeys"],
+        serde_json::json!(["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"])
+    );
+    assert_eq!(v["ExitNodeID"], "n99");
+    assert_eq!(v["NetInfo"]["HavePortMap"], true);
+    assert_eq!(v["NetInfo"]["LinkType"], "wired");
+    assert_eq!(v["NetInfo"]["FirewallMode"], "nft-default");
     assert!(v.get("OsVersion").is_none());
+    let back: HostInfo = serde_json::from_value(v).unwrap();
+    assert_eq!(back.ipn_version, "1.94.1");
+    assert!(back.shields_up);
+    assert!(back.sharee_node);
+    assert!(back.no_logs_no_support);
+    assert!(back.wire_ingress);
+    assert!(back.ingress_enabled);
+    assert!(back.allows_update);
+    assert_eq!(back.go_arch, "amd64");
+    assert_eq!(back.go_arch_var, "v3");
+    assert_eq!(back.go_version, "go1.25.5");
+    assert_eq!(back.ssh_host_keys.len(), 1);
+    assert_eq!(back.net_info.unwrap().firewall_mode, "nft-default");
 }
 
 #[test]

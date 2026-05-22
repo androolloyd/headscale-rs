@@ -80,6 +80,7 @@ fn map_response_emits_required_stock_client_fields() {
                 routable_ips: Vec::new(),
                 request_tags: Vec::new(),
                 net_info: None,
+                ..HostInfo::default()
             },
             created: None,
             key_expiry: None,

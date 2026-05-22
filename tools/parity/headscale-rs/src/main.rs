@@ -457,15 +457,73 @@ struct UserProfileSummary {
 #[derive(Debug, Serialize)]
 struct HostInfoSummary {
     #[serde(skip_serializing_if = "String::is_empty")]
+    ipn_version: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    frontend_log_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    backend_log_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     hostname: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     os: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     os_version: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    env: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    distro: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    distro_version: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    distro_code_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    app: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    package: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    device_model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    push_device_token: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    shields_up: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    sharee_node: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    no_logs_no_support: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    wire_ingress: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    ingress_enabled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allows_update: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    machine: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    go_arch: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    go_arch_var: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    go_version: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     request_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    wol_macs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ssh_host_keys: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    cloud: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    services_hash: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    exit_node_id: String,
     #[serde(skip_serializing_if = "is_zero_i32")]
     preferred_derp: i32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    have_port_map: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    link_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    firewall_mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1686,15 +1744,53 @@ fn json_string<T: Serialize>(value: Option<T>) -> String {
 }
 
 fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
+    let (preferred_derp, have_port_map, link_type, firewall_mode) =
+        hostinfo.net_info.map_or_else(
+            || (0, false, String::new(), String::new()),
+            |net_info| {
+                (
+                    net_info.preferred_derp,
+                    net_info.have_port_map,
+                    net_info.link_type,
+                    net_info.firewall_mode,
+                )
+            },
+        );
     HostInfoSummary {
+        ipn_version: hostinfo.ipn_version,
+        frontend_log_id: hostinfo.frontend_log_id,
+        backend_log_id: hostinfo.backend_log_id,
         hostname: hostinfo.hostname,
         os: hostinfo.os,
         os_version: hostinfo.os_version,
+        env: hostinfo.env,
+        distro: hostinfo.distro,
+        distro_version: hostinfo.distro_version,
+        distro_code_name: hostinfo.distro_code_name,
+        app: hostinfo.app,
+        package: hostinfo.package,
+        device_model: hostinfo.device_model,
+        push_device_token: hostinfo.push_device_token,
+        shields_up: hostinfo.shields_up,
+        sharee_node: hostinfo.sharee_node,
+        no_logs_no_support: hostinfo.no_logs_no_support,
+        wire_ingress: hostinfo.wire_ingress,
+        ingress_enabled: hostinfo.ingress_enabled,
+        allows_update: hostinfo.allows_update,
+        machine: hostinfo.machine,
+        go_arch: hostinfo.go_arch,
+        go_arch_var: hostinfo.go_arch_var,
+        go_version: hostinfo.go_version,
         request_tags: hostinfo.request_tags,
-        preferred_derp: hostinfo
-            .net_info
-            .map(|net_info| net_info.preferred_derp)
-            .unwrap_or_default(),
+        wol_macs: hostinfo.wol_macs,
+        ssh_host_keys: hostinfo.ssh_host_keys,
+        cloud: hostinfo.cloud,
+        services_hash: hostinfo.services_hash,
+        exit_node_id: hostinfo.exit_node_id,
+        preferred_derp,
+        have_port_map,
+        link_type,
+        firewall_mode,
     }
 }
 

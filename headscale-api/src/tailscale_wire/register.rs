@@ -764,7 +764,9 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             request_tags: Vec::new(),
             net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
                 preferred_derp: rec.home_derp,
+                ..crate::tailscale_wire::wire::NetInfo::default()
             }),
+            ..HostInfo::default()
         },
         created: Some(rec.created_at),
         key_expiry: rec.expiry,

@@ -328,11 +328,39 @@ pub struct NetInfo {
     /// unknown and is omitted by tailcfg.
     #[serde(default, rename = "PreferredDERP", skip_serializing_if = "is_zero_i32")]
     pub preferred_derp: i32,
+    /// Whether the client currently has an active port-map.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub have_port_map: bool,
+    /// Current link type, if known (`wired`, `wifi`, `mobile`, ...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_type: String,
+    /// Linux firewall mode/debug reason string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub firewall_mode: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct HostInfo {
+    /// Tailscale client version string.
+    #[serde(
+        default,
+        rename = "IPNVersion",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub ipn_version: String,
+    #[serde(
+        default,
+        rename = "FrontendLogID",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub frontend_log_id: String,
+    #[serde(
+        default,
+        rename = "BackendLogID",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub backend_log_id: String,
     #[serde(default)]
     pub hostname: String,
     /// Upstream JSON tag is `OS` (all-caps). PascalCase would produce
@@ -343,6 +371,50 @@ pub struct HostInfo {
     /// wire byte-identical.
     #[serde(default, rename = "OSVersion")]
     pub os_version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub env: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub distro: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub distro_version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub distro_code_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub package: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub push_device_token: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shields_up: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sharee_node: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_logs_no_support: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wire_ingress: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ingress_enabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allows_update: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine: String,
+    #[serde(default, rename = "GoArch", skip_serializing_if = "String::is_empty")]
+    pub go_arch: String,
+    #[serde(
+        default,
+        rename = "GoArchVar",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub go_arch_var: String,
+    #[serde(
+        default,
+        rename = "GoVersion",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub go_version: String,
     /// Subnet routes advertised by the client.
     #[serde(default, rename = "RoutableIPs")]
     pub routable_ips: Vec<String>,
@@ -350,6 +422,22 @@ pub struct HostInfo {
     /// --advertise-tags=tag:server`.
     #[serde(default, rename = "RequestTags", skip_serializing_if = "Vec::is_empty")]
     pub request_tags: Vec<String>,
+    /// Wake-on-LAN MAC addresses.
+    #[serde(default, rename = "WoLMACs", skip_serializing_if = "Vec::is_empty")]
+    pub wol_macs: Vec<String>,
+    /// Tailscale SSH host keys. Upstream uses a lower-camel legacy JSON name.
+    #[serde(default, rename = "sshHostKeys", skip_serializing_if = "Vec::is_empty")]
+    pub ssh_host_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cloud: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub services_hash: String,
+    #[serde(
+        default,
+        rename = "ExitNodeID",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub exit_node_id: String,
     /// NAT/check results advertised by the client. We currently persist
     /// the preferred DERP field for map-node and stream-patch parity.
     #[serde(default, rename = "NetInfo", skip_serializing_if = "Option::is_none")]
@@ -1396,6 +1484,7 @@ mod tests {
                 routable_ips: Vec::new(),
                 request_tags: Vec::new(),
                 net_info: None,
+                ..HostInfo::default()
             }),
             followup: None,
             tailnet: "required:example.com".into(),

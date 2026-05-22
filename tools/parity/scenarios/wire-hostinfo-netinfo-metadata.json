@@ -1,0 +1,68 @@
+{
+  "name": "wire-hostinfo-netinfo-metadata",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "register_request": {
+      "Version": 96,
+      "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "Auth": { "AuthKey": "hskey-auth-hostinfo" },
+      "Hostinfo": {
+        "IPNVersion": "1.94.1-t000000000-g000000000",
+        "FrontendLogID": "frontend-log-1",
+        "BackendLogID": "backend-log-1",
+        "Hostname": "metadata-peer",
+        "OS": "linux",
+        "OSVersion": "6.12.0",
+        "Env": "kn",
+        "Distro": "ubuntu",
+        "DistroVersion": "24.04",
+        "DistroCodeName": "noble",
+        "App": "tsnet-app",
+        "Package": "apt",
+        "DeviceModel": "vm",
+        "PushDeviceToken": "push-token-1",
+        "ShieldsUp": true,
+        "ShareeNode": true,
+        "NoLogsNoSupport": true,
+        "WireIngress": true,
+        "IngressEnabled": true,
+        "AllowsUpdate": true,
+        "Machine": "x86_64",
+        "GoArch": "amd64",
+        "GoArchVar": "v3",
+        "GoVersion": "go1.25.5",
+        "RequestTags": ["tag:server"],
+        "WoLMACs": ["00:11:22:33:44:55"],
+        "sshHostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"],
+        "Cloud": "aws",
+        "ServicesHash": "services-hash-1",
+        "ExitNodeID": "n99",
+        "NetInfo": {
+          "PreferredDERP": 900,
+          "HavePortMap": true,
+          "LinkType": "wired",
+          "FirewallMode": "nft-default"
+        }
+      }
+    },
+    "map_request": {
+      "Version": 96,
+      "NodeKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "Hostinfo": {
+        "IPNVersion": "1.94.1-t000000000-g000000000",
+        "Hostname": "metadata-peer",
+        "OS": "linux",
+        "OSVersion": "6.12.0",
+        "RequestTags": ["tag:server"],
+        "NetInfo": {
+          "PreferredDERP": 900,
+          "HavePortMap": true,
+          "LinkType": "wired",
+          "FirewallMode": "nft-default"
+        }
+      }
+    }
+  }
+}

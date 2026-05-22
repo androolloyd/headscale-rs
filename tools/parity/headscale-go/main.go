@@ -290,11 +290,40 @@ type userProfileSummary struct {
 }
 
 type hostInfoSummary struct {
-	Hostname      string   `json:"hostname,omitempty"`
-	OS            string   `json:"os,omitempty"`
-	OSVersion     string   `json:"os_version,omitempty"`
-	RequestTags   []string `json:"request_tags,omitempty"`
-	PreferredDERP int      `json:"preferred_derp,omitempty"`
+	IPNVersion      string   `json:"ipn_version,omitempty"`
+	FrontendLogID   string   `json:"frontend_log_id,omitempty"`
+	BackendLogID    string   `json:"backend_log_id,omitempty"`
+	Hostname        string   `json:"hostname,omitempty"`
+	OS              string   `json:"os,omitempty"`
+	OSVersion       string   `json:"os_version,omitempty"`
+	Env             string   `json:"env,omitempty"`
+	Distro          string   `json:"distro,omitempty"`
+	DistroVersion   string   `json:"distro_version,omitempty"`
+	DistroCodeName  string   `json:"distro_code_name,omitempty"`
+	App             string   `json:"app,omitempty"`
+	Package         string   `json:"package,omitempty"`
+	DeviceModel     string   `json:"device_model,omitempty"`
+	PushDeviceToken string   `json:"push_device_token,omitempty"`
+	ShieldsUp       bool     `json:"shields_up,omitempty"`
+	ShareeNode      bool     `json:"sharee_node,omitempty"`
+	NoLogsNoSupport bool     `json:"no_logs_no_support,omitempty"`
+	WireIngress     bool     `json:"wire_ingress,omitempty"`
+	IngressEnabled  bool     `json:"ingress_enabled,omitempty"`
+	AllowsUpdate    bool     `json:"allows_update,omitempty"`
+	Machine         string   `json:"machine,omitempty"`
+	GoArch          string   `json:"go_arch,omitempty"`
+	GoArchVar       string   `json:"go_arch_var,omitempty"`
+	GoVersion       string   `json:"go_version,omitempty"`
+	RequestTags     []string `json:"request_tags,omitempty"`
+	WoLMACs         []string `json:"wol_macs,omitempty"`
+	SSHHostKeys     []string `json:"ssh_host_keys,omitempty"`
+	Cloud           string   `json:"cloud,omitempty"`
+	ServicesHash    string   `json:"services_hash,omitempty"`
+	ExitNodeID      string   `json:"exit_node_id,omitempty"`
+	PreferredDERP   int      `json:"preferred_derp,omitempty"`
+	HavePortMap     bool     `json:"have_port_map,omitempty"`
+	LinkType        string   `json:"link_type,omitempty"`
+	FirewallMode    string   `json:"firewall_mode,omitempty"`
 }
 
 type filterRuleOut struct {
@@ -1110,15 +1139,50 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		return nil
 	}
 	var preferredDERP int
+	var havePortMap bool
+	var linkType string
+	var firewallMode string
 	if netInfo := hostinfo.NetInfo(); netInfo.Valid() {
 		preferredDERP = netInfo.PreferredDERP()
+		havePortMap = netInfo.HavePortMap()
+		linkType = netInfo.LinkType()
+		firewallMode = netInfo.FirewallMode()
 	}
 	return &hostInfoSummary{
-		Hostname:      hostinfo.Hostname(),
-		OS:            hostinfo.OS(),
-		OSVersion:     hostinfo.OSVersion(),
-		RequestTags:   hostinfo.RequestTags().AsSlice(),
-		PreferredDERP: preferredDERP,
+		IPNVersion:      hostinfo.IPNVersion(),
+		FrontendLogID:   hostinfo.FrontendLogID(),
+		BackendLogID:    hostinfo.BackendLogID(),
+		Hostname:        hostinfo.Hostname(),
+		OS:              hostinfo.OS(),
+		OSVersion:       hostinfo.OSVersion(),
+		Env:             hostinfo.Env(),
+		Distro:          hostinfo.Distro(),
+		DistroVersion:   hostinfo.DistroVersion(),
+		DistroCodeName:  hostinfo.DistroCodeName(),
+		App:             hostinfo.App(),
+		Package:         hostinfo.Package(),
+		DeviceModel:     hostinfo.DeviceModel(),
+		PushDeviceToken: hostinfo.PushDeviceToken(),
+		ShieldsUp:       hostinfo.ShieldsUp(),
+		ShareeNode:      hostinfo.ShareeNode(),
+		NoLogsNoSupport: hostinfo.NoLogsNoSupport(),
+		WireIngress:     hostinfo.WireIngress(),
+		IngressEnabled:  hostinfo.IngressEnabled(),
+		AllowsUpdate:    hostinfo.AllowsUpdate(),
+		Machine:         hostinfo.Machine(),
+		GoArch:          hostinfo.GoArch(),
+		GoArchVar:       hostinfo.GoArchVar(),
+		GoVersion:       hostinfo.GoVersion(),
+		RequestTags:     hostinfo.RequestTags().AsSlice(),
+		WoLMACs:         hostinfo.WoLMACs().AsSlice(),
+		SSHHostKeys:     hostinfo.SSH_HostKeys().AsSlice(),
+		Cloud:           hostinfo.Cloud(),
+		ServicesHash:    hostinfo.ServicesHash(),
+		ExitNodeID:      string(hostinfo.ExitNodeID()),
+		PreferredDERP:   preferredDERP,
+		HavePortMap:     havePortMap,
+		LinkType:        linkType,
+		FirewallMode:    firewallMode,
 	}
 }
 

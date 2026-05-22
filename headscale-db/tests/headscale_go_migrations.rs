@@ -75,6 +75,72 @@ async fn node_with_route(
 }
 
 #[tokio::test]
+async fn documents_preauth_user_id_fk_on_delete_set_null_schema_gap() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
+
+    let preauth_user_fks: Vec<(String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT "from", "table", "to", on_delete
+        FROM pragma_foreign_key_list('pre_auth_keys')
+        "#,
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("query pre_auth_keys foreign keys");
+    assert!(
+        !preauth_user_fks
+            .iter()
+            .any(|(from, table, to, on_delete)| from == "user_id"
+                && table == "users"
+                && to == "id"
+                && on_delete.eq_ignore_ascii_case("SET NULL")),
+        "headscale-go v0.28.0 has pre_auth_keys.user_id -> users(id) ON DELETE SET NULL; \
+         this is still a known gap while the DB crate accepts string user labels"
+    );
+
+    sqlx::query(
+        "
+        INSERT INTO pre_auth_keys
+            (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+        VALUES
+            ('legacy-string-user-key', NULL, NULL, 'legacy-string-user', false, false, false, '[]', NULL, datetime('now'))
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("current schema accepts string user labels");
+    let string_user_type: String =
+        sqlx::query_scalar("SELECT typeof(user_id) FROM pre_auth_keys WHERE key = ?")
+            .bind("legacy-string-user-key")
+            .fetch_one(db.pool())
+            .await
+            .expect("query string user storage type");
+    assert_eq!(
+        string_user_type, "text",
+        "a strict upstream FK migration would reject this current compatibility path"
+    );
+
+    let user_id = user_id(&db).await;
+    let auth_key_id = preauth_key_id(&db, user_id).await;
+    users::destroy(db.pool(), user_id)
+        .await
+        .expect("delete owning user");
+
+    let stale_user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM pre_auth_keys WHERE id = ?")
+            .bind(auth_key_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("query preauth key after user delete");
+    assert_eq!(
+        stale_user_id,
+        Some(user_id),
+        "upstream would keep the preauth key row but SET NULL on user deletion"
+    );
+}
+
+#[tokio::test]
 async fn migrates_legacy_routes_table_enabled_rows_to_nodes_approved_routes_and_drops_routes() {
     let db = Database::in_memory().await.expect("open db");
     db.migrate().await.expect("migrate");

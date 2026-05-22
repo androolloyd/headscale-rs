@@ -2252,6 +2252,118 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_route_update_emits_full_peer_delta_with_allowed_ips() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "version": 1,
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.30.0.0/16:*"]}
+            ],
+            "auto_approvers": {
+                "routes": {"10.30.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "a1".repeat(32);
+        let router_key = "b1".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            policy_record(&router_key, "router", 11, "router", Vec::new()),
+        );
+
+        let app = router(state.clone());
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&stream_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(
+            first_mr.peers.is_empty(),
+            "router is hidden until it serves an allowed route"
+        );
+
+        let update_req = serde_json::json!({
+            "Version": 39,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "RoutableIPs": ["10.30.1.0/24"]
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{router_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let raw = to_bytes(update_resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(
+            raw.is_empty(),
+            "non-streaming OmitPeers route updates return an empty lite response"
+        );
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        let peer = &mr.peers_changed[0];
+        assert_eq!(peer.id, stable_id_from_key(&router_key));
+        assert_eq!(peer.name, "router");
+        assert!(
+            peer.hostinfo
+                .routable_ips
+                .iter()
+                .any(|route| route == "10.30.1.0/24")
+        );
+        assert!(
+            peer.allowed_ips.iter().any(|route| route == "10.30.1.0/24"),
+            "approved advertised routes must be sent as route-derived AllowedIPs"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_endpoint_update_uses_peer_changed_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

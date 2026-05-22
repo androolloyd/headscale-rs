@@ -165,6 +165,25 @@ Useful knobs:
 - `REAL_CLIENT_EXPECT_TAGS` defaults to the requested preauth tags.
 - `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.
 
+## Tag Update Smoke
+
+The tag-update scenario logs in a stock client with `tag:server`, replaces the
+node's forced tags with `tag:prod` through the Rust harness or upstream
+`headscale nodes tag`, and asserts that the final node state carries only the
+updated tag:
+
+```sh
+tools/real-client/tag-update-smoke.sh
+tools/real-client/tag-update-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server`.
+- `REAL_CLIENT_SET_TAGS_AFTER_LOGIN` defaults to `tag:prod`.
+- `REAL_CLIENT_EXPECT_TAGS` defaults to the post-update tags.
+- `REAL_CLIENT_POLICY_JSON` can override the generated tag-owner policy.
+
 ## MagicDNS Smoke
 
 The MagicDNS scenario starts two stock clients and asserts that each client

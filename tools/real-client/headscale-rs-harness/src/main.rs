@@ -191,6 +191,11 @@ struct SetApprovedRoutesRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetTagsRequest {
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterPendingRequest {
     #[serde(default = "default_user")]
     user: String,
@@ -299,6 +304,7 @@ async fn main() -> Result<()> {
                 "POST /harness/register/{registration_id}",
                 "GET /harness/machines",
                 "PUT /harness/machines/{node_key}/routes",
+                "PUT /harness/machines/{node_key}/tags",
             ],
         })?
     );
@@ -329,6 +335,7 @@ fn harness_router(state: AppState) -> Router {
             "/harness/machines/:node_key/routes",
             put(set_machine_routes),
         )
+        .route("/harness/machines/:node_key/tags", put(set_machine_tags))
         .with_state(state)
 }
 
@@ -413,6 +420,49 @@ async fn set_machine_routes(
     match state.machines.get(node_key_hex) {
         Some(machine) => Json(machine_summary(&machine)).into_response(),
         None => (StatusCode::NOT_FOUND, "machine not found").into_response(),
+    }
+}
+
+async fn set_machine_tags(
+    State(state): State<AppState>,
+    Path(node_key): Path<String>,
+    Json(req): Json<SetTagsRequest>,
+) -> impl IntoResponse {
+    let mut tags = req.tags;
+    tags.sort();
+    tags.dedup();
+    if tags.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "cannot remove all tags from a node - tagged nodes must have at least one tag"
+                .to_string(),
+        )
+            .into_response();
+    }
+    let invalid_tags = tags
+        .iter()
+        .filter(|tag| !valid_tag(tag) || !state.policy.tag_exists(tag))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid_tags.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "requested tags [{}] are invalid or not permitted",
+                invalid_tags.join(" ")
+            ),
+        )
+            .into_response();
+    }
+
+    let node_key_hex = node_key.strip_prefix("nodekey:").unwrap_or(&node_key);
+    if !state.machines.set_forced_tags(node_key_hex, tags) {
+        return (StatusCode::NOT_FOUND, "machine not found".to_string()).into_response();
+    }
+
+    match state.machines.get(node_key_hex) {
+        Some(machine) => Json(machine_summary(&machine)).into_response(),
+        None => (StatusCode::NOT_FOUND, "machine not found".to_string()).into_response(),
     }
 }
 

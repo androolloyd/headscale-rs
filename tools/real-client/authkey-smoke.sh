@@ -20,7 +20,12 @@ expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
-expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
+set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
+expected_tags_default="${preauth_tags}"
+if [[ -n "${set_tags_after_login}" ]]; then
+  expected_tags_default="${set_tags_after_login}"
+fi
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -416,6 +421,27 @@ if [[ -n "${approve_routes}" ]]; then
       -H 'content-type: application/json' \
       -d "${routes_json}" \
       >"${work_dir}/approved-routes-${node_key#nodekey:}.json"
+  done <<<"${node_key}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${set_tags_after_login}" ]]; then
+  echo "::group::set forced tags"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-tags.json"
+  node_key="$(
+    ruby -rjson -e '
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      expected = Integer(ARGV.fetch(1))
+      abort("expected #{expected} registered machines, got #{machines.length}") unless machines.length == expected
+      puts machines.map { |machine| machine.fetch("node_key") }
+    ' "${work_dir}/machines-before-tags.json" "${expected_machine_count}"
+  )"
+  tags_json="$(ruby -rjson -e 'puts JSON.generate({tags: ARGV.fetch(0).split(",").reject(&:empty?)})' "${set_tags_after_login}")"
+  while IFS= read -r node_key; do
+    curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${node_key}/tags" \
+      -H 'content-type: application/json' \
+      -d "${tags_json}" \
+      >"${work_dir}/set-tags-${node_key#nodekey:}.json"
   done <<<"${node_key}"
   echo "::endgroup::"
 fi

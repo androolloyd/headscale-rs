@@ -21,7 +21,12 @@ expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
-expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${preauth_tags}}"
+set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
+expected_tags_default="${preauth_tags}"
+if [[ -n "${set_tags_after_login}" ]]; then
+  expected_tags_default="${set_tags_after_login}"
+fi
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -496,6 +501,27 @@ if [[ -n "${approve_routes}" ]]; then
       --identifier "${node_id}" \
       --routes "${approve_routes}" \
       >"${work_dir}/approved-routes-${node_id}.json"
+  done <<<"${node_id}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${set_tags_after_login}" ]]; then
+  echo "::group::set headscale-go tags"
+  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-before-tags.json"
+  node_id="$(
+    ruby -rjson -e '
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      expected = Integer(ARGV.fetch(1))
+      abort("expected #{expected} registered nodes, got #{nodes.length}") unless nodes.length == expected
+      puts nodes.map { |node| node.fetch("id") }
+    ' "${work_dir}/nodes-before-tags.json" "${expected_machine_count}"
+  )"
+  while IFS= read -r node_id; do
+    "${headscale_bin}" -c "${config_path}" -o json nodes tag \
+      --identifier "${node_id}" \
+      --tags "${set_tags_after_login}" \
+      >"${work_dir}/set-tags-${node_id}.json"
   done <<<"${node_id}"
   echo "::endgroup::"
 fi

@@ -10,8 +10,8 @@ use std::{
 
 use axum::{
     Json,
-    body::Bytes,
-    extract::{Path, State},
+    body::to_bytes,
+    extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
@@ -30,6 +30,7 @@ const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
 const REGISTRATION_ID_LENGTH: usize = 24;
 const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH not set";
 const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+const VERIFY_BODY_LIMIT: usize = 4 * 1024;
 const SWAGGER_JSON: &str = include_str!("assets/headscale.swagger.json");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
@@ -178,7 +179,10 @@ pub async fn handle_metrics(State(state): State<WireState>) -> Response {
         .into_response()
 }
 
-pub async fn handle_verify(State(state): State<WireState>, raw: Bytes) -> Response {
+pub async fn handle_verify(State(state): State<WireState>, req: Request) -> Response {
+    let Ok(raw) = to_bytes(req.into_body(), VERIFY_BODY_LIMIT).await else {
+        return http_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    };
     let Ok(req) = serde_json::from_slice::<DerpAdmitClientRequest>(&raw) else {
         return http_error(StatusCode::BAD_REQUEST, "Bad Request: invalid JSON");
     };
@@ -2917,6 +2921,32 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"Bad Request: invalid JSON\n");
+    }
+
+    #[tokio::test]
+    async fn verify_endpoint_rejects_oversized_body_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(vec![b'x'; VERIFY_BODY_LIMIT + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"request body too large\n");
     }
 
     #[tokio::test]

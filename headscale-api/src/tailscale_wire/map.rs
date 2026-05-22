@@ -205,7 +205,7 @@ fn packet_filter_nodes_from_snapshot(
         .map(|(node_key, rec)| PacketFilterNode {
             id: stable_id_from_key(node_key),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
-            addrs: vec![rec.ipv4.to_string()],
+            addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
             routes: active_routes.get(node_key).cloned().unwrap_or_default(),
         })
@@ -571,7 +571,7 @@ fn ssh_policy_nodes_from_snapshot(
             } else {
                 Some(rec.user.clone())
             },
-            addrs: vec![rec.ipv4.to_string()],
+            addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
         })
         .collect()
@@ -1624,6 +1624,53 @@ mod tests {
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_response_emits_dual_stack_node_addresses() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        state.machines.update_with(|records| {
+            records.get_mut(&a).unwrap().ipv6 = Some("fd7a:115c:a1e0::10".parse().unwrap());
+            records.get_mut(&b).unwrap().ipv6 = Some("fd7a:115c:a1e0::11".parse().unwrap());
+        });
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+        assert_eq!(
+            node.addresses,
+            vec!["100.64.0.10/32", "fd7a:115c:a1e0::10/128"]
+        );
+        assert!(node.allowed_ips.contains(&"fd7a:115c:a1e0::10/128".into()));
+        assert_eq!(
+            mr.peers[0].addresses,
+            vec!["100.64.0.11/32", "fd7a:115c:a1e0::11/128"]
+        );
+        assert!(
+            mr.peers[0]
+                .allowed_ips
+                .contains(&"fd7a:115c:a1e0::11/128".into())
+        );
     }
 
     #[tokio::test]

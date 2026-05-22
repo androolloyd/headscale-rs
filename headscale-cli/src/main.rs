@@ -59,6 +59,9 @@ enum Commands {
         /// Mesh network CIDR.
         #[arg(long, default_value = "100.64.0.0/10")]
         mesh_cidr: String,
+        /// Optional IPv6 mesh network CIDR.
+        #[arg(long)]
+        mesh_cidr_v6: Option<String>,
     },
 
     /// Run as a mesh node (connects to a control plane).
@@ -304,6 +307,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             listen,
             db_path,
             mesh_cidr,
+            mesh_cidr_v6,
         } => {
             let server_config = config.as_ref().and_then(|c| c.server.as_ref());
             let defaults = ServerConfig::default();
@@ -311,6 +315,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 listen: server_config.map_or(listen, |s| s.listen.clone()),
                 db_path: server_config.map_or(db_path, |s| s.db_path.clone()),
                 mesh_cidr: server_config.map_or(mesh_cidr, |s| s.mesh_cidr.clone()),
+                mesh_cidr_v6: server_config
+                    .and_then(|s| s.mesh_cidr_v6.clone())
+                    .or(mesh_cidr_v6),
                 server_url: server_config.and_then(|s| s.server_url.clone()),
                 state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
                 https_listen: server_config.and_then(|s| s.https_listen.clone()),
@@ -700,6 +707,7 @@ async fn init_config(output: &PathBuf) -> Result<()> {
 listen = "0.0.0.0:8080"
 db_path = "/var/lib/headscale/db.sqlite"
 mesh_cidr = "100.64.0.0/10"
+# mesh_cidr_v6 = "fd7a:115c:a1e0::/48"
 # Required when [oidc] is configured; used for /oidc/callback and helper URLs.
 # server_url = "https://headscale.example"
 # state_dir = "/var/lib/headscale"

@@ -1312,6 +1312,11 @@ pub mod upstream {
             ipv4,
             false,
         );
+        record.ipv6 = machine
+            .ipv6
+            .as_deref()
+            .filter(|ipv6| !ipv6.is_empty())
+            .and_then(|ipv6| ipv6.parse().ok());
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1338,6 +1343,11 @@ pub mod upstream {
             .ipv4
             .parse()
             .unwrap_or_else(|_| cgnat_ip_from_key(&machine.id));
+        record.ipv6 = machine
+            .ipv6
+            .as_deref()
+            .filter(|ipv6| !ipv6.is_empty())
+            .and_then(|ipv6| ipv6.parse().ok());
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1361,7 +1371,7 @@ pub mod upstream {
             name: record.hostname,
             user: record.user,
             ipv4: record.ipv4.to_string(),
-            ipv6: None,
+            ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
             online: !expired,
             last_seen: record.last_seen.timestamp().max(0) as u64,
             created_at: record.created_at.timestamp().max(0) as u64,

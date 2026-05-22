@@ -96,6 +96,9 @@ pub(crate) struct ServerConfig {
     /// Mesh network CIDR
     #[serde(default = "default_mesh_cidr")]
     pub mesh_cidr: String,
+    /// Optional IPv6 mesh network CIDR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_cidr_v6: Option<String>,
     /// Public control server URL used for client helper pages and OIDC redirects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
@@ -320,7 +323,7 @@ impl CliConfig {
             || self
                 .prefixes
                 .as_ref()
-                .is_some_and(|prefixes| prefixes.v4.is_some())
+                .is_some_and(|prefixes| prefixes.v4.is_some() || prefixes.v6.is_some())
             || self
                 .database
                 .as_ref()
@@ -363,6 +366,14 @@ impl CliConfig {
             && !prefix_v4.trim().is_empty()
         {
             server.mesh_cidr.clone_from(prefix_v4);
+        }
+        if let Some(prefix_v6) = self
+            .prefixes
+            .as_ref()
+            .and_then(|prefixes| prefixes.v6.as_ref())
+            && !prefix_v6.trim().is_empty()
+        {
+            server.mesh_cidr_v6 = Some(prefix_v6.clone());
         }
         if let Some(sqlite_path) = self
             .database
@@ -765,6 +776,7 @@ impl Default for ServerConfig {
             listen: default_listen(),
             db_path: default_db_path(),
             mesh_cidr: default_mesh_cidr(),
+            mesh_cidr_v6: None,
             server_url: None,
             state_dir: default_state_dir(),
             https_listen: None,
@@ -943,6 +955,7 @@ database:
         assert_eq!(server.unix_socket_permission, 0o760);
         assert_eq!(server.state_dir, PathBuf::from("/srv/headscale"));
         assert_eq!(server.mesh_cidr, "100.100.0.0/16");
+        assert_eq!(server.mesh_cidr_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
         assert_eq!(server.db_path, PathBuf::from("/srv/headscale/db.sqlite"));
     }
 

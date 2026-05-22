@@ -111,6 +111,13 @@ pub struct MachineRecord {
     pub host_info: HostInfo,
     /// Allocated tailnet IPv4 in the CGNAT range.
     pub ipv4: std::net::Ipv4Addr,
+    /// Optional allocated tailnet IPv6.
+    ///
+    /// Headscale-go stores IPv4 and IPv6 independently and emits both
+    /// as host prefixes in `tailcfg.Node.Addresses`. This remains
+    /// optional so embedders that still only implement the legacy
+    /// IPv4 allocator contract keep their current behavior.
+    pub ipv6: Option<std::net::Ipv6Addr>,
     /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
     /// Populated from `MapRequest.disco_key` on every `/machine/map`
     /// call (the client refreshes it on each map round-trip). `None`
@@ -176,6 +183,22 @@ pub struct MachineRecord {
 }
 
 impl MachineRecord {
+    pub fn address_strings(&self) -> Vec<String> {
+        let mut addrs = vec![self.ipv4.to_string()];
+        if let Some(ipv6) = self.ipv6 {
+            addrs.push(ipv6.to_string());
+        }
+        addrs
+    }
+
+    pub fn address_prefixes(&self) -> Vec<String> {
+        let mut addrs = vec![format!("{}/32", self.ipv4)];
+        if let Some(ipv6) = self.ipv6 {
+            addrs.push(format!("{ipv6}/128"));
+        }
+        addrs
+    }
+
     /// True when the node is owned by tags instead of its registering user.
     pub fn is_tagged(&self) -> bool {
         !self.forced_tags.is_empty()
@@ -247,6 +270,7 @@ impl MachineRecord {
                 ..HostInfo::default()
             },
             ipv4,
+            ipv6: None,
             disco_key: None,
             endpoints: Vec::new(),
             home_derp: 0,

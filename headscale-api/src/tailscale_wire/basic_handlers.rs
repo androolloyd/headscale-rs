@@ -2367,7 +2367,7 @@ fn ssh_policy_nodes_from_snapshot(
             } else {
                 Some(rec.user.clone())
             },
-            addrs: vec![rec.ipv4.to_string()],
+            addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
         })
         .collect()

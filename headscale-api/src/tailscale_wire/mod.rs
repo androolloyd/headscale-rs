@@ -33,7 +33,7 @@
 //! history) for the rationale behind each wire choice.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -231,7 +231,7 @@ pub trait PreauthRedeemer: Send + Sync {
     }
 }
 
-/// Allocates a tailnet IPv4 for a registering node.
+/// Allocates tailnet addresses for a registering node.
 ///
 /// Implementations are expected to be deterministic given
 /// `node_key_hex` (the in-tree OctraVPN allocator hashes
@@ -240,6 +240,15 @@ pub trait PreauthRedeemer: Send + Sync {
 /// rotates assignments on each call is also valid.
 pub trait IpAllocator: Send + Sync {
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError>;
+
+    /// Optionally allocate an IPv6 address for the same node.
+    ///
+    /// The default preserves the original IPv4-only embedder contract.
+    /// Production headscale-rs overrides this when an upstream-style
+    /// `prefixes.v6` is configured.
+    fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
+        Ok(None)
+    }
 }
 
 /// Result of persisting a wire registration into the durable node store.
@@ -1329,6 +1338,7 @@ impl MachineRegistry {
             self.get_by_machine_key_for_user(&pending.machine_key_hex, user)
         {
             pending.ipv4 = existing.ipv4;
+            pending.ipv6 = existing.ipv6;
             pending.created_at = existing.created_at;
             pending.ephemeral = existing.ephemeral;
             pending.disco_key = existing.disco_key;
@@ -1661,6 +1671,7 @@ mod registry_tests {
                 ..wire::HostInfo::default()
             },
             ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
+            ipv6: None,
             disco_key: Some(format!("disco-{host:08x}")),
             endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],
             home_derp: 0,

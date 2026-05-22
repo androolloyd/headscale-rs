@@ -30,7 +30,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::RngCore;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Decode a `RegisterRequest` from a raw body without requiring the
 /// `Content-Type: application/json` header. Stock `tailscale up`
@@ -299,11 +299,11 @@ async fn register_inner(
         )
             .into_response();
     }
-    let ipv4 = if let Some((_, existing)) = existing_machine.as_ref() {
-        existing.ipv4
+    let (ipv4, ipv6) = if let Some((_, existing)) = existing_machine.as_ref() {
+        (existing.ipv4, existing.ipv6)
     } else {
-        match allocate_register_ip(&state, &format!("{user}:{node_key_hex}")) {
-            Ok(ip) => ip,
+        match allocate_register_ips(&state, &format!("{user}:{node_key_hex}")) {
+            Ok(ips) => ips,
             Err(resp) => return resp,
         }
     };
@@ -409,6 +409,7 @@ async fn register_inner(
         os_version,
         host_info,
         ipv4,
+        ipv6,
         // Wall 7: DiscoKey + Endpoints arrive on the `/map` call, not
         // on register. New registrations start empty; same-machine
         // reauth preserves the last map-provided values.
@@ -490,8 +491,8 @@ async fn register_interactive(
         Err(resp) => return resp,
     };
     let requested_tags = requested_tags_for_body(&body);
-    let ipv4 = match allocate_register_ip(&state, &format!("pending:{node_key_hex}")) {
-        Ok(ip) => ip,
+    let (ipv4, ipv6) = match allocate_register_ips(&state, &format!("pending:{node_key_hex}")) {
+        Ok(ips) => ips,
         Err(resp) => return resp,
     };
     let now = chrono::Utc::now();
@@ -505,6 +506,7 @@ async fn register_interactive(
         os_version,
         host_info,
         ipv4,
+        ipv6,
         disco_key: None,
         endpoints: Vec::new(),
         home_derp: 0,
@@ -722,11 +724,11 @@ fn register_error_response(error: impl Into<String>) -> axum::response::Response
     .into_response()
 }
 
-fn allocate_register_ip(
+fn allocate_register_ips(
     state: &WireState,
     alloc_input: &str,
-) -> Result<Ipv4Addr, axum::response::Response> {
-    state.ip_allocator.allocate(alloc_input).map_err(|e| {
+) -> Result<(Ipv4Addr, Option<Ipv6Addr>), axum::response::Response> {
+    let ipv4 = state.ip_allocator.allocate(alloc_input).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorBody {
@@ -734,7 +736,17 @@ fn allocate_register_ip(
             }),
         )
             .into_response()
-    })
+    })?;
+    let ipv6 = state.ip_allocator.allocate_ipv6(alloc_input).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("ip allocation failed: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+    Ok((ipv4, ipv6))
 }
 
 fn empty_simple_user() -> SimpleUser {
@@ -864,6 +876,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         Some(format!("mkey:{}", rec.machine_key_hex))
     };
     let expired = rec.is_expired_at(chrono::Utc::now());
+    let addresses = rec.address_prefixes();
     MapNode {
         id,
         stable_id,
@@ -871,8 +884,9 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         user,
         key: format!("nodekey:{}", rec.node_key_hex),
         machine,
-        addresses: vec![format!("{}/32", rec.ipv4)],
-        allowed_ips: std::iter::once(format!("{}/32", rec.ipv4))
+        addresses: addresses.clone(),
+        allowed_ips: addresses
+            .into_iter()
             .chain(rec.approved_routes.iter().cloned())
             .collect(),
         primary_routes: rec.approved_routes.clone(),
@@ -1045,6 +1059,32 @@ mod tests {
         );
         assert_eq!(node.hostinfo.os, "linux");
         assert_eq!(node.hostinfo.os_version, "6.8");
+    }
+
+    #[test]
+    fn record_to_map_node_emits_ipv4_and_ipv6_prefixes() {
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "ab".repeat(32),
+            "cd".repeat(32),
+            "alice".into(),
+            "dual-a".into(),
+            Ipv4Addr::new(100, 64, 0, 9),
+            false,
+        );
+        record.ipv6 = Some("fd7a:115c:a1e0::9".parse().unwrap());
+        record.approved_routes = vec!["10.10.0.0/24".into()];
+
+        let node = record_to_map_node(&record, "octra.test");
+
+        assert_eq!(
+            node.addresses,
+            vec!["100.64.0.9/32", "fd7a:115c:a1e0::9/128"]
+        );
+        assert_eq!(
+            node.allowed_ips,
+            vec!["100.64.0.9/32", "fd7a:115c:a1e0::9/128", "10.10.0.0/24"]
+        );
     }
 
     #[tokio::test]

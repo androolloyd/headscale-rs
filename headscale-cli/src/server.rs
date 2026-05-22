@@ -1,7 +1,7 @@
 //! Server mode - runs the control plane.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -43,6 +43,7 @@ pub(crate) struct RunServerConfig {
     pub listen: String,
     pub db_path: PathBuf,
     pub mesh_cidr: String,
+    pub mesh_cidr_v6: Option<String>,
     pub server_url: Option<String>,
     pub state_dir: PathBuf,
     pub https_listen: Option<String>,
@@ -71,6 +72,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     tracing::info!("  Database: {}", cfg.db_path.display());
     tracing::info!("  State dir: {}", cfg.state_dir.display());
     tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
+    if let Some(mesh_cidr_v6) = &cfg.mesh_cidr_v6 {
+        tracing::info!("  IPv6 prefix: {}", mesh_cidr_v6);
+    }
     tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
     tracing::info!("  Remote gRPC: {}", remote_grpc_status(&cfg));
 
@@ -109,6 +113,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         &cfg.state_dir,
         server_url,
         &cfg.mesh_cidr,
+        cfg.mesh_cidr_v6.as_deref(),
         oidc,
         derp_map,
         dns_store.clone(),
@@ -200,6 +205,7 @@ async fn build_persistent_wire_runtime(
         state_dir,
         server_url,
         mesh_cidr,
+        None,
         oidc,
         derp_map,
         Arc::new(DnsStore::new()),
@@ -212,6 +218,7 @@ async fn build_persistent_wire_runtime_with_dns(
     state_dir: &Path,
     server_url: &str,
     mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
     oidc: Option<OidcAuthRuntime>,
     derp_map: DerpMap,
     dns: Arc<DnsStore>,
@@ -224,7 +231,8 @@ async fn build_persistent_wire_runtime_with_dns(
         Arc::new(PersistentMachineAdmin::new(pool.clone()).with_user_admin(users.clone()));
     let wire_registry = Arc::new(MachineRegistry::new());
     let registration_cache = Arc::new(RegistrationCache::new());
-    let ip_allocator: Arc<dyn IpAllocator> = Arc::new(CidrIpAllocator::from_cidr(mesh_cidr)?);
+    let ip_allocator: Arc<dyn IpAllocator> =
+        Arc::new(CidrIpAllocator::from_cidrs(mesh_cidr, mesh_cidr_v6)?);
     let policy = Arc::new(PolicyStore::new());
     let policy_loaded = load_persisted_policy(pool, &policy).await?;
     tracing::info!(
@@ -621,10 +629,22 @@ fn hostname_from_server_url(server_url: &str) -> String {
 struct CidrIpAllocator {
     network: u32,
     usable_hosts: u64,
+    ipv6: Option<Ipv6CidrAllocator>,
+}
+
+#[derive(Debug, Clone)]
+struct Ipv6CidrAllocator {
+    network: u128,
+    usable_hosts: u64,
 }
 
 impl CidrIpAllocator {
+    #[cfg(test)]
     fn from_cidr(cidr: &str) -> Result<Self> {
+        Self::from_cidrs(cidr, None)
+    }
+
+    fn from_cidrs(cidr: &str, cidr_v6: Option<&str>) -> Result<Self> {
         let (addr, prefix) = cidr
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
@@ -659,20 +679,78 @@ impl CidrIpAllocator {
         Ok(Self {
             network: u32::from(addr) & mask,
             usable_hosts,
+            ipv6: cidr_v6
+                .filter(|cidr| !cidr.trim().is_empty())
+                .map(parse_ipv6_cidr)
+                .transpose()?,
         })
     }
 }
 
+fn parse_ipv6_cidr(cidr: &str) -> Result<Ipv6CidrAllocator> {
+    let (addr, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr_v6 {cidr:?}: missing prefix"))?;
+    let addr: Ipv6Addr = addr
+        .parse()
+        .with_context(|| format!("invalid server.mesh_cidr_v6 {cidr:?}: invalid IPv6 address"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .with_context(|| format!("invalid server.mesh_cidr_v6 {cidr:?}: invalid prefix length"))?;
+    if prefix > 128 {
+        anyhow::bail!("invalid server.mesh_cidr_v6 {cidr:?}: prefix length must be <= 128");
+    }
+
+    let host_bits = 128u32 - u32::from(prefix);
+    let usable_hosts = match host_bits {
+        0 | 1 => 0,
+        2..=63 => (1u64 << host_bits) - 2,
+        _ => u64::MAX - 1,
+    };
+    if usable_hosts == 0 {
+        anyhow::bail!(
+            "invalid server.mesh_cidr_v6 {cidr:?}: prefix must leave assignable host addresses"
+        );
+    }
+
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << host_bits
+    };
+    Ok(Ipv6CidrAllocator {
+        network: u128::from(addr) & mask,
+        usable_hosts,
+    })
+}
+
 impl IpAllocator for CidrIpAllocator {
     fn allocate(&self, node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in node_key_hex.as_bytes() {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        let h = fnv1a64(node_key_hex);
         let host = (h % self.usable_hosts) + 2;
         Ok(Ipv4Addr::from(self.network + host as u32))
     }
+
+    fn allocate_ipv6(
+        &self,
+        node_key_hex: &str,
+    ) -> std::result::Result<Option<Ipv6Addr>, AllocError> {
+        let Some(ipv6) = &self.ipv6 else {
+            return Ok(None);
+        };
+        let h = fnv1a64(node_key_hex);
+        let host = (h % ipv6.usable_hosts) + 2;
+        Ok(Some(Ipv6Addr::from(ipv6.network + u128::from(host))))
+    }
+}
+
+fn fnv1a64(input: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in input.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 #[cfg(test)]
@@ -902,6 +980,7 @@ mod tests {
             dir.path(),
             "https://headscale.example",
             "100.64.0.0/10",
+            None,
             None,
             DerpMap::default(),
             dns_store,
@@ -1175,6 +1254,7 @@ mod tests {
             listen: "127.0.0.1:0".into(),
             db_path: dir.path().join("db.sqlite"),
             mesh_cidr: "100.64.0.0/10".into(),
+            mesh_cidr_v6: None,
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
             https_listen: None,
@@ -1218,6 +1298,7 @@ mod tests {
             listen: "127.0.0.1:0".into(),
             db_path: dir.path().join("db.sqlite"),
             mesh_cidr: "100.64.0.0/10".into(),
+            mesh_cidr_v6: None,
             server_url: None,
             state_dir: dir.path().join("state"),
             https_listen: None,
@@ -1363,8 +1444,22 @@ mod tests {
     }
 
     #[test]
+    fn cidr_allocator_uses_configured_ipv6_prefix() {
+        let allocator =
+            CidrIpAllocator::from_cidrs("10.44.0.0/16", Some("fd7a:115c:a1e0::/48")).unwrap();
+
+        let ip = allocator.allocate_ipv6("node-key").unwrap().unwrap();
+
+        assert!(ip.to_string().starts_with("fd7a:115c:a1e0:"));
+    }
+
+    #[test]
     fn cidr_allocator_rejects_invalid_or_tiny_prefixes() {
         assert!(CidrIpAllocator::from_cidr("not-a-cidr").is_err());
         assert!(CidrIpAllocator::from_cidr("100.64.0.0/32").is_err());
+        assert!(CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("not-a-cidr")).is_err());
+        assert!(
+            CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("fd7a:115c:a1e0::/128")).is_err()
+        );
     }
 }

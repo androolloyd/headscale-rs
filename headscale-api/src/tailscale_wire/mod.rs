@@ -505,9 +505,7 @@ impl PingTracker {
     pub(crate) fn pop_next_for_node(&self, node_id: u64) -> Option<PingRequest> {
         let (request, generation) = {
             let mut inner = self.inner.lock();
-            let Some(queue) = inner.outbound.get_mut(&node_id) else {
-                return None;
-            };
+            let queue = inner.outbound.get_mut(&node_id)?;
             let request = queue.pop_front();
             let more_pending = !queue.is_empty();
             if queue.is_empty() {

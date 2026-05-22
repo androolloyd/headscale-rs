@@ -268,11 +268,16 @@ pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Respon
         .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PingResponseQuery {
+    id: Option<String>,
+}
+
 pub async fn handle_ping_response(
     State(state): State<WireState>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<PingResponseQuery>,
 ) -> Response {
-    let Some(ping_id) = query.get("id").filter(|id| !id.is_empty()) else {
+    let Some(ping_id) = query.id.as_deref().filter(|id| !id.is_empty()) else {
         return empty_ping_response(StatusCode::BAD_REQUEST);
     };
 

@@ -420,6 +420,7 @@ pub fn build_dns_config(
         cert_domains: Vec::new(),
         extra_records: combined,
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
+        temp_corp_issue_13969: String::new(),
         authoritative_suffixes: authoritative,
     }
 }

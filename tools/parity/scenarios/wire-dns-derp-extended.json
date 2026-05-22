@@ -1,0 +1,74 @@
+{
+  "name": "wire-dns-derp-extended",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "dns_config": {
+      "Resolvers": [
+        {
+          "Addr": "https://dns.example/dns-query",
+          "BootstrapResolution": ["203.0.113.53"],
+          "UseWithExitNode": true
+        }
+      ],
+      "Routes": {
+        "tail.example": [],
+        "corp.example": [
+          {
+            "Addr": "tls://dns.corp.example",
+            "BootstrapResolution": ["2001:db8::53"]
+          }
+        ]
+      },
+      "FallbackResolvers": [
+        { "Addr": "8.8.8.8" }
+      ],
+      "Domains": ["tail.example", "corp.example"],
+      "Proxied": true,
+      "Nameservers": ["100.100.100.100"],
+      "CertDomains": ["node.tail.example"],
+      "ExtraRecords": [
+        { "Name": "v6.tail.example", "Type": "AAAA", "Value": "fd7a:115c:a1e0::53" },
+        { "Name": "alias.tail.example", "Type": "CNAME", "Value": "node.tail.example" }
+      ],
+      "ExitNodeFilteredSet": [".corp.example", "internal.example"],
+      "TempCorpIssue13969": "https://dns.example/blocklist.txt"
+    },
+    "derp_map": {
+      "HomeParams": {
+        "RegionScore": {
+          "900": 0.75,
+          "901": 1.25
+        }
+      },
+      "Regions": {
+        "900": {
+          "RegionID": 900,
+          "RegionCode": "edge",
+          "RegionName": "Edge DERP",
+          "Latitude": 44.6488,
+          "Longitude": -63.5752,
+          "Avoid": true,
+          "NoMeasureNoHome": true,
+          "Nodes": [
+            {
+              "Name": "900a",
+              "RegionID": 900,
+              "HostName": "derp.edge.example",
+              "CertName": "sha256-raw:abc123",
+              "IPv4": "203.0.113.10",
+              "IPv6": "2001:db8::10",
+              "DERPPort": 8443,
+              "STUNPort": -1,
+              "InsecureForTests": true,
+              "STUNTestIP": "198.51.100.10",
+              "CanPort80": true
+            }
+          ]
+        }
+      },
+      "omitDefaultRegions": true
+    }
+  }
+}

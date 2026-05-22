@@ -1067,9 +1067,6 @@ pub struct MapNode {
 ///
 /// Field set verified against
 /// `tailscale/tailcfg/tailcfg.go::DNSConfig` at upstream `main` as of
-/// 2026-05-19. `TempCorpIssue13969` is intentionally omitted (upstream
-/// debug-only field).
-///
 /// `AuthoritativeSuffixes` is **non-stock**: a headscale-rs operator
 /// extension allowing embedders to assert "the control plane is
 /// authoritative for these suffixes; do not ask the upstream
@@ -1111,6 +1108,15 @@ pub struct DnsConfig {
     /// client must not resolve through an exit node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exit_node_filtered_set: Vec<String>,
+    /// `tailcfg.DNSConfig.TempCorpIssue13969` — upstream temporary
+    /// DNS-blocklist prototype field. It remains part of the pinned
+    /// tailcfg JSON contract, so keep it round-trippable.
+    #[serde(
+        default,
+        rename = "TempCorpIssue13969",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub temp_corp_issue_13969: String,
     /// **Non-stock field.** Operator-grade extension: suffixes the
     /// control plane is authoritative for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1151,6 +1157,10 @@ pub struct DnsRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DerpMap {
+    /// `tailcfg.DERPMap.HomeParams` — optional server-side tuning for
+    /// home DERP selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_params: Option<DerpHomeParams>,
     /// region_id → region info. Empty for non-interop deployments;
     /// the interop test populates a single region via
     /// `OCTRAVPN_DERP_MAP_PATH` → [`derp_config::load_derp_map`].
@@ -1164,6 +1174,15 @@ pub struct DerpMap {
     pub omit_default_regions: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct DerpHomeParams {
+    /// `tailcfg.DERPHomeParams.RegionScore` — region ID → weighting
+    /// factor used by clients when selecting home DERP.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub region_score: HashMap<u16, f64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DerpRegion {
@@ -1174,10 +1193,19 @@ pub struct DerpRegion {
     pub region_id: u16,
     pub region_code: String,
     pub region_name: String,
+    /// Optional geographic coordinates.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub latitude: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub longitude: f64,
     /// Whether the region should be skipped for new sessions. Defaults
     /// to false (region is healthy).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub avoid: bool,
+    /// Upstream replacement for deprecated `Avoid`: do not measure
+    /// this region or select it as home unless needed for a peer there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_measure_no_home: bool,
     pub nodes: Vec<DerpRegionNode>,
 }
 
@@ -1197,6 +1225,9 @@ pub struct DerpRegionNode {
     #[serde(rename = "RegionID")]
     pub region_id: u16,
     pub host_name: String,
+    /// Expected TLS certificate name/hash. Empty means `HostName`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cert_name: String,
     /// Upstream JSON tag is `IPv4` (all-caps); PascalCase rename keeps
     /// the wire byte-identical (camel-to-pascal mishandles single-letter
     /// prefixes).
@@ -1223,6 +1254,20 @@ pub struct DerpRegionNode {
     /// public CA.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub insecure_for_tests: bool,
+    /// Test-only override for the STUN server IP.
+    #[serde(
+        rename = "STUNTestIP",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub stun_test_ip: String,
+    /// Whether this node is reachable over HTTP on port 80.
+    #[serde(
+        rename = "CanPort80",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub can_port80: bool,
 }
 
 fn is_zero_u16(v: &u16) -> bool {

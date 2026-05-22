@@ -14,11 +14,12 @@ use std::collections::BTreeMap;
 
 use headscale_api::tailscale_wire::MachineRecord;
 use headscale_api::tailscale_wire::wire::{
-    ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpMap, DerpRegion,
-    DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig, DnsResolver, FilterRule,
-    HostInfo, MapNode, MapRequest, MapResponse, NetInfo, NetPortRange, PeerChange, PingRequest,
-    PortRange, RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction,
-    SshPolicy, SshPrincipal, SshRule, TkaInfo, UserProfile, stable_id_from_key, strip_key_prefix,
+    ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams, DerpMap,
+    DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig, DnsResolver,
+    FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetInfo, NetPortRange, PeerChange,
+    PingRequest, PortRange, RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin,
+    SimpleUser, SshAction, SshPolicy, SshPrincipal, SshRule, TkaInfo, UserProfile,
+    stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -739,6 +740,46 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// DnsConfig — upstream DNS fields and headscale-rs extensions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dns_config_preserves_legacy_and_temp_upstream_fields() {
+    let cfg = DnsConfig {
+        resolvers: vec![DnsResolver {
+            addr: "https://dns.example/dns-query".into(),
+            bootstrap_resolution: vec!["203.0.113.53".into()],
+            use_with_exit_node: true,
+        }],
+        routes: Default::default(),
+        fallback_resolvers: Vec::new(),
+        domains: vec!["tail.example".into()],
+        proxied: true,
+        nameservers: vec!["100.100.100.100".into()],
+        cert_domains: vec!["node.tail.example".into()],
+        extra_records: Vec::new(),
+        exit_node_filtered_set: vec!["corp.example".into()],
+        temp_corp_issue_13969: "https://dns.example/blocklist.txt".into(),
+        authoritative_suffixes: vec!["tail.example".into()],
+    };
+    let v = serde_json::to_value(&cfg).unwrap();
+    assert_eq!(v["Nameservers"][0], "100.100.100.100");
+    assert_eq!(v["CertDomains"][0], "node.tail.example");
+    assert_eq!(v["TempCorpIssue13969"], "https://dns.example/blocklist.txt");
+    assert_eq!(v["Resolvers"][0]["BootstrapResolution"][0], "203.0.113.53");
+    assert_eq!(v["Resolvers"][0]["UseWithExitNode"], true);
+    assert_eq!(v["AuthoritativeSuffixes"][0], "tail.example");
+
+    let back: DnsConfig = serde_json::from_value(v).unwrap();
+    assert_eq!(back.nameservers, vec!["100.100.100.100"]);
+    assert_eq!(
+        back.temp_corp_issue_13969,
+        "https://dns.example/blocklist.txt"
+    );
+    assert_eq!(back.resolvers[0].bootstrap_resolution, vec!["203.0.113.53"]);
+}
+
+// ---------------------------------------------------------------------------
 // DerpRegion / DerpRegionNode — all-caps DERP/STUN/IPv4/IPv6
 // ---------------------------------------------------------------------------
 
@@ -748,17 +789,23 @@ fn derp_region_round_trip_preserves_region_id_field_name() {
         region_id: 1,
         region_code: "oct-1".into(),
         region_name: "Octra Region 1".into(),
+        latitude: 0.0,
+        longitude: 0.0,
         avoid: false,
+        no_measure_no_home: false,
         nodes: vec![DerpRegionNode {
             name: "1a".into(),
             region_id: 1,
             host_name: "derp.octra.test".into(),
+            cert_name: String::new(),
             ipv4: "198.51.100.10".into(),
             ipv6: String::new(),
             derp_port: 0,
             stun_port: 0,
             stun_only: false,
             insecure_for_tests: true,
+            stun_test_ip: String::new(),
+            can_port80: false,
         }],
     };
     let v: Value = serde_json::to_value(&r).unwrap();
@@ -786,12 +833,15 @@ fn derp_region_node_emits_ports_when_nonzero() {
         name: "1a".into(),
         region_id: 1,
         host_name: "derp.octra.test".into(),
+        cert_name: String::new(),
         ipv4: "198.51.100.10".into(),
         ipv6: String::new(),
         derp_port: 8443,
         stun_port: 3478,
         stun_only: true,
         insecure_for_tests: false,
+        stun_test_ip: String::new(),
+        can_port80: false,
     };
     let v: Value = serde_json::to_value(&n).unwrap();
     assert_eq!(v["DERPPort"], 8443);
@@ -802,12 +852,77 @@ fn derp_region_node_emits_ports_when_nonzero() {
 }
 
 #[test]
+fn derp_region_and_node_preserve_extended_upstream_fields() {
+    let r = DerpRegion {
+        region_id: 900,
+        region_code: "edge".into(),
+        region_name: "Edge Region".into(),
+        latitude: 44.6488,
+        longitude: -63.5752,
+        avoid: true,
+        no_measure_no_home: true,
+        nodes: vec![DerpRegionNode {
+            name: "900a".into(),
+            region_id: 900,
+            host_name: "derp.edge.test".into(),
+            cert_name: "sha256-raw:abc123".into(),
+            ipv4: "203.0.113.10".into(),
+            ipv6: "2001:db8::10".into(),
+            derp_port: 8443,
+            stun_port: -1,
+            stun_only: false,
+            insecure_for_tests: true,
+            stun_test_ip: "198.51.100.10".into(),
+            can_port80: true,
+        }],
+    };
+    let v: Value = serde_json::to_value(&r).unwrap();
+    assert_eq!(v["Latitude"], 44.6488);
+    assert_eq!(v["Longitude"], -63.5752);
+    assert_eq!(v["Avoid"], true);
+    assert_eq!(v["NoMeasureNoHome"], true);
+    let n0 = &v["Nodes"][0];
+    assert_eq!(n0["CertName"], "sha256-raw:abc123");
+    assert_eq!(n0["IPv6"], "2001:db8::10");
+    assert_eq!(n0["STUNPort"], -1);
+    assert_eq!(n0["STUNTestIP"], "198.51.100.10");
+    assert_eq!(n0["CanPort80"], true);
+
+    let back: DerpRegion = serde_json::from_value(v).unwrap();
+    assert_eq!(back.latitude, 44.6488);
+    assert!(back.no_measure_no_home);
+    assert_eq!(back.nodes[0].cert_name, "sha256-raw:abc123");
+    assert!(back.nodes[0].can_port80);
+}
+
+#[test]
 fn derp_map_omit_default_regions_round_trip() {
     let j = r#"{"OmitDefaultRegions": true, "Regions": {}}"#;
     let m: DerpMap = serde_json::from_str(j).unwrap();
     assert!(m.omit_default_regions);
     let v = serde_json::to_value(&m).unwrap();
     assert_eq!(v["omitDefaultRegions"], true);
+}
+
+#[test]
+fn derp_map_preserves_home_params_region_scores() {
+    let m = DerpMap {
+        home_params: Some(DerpHomeParams {
+            region_score: BTreeMap::from([(900, 0.75), (901, 1.25)])
+                .into_iter()
+                .collect(),
+        }),
+        regions: Default::default(),
+        omit_default_regions: true,
+    };
+    let v = serde_json::to_value(&m).unwrap();
+    assert_eq!(v["HomeParams"]["RegionScore"]["900"], 0.75);
+    assert_eq!(v["HomeParams"]["RegionScore"]["901"], 1.25);
+    let back: DerpMap = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        back.home_params.unwrap().region_score.get(&900),
+        Some(&0.75)
+    );
 }
 
 // ---------------------------------------------------------------------------

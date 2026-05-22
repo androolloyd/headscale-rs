@@ -2465,6 +2465,7 @@ mod tests {
 
     fn derp_fixture() -> DerpMap {
         DerpMap {
+            home_params: None,
             omit_default_regions: true,
             regions: HashMap::from([(
                 1,
@@ -2472,17 +2473,23 @@ mod tests {
                     region_id: 1,
                     region_code: "test".to_string(),
                     region_name: "Test region".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
                     avoid: false,
+                    no_measure_no_home: false,
                     nodes: vec![DerpRegionNode {
                         name: "derp-1".to_string(),
                         region_id: 1,
                         host_name: "derp1.example.com".to_string(),
+                        cert_name: String::new(),
                         ipv4: "198.51.100.10".to_string(),
                         ipv6: String::new(),
                         derp_port: 443,
                         stun_port: 3478,
                         stun_only: false,
                         insecure_for_tests: false,
+                        stun_test_ip: String::new(),
+                        can_port80: false,
                     }],
                 },
             )]),

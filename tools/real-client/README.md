@@ -64,6 +64,86 @@ Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
 its own preauth, persistence, billing, and deployment concerns around the shared
 headscale-rs wire surface.
 
+## Smoke Coverage Matrix
+
+Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
+truth for the checked-in real-client matrix. Each row has a Rust harness script
+and a matching pinned headscale-go script so parity work can compare behavior
+with the same stock `tailscaled` image.
+
+| Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
+| --- | --- | --- | --- | --- |
+| Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
+| Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
+| Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
+| Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
+| Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| Tags | `tagged-preauth` | `tagged-preauth-smoke.sh` | `tagged-preauth-headscale-go-smoke.sh` | Tagged preauth key with `tagOwners` policy |
+| Tags | `tag-update` | `tag-update-smoke.sh` | `tag-update-headscale-go-smoke.sh` | Post-login forced tag replacement |
+| Tags | `tag-update-invalid` | `tag-update-invalid-smoke.sh` | `tag-update-invalid-headscale-go-smoke.sh` | Invalid tag update rejection |
+| Tags | `tag-reauth-clear` | `tag-reauth-clear-smoke.sh` | `tag-reauth-clear-headscale-go-smoke.sh` | Web reauth clears forced tags |
+| DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix and peer DNS names |
+| DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
+| DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
+| ACL | `acl-allow` | `acl-allow-smoke.sh` | `acl-allow-headscale-go-smoke.sh` | Allowed peers visible |
+| ACL | `acl-empty` | `acl-empty-smoke.sh` | `acl-empty-headscale-go-smoke.sh` | Empty ACL streaming visibility edge |
+| ACL | `acl-autogroup-self` | `acl-autogroup-self-smoke.sh` | `acl-autogroup-self-headscale-go-smoke.sh` | `autogroup:self` peer isolation |
+| Routes | `route-advertise` | `route-advertise-smoke.sh` | `route-advertise-headscale-go-smoke.sh` | Advertised route recorded |
+| Routes | `route-approve` | `route-approve-smoke.sh` | `route-approve-headscale-go-smoke.sh` | Route approval recorded |
+| Routes | `route-primary` | `route-primary-smoke.sh` | `route-primary-headscale-go-smoke.sh` | Single primary route owner |
+| Routes | `route-primary-failover` | `route-primary-failover-smoke.sh` | `route-primary-failover-headscale-go-smoke.sh` | Primary route failover |
+| Routes | `route-primary-sticky` | `route-primary-sticky-smoke.sh` | `route-primary-sticky-headscale-go-smoke.sh` | Sticky primary route ownership |
+| Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover |
+| Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
+| SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
+
+## Local and CI Execution
+
+The real-client smokes require a Docker daemon that supports
+`--add-host host.docker.internal:host-gateway`, plus `cargo`, `curl`, and
+`ruby`. The headscale-go target also needs either `go` or `HEADSCALE_GO_BIN`;
+TLS-backed headscale-go runs need `openssl`. The OIDC row also uses `sqlite3`.
+
+Run a quick paired gate:
+
+```sh
+tools/real-client/smoke-matrix.sh
+```
+
+Run selected rows against only the Rust harness while iterating:
+
+```sh
+REAL_CLIENT_SMOKES=authkey,web-register,magicdns,acl-allow,route-advertise \
+REAL_CLIENT_TARGETS=rust \
+tools/real-client/smoke-matrix.sh
+```
+
+Run the full paired matrix in a parity branch or scheduled CI job:
+
+```sh
+REAL_CLIENT_SMOKES=all \
+REAL_CLIENT_TARGETS='rust headscale-go' \
+REAL_CLIENT_TIMEOUT_SECS=180 \
+tools/real-client/smoke-matrix.sh
+```
+
+The default repository CI already runs `./scripts/fuzz_ci.sh` for the 10k-input
+fuzz smoke and compiles the real-client Rust harness. A parity-focused CI job
+should run the fuzz gate first, then the real-client matrix, so a crash-only
+protocol failure is separated from a stock-client behavior mismatch:
+
+```sh
+FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,magicdns,acl-allow,route-approve \
+REAL_CLIENT_TARGETS='rust headscale-go' \
+tools/real-client/smoke-matrix.sh
+```
+
+Use `REAL_CLIENT_SMOKES=all` for scheduled or release parity runs. For pull
+requests, keep the selected rows close to the changed surface because the full
+matrix builds headscale-go, pulls the Tailscale image, and starts multiple
+stock clients serially.
+
 ## Auth-Key Smoke
 
 The first runnable stock-client scenario runs against headscale-rs:

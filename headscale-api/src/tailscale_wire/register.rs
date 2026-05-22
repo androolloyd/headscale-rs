@@ -29,7 +29,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::RngCore;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 /// Decode a `RegisterRequest` from a raw body without requiring the
@@ -61,6 +61,10 @@ use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 const REGISTRATION_ID_LENGTH: usize = 24;
+
+pub(crate) const CAPABILITY_ADMIN: &str = "https://tailscale.com/cap/is-admin";
+pub(crate) const CAPABILITY_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
+pub(crate) const CAPABILITY_SSH: &str = "https://tailscale.com/cap/ssh";
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -828,7 +832,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         // clients transition back to `NeedsLogin`.
         machine_authorized: !expired,
         capabilities: Vec::new(),
-        cap_map: std::collections::BTreeMap::new(),
+        cap_map: default_node_cap_map(),
         expired,
         home_derp: rec.home_derp,
         legacy_derp_string: if rec.home_derp == 0 {
@@ -844,6 +848,14 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         endpoints: rec.endpoints.clone(),
         ..MapNode::default()
     }
+}
+
+fn default_node_cap_map() -> BTreeMap<String, Vec<serde_json::Value>> {
+    BTreeMap::from([
+        (CAPABILITY_ADMIN.to_string(), Vec::new()),
+        (CAPABILITY_FILE_SHARING.to_string(), Vec::new()),
+        (CAPABILITY_SSH.to_string(), Vec::new()),
+    ])
 }
 
 #[cfg(test)]

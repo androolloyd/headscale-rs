@@ -1272,6 +1272,7 @@ mod tests {
     use crate::tailscale_wire::{
         MachineRecord, MachineRegistry, WireState,
         noise::ServerNoiseKey,
+        register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
         router,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::DerpMap,
@@ -1334,6 +1335,12 @@ mod tests {
         rec.available_routes = routes.clone();
         rec.approved_routes = routes;
         rec
+    }
+
+    fn assert_default_cap_map(node: &MapNode) {
+        assert!(node.cap_map.contains_key(CAPABILITY_ADMIN));
+        assert!(node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
+        assert!(node.cap_map.contains_key(CAPABILITY_SSH));
     }
 
     fn policy_record(
@@ -3369,7 +3376,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_response_applies_node_attrs_to_cap_map() {
+    async fn map_response_includes_default_node_cap_map() {
+        let (state, _dir) = fixture();
+        let node_key = "dc".repeat(32);
+        state.machines.upsert(
+            node_key.clone(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_key.clone(),
+                String::new(),
+                "alice".into(),
+                "server".into(),
+                Ipv4Addr::new(100, 64, 0, 12),
+                false,
+            ),
+        );
+        let peer_key = "de".repeat(32);
+        insert_peer(&state, &peer_key, "peer", 14);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+        assert_default_cap_map(node);
+    }
+
+    #[tokio::test]
+    async fn map_response_applies_node_attrs_to_cap_map_additively() {
         let (state, _dir) = fixture();
         let node_key = "dd".repeat(32);
         let mut rec = MachineRecord::new_at(
@@ -3383,6 +3428,8 @@ mod tests {
         );
         rec.forced_tags = vec!["tag:server".into()];
         state.machines.upsert(node_key.clone(), rec);
+        let peer_key = "df".repeat(32);
+        insert_peer(&state, &peer_key, "peer", 14);
 
         let raw_policy = r#"
             version = 1
@@ -3413,6 +3460,7 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let node = mr.node.as_ref().expect("own node present");
+        assert_default_cap_map(node);
         assert!(node.cap_map.contains_key("funnel"));
         assert!(node.cap_map.contains_key("ssh"));
     }

@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
+smoke_spec="${REAL_CLIENT_SMOKES:-authkey}"
+target_spec="${REAL_CLIENT_TARGETS:-rust headscale-go}"
+list_only=0
+arg_smokes=()
+
+usage() {
+  cat <<'EOF'
+Usage: tools/real-client/smoke-matrix.sh [--list] [--rust|--headscale-go|--both] [--all] [SMOKE...]
+
+Run paired stock-client smoke scripts against headscale-rs and/or pinned
+headscale-go. SMOKE values are the IDs printed by --list.
+
+Environment:
+  REAL_CLIENT_SMOKES    Space- or comma-separated smoke IDs, or all.
+                       Defaults to authkey.
+  REAL_CLIENT_TARGETS   Space- or comma-separated targets: rust, headscale-go.
+                       Defaults to both targets.
+
+Examples:
+  tools/real-client/smoke-matrix.sh --list
+  REAL_CLIENT_SMOKES=authkey,magicdns REAL_CLIENT_TARGETS=rust tools/real-client/smoke-matrix.sh
+  REAL_CLIENT_SMOKES=all REAL_CLIENT_TARGETS='rust headscale-go' tools/real-client/smoke-matrix.sh
+EOF
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --list)
+      list_only=1
+      ;;
+    --rust)
+      target_spec="rust"
+      ;;
+    --headscale-go)
+      target_spec="headscale-go"
+      ;;
+    --both)
+      target_spec="rust headscale-go"
+      ;;
+    --all)
+      smoke_spec="all"
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      arg_smokes+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if ((${#arg_smokes[@]} > 0)); then
+  smoke_spec="${arg_smokes[*]}"
+fi
+
+smoke_ids=(
+  authkey
+  web-register
+  web-register-tags
+  web-register-unowned-tag
+  oidc
+  tagged-preauth
+  tag-update
+  tag-update-invalid
+  tag-reauth-clear
+  magicdns
+  magicdns-custom-domain
+  dns-disabled
+  acl-allow
+  acl-empty
+  acl-autogroup-self
+  route-advertise
+  route-approve
+  route-primary
+  route-primary-failover
+  route-primary-sticky
+  route-primary-withdraw
+  route-exit-node
+  ssh
+)
+
+smoke_areas=(
+  registration
+  registration
+  registration
+  registration
+  registration
+  tags
+  tags
+  tags
+  tags
+  dns
+  dns
+  dns
+  acl
+  acl
+  acl
+  routes
+  routes
+  routes
+  routes
+  routes
+  routes
+  routes
+  ssh
+)
+
+smoke_rust_scripts=(
+  tools/real-client/authkey-smoke.sh
+  tools/real-client/web-register-smoke.sh
+  tools/real-client/web-register-tags-smoke.sh
+  tools/real-client/web-register-unowned-tag-smoke.sh
+  tools/real-client/oidc-smoke.sh
+  tools/real-client/tagged-preauth-smoke.sh
+  tools/real-client/tag-update-smoke.sh
+  tools/real-client/tag-update-invalid-smoke.sh
+  tools/real-client/tag-reauth-clear-smoke.sh
+  tools/real-client/magicdns-smoke.sh
+  tools/real-client/magicdns-custom-domain-smoke.sh
+  tools/real-client/dns-disabled-smoke.sh
+  tools/real-client/acl-allow-smoke.sh
+  tools/real-client/acl-empty-smoke.sh
+  tools/real-client/acl-autogroup-self-smoke.sh
+  tools/real-client/route-advertise-smoke.sh
+  tools/real-client/route-approve-smoke.sh
+  tools/real-client/route-primary-smoke.sh
+  tools/real-client/route-primary-failover-smoke.sh
+  tools/real-client/route-primary-sticky-smoke.sh
+  tools/real-client/route-primary-withdraw-smoke.sh
+  tools/real-client/route-exit-node-smoke.sh
+  tools/real-client/ssh-smoke.sh
+)
+
+smoke_go_scripts=(
+  tools/real-client/authkey-headscale-go-smoke.sh
+  tools/real-client/web-register-headscale-go-smoke.sh
+  tools/real-client/web-register-tags-headscale-go-smoke.sh
+  tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
+  tools/real-client/oidc-headscale-go-smoke.sh
+  tools/real-client/tagged-preauth-headscale-go-smoke.sh
+  tools/real-client/tag-update-headscale-go-smoke.sh
+  tools/real-client/tag-update-invalid-headscale-go-smoke.sh
+  tools/real-client/tag-reauth-clear-headscale-go-smoke.sh
+  tools/real-client/magicdns-headscale-go-smoke.sh
+  tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
+  tools/real-client/dns-disabled-headscale-go-smoke.sh
+  tools/real-client/acl-allow-headscale-go-smoke.sh
+  tools/real-client/acl-empty-headscale-go-smoke.sh
+  tools/real-client/acl-autogroup-self-headscale-go-smoke.sh
+  tools/real-client/route-advertise-headscale-go-smoke.sh
+  tools/real-client/route-approve-headscale-go-smoke.sh
+  tools/real-client/route-primary-headscale-go-smoke.sh
+  tools/real-client/route-primary-failover-headscale-go-smoke.sh
+  tools/real-client/route-primary-sticky-headscale-go-smoke.sh
+  tools/real-client/route-primary-withdraw-headscale-go-smoke.sh
+  tools/real-client/route-exit-node-headscale-go-smoke.sh
+  tools/real-client/ssh-headscale-go-smoke.sh
+)
+
+smoke_assertions=(
+  "auth-key login and one alice node"
+  "no-auth pending registration and CLI approval"
+  "web registration with owned requested tag"
+  "web registration rejects unowned requested tag"
+  "OIDC callback, node row, and user profile"
+  "preauth key with ACL tag owners"
+  "post-login tag replacement"
+  "invalid tag update rejection"
+  "web reauth clears forced tags"
+  "MagicDNS suffix and peer DNS names"
+  "custom DNS base domain"
+  "MagicDNS disabled fallback names"
+  "allowed peers visible"
+  "empty ACL peer visibility edge"
+  "autogroup:self peer isolation"
+  "advertised route recorded"
+  "route approval recorded"
+  "single primary route owner"
+  "primary route failover"
+  "sticky primary route ownership"
+  "withdrawn primary route failover"
+  "exit-node route advertisement and approval"
+  "Tailscale SSH allow, deny, and ACL timeout"
+)
+
+assert_matrix_lengths() {
+  local expected="${#smoke_ids[@]}"
+  if ((
+    ${#smoke_areas[@]} != expected ||
+      ${#smoke_rust_scripts[@]} != expected ||
+      ${#smoke_go_scripts[@]} != expected ||
+      ${#smoke_assertions[@]} != expected
+  )); then
+    echo "internal real-client smoke matrix length mismatch" >&2
+    exit 2
+  fi
+}
+
+split_words() {
+  local value="$1"
+  value="${value//,/ }"
+  read -r -a split_result <<<"${value}"
+}
+
+known_smoke() {
+  local candidate="$1"
+  local id
+  for id in "${smoke_ids[@]}"; do
+    [[ "${candidate}" == "${id}" ]] && return 0
+  done
+  return 1
+}
+
+known_target() {
+  case "$1" in
+    rust | headscale-go) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+selected_smoke() {
+  local candidate="$1"
+  local wanted
+  for wanted in "${selected_smokes[@]}"; do
+    [[ "${wanted}" == "all" || "${wanted}" == "${candidate}" ]] && return 0
+  done
+  return 1
+}
+
+group_start() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::group::$*"
+  else
+    echo "==> $*"
+  fi
+}
+
+group_end() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::endgroup::"
+  fi
+}
+
+print_matrix() {
+  printf '%-28s %-14s %-52s %-62s %s\n' \
+    "smoke" "area" "headscale-rs script" "headscale-go script" "assertion"
+  local i
+  for i in "${!smoke_ids[@]}"; do
+    printf '%-28s %-14s %-52s %-62s %s\n' \
+      "${smoke_ids[$i]}" \
+      "${smoke_areas[$i]}" \
+      "${smoke_rust_scripts[$i]}" \
+      "${smoke_go_scripts[$i]}" \
+      "${smoke_assertions[$i]}"
+  done
+}
+
+assert_matrix_lengths
+
+if ((list_only)); then
+  print_matrix
+  exit 0
+fi
+
+split_words "${smoke_spec}"
+selected_smokes=("${split_result[@]}")
+split_words "${target_spec}"
+selected_targets=("${split_result[@]}")
+
+if ((${#selected_smokes[@]} == 0)); then
+  echo "no real-client smokes selected" >&2
+  exit 2
+fi
+if ((${#selected_targets[@]} == 0)); then
+  echo "no real-client targets selected" >&2
+  exit 2
+fi
+
+for smoke in "${selected_smokes[@]}"; do
+  if [[ "${smoke}" != "all" ]] && ! known_smoke "${smoke}"; then
+    echo "unknown real-client smoke: ${smoke}" >&2
+    echo "run tools/real-client/smoke-matrix.sh --list for valid smoke IDs" >&2
+    exit 2
+  fi
+done
+
+for target in "${selected_targets[@]}"; do
+  if ! known_target "${target}"; then
+    echo "unknown real-client target: ${target}" >&2
+    echo "valid targets: rust, headscale-go" >&2
+    exit 2
+  fi
+done
+
+ran=0
+for i in "${!smoke_ids[@]}"; do
+  selected_smoke "${smoke_ids[$i]}" || continue
+  for target in "${selected_targets[@]}"; do
+    if [[ "${target}" == "rust" ]]; then
+      script="${smoke_rust_scripts[$i]}"
+    else
+      script="${smoke_go_scripts[$i]}"
+    fi
+
+    group_start "real-client ${target} ${smoke_ids[$i]}"
+    set +e
+    "${repo_root}/${script}"
+    status="$?"
+    set -e
+    group_end
+
+    if ((status != 0)); then
+      exit "${status}"
+    fi
+    ran=$((ran + 1))
+  done
+done
+
+echo "real-client smoke matrix passed (${ran} script runs)"

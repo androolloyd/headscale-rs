@@ -7,10 +7,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use headscale_api::admin::{
-    PersistentMachineAdmin, PersistentOidcRegistrationHandler, PersistentPreauthAdmin,
-    PersistentUserAdmin,
+    PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
+    PersistentPreauthAdmin, PersistentUserAdmin,
 };
 use headscale_api::dns::DnsStore;
+use headscale_api::grpc::upstream::HeadscaleAdminService;
+use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls::SanConfig;
@@ -79,6 +81,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let tls_hostname = cfg
         .tls_hostname
         .unwrap_or_else(|| hostname_from_server_url(server_url));
+    let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
         http_addr,
         https_addr,
@@ -87,7 +90,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         oidc: runtime.oidc,
     };
 
-    let handle = serve::serve(runtime.state, serve_cfg, axum::Router::new())
+    let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
     tracing::info!("Headscale-compatible Tailscale control plane ready");
@@ -97,6 +100,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
 struct PersistentWireRuntime {
     state: WireState,
     oidc: Option<OidcAuthRuntime>,
+    admin_service: HeadscaleAdminService,
 }
 
 async fn build_persistent_wire_runtime(
@@ -107,6 +111,7 @@ async fn build_persistent_wire_runtime(
     oidc: Option<OidcAuthRuntime>,
 ) -> Result<PersistentWireRuntime> {
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
+    let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
     let preauth =
         Arc::new(PersistentPreauthAdmin::new(pool.clone()).with_user_admin(users.clone()));
     let machines =
@@ -127,6 +132,17 @@ async fn build_persistent_wire_runtime(
         nodes = hydrated,
         "hydrated persisted nodes into wire registry"
     );
+    let admin_service = HeadscaleAdminService::with_user_admin(
+        users.clone(),
+        api_keys,
+        preauth.clone(),
+        policy.as_ref().clone(),
+        machines.clone(),
+    )
+    .with_database_pool(pool.clone())
+    .with_policy_pool(pool.clone())
+    .with_registration_cache(registration_cache.clone())
+    .with_wire_registry(wire_registry.clone());
     let oidc = oidc.map(|runtime| {
         let handler = PersistentOidcRegistrationHandler::new(
             registration_cache.clone(),
@@ -153,7 +169,15 @@ async fn build_persistent_wire_runtime(
         registration_cache,
     };
 
-    Ok(PersistentWireRuntime { state, oidc })
+    Ok(PersistentWireRuntime {
+        state,
+        oidc,
+        admin_service,
+    })
+}
+
+fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
+    grpc_gateway::router(runtime.admin_service.clone())
 }
 
 async fn load_persisted_policy(pool: &sqlx::SqlitePool, policy: &PolicyStore) -> Result<bool> {
@@ -297,8 +321,14 @@ impl IpAllocator for CidrIpAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
     use headscale_api::oidc::{OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig};
+    use serde_json::Value;
     use std::collections::BTreeMap;
+    use tower::ServiceExt;
 
     fn oidc_runtime() -> OidcAuthRuntime {
         OidcAuthRuntime::new(OidcAuthConfig {
@@ -367,6 +397,59 @@ mod tests {
         );
         assert!(runtime.state.registration_store.is_some());
         assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_exposes_authenticated_grpc_gateway() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+        )
+        .await
+        .unwrap();
+        let token = headscale_db::api_keys::create_with_cost(
+            db.pool(),
+            headscale_db::api_keys::CreateParams { expiration: None },
+            headscale_db::api_keys::BCRYPT_COST_TEST,
+        )
+        .await
+        .unwrap()
+        .plaintext;
+
+        let app = production_extra_routes(&runtime);
+        let missing_auth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+
+        let authed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), StatusCode::OK);
+        let body = to_bytes(authed.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["databaseConnectivity"], true);
     }
 
     #[tokio::test]

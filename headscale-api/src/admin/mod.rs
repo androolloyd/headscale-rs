@@ -253,6 +253,9 @@ impl MachineAdmin for NoopMachines {
     ) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }
+    async fn set_routes(&self, id: &str, _routes: Vec<String>) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }

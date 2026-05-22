@@ -413,6 +413,49 @@ pub async fn set_approved_routes(
     get_by_id(pool, id).await
 }
 
+pub async fn set_host_info_routable_ips(
+    pool: &SqlitePool,
+    id: i64,
+    routes: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let row = get_by_id(pool, id).await?;
+    let mut host_info = row.host_info_value();
+    if !host_info.is_object() {
+        host_info = json!({});
+    }
+    if let Value::Object(fields) = &mut host_info {
+        if routes.is_empty() {
+            fields.remove("RoutableIPs");
+        } else {
+            fields.insert(
+                "RoutableIPs".into(),
+                Value::Array(routes.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+
+    let host_info = json_object_or_value(&host_info)?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET host_info = ?, updated_at = datetime(?, 'unixepoch')
+        WHERE id = ? AND deleted_at IS NULL
+        ",
+    )
+    .bind(host_info)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_by_id(pool, id).await
+}
+
 pub async fn set_expiry(
     pool: &SqlitePool,
     id: i64,
@@ -743,6 +786,41 @@ mod tests {
             .unwrap()
             .approved_route_list();
         assert_eq!(routes, vec!["::/0", "0.0.0.0/0"]);
+    }
+
+    #[tokio::test]
+    async fn set_host_info_routable_ips_updates_available_routes_without_clearing_approved_routes()
+    {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let mut params = node_params(user_id, auth_key_id);
+        params.host_info = json!({
+            "Hostname": "alice-laptop",
+            "OS": "linux",
+            "RoutableIPs": ["10.0.0.0/24", "10.1.0.0/24"],
+        });
+        params.approved_routes = vec!["10.0.0.0/24".into()];
+        let node = create(db.pool(), params).await.unwrap();
+
+        let updated = set_host_info_routable_ips(
+            db.pool(),
+            node.id,
+            vec!["10.1.0.0/24".into(), "10.2.0.0/24".into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.host_info_value()["RoutableIPs"],
+            serde_json::json!(["10.1.0.0/24", "10.2.0.0/24"])
+        );
+        assert_eq!(updated.approved_route_list(), vec!["10.0.0.0/24"]);
+
+        let cleared = set_host_info_routable_ips(db.pool(), node.id, Vec::new())
+            .await
+            .unwrap();
+        assert!(cleared.host_info_value().get("RoutableIPs").is_none());
+        assert_eq!(cleared.approved_route_list(), vec!["10.0.0.0/24"]);
     }
 
     #[tokio::test]

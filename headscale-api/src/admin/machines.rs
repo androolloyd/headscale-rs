@@ -167,6 +167,9 @@ pub trait MachineAdmin: Send + Sync {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError>;
+    /// Replace the node's advertised route list while preserving
+    /// operator approvals.
+    async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError>;
     /// Mark a machine deleted. Same sidecar story as `expire`. The
     /// record disappears from `list()` once flagged.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
@@ -545,6 +548,14 @@ impl MachineAdmin for PersistentMachineAdmin {
             .map_err(|e| db_error_to_machine(e, id))
     }
 
+    async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::set_host_info_routable_ips(&self.pool, row.id, routes)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
         headscale_db::headscale_nodes::destroy(&self.pool, row.id)
@@ -693,6 +704,16 @@ impl MachineAdmin for WireMachineAdmin {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         if !self.registry.set_approved_routes(id, routes) {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
+        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        if !self.registry.set_available_routes(id, routes) {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
@@ -1113,5 +1134,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_route_withdraw_preserves_approved_routes() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let mut record = persistent_record();
+        record.routes = vec!["10.0.0.0/24".into(), "10.1.0.0/24".into()];
+        record.approved_routes = vec!["10.0.0.0/24".into()];
+        let created = admin.create(record).await.unwrap();
+
+        admin
+            .set_routes(
+                &created.id,
+                vec!["10.1.0.0/24".into(), "10.2.0.0/24".into()],
+            )
+            .await
+            .unwrap();
+        let updated = admin.get(&created.id).await.unwrap();
+        assert_eq!(updated.routes, vec!["10.1.0.0/24", "10.2.0.0/24"]);
+        assert_eq!(updated.approved_routes, vec!["10.0.0.0/24"]);
     }
 }

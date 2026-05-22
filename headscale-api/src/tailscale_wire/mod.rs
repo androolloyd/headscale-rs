@@ -760,11 +760,14 @@ impl MachineRegistry {
         primary_routes: &mut PrimaryRouteState,
         snapshot: &HashMap<String, MachineRecord>,
     ) {
-        let _ = primary_routes.sync_routes(snapshot.iter().map(|(node_key, rec)| {
-            (
-                stable_id_from_key(node_key),
-                active_approved_routes(&rec.available_routes, &rec.approved_routes),
-            )
+        let now = Utc::now();
+        let _ = primary_routes.sync_routes(snapshot.iter().filter_map(|(node_key, rec)| {
+            (!rec.is_expired_at(now)).then(|| {
+                (
+                    stable_id_from_key(node_key),
+                    active_approved_routes(&rec.available_routes, &rec.approved_routes),
+                )
+            })
         }));
     }
 
@@ -1227,6 +1230,18 @@ impl MachineRegistry {
         })
     }
 
+    /// Replace a machine's advertised subnet routes. Empty list clears
+    /// advertised routes while preserving operator approvals.
+    pub fn set_available_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
+        self.update_with(|map| match map.get_mut(node_key_hex) {
+            Some(rec) => {
+                rec.available_routes = routes;
+                true
+            }
+            None => false,
+        })
+    }
+
     /// Remove every ephemeral node whose `last_seen` is older than
     /// `grace`. Returns the list of `node_key_hex` strings that were
     /// removed. Mirrors `db.EphemeralGarbageCollect` /
@@ -1550,6 +1565,35 @@ mod registry_tests {
         // Empty list clears.
         assert!(reg.set_forced_tags("nk-a", Vec::new()));
         assert!(reg.get("nk-a").unwrap().forced_tags.is_empty());
+    }
+
+    #[test]
+    fn set_available_routes_replaces_routes_without_clearing_approval() {
+        let reg = MachineRegistry::new();
+        let mut rec = mk_record(8);
+        rec.available_routes = vec!["10.0.0.0/24".into()];
+        rec.approved_routes = vec!["10.0.0.0/24".into()];
+        reg.upsert("nk-a".to_string(), rec);
+
+        assert!(reg.set_available_routes("nk-a", vec!["10.1.0.0/24".into()]));
+        let updated = reg.get("nk-a").unwrap();
+        assert_eq!(updated.available_routes, vec!["10.1.0.0/24"]);
+        assert_eq!(updated.approved_routes, vec!["10.0.0.0/24"]);
+        assert!(!reg.set_available_routes("nk-zzz", Vec::new()));
+    }
+
+    #[test]
+    fn debug_routes_excludes_expired_nodes() {
+        let reg = MachineRegistry::new();
+        let mut rec = mk_record(8);
+        rec.available_routes = vec!["10.0.0.0/24".into()];
+        rec.approved_routes = vec!["10.0.0.0/24".into()];
+        rec.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        reg.upsert("nk-a".to_string(), rec);
+
+        let routes = reg.debug_routes_for_snapshot(&reg.snapshot());
+        assert!(routes.available_routes.is_empty());
+        assert!(routes.primary_routes.is_empty());
     }
 
     #[test]

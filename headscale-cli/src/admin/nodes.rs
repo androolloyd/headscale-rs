@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use headscale_api::admin::MachineAdminRecord;
 use headscale_api::tailscale_wire::routes::{active_exit_routes, primary_routes_by_node};
+use headscale_api::tailscale_wire::wire::stable_id_from_key;
 
 use super::AdminError;
 use super::client::AdminClient;
@@ -253,15 +254,10 @@ fn render_routes(nodes: &[MachineAdminRecord]) {
 }
 
 fn serving_routes(nodes: &[MachineAdminRecord]) -> BTreeMap<String, Vec<String>> {
-    let primary = primary_routes_by_node(nodes.iter().enumerate().map(|(idx, n)| {
-        let node_id = if n.node_id == 0 {
-            (idx + 1) as u64
-        } else {
-            n.node_id
-        };
+    let primary = primary_routes_by_node(nodes.iter().map(|n| {
         (
             n.id.as_str(),
-            node_id,
+            route_node_id(n),
             n.routes.as_slice(),
             n.approved_routes.as_slice(),
         )
@@ -276,6 +272,14 @@ fn serving_routes(nodes: &[MachineAdminRecord]) -> BTreeMap<String, Vec<String>>
             (!routes.is_empty()).then(|| (n.id.clone(), routes))
         })
         .collect()
+}
+
+fn route_node_id(n: &MachineAdminRecord) -> u64 {
+    if n.node_id == 0 {
+        stable_id_from_key(&n.id)
+    } else {
+        n.node_id
+    }
 }
 
 /// Truncate the node_key-hex ID to its first 12 chars for the table
@@ -304,5 +308,49 @@ mod tests {
     #[test]
     fn short_id_leaves_short_strings_alone() {
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    fn route_record(id: &str, routes: &[&str], approved_routes: &[&str]) -> MachineAdminRecord {
+        MachineAdminRecord {
+            node_id: 0,
+            id: id.to_string(),
+            name: id.to_string(),
+            user: "user".to_string(),
+            ipv4: "100.64.0.1".to_string(),
+            online: true,
+            last_seen: 0,
+            created_at: 0,
+            expiry: None,
+            machine_key_hex: String::new(),
+            os: "unknown".to_string(),
+            version: "unknown".to_string(),
+            tags: Vec::new(),
+            routes: routes.iter().map(|route| (*route).to_string()).collect(),
+            approved_routes: approved_routes
+                .iter()
+                .map(|route| (*route).to_string())
+                .collect(),
+            register_method: 0,
+            expired: false,
+        }
+    }
+
+    #[test]
+    fn serving_routes_uses_stable_id_for_zero_node_id() {
+        let route = "10.0.0.0/24";
+        let nodes = vec![
+            route_record("node-0", &[route], &[route]),
+            route_record("node-10", &[route], &[route]),
+        ];
+
+        assert!(stable_id_from_key("node-10") < stable_id_from_key("node-0"));
+
+        let serving = serving_routes(&nodes);
+
+        assert_eq!(
+            serving.get("node-10").cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!serving.contains_key("node-0"));
     }
 }

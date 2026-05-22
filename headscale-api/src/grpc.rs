@@ -1275,16 +1275,24 @@ pub mod upstream {
         machines: &[MachineAdminRecord],
     ) -> MachineRouteSets {
         let mut state = primary_state.lock();
-        let _ = state.sync_routes(machines.iter().map(|machine| {
-            (
-                machine_numeric_id(machine),
-                active_approved_routes(&machine.routes, &machine.approved_routes),
-            )
-        }));
+        let _ = state.sync_routes(
+            machines
+                .iter()
+                .filter(|machine| machine.online && !machine.expired)
+                .map(|machine| {
+                    (
+                        machine_numeric_id(machine),
+                        active_approved_routes(&machine.routes, &machine.approved_routes),
+                    )
+                }),
+        );
 
         let mut primary_routes = BTreeMap::new();
         let mut exit_routes = BTreeMap::new();
-        for machine in machines {
+        for machine in machines
+            .iter()
+            .filter(|machine| machine.online && !machine.expired)
+        {
             let node_id = machine_numeric_id(machine);
             let primary = state.primary_routes(node_id);
             if !primary.is_empty() {
@@ -1566,21 +1574,27 @@ mod upstream_tests {
             .await
             .expect("open in-memory db");
         db.migrate().await.expect("migrate");
-        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        (
+            admin_service_with_persistent_machines_for_pool(db.pool().clone()),
+            db,
+        )
+    }
+
+    fn admin_service_with_persistent_machines_for_pool(
+        pool: sqlx::SqlitePool,
+    ) -> HeadscaleAdminService {
+        let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
         let machines =
-            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+            Arc::new(PersistentMachineAdmin::new(pool.clone()).with_user_admin(users.clone()));
         let service = HeadscaleAdminService::with_user_admin(
             users.clone(),
-            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
-            Arc::new(
-                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
-            ),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(pool.clone())),
+            Arc::new(PersistentPreauthAdmin::new_for_test(pool.clone()).with_user_admin(users)),
             PolicyStore::new(),
             machines,
         )
-        .with_database_pool(db.pool().clone());
-        let service = service.with_policy_pool(db.pool().clone());
-        (service, db)
+        .with_database_pool(pool.clone());
+        service.with_policy_pool(pool)
     }
 
     async fn admin_service_with_policy_db() -> (HeadscaleAdminService, headscale_db::Database) {
@@ -2141,6 +2155,80 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn persistent_node_grpc_set_approved_routes_survives_fresh_service() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        const REGISTRATION_ID: &str = "exitrouteabcdefghijklmno";
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "exit-router".into(),
+                routes: vec!["0.0.0.0/0".into(), "::/0".into()],
+            }))
+            .await
+            .unwrap();
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+
+        let updated = service
+            .set_approved_routes(Request::new(SetApprovedRoutesRequest {
+                node_id: registered.id,
+                routes: vec!["0.0.0.0/0".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("updated node");
+        assert_eq!(updated.approved_routes, vec!["0.0.0.0/0", "::/0"]);
+        assert!(updated.subnet_routes.is_empty());
+
+        let raw_routes: String =
+            sqlx::query_scalar("SELECT approved_routes FROM nodes WHERE id = ?")
+                .bind(registered.id as i64)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(raw_routes, r#"["0.0.0.0/0","::/0"]"#);
+
+        let fresh_service = admin_service_with_persistent_machines_for_pool(db.pool().clone());
+        let listed = fresh_service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let listed_node = listed
+            .nodes
+            .iter()
+            .find(|node| node.id == registered.id)
+            .expect("fresh service listed node");
+        assert_eq!(listed_node.approved_routes, vec!["0.0.0.0/0", "::/0"]);
+        assert_eq!(listed_node.subnet_routes, vec!["0.0.0.0/0", "::/0"]);
+    }
+
+    #[tokio::test]
     async fn upstream_node_grpc_list_get_rename_tags_expire_delete() {
         let (service, machines) = admin_service_with_machines().await;
         let node_key = "aa".repeat(32);
@@ -2514,6 +2602,38 @@ mod upstream_tests {
             .find(|node| node.id == node_id)
             .expect("listed node");
         assert_eq!(listed_node.subnet_routes, vec!["0.0.0.0/0", "::/0"]);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_expired_nodes_do_not_serve_subnet_routes() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "65".repeat(32);
+        let mut machine = fixture_machine_with_routes(
+            &node_key,
+            "alice",
+            "expired-router",
+            vec!["10.9.0.0/24".into()],
+        );
+        machine.approved_routes = vec!["10.9.0.0/24".into()];
+        machine.expiry = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+        machines.upsert(node_key.clone(), machine);
+        let node_id = stable_id_from_key(&node_key);
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let listed_node = listed
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .expect("listed expired node");
+        assert!(!listed_node.online);
+        assert_eq!(listed_node.approved_routes, vec!["10.9.0.0/24"]);
+        assert!(listed_node.subnet_routes.is_empty());
     }
 
     #[tokio::test]

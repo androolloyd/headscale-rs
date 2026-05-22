@@ -9,8 +9,8 @@ use axum::{
     response::Response,
 };
 use headscale_api::admin::{
-    ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentPreauthAdmin,
-    PersistentUserAdmin, WireMachineAdmin,
+    ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentMachineAdmin,
+    PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
 };
 use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::grpc_gateway;
@@ -39,6 +39,24 @@ async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
         .expect("open in-memory db");
     db.migrate().await.expect("migrate");
 
+    let (service, token) = service_for_db(&db, false).await;
+    (grpc_gateway::router(service), token, db)
+}
+
+async fn fixture_with_persistent_machines() -> (Router, String, headscale_db::Database) {
+    let db = headscale_db::Database::in_memory()
+        .await
+        .expect("open in-memory db");
+    db.migrate().await.expect("migrate");
+
+    let (service, token) = service_for_db(&db, true).await;
+    (grpc_gateway::router(service), token, db)
+}
+
+async fn service_for_db(
+    db: &headscale_db::Database,
+    persistent_machines: bool,
+) -> (HeadscaleAdminService, String) {
     let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
     let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
     let created = api_keys
@@ -48,7 +66,11 @@ async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
     let preauth = Arc::new(
         PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
     );
-    let machines = Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new())));
+    let machines: Arc<dyn headscale_api::admin::MachineAdmin> = if persistent_machines {
+        Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()))
+    } else {
+        Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new())))
+    };
     let service = HeadscaleAdminService::with_user_admin(
         users,
         api_keys,
@@ -58,7 +80,7 @@ async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
     )
     .with_database_pool(db.pool().clone())
     .with_policy_pool(db.pool().clone());
-    (grpc_gateway::router(service), created.api_key, db)
+    (service, created.api_key)
 }
 
 async fn fixture_with_failing_health() -> (Router, String) {
@@ -610,6 +632,98 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .expect("listed exit node");
     assert_eq!(
         node["subnetRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+}
+
+#[tokio::test]
+async fn grpc_gateway_node_approve_routes_persists_go_nodes_approved_routes() {
+    let (app, token, db) = fixture_with_persistent_machines().await;
+    let registration_key = "persistedexitrouteabcdef";
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"persist-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/debug/node",
+            Some(&token),
+            Body::from(format!(
+                r#"{{"user":"persist-user","key":"{registration_key}","name":"persist-exit","routes":["0.0.0.0/0","::/0"]}}"#
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/register?user=persist-user&key={registration_key}"),
+            Some(&token),
+            Body::from(r#"{}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let node_id = body["node"]["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/{node_id}/approve_routes"),
+            Some(&token),
+            Body::from(r#"{"routes":["0.0.0.0/0"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["node"]["approvedRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+
+    let raw_routes: String = sqlx::query_scalar("SELECT approved_routes FROM nodes WHERE id = ?")
+        .bind(node_id.parse::<i64>().unwrap())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(raw_routes, r#"["0.0.0.0/0","::/0"]"#);
+
+    let (fresh_service, fresh_token) = service_for_db(&db, true).await;
+    let fresh_app = grpc_gateway::router(fresh_service);
+    let resp = fresh_app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/node?user=persist-user",
+            Some(&fresh_token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["nodes"][0]["approvedRoutes"],
+        serde_json::json!(["0.0.0.0/0", "::/0"])
+    );
+    assert_eq!(
+        body["nodes"][0]["subnetRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])
     );
 }

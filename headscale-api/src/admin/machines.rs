@@ -59,6 +59,7 @@ use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
     IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
     PersistedMachineRegistration, RegistrationCache, routes::auto_approved_routes_for_node,
+    wire::HostInfo,
 };
 
 use super::auth::now_unix;
@@ -711,10 +712,14 @@ impl PersistentMachineAdmin {
             node_key.clone(),
             key_without_prefix("mkey:", &row.machine_key),
             self.user_name_for_row(&row).await,
-            name,
+            name.clone(),
             ipv4,
             false,
         );
+        record.replace_host_info(host_info_from_value(&host_info));
+        if !name.is_empty() {
+            record.hostname = name;
+        }
         record.disco_key = (!row.disco_key.is_empty()).then_some(row.disco_key.clone());
         record.endpoints = row.endpoint_list();
         record.home_derp = preferred_derp_from_host_info(&host_info);
@@ -723,20 +728,7 @@ impl PersistentMachineAdmin {
             .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
             .transpose()?;
         record.last_seen = last_seen;
-        record.os = host_info
-            .get("OS")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        record.os_version = host_info
-            .get("OSVersion")
-            .or_else(|| host_info.get("App"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        record.ssh_host_keys = ssh_host_keys_from_host_info(&host_info);
         record.forced_tags = row.tag_list();
-        record.available_routes = routes_from_host_info(&host_info);
         record.approved_routes = row.approved_route_list();
         record.register_method = register_method_from_db(&row.register_method);
         Ok(record)
@@ -799,11 +791,13 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
     ) -> Result<PersistedMachineRegistration, String> {
+        let wire_record = record.clone();
         let result = self
             .create_or_update_auth_key_path(record, policy, auth_key_id)
             .await
             .map_err(|err| err.to_string())?;
-        let record = machine_admin_record_to_wire(&result.record).map_err(|err| err.to_string())?;
+        let record = canonical_wire_record_for_auth_path(&result.record, Some(&wire_record))
+            .map_err(|err| err.to_string())?;
         Ok(PersistedMachineRegistration {
             record,
             replaced_node_key_hex: result.replaced_node_key_hex,
@@ -1392,6 +1386,14 @@ fn machine_admin_record_to_wire(
     record.available_routes.clone_from(&machine.routes);
     record.approved_routes.clone_from(&machine.approved_routes);
     record.register_method = machine.register_method;
+    record.host_info = HostInfo {
+        hostname: record.hostname.clone(),
+        os: record.os.clone(),
+        os_version: record.os_version.clone(),
+        routable_ips: record.available_routes.clone(),
+        ssh_host_keys: record.ssh_host_keys.clone(),
+        ..HostInfo::default()
+    };
     Ok(record)
 }
 
@@ -1463,6 +1465,7 @@ fn routes_from_host_info(host_info: &Value) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn ssh_host_keys_from_host_info(host_info: &Value) -> Vec<String> {
     host_info
         .get("sshHostKeys")
@@ -1483,6 +1486,10 @@ fn preferred_derp_from_host_info(host_info: &Value) -> i32 {
         .unwrap_or_default()
 }
 
+fn host_info_from_value(host_info: &Value) -> HostInfo {
+    serde_json::from_value(host_info.clone()).unwrap_or_default()
+}
+
 fn host_info_for_record(record: &MachineAdminRecord) -> Value {
     json!({
         "Hostname": record.name,
@@ -1493,11 +1500,13 @@ fn host_info_for_record(record: &MachineAdminRecord) -> Value {
 }
 
 fn host_info_for_wire_record(record: &MachineRecord) -> Value {
-    let mut host_info = json!({
-        "Hostname": record.hostname,
-        "OS": record.os,
-        "OSVersion": record.os_version,
-        "RoutableIPs": record.available_routes,
+    let mut host_info = serde_json::to_value(record.host_info_for_node()).unwrap_or_else(|_| {
+        json!({
+            "Hostname": record.hostname,
+            "OS": record.os,
+            "OSVersion": record.os_version,
+            "RoutableIPs": record.available_routes,
+        })
     });
     let Some(fields) = host_info.as_object_mut() else {
         return host_info;
@@ -1513,27 +1522,6 @@ fn host_info_for_wire_record(record: &MachineRecord) -> Value {
     }
     if record.available_routes.is_empty() {
         fields.remove("RoutableIPs");
-    }
-    if record.home_derp != 0 {
-        fields.insert(
-            "NetInfo".into(),
-            json!({
-                "PreferredDERP": record.home_derp,
-            }),
-        );
-    }
-    if !record.ssh_host_keys.is_empty() {
-        fields.insert(
-            "sshHostKeys".into(),
-            Value::Array(
-                record
-                    .ssh_host_keys
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
     }
     host_info
 }

@@ -232,6 +232,7 @@ fn oidc_runtime(issuer: &str) -> OidcAuthRuntime {
 
 fn register_request(node_key_hex: &str, followup: Option<&str>) -> Request<Body> {
     let mut body = json!({
+        "Version": 113,
         "NodeKey": format!("nodekey:{node_key_hex}"),
         "Hostinfo": {
             "Hostname": "oidc-client",

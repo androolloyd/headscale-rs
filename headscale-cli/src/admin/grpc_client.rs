@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    ApiKey, CreateApiKeyRequest, CreateUserRequest, DeleteApiKeyRequest, DeleteUserRequest,
-    ExpireApiKeyRequest, ListApiKeysRequest, ListUsersRequest, RenameUserRequest, User,
+    ApiKey, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DeleteApiKeyRequest,
+    DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest, ListApiKeysRequest,
+    ListPreAuthKeysRequest, ListUsersRequest, PreAuthKey, RenameUserRequest, User,
     headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
@@ -109,6 +110,52 @@ impl GrpcAdminClient {
             .map_err(|status| status_to_admin_error(&status))?
             .into_inner()
             .api_keys)
+    }
+
+    pub async fn create_pre_auth_key(
+        &mut self,
+        user: u64,
+        reusable: bool,
+        ephemeral: bool,
+        expiration: Option<i64>,
+        acl_tags: Vec<String>,
+    ) -> Result<PreAuthKey, AdminError> {
+        let request = self.request(CreatePreAuthKeyRequest {
+            user,
+            reusable,
+            ephemeral,
+            expiration: expiration.map(unix_to_timestamp),
+            acl_tags,
+        })?;
+        let response = self
+            .client
+            .create_pre_auth_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        response
+            .pre_auth_key
+            .ok_or_else(|| AdminError::Decode("CreatePreAuthKey response omitted key".into()))
+    }
+
+    pub async fn list_pre_auth_keys(&mut self) -> Result<Vec<PreAuthKey>, AdminError> {
+        let request = self.request(ListPreAuthKeysRequest {})?;
+        Ok(self
+            .client
+            .list_pre_auth_keys(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner()
+            .pre_auth_keys)
+    }
+
+    pub async fn expire_pre_auth_key(&mut self, id: u64) -> Result<(), AdminError> {
+        let request = self.request(ExpirePreAuthKeyRequest { id })?;
+        self.client
+            .expire_pre_auth_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
     }
 
     pub async fn expire_api_key(
@@ -384,8 +431,8 @@ mod tests {
     use std::sync::Arc;
 
     use headscale_api::admin::{
-        InMemoryPreauthAdmin, NoopApiKeyAdmin, PersistentApiKeyAdmin, UserRegistry,
-        WireMachineAdmin,
+        InMemoryPreauthAdmin, NoopApiKeyAdmin, PersistentApiKeyAdmin, PersistentPreauthAdmin,
+        UserRegistry, WireMachineAdmin,
     };
     use headscale_api::grpc::upstream::HeadscaleAdminService;
     use headscale_api::policy::PolicyStore;
@@ -557,6 +604,60 @@ mod tests {
             .await
             .unwrap();
         assert!(client.list_api_keys().await.unwrap().is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn grpc_client_uses_local_unix_socket_for_preauth_key_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("headscale.sock");
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(UserRegistry::new());
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let listener = UnixListener::bind(&socket).unwrap();
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await
+        });
+
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+            .await
+            .unwrap();
+        let user = client.create_user("alice", "", "", "").await.unwrap();
+        let expiration = current_unix_i64() + 3600;
+        let key = client
+            .create_pre_auth_key(
+                user.id,
+                true,
+                true,
+                Some(expiration),
+                vec!["tag:server".into()],
+            )
+            .await
+            .unwrap();
+        assert!(key.key.starts_with("hskey-auth-"));
+        assert_eq!(key.user.as_ref().unwrap().name, "alice");
+        assert_eq!(key.acl_tags, vec!["tag:server".to_string()]);
+
+        let listed = client.list_pre_auth_keys().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, key.id);
+
+        client.expire_pre_auth_key(key.id).await.unwrap();
 
         handle.abort();
         let _ = handle.await;

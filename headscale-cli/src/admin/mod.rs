@@ -485,8 +485,35 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
 }
 
 pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result<(), AdminError> {
-    let client = conn.build_client()?;
     let fmt = conn.fmt()?;
+    if conn.should_use_legacy_http_for_migrated_commands() {
+        let client = conn.build_client()?;
+        return match cmd {
+            PreauthKeysCmd::Create {
+                user,
+                reusable,
+                ephemeral,
+                tags,
+                expires_in,
+            } => {
+                let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
+                preauthkeys::create(
+                    &client,
+                    user,
+                    *reusable,
+                    *ephemeral,
+                    tags.clone(),
+                    secs,
+                    fmt,
+                )
+                .await
+            }
+            PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
+            PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+        };
+    }
+
+    let mut client = conn.build_grpc_client().await?;
     match cmd {
         PreauthKeysCmd::Create {
             user,
@@ -496,8 +523,8 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             expires_in,
         } => {
             let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
-            preauthkeys::create(
-                &client,
+            preauthkeys::create_grpc(
+                &mut client,
                 user,
                 *reusable,
                 *ephemeral,
@@ -507,8 +534,10 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             )
             .await
         }
-        PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
-        PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+        PreauthKeysCmd::List { user } => {
+            preauthkeys::list_grpc(&mut client, user.as_deref(), fmt).await
+        }
+        PreauthKeysCmd::Expire { prefix } => preauthkeys::expire_grpc(&mut client, prefix).await,
     }
 }
 

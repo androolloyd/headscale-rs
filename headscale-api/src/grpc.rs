@@ -1161,6 +1161,8 @@ pub mod upstream {
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
         record.last_seen = last_seen;
+        record.os = machine.os.clone();
+        record.os_version = machine.version.clone();
         record.forced_tags = machine.tags.clone();
         record.available_routes = machine.routes.clone();
         record.approved_routes = machine.approved_routes.clone();
@@ -1181,8 +1183,16 @@ pub mod upstream {
             created_at: record.created_at.timestamp().max(0) as u64,
             expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
             machine_key_hex: record.machine_key_hex,
-            os: "unknown".into(),
-            version: "unknown".into(),
+            os: if record.os.is_empty() {
+                "unknown".into()
+            } else {
+                record.os
+            },
+            version: if record.os_version.is_empty() {
+                "unknown".into()
+            } else {
+                record.os_version
+            },
             tags: record.forced_tags,
             routes: record.available_routes,
             approved_routes: record.approved_routes,

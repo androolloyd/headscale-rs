@@ -540,6 +540,18 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         record_changed = true;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
+        if !hostinfo.hostname.is_empty() && own.hostname != hostinfo.hostname {
+            own.hostname = hostinfo.hostname.clone();
+            record_changed = true;
+        }
+        if !hostinfo.os.is_empty() && own.os != hostinfo.os {
+            own.os = hostinfo.os.clone();
+            record_changed = true;
+        }
+        if !hostinfo.os_version.is_empty() && own.os_version != hostinfo.os_version {
+            own.os_version = hostinfo.os_version.clone();
+            record_changed = true;
+        }
         if let Some(net_info) = hostinfo.net_info.as_ref()
             && own.home_derp != net_info.preferred_derp
         {
@@ -1643,6 +1655,50 @@ mod tests {
         assert!(node.allowed_ips.iter().any(|route| route == "0.0.0.0/0"));
         assert!(node.allowed_ips.iter().any(|route| route == "::/0"));
         assert!(!node.allowed_ips.iter().any(|route| route == "10.99.0.0/24"));
+    }
+
+    #[tokio::test]
+    async fn map_request_updates_hostinfo_identity_fields() {
+        let (state, _dir) = fixture();
+        let node_key = "e1".repeat(32);
+        insert_peer(&state, &node_key, "old-host", 9);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "Hostname": "new-host",
+                                "OS": "darwin",
+                                "OSVersion": "15.1"
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state
+            .machines
+            .get(&node_key)
+            .expect("node still registered");
+        assert_eq!(rec.hostname, "new-host");
+        assert_eq!(rec.os, "darwin");
+        assert_eq!(rec.os_version, "15.1");
+
+        let map_node = record_to_map_node(&rec, "tail.example");
+        assert_eq!(map_node.hostinfo.hostname, "new-host");
+        assert_eq!(map_node.hostinfo.os, "darwin");
+        assert_eq!(map_node.hostinfo.os_version, "15.1");
     }
 
     #[tokio::test]

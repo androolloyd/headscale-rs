@@ -258,7 +258,12 @@ async fn register_inner(
         return invalid_requested_tags_response(&requested_tags);
     }
 
-    let (hostname, available_routes) = match hostname_and_routes(&body) {
+    let RegisterHostInfoParts {
+        hostname,
+        os: requested_os,
+        os_version: requested_os_version,
+        available_routes,
+    } = match register_hostinfo_parts(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
@@ -343,6 +348,22 @@ async fn register_inner(
             )
         })
         .unwrap_or((None, Vec::new(), 0));
+    let os = if requested_os.is_empty() {
+        existing_machine
+            .as_ref()
+            .map(|(_, existing)| existing.os.clone())
+            .unwrap_or_default()
+    } else {
+        requested_os
+    };
+    let os_version = if requested_os_version.is_empty() {
+        existing_machine
+            .as_ref()
+            .map(|(_, existing)| existing.os_version.clone())
+            .unwrap_or_default()
+    } else {
+        requested_os_version
+    };
     let expiry = if forced_tags.is_empty() {
         body.expiry
     } else {
@@ -355,6 +376,8 @@ async fn register_inner(
         machine_key_hex,
         user: user.clone(),
         hostname,
+        os,
+        os_version,
         ipv4,
         // Wall 7: DiscoKey + Endpoints arrive on the `/map` call, not
         // on register. New registrations start empty; same-machine
@@ -392,7 +415,12 @@ async fn register_interactive(
     machine_key_hex: Option<String>,
     body: RegisterRequest,
 ) -> axum::response::Response {
-    let (hostname, available_routes) = match hostname_and_routes(&body) {
+    let RegisterHostInfoParts {
+        hostname,
+        os,
+        os_version,
+        available_routes,
+    } = match register_hostinfo_parts(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
@@ -408,6 +436,8 @@ async fn register_interactive(
         machine_key_hex: machine_key_hex.unwrap_or_default(),
         user: String::new(),
         hostname,
+        os,
+        os_version,
         ipv4,
         disco_key: None,
         endpoints: Vec::new(),
@@ -436,14 +466,17 @@ async fn register_interactive(
     .into_response()
 }
 
-fn hostname_and_routes(
+struct RegisterHostInfoParts {
+    hostname: String,
+    os: String,
+    os_version: String,
+    available_routes: Vec<String>,
+}
+
+fn register_hostinfo_parts(
     body: &RegisterRequest,
-) -> Result<(String, Vec<String>), axum::response::Response> {
-    let hostname = body
-        .hostinfo
-        .as_ref()
-        .map(|h| h.hostname.clone())
-        .unwrap_or_default();
+) -> Result<RegisterHostInfoParts, axum::response::Response> {
+    let hostinfo = body.hostinfo.as_ref();
     let available_routes = body
         .hostinfo
         .as_ref()
@@ -459,7 +492,12 @@ fn hostname_and_routes(
                 .into_response()
         })?
         .unwrap_or_default();
-    Ok((hostname, available_routes))
+    Ok(RegisterHostInfoParts {
+        hostname: hostinfo.map(|h| h.hostname.clone()).unwrap_or_default(),
+        os: hostinfo.map(|h| h.os.clone()).unwrap_or_default(),
+        os_version: hostinfo.map(|h| h.os_version.clone()).unwrap_or_default(),
+        available_routes,
+    })
 }
 
 fn requested_tags_for_body(body: &RegisterRequest) -> Vec<String> {
@@ -710,8 +748,8 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         primary_routes: rec.approved_routes.clone(),
         hostinfo: HostInfo {
             hostname: rec.hostname.clone(),
-            os: String::new(),
-            os_version: String::new(),
+            os: rec.os.clone(),
+            os_version: rec.os_version.clone(),
             routable_ips: rec.available_routes.clone(),
             request_tags: Vec::new(),
             net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
@@ -799,6 +837,8 @@ mod tests {
             Ipv4Addr::new(100, 64, 0, 8),
             false,
         );
+        record.os = "linux".into();
+        record.os_version = "6.8".into();
         record.available_routes = vec!["10.0.0.0/24".into(), "fd7a:115c:a1e0::/48".into()];
         record.approved_routes = vec!["10.0.0.0/24".into()];
 
@@ -810,6 +850,8 @@ mod tests {
             node.hostinfo.routable_ips,
             vec!["10.0.0.0/24", "fd7a:115c:a1e0::/48"]
         );
+        assert_eq!(node.hostinfo.os, "linux");
+        assert_eq!(node.hostinfo.os_version, "6.8");
     }
 
     #[test]
@@ -890,6 +932,8 @@ mod tests {
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(rec.user, "alice");
         assert_eq!(rec.hostname, "peer-a");
+        assert_eq!(rec.os, "linux");
+        assert_eq!(rec.os_version, "6.6");
         // Allocated IP is in CGNAT.
         assert!(rec.ipv4.octets()[0] == 100);
     }

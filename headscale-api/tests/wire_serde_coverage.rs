@@ -825,6 +825,8 @@ fn machine_record_clone_preserves_wall7_fields() {
         std::net::Ipv4Addr::new(100, 64, 0, 5),
         false,
     );
+    rec.os = "linux".into();
+    rec.os_version = "6.8".into();
     rec.disco_key = Some("dk".into());
     rec.endpoints = vec!["1.2.3.4:5".into(), "5.6.7.8:9".into()];
     rec.home_derp = 901;
@@ -832,6 +834,8 @@ fn machine_record_clone_preserves_wall7_fields() {
     assert_eq!(cloned.disco_key, rec.disco_key);
     assert_eq!(cloned.endpoints, rec.endpoints);
     assert_eq!(cloned.home_derp, rec.home_derp);
+    assert_eq!(cloned.os, rec.os);
+    assert_eq!(cloned.os_version, rec.os_version);
     assert_eq!(cloned.ipv4, rec.ipv4);
     assert_eq!(cloned.created_at, rec.created_at);
     assert_eq!(cloned.last_seen, rec.last_seen);

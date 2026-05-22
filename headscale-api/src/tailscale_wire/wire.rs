@@ -59,6 +59,7 @@ pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
 /// | `RegisterMethod == "authkey-ephemeral"`          | `ephemeral`        |
 /// | `CreatedAt time.Time`                            | `created_at`       |
 /// | `ForcedTags []string`                            | `forced_tags`      |
+/// | `Hostinfo.Hostname/OS/OSVersion`                 | `hostname`/`os`/`os_version` |
 ///
 /// `Expiry` is checked on every `/map` request: an elapsed expiry
 /// causes the server to emit a logout response (upstream behaviour at
@@ -78,6 +79,10 @@ pub struct MachineRecord {
     /// Hostname the client advertised in HostInfo (best-effort; may
     /// be empty).
     pub hostname: String,
+    /// Client operating system from `Hostinfo.OS`.
+    pub os: String,
+    /// Client operating system version from `Hostinfo.OSVersion`.
+    pub os_version: String,
     /// Allocated tailnet IPv4 in the CGNAT range.
     pub ipv4: std::net::Ipv4Addr,
     /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
@@ -203,6 +208,8 @@ impl MachineRecord {
             machine_key_hex,
             user,
             hostname,
+            os: String::new(),
+            os_version: String::new(),
             ipv4,
             disco_key: None,
             endpoints: Vec::new(),

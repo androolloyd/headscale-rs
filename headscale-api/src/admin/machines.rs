@@ -268,14 +268,22 @@ impl WireMachineAdmin {
             created_at: rec.created_at.timestamp().max(0) as u64,
             expiry: rec.expiry.map(|t| t.timestamp().max(0) as u64),
             machine_key_hex: rec.machine_key_hex.clone(),
-            os: "unknown".into(),
-            version: "unknown".into(),
+            os: nonempty_or_unknown(&rec.os),
+            version: nonempty_or_unknown(&rec.os_version),
             tags: rec.forced_tags.clone(),
             routes: rec.available_routes.clone(),
             approved_routes: rec.approved_routes.clone(),
             register_method: rec.register_method,
             expired: is_expired,
         }
+    }
+}
+
+fn nonempty_or_unknown(value: &str) -> String {
+    if value.is_empty() {
+        "unknown".into()
+    } else {
+        value.to_string()
     }
 }
 
@@ -606,6 +614,8 @@ impl MachineAdmin for WireMachineAdmin {
         );
         rec.expiry = expiry;
         rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
+        rec.os = record.os.clone();
+        rec.os_version = record.version.clone();
         rec.forced_tags = record.tags.clone();
         rec.available_routes = record.routes.clone();
         rec.approved_routes = record.approved_routes.clone();

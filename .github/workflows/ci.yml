@@ -46,6 +46,7 @@ jobs:
           done
       - run: cargo fmt --manifest-path headscale-core/fuzz/Cargo.toml --all -- --check
       - run: cargo fmt --manifest-path tools/parity/headscale-rs/Cargo.toml --all -- --check
+      - run: cargo fmt --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml --all -- --check
 
   clippy:
     name: cargo clippy
@@ -112,6 +113,7 @@ jobs:
       - run: cargo test -p headscale-api --no-default-features
       # Admin-only test run — admin is not a default feature.
       - run: cargo test -p headscale-api --no-default-features --features admin
+      - run: cargo check --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml
 
   fuzz:
     name: cargo fuzz 10k

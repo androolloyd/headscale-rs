@@ -1,0 +1,63 @@
+# Real-Client Parity Harness
+
+This directory is for end-to-end parity tests that run stock `tailscaled`
+clients against both headscale-go and headscale-rs.
+
+The first checked-in piece is a Rust wire-control harness:
+
+```sh
+cargo run --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml -- \
+  --http 0.0.0.0:51821 \
+  --https 0.0.0.0:443 \
+  --hostname headscale-rs.test \
+  --public-url https://headscale-rs.test \
+  --base-domain tail.test
+```
+
+It starts the headscale-rs Tailscale wire surface and adds harness-only routes:
+
+- `GET /harness/health`
+- `POST /harness/preauth`
+- `PUT /harness/policy`
+- `GET /harness/machines`
+
+Mint an auth key for a stock client:
+
+```sh
+curl -sS -X POST http://127.0.0.1:51821/harness/preauth \
+  -H 'content-type: application/json' \
+  -d '{"user":"alice","reusable":true}'
+```
+
+Then run a client with that key:
+
+```sh
+tailscale up --login-server https://headscale-rs.test --authkey <key>
+```
+
+The harness prints the generated TLS certificate path on startup. Real client
+jobs must install that certificate into the client trust store or terminate TLS
+in front of the harness with a trusted certificate.
+
+## Parity Plan
+
+Use the upstream headscale-go v0.28 integration tests as the scenario inventory:
+
+- auth key registration
+- web registration
+- OIDC registration
+- ACL and tag behavior
+- DNS and MagicDNS
+- routes and exit nodes
+- SSH policy
+- embedded DERP and `/verify`
+- API auth and CLI behavior
+
+Each scenario should run the same stock `tailscaled` image against:
+
+1. headscale-go v0.28.0, pinned by `tools/parity/headscale-go/go.mod`
+2. this headscale-rs harness
+
+Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
+its own preauth, persistence, billing, and deployment concerns around the shared
+headscale-rs wire surface.

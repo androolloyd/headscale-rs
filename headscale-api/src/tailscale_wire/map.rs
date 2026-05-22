@@ -79,6 +79,10 @@ use super::{MachineRecord, WireState};
 use crate::dns::{DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
 
+const MAP_NODE_NOT_FOUND_ERROR: &str = "node not found";
+const MAP_NODE_KEY_MISMATCH_ERROR: &str =
+    "node key in request does not match the one associated with this machine key";
+
 fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
     let mut merged = serde_json::to_value(current).unwrap_or_default();
     let mut update = serde_json::to_value(requested).unwrap_or_default();
@@ -587,6 +591,21 @@ struct ErrorBody {
     error: String,
 }
 
+fn plain_map_error(status: StatusCode, message: &str) -> Response {
+    (status, format!("{message}\n")).into_response()
+}
+
+fn canonical_map_node_key(node_key: &str) -> String {
+    match strip_key_prefix(node_key) {
+        Some(h) => h.to_string(),
+        None => node_key.to_string(),
+    }
+}
+
+fn map_request_node_key(req: &MapRequest) -> Option<String> {
+    (!req.node_key.is_empty()).then(|| canonical_map_node_key(&req.node_key))
+}
+
 pub async fn handle_map(
     State(state): State<WireState>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
@@ -604,10 +623,8 @@ pub async fn handle_map(
     if let Err(resp) = reject_unsupported_capability(req.version) {
         return resp;
     }
-    let node_key_hex = match strip_key_prefix(&node_key_path) {
-        Some(h) => h.to_string(),
-        None => node_key_path.clone(),
-    };
+    let node_key_hex =
+        map_request_node_key(&req).unwrap_or_else(|| canonical_map_node_key(&node_key_path));
     map_inner(state, node_key_hex, machine_key, req).await
 }
 
@@ -631,10 +648,7 @@ pub async fn handle_map_flat(
     if let Err(resp) = reject_unsupported_capability(req.version) {
         return resp;
     }
-    let node_key_hex = match strip_key_prefix(&req.node_key) {
-        Some(h) => h.to_string(),
-        None => req.node_key.clone(),
-    };
+    let node_key_hex = canonical_map_node_key(&req.node_key);
     if node_key_hex.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -656,13 +670,7 @@ async fn map_inner(
     // The caller must already have registered. If not, 404 — they need
     // to go through `/machine/{node_key}/register` first.
     let Some(mut own) = state.machines.get(&node_key_hex) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "machine not registered".into(),
-            }),
-        )
-            .into_response();
+        return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
     if let Err(resp) = validate_map_machine_key(&machine_key_hex, &own) {
         return resp;
@@ -845,13 +853,7 @@ async fn map_inner(
         &state.policy,
         req.version,
     ) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "machine not registered".into(),
-            }),
-        )
-            .into_response();
+        return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
     // #238: `snapshot()` returns `Arc<HashMap<…>>` — one Arc clone
     // total. Iterating borrows the map; we never clone individual
@@ -1140,13 +1142,10 @@ fn validate_map_machine_key(
         return Ok(());
     }
 
-    Err((
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorBody {
-            error: "node exists with different machine key".into(),
-        }),
-    )
-        .into_response())
+    Err(plain_map_error(
+        StatusCode::NOT_FOUND,
+        MAP_NODE_KEY_MISMATCH_ERROR,
+    ))
 }
 
 fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
@@ -1596,6 +1595,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flat_map_missing_node_matches_upstream_404_body() {
+        let (state, _dir) = fixture();
+        let missing_node_key = "a4".repeat(32);
+        let app = router(state);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{missing_node_key}"),
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/map")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(raw.as_ref(), b"node not found\n");
+    }
+
+    #[tokio::test]
     async fn map_requires_noise_machine_key() {
         let (state, _dir) = fixture();
         let node_key = "a0".repeat(32);
@@ -1628,14 +1653,69 @@ mod tests {
             .method("POST")
             .uri(format!("/machine/nodekey:{node_key}/map"))
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "Version": 113,
+                    "NodeKey": format!("nodekey:{node_key}"),
+                }))
+                .unwrap(),
+            ))
             .unwrap();
         req.extensions_mut()
             .insert(NoisePeerMachineKey("11".repeat(32)));
 
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            raw.as_ref(),
+            b"node key in request does not match the one associated with this machine key\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyed_map_validates_body_node_key_against_noise_machine_key() {
+        let (state, _dir) = fixture();
+        let path_node_key = "a5".repeat(32);
+        let body_node_key = "b5".repeat(32);
+        insert_peer(&state, &path_node_key, "peer-a", 10);
+        state.machines.upsert(
+            body_node_key.clone(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                body_node_key.clone(),
+                "22".repeat(32),
+                "u".into(),
+                "peer-b".into(),
+                Ipv4Addr::new(100, 64, 0, 11),
+                false,
+            ),
+        );
+
+        let app = router(state);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{body_node_key}"),
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{path_node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            raw.as_ref(),
+            b"node key in request does not match the one associated with this machine key\n"
+        );
     }
 
     #[tokio::test]

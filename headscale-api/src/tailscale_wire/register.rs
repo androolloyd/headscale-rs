@@ -62,6 +62,9 @@ use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 const REGISTRATION_ID_LENGTH: usize = 24;
+const REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH: &str =
+    "node exists with a different machine key";
+const REGISTER_LOGOUT_MACHINE_KEY_MISMATCH: &str = "node exist with different machine key";
 
 pub(crate) const CAPABILITY_ADMIN: &str = "https://tailscale.com/cap/is-admin";
 pub(crate) const CAPABILITY_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
@@ -170,7 +173,11 @@ async fn register_inner(
         && expiry <= now
         && let Some(record) = state.machines.get(&node_key_hex)
     {
-        if let Err(resp) = validate_existing_machine_key(&machine_key_hex, &record) {
+        if let Err(resp) = validate_existing_machine_key(
+            &machine_key_hex,
+            &record,
+            REGISTER_LOGOUT_MACHINE_KEY_MISMATCH,
+        ) {
             return resp;
         }
         return logout_existing_node(&state, &node_key_hex, &record, expiry);
@@ -178,7 +185,11 @@ async fn register_inner(
 
     if authkey.is_empty() {
         if let Some(record) = state.machines.get(&node_key_hex) {
-            if let Err(resp) = validate_existing_machine_key(&machine_key_hex, &record) {
+            if let Err(resp) = validate_existing_machine_key(
+                &machine_key_hex,
+                &record,
+                REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH,
+            ) {
                 return resp;
             }
             if record.is_expired_at(now) {
@@ -676,14 +687,13 @@ fn require_noise_machine_key(
 fn validate_existing_machine_key(
     presented_machine_key_hex: &str,
     record: &MachineRecord,
+    mismatch_error: &'static str,
 ) -> Result<(), axum::response::Response> {
     if record.machine_key_hex == presented_machine_key_hex {
         return Ok(());
     }
 
-    Err(register_error_response(
-        "node exist with different machine key",
-    ))
+    Err(register_error_response(mismatch_error))
 }
 
 fn reject_unsupported_capability(version: u32) -> Result<(), axum::response::Response> {
@@ -1985,7 +1995,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "node exist with different machine key");
+        assert_eq!(rr.error, "node exists with a different machine key");
     }
 
     #[tokio::test]

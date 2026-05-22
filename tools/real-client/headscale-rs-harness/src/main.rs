@@ -283,6 +283,7 @@ async fn main() -> Result<()> {
         https_addr: (!args.no_https).then_some(args.https),
         state_dir: args.state_dir,
         sans: headscale_api::tailscale_wire::tls::SanConfig::with_hostname(args.hostname),
+        oidc: None,
     };
     let handle = serve::serve(state, cfg, extra_routes).await?;
     let tls_cert_path = handle

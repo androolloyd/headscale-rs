@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 
 use super::raw_tls;
 use super::tls::{self, SanConfig, TlsMaterial};
-use super::{WireError, WireState, router};
+use super::{WireError, WireState, router, router_with_oidc};
 
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
@@ -58,6 +58,9 @@ pub struct ServeConfig {
     /// SAN hostname for the minted cert. Cert is reused across
     /// restarts as long as the SAN list doesn't change.
     pub sans: SanConfig,
+    /// Optional OIDC auth runtime. When present, the public `/register/{id}`
+    /// route starts the OIDC auth-code flow and `/oidc/callback` is mounted.
+    pub oidc: Option<crate::oidc::OidcAuthRuntime>,
 }
 
 impl ServeConfig {
@@ -70,6 +73,7 @@ impl ServeConfig {
             https_addr: Some("127.0.0.1:443".parse().unwrap()),
             state_dir: state_dir.as_ref().into(),
             sans: SanConfig::with_hostname(hostname),
+            oidc: None,
         }
     }
 }
@@ -96,7 +100,8 @@ pub async fn serve(
     cfg: ServeConfig,
     extra_routes: Router,
 ) -> Result<ServeHandle, WireError> {
-    let app = extra_routes.merge(router(state.clone()));
+    let oidc = cfg.oidc.clone();
+    let app = extra_routes.merge(public_router(state.clone(), oidc));
 
     let http_listener = tokio::net::TcpListener::bind(cfg.http_addr)
         .await
@@ -150,6 +155,13 @@ pub async fn serve(
     Ok(ServeHandle { http, https, tls })
 }
 
+fn public_router(state: WireState, oidc: Option<crate::oidc::OidcAuthRuntime>) -> Router {
+    match oidc {
+        Some(oidc) => router_with_oidc(state, oidc),
+        None => router(state),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,8 +170,11 @@ mod tests {
         noise::ServerNoiseKey,
         test_support::{MockIpAllocator, MockRedeemer},
     };
+    use axum::body::to_bytes;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -194,6 +209,7 @@ mod tests {
             https_addr: None,
             state_dir: dir.path().into(),
             sans: SanConfig::with_hostname("test-host"),
+            oidc: None,
         };
         // We need the actual bound port; tokio::net::TcpListener::bind
         // returns it via local_addr. Inline the relevant piece of
@@ -209,5 +225,46 @@ mod tests {
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_success());
         handle.abort();
+    }
+
+    fn oidc_runtime() -> crate::oidc::OidcAuthRuntime {
+        crate::oidc::OidcAuthRuntime::new(crate::oidc::OidcAuthConfig {
+            authorization_endpoint: "https://issuer.example/oauth2/auth".into(),
+            client_id: "headscale-rs".into(),
+            redirect_url: "https://headscale.example/oidc/callback".into(),
+            scopes: vec!["openid".into(), "profile".into(), "email".into()],
+            extra_params: BTreeMap::new(),
+            pkce: crate::oidc::OidcPkceConfig::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn serve_public_router_mounts_oidc_when_configured() {
+        let (state, _dir) = fixture_state();
+        let oidc = oidc_runtime();
+        let app = public_router(state, Some(oidc));
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/register/{}", "a".repeat(24)))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::FOUND);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("https://issuer.example/oauth2/auth?")
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty());
     }
 }

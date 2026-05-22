@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    CreateUserRequest, DeleteUserRequest, ListUsersRequest, User,
+    CreateUserRequest, DeleteUserRequest, ListUsersRequest, RenameUserRequest, User,
     headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
@@ -62,12 +62,18 @@ impl GrpcAdminClient {
         }
     }
 
-    pub async fn create_user(&mut self, name: &str) -> Result<User, AdminError> {
+    pub async fn create_user(
+        &mut self,
+        name: &str,
+        display_name: &str,
+        email: &str,
+        picture_url: &str,
+    ) -> Result<User, AdminError> {
         let request = self.request(CreateUserRequest {
             name: name.to_string(),
-            display_name: String::new(),
-            email: String::new(),
-            picture_url: String::new(),
+            display_name: display_name.to_string(),
+            email: email.to_string(),
+            picture_url: picture_url.to_string(),
         })?;
         let response = self
             .client
@@ -80,11 +86,30 @@ impl GrpcAdminClient {
             .ok_or_else(|| AdminError::Decode("CreateUser response omitted user".into()))
     }
 
-    pub async fn list_users(&mut self, name: Option<&str>) -> Result<Vec<User>, AdminError> {
+    pub async fn rename_user_by_id(&mut self, id: u64, new_name: &str) -> Result<User, AdminError> {
+        let request = self.request(RenameUserRequest {
+            old_id: id,
+            new_name: new_name.to_string(),
+        })?;
+        let response = self
+            .client
+            .rename_user(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner();
+        response
+            .user
+            .ok_or_else(|| AdminError::Decode("RenameUser response omitted user".into()))
+    }
+
+    pub async fn list_users(
+        &mut self,
+        selector: UserSelector<'_>,
+    ) -> Result<Vec<User>, AdminError> {
         let request = self.request(ListUsersRequest {
-            id: 0,
-            name: name.unwrap_or_default().to_string(),
-            email: String::new(),
+            id: selector.id.unwrap_or_default(),
+            name: selector.name.unwrap_or_default().to_string(),
+            email: selector.email.unwrap_or_default().to_string(),
         })?;
         Ok(self
             .client
@@ -113,6 +138,13 @@ impl GrpcAdminClient {
         }
         Ok(request)
     }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct UserSelector<'a> {
+    pub id: Option<u64>,
+    pub name: Option<&'a str>,
+    pub email: Option<&'a str>,
 }
 
 async fn unix_channel(path: PathBuf) -> Result<Channel, AdminError> {
@@ -375,15 +407,42 @@ mod tests {
         let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
             .await
             .unwrap();
-        let created = client.create_user("alice").await.unwrap();
+        let created = client
+            .create_user("alice", "Alice Example", "alice@example.com", "")
+            .await
+            .unwrap();
         assert_eq!(created.name, "alice");
+        assert_eq!(created.display_name, "Alice Example");
+        assert_eq!(created.email, "alice@example.com");
 
-        let listed = client.list_users(None).await.unwrap();
+        let listed = client.list_users(UserSelector::default()).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "alice");
 
+        let filtered = client
+            .list_users(UserSelector {
+                id: None,
+                name: Some("alice"),
+                email: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+
+        let renamed = client
+            .rename_user_by_id(listed[0].id, "alice-renamed")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "alice-renamed");
+
         client.delete_user_by_id(listed[0].id).await.unwrap();
-        assert!(client.list_users(None).await.unwrap().is_empty());
+        assert!(
+            client
+                .list_users(UserSelector::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         handle.abort();
         let _ = handle.await;
@@ -432,7 +491,7 @@ mod tests {
             GrpcAdminClient::connect(Some(&addr.to_string()), Some("test-api-key"), None, true)
                 .await
                 .unwrap();
-        let created = client.create_user("remote").await.unwrap();
+        let created = client.create_user("remote", "", "", "").await.unwrap();
         assert_eq!(created.name, "remote");
 
         handle.abort();

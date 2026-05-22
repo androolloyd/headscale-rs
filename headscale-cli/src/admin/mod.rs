@@ -132,6 +132,9 @@ pub struct ConnectArgs {
         value_parser = ["json", "json-line", "yaml"]
     )]
     pub output: Option<String>,
+    /// Disable confirmation prompts.
+    #[arg(long, global = true)]
+    pub force: bool,
 }
 
 impl ConnectArgs {
@@ -181,13 +184,54 @@ impl ConnectArgs {
 pub enum UsersCmd {
     /// Create a new user.
     #[command(alias = "c", alias = "new")]
-    Create { name: String },
+    Create {
+        name: String,
+        /// Display name.
+        #[arg(short = 'd', long = "display-name")]
+        display_name: Option<String>,
+        /// Email address.
+        #[arg(short = 'e', long)]
+        email: Option<String>,
+        /// Profile picture URL.
+        #[arg(short = 'p', long = "picture-url")]
+        picture_url: Option<String>,
+    },
     /// List all users.
     #[command(alias = "ls", alias = "show")]
-    List,
-    /// Delete a user by name.
-    #[command(alias = "destroy")]
-    Delete { name: String },
+    List {
+        /// User identifier (ID).
+        #[arg(short = 'i', long = "identifier")]
+        identifier: Option<u64>,
+        /// Username.
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Email address.
+        #[arg(short = 'e', long)]
+        email: Option<String>,
+    },
+    /// Destroy a user.
+    #[command(name = "destroy", alias = "delete")]
+    Destroy {
+        /// User identifier (ID).
+        #[arg(short = 'i', long = "identifier")]
+        identifier: Option<u64>,
+        /// Username.
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+    },
+    /// Rename a user.
+    #[command(alias = "mv")]
+    Rename {
+        /// User identifier (ID).
+        #[arg(short = 'i', long = "identifier")]
+        identifier: Option<u64>,
+        /// Username.
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// New username.
+        #[arg(short = 'r', long = "new-name")]
+        new_name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -366,16 +410,59 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
     if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
         return match cmd {
-            UsersCmd::Create { name } => users::create(&client, name, fmt).await,
-            UsersCmd::List => users::list(&client, fmt).await,
-            UsersCmd::Delete { name } => users::delete(&client, name).await,
+            UsersCmd::Create { name, .. } => users::create(&client, name, fmt).await,
+            UsersCmd::List { .. } => users::list(&client, fmt).await,
+            UsersCmd::Destroy { name, .. } => {
+                let name = name.as_deref().ok_or_else(|| {
+                    AdminError::Local("--name is required for legacy HTTP user delete".into())
+                })?;
+                users::delete(&client, name).await
+            }
+            UsersCmd::Rename { .. } => Err(AdminError::Local(
+                "user rename requires the upstream gRPC transport".into(),
+            )),
         };
     }
     let mut client = conn.build_grpc_client().await?;
     match cmd {
-        UsersCmd::Create { name } => users::create_grpc(&mut client, name, fmt).await,
-        UsersCmd::List => users::list_grpc(&mut client, fmt).await,
-        UsersCmd::Delete { name } => users::delete_grpc(&mut client, name).await,
+        UsersCmd::Create {
+            name,
+            display_name,
+            email,
+            picture_url,
+        } => {
+            users::create_grpc(
+                &mut client,
+                name,
+                display_name.as_deref().unwrap_or_default(),
+                email.as_deref().unwrap_or_default(),
+                picture_url.as_deref().unwrap_or_default(),
+                fmt,
+            )
+            .await
+        }
+        UsersCmd::List {
+            identifier,
+            name,
+            email,
+        } => {
+            users::list_grpc(
+                &mut client,
+                *identifier,
+                name.as_deref(),
+                email.as_deref(),
+                fmt,
+            )
+            .await
+        }
+        UsersCmd::Destroy { identifier, name } => {
+            users::destroy_grpc(&mut client, *identifier, name.as_deref(), conn.force, fmt).await
+        }
+        UsersCmd::Rename {
+            identifier,
+            name,
+            new_name,
+        } => users::rename_grpc(&mut client, *identifier, name.as_deref(), new_name, fmt).await,
     }
 }
 
@@ -461,6 +548,13 @@ pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), Adm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct UsersHarness {
+        #[command(subcommand)]
+        action: UsersCmd,
+    }
 
     #[test]
     fn exit_code_mapping_covers_every_variant() {
@@ -513,6 +607,7 @@ mod tests {
             insecure: false,
             json: false,
             output: None,
+            force: false,
         };
         let e = conn.build_client().unwrap_err();
         assert!(matches!(e, AdminError::Local(_)));
@@ -529,6 +624,7 @@ mod tests {
             insecure: false,
             json: false,
             output: None,
+            force: false,
         };
         assert!(conn.build_client().is_ok());
     }
@@ -544,6 +640,7 @@ mod tests {
             insecure: false,
             json: false,
             output: Some("json-line".into()),
+            force: false,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
     }
@@ -559,7 +656,61 @@ mod tests {
             insecure: false,
             json: false,
             output: None,
+            force: false,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());
+    }
+
+    #[test]
+    fn users_accept_upstream_filter_and_profile_flags() {
+        assert!(matches!(
+            UsersHarness::try_parse_from([
+                "headscale",
+                "create",
+                "alice",
+                "--display-name",
+                "Alice Example",
+                "--email",
+                "alice@example.com",
+                "--picture-url",
+                "https://example.com/alice.png",
+            ])
+            .unwrap()
+            .action,
+            UsersCmd::Create { name, display_name, email, picture_url }
+                if name == "alice"
+                    && display_name.as_deref() == Some("Alice Example")
+                    && email.as_deref() == Some("alice@example.com")
+                    && picture_url.as_deref() == Some("https://example.com/alice.png")
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from(["headscale", "list", "--identifier", "42"])
+                .unwrap()
+                .action,
+            UsersCmd::List {
+                identifier: Some(42),
+                ..
+            }
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from(["headscale", "destroy", "--name", "alice"])
+                .unwrap()
+                .action,
+            UsersCmd::Destroy { name, .. } if name.as_deref() == Some("alice")
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from([
+                "headscale",
+                "rename",
+                "--name",
+                "alice",
+                "--new-name",
+                "bob",
+            ])
+            .unwrap()
+            .action,
+            UsersCmd::Rename { name, new_name, .. }
+                if name.as_deref() == Some("alice") && new_name == "bob"
+        ));
     }
 }

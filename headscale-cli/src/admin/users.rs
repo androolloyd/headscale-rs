@@ -1,15 +1,19 @@
-//! `headscale users {create,list,delete}` over upstream-compatible gRPC.
+//! `headscale users` over upstream-compatible gRPC.
 //!
 //! Supplying `--server` keeps the legacy `/api/v1/users` transport available
 //! for older admin HTTP deployments.
 
+use std::collections::BTreeMap;
+use std::io::{self, Write};
+
+use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::UserRecord;
 use headscale_api::generated::User as GrpcUser;
 use serde::Serialize;
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::grpc_client::GrpcAdminClient;
+use super::grpc_client::{GrpcAdminClient, UserSelector};
 use super::output::{OutputFormat, print_structured, print_table};
 
 /// `POST /api/v1/users` payload.
@@ -33,14 +37,21 @@ pub async fn create(client: &AdminClient, name: &str, fmt: OutputFormat) -> Resu
 pub async fn create_grpc(
     client: &mut GrpcAdminClient,
     name: &str,
+    display_name: &str,
+    email: &str,
+    picture_url: &str,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let user = grpc_user_to_record(client.create_user(name).await?);
+    validate_picture_url(picture_url)?;
+    let user = UserOutput::from(
+        client
+            .create_user(name, display_name, email, picture_url)
+            .await?,
+    );
     if fmt.is_structured() {
         print_structured(fmt, &user)?;
     } else {
-        println!("Created user '{}'", user.name);
-        render_users(&[user]);
+        println!("User created");
     }
     Ok(())
 }
@@ -55,17 +66,24 @@ pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminEr
     Ok(())
 }
 
-pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
-    let users: Vec<UserRecord> = client
-        .list_users(None)
+pub async fn list_grpc(
+    client: &mut GrpcAdminClient,
+    id: Option<u64>,
+    name: Option<&str>,
+    email: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let selector = list_selector(id, name, email);
+    let users: Vec<UserOutput> = client
+        .list_users(selector)
         .await?
         .into_iter()
-        .map(grpc_user_to_record)
+        .map(UserOutput::from)
         .collect();
     if fmt.is_structured() {
         print_structured(fmt, &users)?;
     } else {
-        render_users(&users);
+        render_grpc_users(&users);
     }
     Ok(())
 }
@@ -80,13 +98,52 @@ pub async fn delete(client: &AdminClient, name: &str) -> Result<(), AdminError> 
     Ok(())
 }
 
-pub async fn delete_grpc(client: &mut GrpcAdminClient, name: &str) -> Result<(), AdminError> {
-    let users = client.list_users(Some(name)).await?;
-    let user = users
-        .first()
-        .ok_or_else(|| AdminError::NotFound(format!("user {name:?} not found")))?;
+pub async fn destroy_grpc(
+    client: &mut GrpcAdminClient,
+    id: Option<u64>,
+    name: Option<&str>,
+    force: bool,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let user = resolve_single_user(client, id, name).await?;
+    if !force
+        && !confirm_action(&format!(
+            "Do you want to remove the user {:?} ({}) and any associated preauthkeys?",
+            user.name, user.id
+        ))?
+    {
+        let message = "User not destroyed";
+        if fmt.is_structured() {
+            print_result(fmt, message)?;
+        } else {
+            println!("{message}");
+        }
+        return Ok(());
+    }
+
     client.delete_user_by_id(user.id).await?;
-    println!("Deleted user '{name}'");
+    if fmt.is_structured() {
+        print_structured(fmt, &BTreeMap::<String, String>::new())?;
+    } else {
+        println!("User destroyed");
+    }
+    Ok(())
+}
+
+pub async fn rename_grpc(
+    client: &mut GrpcAdminClient,
+    id: Option<u64>,
+    name: Option<&str>,
+    new_name: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let user = resolve_single_user(client, id, name).await?;
+    let renamed = UserOutput::from(client.rename_user_by_id(user.id, new_name).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &renamed)?;
+    } else {
+        println!("User renamed");
+    }
     Ok(())
 }
 
@@ -109,21 +166,196 @@ fn render_users(users: &[UserRecord]) {
     print_table(&["NAME", "CREATED", "LAST_ACTIVITY"], &rows);
 }
 
-fn grpc_user_to_record(user: GrpcUser) -> UserRecord {
-    let created_at = user
-        .created_at
-        .as_ref()
-        .and_then(|ts| u64::try_from(ts.seconds).ok())
-        .unwrap_or_default();
-    UserRecord {
-        id: user.id,
-        name: user.name,
-        created_at,
-        last_activity: created_at,
-        display_name: user.display_name,
-        email: user.email,
-        provider_id: user.provider_id,
-        provider: user.provider,
-        profile_pic_url: user.profile_pic_url,
+fn render_grpc_users(users: &[UserOutput]) {
+    let rows: Vec<Vec<String>> = users
+        .iter()
+        .map(|u| {
+            vec![
+                u.id.to_string(),
+                u.display_name.clone(),
+                u.name.clone(),
+                u.email.clone(),
+                u.created.clone(),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "Name", "Username", "Email", "Created"], &rows);
+}
+
+async fn resolve_single_user(
+    client: &mut GrpcAdminClient,
+    id: Option<u64>,
+    name: Option<&str>,
+) -> Result<UserOutput, AdminError> {
+    if id.is_none() && name.unwrap_or_default().is_empty() {
+        return Err(AdminError::Local(
+            "--name or --identifier flag is required".into(),
+        ));
+    }
+    let users = client
+        .list_users(UserSelector {
+            id,
+            name: name.filter(|value| !value.is_empty()),
+            email: None,
+        })
+        .await?;
+    if users.len() != 1 {
+        return Err(AdminError::Local(
+            "multiple users match query, specify an ID".into(),
+        ));
+    }
+    users
+        .into_iter()
+        .next()
+        .map(UserOutput::from)
+        .ok_or_else(|| AdminError::Local("multiple users match query, specify an ID".into()))
+}
+
+fn list_selector<'a>(
+    id: Option<u64>,
+    name: Option<&'a str>,
+    email: Option<&'a str>,
+) -> UserSelector<'a> {
+    if id.is_some_and(|id| id > 0) {
+        UserSelector {
+            id,
+            name: None,
+            email: None,
+        }
+    } else if name.is_some_and(|value| !value.is_empty()) {
+        UserSelector {
+            id: None,
+            name,
+            email: None,
+        }
+    } else if email.is_some_and(|value| !value.is_empty()) {
+        UserSelector {
+            id: None,
+            name: None,
+            email,
+        }
+    } else {
+        UserSelector::default()
+    }
+}
+
+fn validate_picture_url(url: &str) -> Result<(), AdminError> {
+    if url.bytes().any(|byte| byte.is_ascii_control()) || has_invalid_percent_escape(url) {
+        return Err(AdminError::Local(format!("invalid picture URL: {url}")));
+    }
+    Ok(())
+}
+
+fn has_invalid_percent_escape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(hex) = bytes.get(index + 1..index + 3) else {
+                return true;
+            };
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return true;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    false
+}
+
+fn confirm_action(prompt: &str) -> Result<bool, AdminError> {
+    eprint!("{prompt} [y/n] ");
+    io::stderr()
+        .flush()
+        .map_err(|e| AdminError::Local(format!("write confirmation prompt: {e}")))?;
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .map_err(|e| AdminError::Local(format!("read confirmation response: {e}")))?;
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "sure"
+    ))
+}
+
+fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
+    #[derive(Serialize)]
+    struct ResultOutput<'a> {
+        #[serde(rename = "Result")]
+        result: &'a str,
+    }
+    print_structured(fmt, &ResultOutput { result: message })
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UserOutput {
+    id: u64,
+    name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    created_at: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    display_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    email: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    provider_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    provider: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    profile_pic_url: String,
+    #[serde(skip)]
+    created: String,
+}
+
+impl From<GrpcUser> for UserOutput {
+    fn from(user: GrpcUser) -> Self {
+        let created = user.created_at.as_ref().and_then(|ts| {
+            let nanos = u32::try_from(ts.nanos).ok()?;
+            DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
+        });
+        Self {
+            id: user.id,
+            name: user.name,
+            created_at: created
+                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_default(),
+            display_name: user.display_name,
+            email: user.email,
+            provider_id: user.provider_id,
+            provider: user.provider,
+            profile_pic_url: user.profile_pic_url,
+            created: created
+                .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_list_selector_matches_upstream_filter_precedence() {
+        assert_eq!(
+            list_selector(Some(42), Some("alice"), Some("alice@example.com")).id,
+            Some(42)
+        );
+        let by_name = list_selector(None, Some("alice"), Some("alice@example.com"));
+        assert_eq!(by_name.name, Some("alice"));
+        assert_eq!(by_name.email, None);
+        let by_email = list_selector(None, None, Some("alice@example.com"));
+        assert_eq!(by_email.email, Some("alice@example.com"));
+    }
+
+    #[test]
+    fn picture_url_validation_matches_upstream_permissive_parse() {
+        assert!(validate_picture_url("").is_ok());
+        assert!(validate_picture_url("https://example.com/alice.png").is_ok());
+        assert!(validate_picture_url("avatar.png").is_ok());
+        assert!(validate_picture_url("https://example.com/%zz").is_err());
+        assert!(validate_picture_url("https://example.com/\n").is_err());
     }
 }

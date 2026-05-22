@@ -146,7 +146,7 @@ mod tests {
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Users {
-                action: UsersCmd::List
+                action: UsersCmd::List { .. }
             }
         ));
     }

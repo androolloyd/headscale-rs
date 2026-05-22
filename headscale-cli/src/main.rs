@@ -475,7 +475,7 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Users {
-                action: UsersCmd::List
+                action: UsersCmd::List { .. }
             }
         ));
     }

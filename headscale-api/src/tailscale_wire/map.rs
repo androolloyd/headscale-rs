@@ -180,6 +180,67 @@ fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str) -> bool {
     }
 }
 
+fn visible_peer_ids_for_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    allowed_ids: Option<&BTreeSet<u64>>,
+) -> BTreeSet<u64> {
+    snapshot
+        .keys()
+        .filter(|node_key| node_key.as_str() != self_node_key)
+        .filter(|node_key| peer_allowed(allowed_ids, node_key))
+        .map(|node_key| stable_id_from_key(node_key))
+        .collect()
+}
+
+fn visible_peer_ids_for_registry(
+    machines: &crate::tailscale_wire::MachineRegistry,
+    policy: &PolicyStore,
+    self_node_key: &str,
+) -> BTreeSet<u64> {
+    let snapshot = machines.snapshot();
+    let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
+    let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let allowed_peer_ids =
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+    visible_peer_ids_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref())
+}
+
+fn visible_peer_map_nodes(
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    allowed_ids: Option<&BTreeSet<u64>>,
+    tailnet_domain: &str,
+    primary_routes: &HashMap<String, Vec<String>>,
+    exit_routes: &HashMap<String, Vec<String>>,
+    policy: &PolicyStore,
+) -> Vec<MapNode> {
+    let mut peers: Vec<MapNode> = snapshot
+        .iter()
+        .filter(|(node_key, _)| node_key.as_str() != self_node_key)
+        .filter(|(node_key, _)| peer_allowed(allowed_ids, node_key))
+        .map(|(node_key, rec)| {
+            let mut node = record_to_map_node(rec, tailnet_domain);
+            apply_routes_to_map_node(
+                &mut node,
+                primary_routes
+                    .get(node_key.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                exit_routes
+                    .get(node_key.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            );
+            apply_policy_attrs_to_map_node(&mut node, rec, policy);
+            node
+        })
+        .collect();
+    peers.sort_by_key(|node| node.id);
+    peers
+}
+
 fn user_profiles_for_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
     self_node_key: &str,
@@ -540,29 +601,15 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     // total. Iterating borrows the map; we never clone individual
     // records. `record_to_map_node` takes `&MachineRecord` so the
     // borrowed iter feeds it directly.
-    let mut peers: Vec<MapNode> = snapshot
-        .iter()
-        .filter(|(k, _)| k.as_str() != node_key_hex.as_str())
-        .filter(|(k, _)| peer_allowed(allowed_peer_ids.as_ref(), k.as_str()))
-        .map(|(node_key, rec)| {
-            let mut node = record_to_map_node(rec, &tailnet_domain);
-            apply_routes_to_map_node(
-                &mut node,
-                primary_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                exit_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            );
-            apply_policy_attrs_to_map_node(&mut node, rec, &state.policy);
-            node
-        })
-        .collect();
-    // Stable order so tests are deterministic.
-    peers.sort_by_key(|n| n.id);
+    let peers = visible_peer_map_nodes(
+        &snapshot,
+        &node_key_hex,
+        allowed_peer_ids.as_ref(),
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        &state.policy,
+    );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
     let user_profiles =
@@ -605,13 +652,18 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
         // Stream:true — emit length-prefixed zstd-compressed
         // MapResponse JSON chunks. See module decision log for the
         // wire-format details. The first chunk goes out immediately;
-        // subsequent chunks land either when the registry changes
-        // (full MapResponse rebuild) or after [`MAP_KEEPALIVE_INTERVAL`]
-        // (a compact `{"KeepAlive":true}` keepalive frame).
+        // registry wakes use incremental peer deltas, configuration
+        // wakes rebuild the broader snapshot, and keepalive ticks emit
+        // a compact `{"KeepAlive":true}` frame.
         //
         // Per `docs/tailscale-interop-blocker.md` "Wall 5":
         // the body must NOT terminate naturally — the client expects
         // to long-poll until it closes the connection itself.
+        let initial_peer_ids = resp
+            .peers
+            .iter()
+            .map(|peer| peer.id)
+            .collect::<BTreeSet<_>>();
         let first = match build_framed_chunk(&resp) {
             Ok(v) => v,
             Err(e) => {
@@ -661,6 +713,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 derp_map_for_stream,
                 dns_for_stream,
+                initial_peer_ids,
                 connection_guard,
             ),
             move |(
@@ -671,6 +724,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 self_node_key,
                 machines_derp_map,
                 dns,
+                last_peer_ids,
                 connection_guard,
             )| async move {
                 if let Some(initial) = first_opt {
@@ -684,6 +738,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             self_node_key,
                             machines_derp_map,
                             dns,
+                            last_peer_ids,
                             connection_guard,
                         ),
                     ));
@@ -698,7 +753,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                 // returns immediately rather than parking. That's the
                 // load-bearing property that closes the audit-2 C-1
                 // race — see the registry's `wake_waiters` doc.
-                let chunk = {
+                let (chunk, next_peer_ids) = {
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
                     let dns_for_wait = dns.clone();
@@ -714,22 +769,28 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         // keepalive frame and let the next iteration
                         // (or stream end) handle teardown.
                         if res.is_err() {
-                            build_keepalive_chunk()
+                            (build_keepalive_chunk(), last_peer_ids)
                         } else {
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "peers")
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, &last_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
                         // Policy edited via admin PUT — every parked
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "policy")
+                        (
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "policy"),
+                            visible_peer_ids_for_registry(&machines, &policy, &self_node_key),
+                        )
                     }
                     () = &mut dns_changed => {
                         // Extra-records file edited (or DnsStore.set_spec
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
-                        rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "config")
+                        (
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, "config"),
+                            visible_peer_ids_for_registry(&machines, &policy, &self_node_key),
+                        )
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
                         machines.record_mapresponse_sent_for_node(
@@ -737,7 +798,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                             "keepalive",
                             stable_id_from_key(&self_node_key),
                         );
-                        build_keepalive_chunk()
+                        (build_keepalive_chunk(), last_peer_ids)
                     }
                     }
                 };
@@ -751,6 +812,7 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
                         self_node_key,
                         machines_derp_map,
                         dns,
+                        next_peer_ids,
                         connection_guard,
                     ),
                 ))
@@ -771,13 +833,77 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
     }
 }
 
-/// Rebuild a single `MapResponse` chunk for an in-flight `Stream:true`
-/// `/machine/map` poller. Called once per registry / policy wake; the
-/// caller decides between this and `build_keepalive_chunk` based on
-/// what fired in the select. If the requesting node has been deleted
-/// from the registry between the wake and the rebuild, we emit a
-/// keepalive instead of a stale MapResponse — the next iteration
-/// handles teardown.
+/// Rebuild an incremental peer update for an in-flight `Stream:true`
+/// `/machine/map` poller after the registry changes. Upstream
+/// headscale sends the initial stream response as a full `Peers`
+/// snapshot, then uses `PeersChanged`/`PeersRemoved` for later node
+/// add/remove/update events instead of replacing the full peer list on
+/// every wake.
+fn rebuild_peer_delta_chunk(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    policy: &Arc<crate::policy::PolicyStore>,
+    self_node_key: &str,
+    dns: &Arc<DnsStore>,
+    last_peer_ids: &BTreeSet<u64>,
+) -> (Vec<u8>, BTreeSet<u64>) {
+    if machines.get(self_node_key).is_none() {
+        return (build_keepalive_chunk(), last_peer_ids.clone());
+    }
+    machines.record_mapresponse_generated("peers");
+    let snapshot = machines.snapshot();
+    let tailnet_domain = tailnet_domain(dns);
+    let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
+    let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let allowed_peer_ids =
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+    let self_node_id = stable_id_from_key(self_node_key);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
+    let peers_changed = visible_peer_map_nodes(
+        &snapshot,
+        self_node_key,
+        allowed_peer_ids.as_ref(),
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        policy,
+    );
+    let current_peer_ids = peers_changed
+        .iter()
+        .map(|peer| peer.id)
+        .collect::<BTreeSet<_>>();
+    let peers_removed = last_peer_ids
+        .difference(&current_peer_ids)
+        .copied()
+        .collect::<Vec<_>>();
+
+    let mr = MapResponse {
+        peers_changed,
+        peers_removed,
+        user_profiles: user_profiles_for_snapshot(
+            &snapshot,
+            self_node_key,
+            allowed_peer_ids.as_ref(),
+        ),
+        packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
+        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
+        control_time: Some(chrono::Utc::now()),
+        keep_alive: false,
+        node_key_expired: false,
+        ..MapResponse::default()
+    };
+    (
+        build_framed_chunk(&mr).unwrap_or_else(|_| build_keepalive_chunk()),
+        current_peer_ids,
+    )
+}
+
+/// Rebuild a full `MapResponse` chunk for an in-flight `Stream:true`
+/// `/machine/map` poller. Used for configuration-style wakes that
+/// still need the broader snapshot path. If the requesting node has
+/// been deleted from the registry between the wake and the rebuild,
+/// we emit a keepalive instead of a stale MapResponse — the next
+/// iteration handles teardown.
 fn rebuild_map_chunk(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
     policy: &Arc<crate::policy::PolicyStore>,
@@ -812,28 +938,15 @@ fn rebuild_map_chunk(
             .unwrap_or_default(),
     );
     apply_policy_attrs_to_map_node(&mut own_node, &own, policy);
-    let mut peers: Vec<MapNode> = snapshot
-        .iter()
-        .filter(|(k, _)| k.as_str() != self_node_key)
-        .filter(|(k, _)| peer_allowed(allowed_peer_ids.as_ref(), k.as_str()))
-        .map(|(node_key, rec)| {
-            let mut node = record_to_map_node(rec, &tailnet_domain);
-            apply_routes_to_map_node(
-                &mut node,
-                primary_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                exit_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            );
-            apply_policy_attrs_to_map_node(&mut node, rec, policy);
-            node
-        })
-        .collect();
-    peers.sort_by_key(|n| n.id);
+    let peers = visible_peer_map_nodes(
+        &snapshot,
+        self_node_key,
+        allowed_peer_ids.as_ref(),
+        &tailnet_domain,
+        &primary_routes,
+        &exit_routes,
+        policy,
+    );
     let dns_config = build_dns_for_snapshot(dns, &snapshot);
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
@@ -1852,12 +1965,17 @@ mod tests {
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(
-            mr.peers.len(),
-            1,
-            "second chunk should include the newly-registered peer"
+        assert!(
+            mr.peers.is_empty(),
+            "follow-up stream chunks use incremental peer deltas"
         );
-        assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
+        assert_eq!(
+            mr.peers_changed.len(),
+            1,
+            "second chunk should include the newly-registered peer as a delta"
+        );
+        assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
+        assert!(mr.peers_removed.is_empty());
 
         let metrics_resp = app
             .clone()
@@ -1946,7 +2064,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         // Now read the next chunk — must be the refreshed MapResponse
-        // (peers.len == 1), NOT a keepalive.
+        // (PeersChanged.len == 1), NOT a keepalive.
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -1954,13 +2072,66 @@ mod tests {
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(
+            mr.peers.is_empty(),
+            "follow-up stream chunks use incremental peer deltas"
+        );
         assert_eq!(
-            mr.peers.len(),
+            mr.peers_changed.len(),
             1,
             "wake fired during chunk-build window must surface on the next chunk; \
              got keepalive instead, indicating the lost-wake race regressed"
         );
-        assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
+        assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_emits_peers_removed_when_peer_disappears() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+
+        assert!(state.machines.delete(&b));
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
     }
 
     /// Stream:true: the response body emits the first framed

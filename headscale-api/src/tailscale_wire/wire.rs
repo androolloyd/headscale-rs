@@ -26,10 +26,10 @@
 //!   layer because the prefix is part of the on-wire identity. A
 //!   helper `strip_key_prefix` lives below for handlers that need the
 //!   raw bytes.
-//! - **`MapResponse.Peers` is the *only* peer-emission path we use.**
-//!   Tailscale's incremental update mechanism
-//!   (`PeersChanged{,Patch}`, `PeerSeenChange`) is intentionally not
-//!   modelled — the interop test only needs the first full snapshot.
+//! - **`MapResponse.Peers` is the first-snapshot peer-emission path.**
+//!   Streaming registry updates use the current tailcfg delta fields
+//!   (`PeersChanged`, `PeersRemoved`, and packet-filter deltas) so
+//!   long-poll behavior can move toward headscale-go's map batcher.
 
 use std::collections::{BTreeMap, HashMap};
 

@@ -260,6 +260,7 @@ async fn register_inner(
         os: requested_os,
         os_version: requested_os_version,
         available_routes,
+        ssh_host_keys: requested_ssh_host_keys,
     } = match register_hostinfo_parts(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
@@ -343,6 +344,14 @@ async fn register_inner(
                     existing.home_derp,
                 )
             });
+    let ssh_host_keys = if requested_ssh_host_keys.is_empty() {
+        existing_machine
+            .as_ref()
+            .map(|(_, existing)| existing.ssh_host_keys.clone())
+            .unwrap_or_default()
+    } else {
+        requested_ssh_host_keys
+    };
     let os = if requested_os.is_empty() {
         existing_machine
             .as_ref()
@@ -387,6 +396,7 @@ async fn register_inner(
         forced_tags,
         available_routes,
         approved_routes,
+        ssh_host_keys,
         register_method: 1,
     };
     if let Some((old_node_key_hex, _)) = existing_machine {
@@ -415,6 +425,7 @@ async fn register_interactive(
         os,
         os_version,
         available_routes,
+        ssh_host_keys,
     } = match register_hostinfo_parts(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
@@ -444,6 +455,7 @@ async fn register_interactive(
         forced_tags: requested_tags,
         available_routes,
         approved_routes: Vec::new(),
+        ssh_host_keys,
         register_method: 0,
     };
     state
@@ -467,6 +479,7 @@ struct RegisterHostInfoParts {
     os: String,
     os_version: String,
     available_routes: Vec<String>,
+    ssh_host_keys: Vec<String>,
 }
 
 fn register_hostinfo_parts(
@@ -493,6 +506,9 @@ fn register_hostinfo_parts(
         os: hostinfo.map(|h| h.os.clone()).unwrap_or_default(),
         os_version: hostinfo.map(|h| h.os_version.clone()).unwrap_or_default(),
         available_routes,
+        ssh_host_keys: hostinfo
+            .map(|h| h.ssh_host_keys.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -761,6 +777,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             os_version: rec.os_version.clone(),
             routable_ips: rec.available_routes.clone(),
             request_tags: Vec::new(),
+            ssh_host_keys: rec.ssh_host_keys.clone(),
             net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
                 preferred_derp: rec.home_derp,
                 ..crate::tailscale_wire::wire::NetInfo::default()

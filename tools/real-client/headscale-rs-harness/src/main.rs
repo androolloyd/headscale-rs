@@ -380,7 +380,7 @@ async fn register_pending(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let record = state.machines.complete_web_registration(record, user, 2);
+    let record = state.machines.complete_web_registration(record, &user, 2);
     if !state
         .registration_cache
         .complete(&registration_id, record.clone())

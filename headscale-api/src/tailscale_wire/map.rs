@@ -638,6 +638,10 @@ async fn map_inner(state: WireState, node_key_hex: String, req: MapRequest) -> R
             own.home_derp = net_info.preferred_derp;
             record_changed = true;
         }
+        if !hostinfo.ssh_host_keys.is_empty() && own.ssh_host_keys != hostinfo.ssh_host_keys {
+            own.ssh_host_keys.clone_from(&hostinfo.ssh_host_keys);
+            record_changed = true;
+        }
 
         let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
             Ok(routes) => routes,
@@ -1781,7 +1785,8 @@ mod tests {
                             "Hostinfo": {
                                 "Hostname": "new-host",
                                 "OS": "darwin",
-                                "OSVersion": "15.1"
+                                "OSVersion": "15.1",
+                                "sshHostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkey"]
                             }
                         }))
                         .unwrap(),
@@ -1799,11 +1804,19 @@ mod tests {
         assert_eq!(rec.hostname, "new-host");
         assert_eq!(rec.os, "darwin");
         assert_eq!(rec.os_version, "15.1");
+        assert_eq!(
+            rec.ssh_host_keys,
+            vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkey"]
+        );
 
         let map_node = record_to_map_node(&rec, "tail.example");
         assert_eq!(map_node.hostinfo.hostname, "new-host");
         assert_eq!(map_node.hostinfo.os, "darwin");
         assert_eq!(map_node.hostinfo.os_version, "15.1");
+        assert_eq!(
+            map_node.hostinfo.ssh_host_keys,
+            vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkey"]
+        );
     }
 
     #[tokio::test]
@@ -3025,6 +3038,7 @@ mod tests {
         let disco_a = format!("discokey:{}", "1a".repeat(32));
         let endpoints_a = vec!["10.0.0.10:41641".to_string(), "[fe80::1]:41641".to_string()];
         let home_derp_a = 901;
+        let ssh_host_keys_a = vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIpeerakey".to_string()];
 
         // Peer-a posts a /map call with DiscoKey + Endpoints + NetInfo set.
         let req_a = serde_json::json!({
@@ -3032,6 +3046,7 @@ mod tests {
             "DiscoKey": &disco_a,
             "Endpoints": &endpoints_a,
             "Hostinfo": {
+                "sshHostKeys": &ssh_host_keys_a,
                 "NetInfo": {
                     "PreferredDERP": home_derp_a
                 }
@@ -3056,10 +3071,12 @@ mod tests {
         assert_eq!(rec_a.disco_key.as_deref(), Some(disco_a.as_str()));
         assert_eq!(rec_a.endpoints, endpoints_a);
         assert_eq!(rec_a.home_derp, home_derp_a);
+        assert_eq!(rec_a.ssh_host_keys, ssh_host_keys_a);
 
         // Peer-b polls /map and must see peer-a's DiscoKey, Endpoints,
-        // HomeDERP, and Hostinfo.NetInfo on its MapNode entry. Pins both
-        // the wire-tag spelling and the payload value.
+        // HomeDERP, Hostinfo.NetInfo, and Tailscale SSH host keys on its
+        // MapNode entry. Pins both the wire-tag spelling and the payload
+        // value.
         let req_b = serde_json::json!({ "Version": 39 });
         let resp = app
             .oneshot(
@@ -3091,6 +3108,10 @@ mod tests {
             raw_str.contains("\"PreferredDERP\""),
             "PreferredDERP tag present on the wire: {raw_str}"
         );
+        assert!(
+            raw_str.contains("\"sshHostKeys\""),
+            "sshHostKeys tag present on the wire: {raw_str}"
+        );
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers.len(), 1);
         let peer_a = &mr.peers[0];
@@ -3109,6 +3130,7 @@ mod tests {
                 .map(|net_info| net_info.preferred_derp),
             Some(home_derp_a)
         );
+        assert_eq!(peer_a.hostinfo.ssh_host_keys, ssh_host_keys_a);
     }
 
     #[tokio::test]

@@ -1377,6 +1377,7 @@ mod registry_tests {
             forced_tags: Vec::new(),
             available_routes: Vec::new(),
             approved_routes: Vec::new(),
+            ssh_host_keys: Vec::new(),
             register_method: 1,
         }
     }

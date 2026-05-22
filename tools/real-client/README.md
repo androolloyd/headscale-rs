@@ -392,3 +392,29 @@ Additional knobs:
 - `REAL_CLIENT_EXIT_ROUTES` defaults to `0.0.0.0/0,::/0`.
 - `REAL_CLIENT_ADVERTISE_EXIT_NODE` defaults to `true` in the exit-node
   wrappers.
+
+## Tailscale SSH Smoke
+
+The SSH scenario enables Tailscale SSH on stock clients, installs the
+OpenSSH client package inside the client containers, creates the local
+`ssh-it-user`, and runs actual `tailscale ssh` commands. The first pass checks
+same-user `autogroup:self` success plus cross-user policy denial; the second
+pass keeps the SSH policy but blocks port 22 in ACLs and expects the SSH
+attempt to time out.
+
+```sh
+tools/real-client/ssh-smoke.sh
+tools/real-client/ssh-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_SSH_USER` defaults to `ssh-it-user`.
+- `REAL_CLIENT_EXPECT_SSH_MATRIX` defaults to
+  `1:2:allow,2:1:allow,1:3:deny,3:1:deny` for the first pass.
+- `REAL_CLIENT_TIMEOUT_EXPECT_SSH_MATRIX` defaults to `1:2:timeout` for the
+  ACL-blocked pass.
+- `REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS` defaults to `12`.
+- `REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS` defaults to `30`; this fails fast
+  when a control server does not re-emit peer `sshHostKeys`, which the
+  `tailscale ssh` wrapper needs for strict host-key checking.

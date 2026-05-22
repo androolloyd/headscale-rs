@@ -60,6 +60,7 @@ pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
 /// | `CreatedAt time.Time`                            | `created_at`       |
 /// | `ForcedTags []string`                            | `forced_tags`      |
 /// | `Hostinfo.Hostname/OS/OSVersion`                 | `hostname`/`os`/`os_version` |
+/// | `Hostinfo.sshHostKeys`                           | `ssh_host_keys`    |
 ///
 /// `Expiry` is reflected into map-node `KeyExpiry`/`Expired` state.
 /// Stock clients derive their own `NeedsLogin` transition from the
@@ -139,6 +140,11 @@ pub struct MachineRecord {
     /// emitted as `MapNode.AllowedIPs` in addition to the node's own
     /// `/32` address.
     pub approved_routes: Vec<String>,
+    /// Tailscale SSH host keys advertised by the client in
+    /// `Hostinfo.sshHostKeys`. Peers need these in their MapNode
+    /// Hostinfo for strict host-key checks before `tailscale ssh`
+    /// can evaluate SSH policy.
+    pub ssh_host_keys: Vec<String>,
     /// Upstream `headscale.v1.RegisterMethod` numeric value. Auth-key
     /// registration is the normal wire path default.
     pub register_method: i32,
@@ -222,6 +228,7 @@ impl MachineRecord {
             forced_tags: Vec::new(),
             available_routes: Vec::new(),
             approved_routes: Vec::new(),
+            ssh_host_keys: Vec::new(),
             register_method: 1,
         }
     }

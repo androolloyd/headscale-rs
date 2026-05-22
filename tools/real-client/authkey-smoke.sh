@@ -33,6 +33,17 @@ expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
+enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
+install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
+ssh_user="${REAL_CLIENT_SSH_USER:-}"
+expected_ssh_matrix="${REAL_CLIENT_EXPECT_SSH_MATRIX:-}"
+ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
+ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
+if [[ -n "${expected_ssh_matrix}" ]]; then
+  enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-true}"
+  install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-true}"
+  ssh_user="${ssh_user:-ssh-it-user}"
+fi
 case "${login_mode}" in
   authkey | web) ;;
   *)
@@ -40,6 +51,46 @@ case "${login_mode}" in
     exit 2
     ;;
 esac
+case "${enable_tailscale_ssh}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    enable_tailscale_ssh_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    enable_tailscale_ssh_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ENABLE_TAILSCALE_SSH must be true or false, got ${enable_tailscale_ssh}" >&2
+    exit 2
+    ;;
+esac
+case "${install_openssh}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    install_openssh_client=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    install_openssh_client=0
+    ;;
+  *)
+    echo "REAL_CLIENT_INSTALL_OPENSSH must be true or false, got ${install_openssh}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${expected_ssh_matrix}" && -z "${ssh_user}" ]]; then
+  echo "REAL_CLIENT_EXPECT_SSH_MATRIX requires REAL_CLIENT_SSH_USER" >&2
+  exit 2
+fi
+if [[ -n "${ssh_user}" && ! "${ssh_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  echo "REAL_CLIENT_SSH_USER must be a simple Linux username, got ${ssh_user}" >&2
+  exit 2
+fi
+if ! [[ "${ssh_attempt_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_attempt_timeout_secs < 1)); then
+  echo "REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS must be a positive integer, got ${ssh_attempt_timeout_secs}" >&2
+  exit 2
+fi
+if ! [[ "${ssh_host_key_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_host_key_timeout_secs < 1)); then
+  echo "REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS must be a positive integer, got ${ssh_host_key_timeout_secs}" >&2
+  exit 2
+fi
 case "${expected_register_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     expect_register_failure=1
@@ -318,6 +369,52 @@ tailscale_peer_count_matches() {
   ' "${count}" <<<"${status_json}"
 }
 
+tailscale_ssh_attempt() {
+  local source_name="$1"
+  local target_name="$2"
+  local stdout_path="$3"
+  local stderr_path="$4"
+  docker exec "${source_name}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" hostname' \
+    sh "${ssh_attempt_timeout_secs}" "${ssh_user}" "${target_name}" \
+    >"${stdout_path}" \
+    2>"${stderr_path}"
+}
+
+tailscale_ssh_succeeded() {
+  local source_name="$1"
+  local target_name="$2"
+  local stdout_path="${work_dir}/ssh-${source_name}-to-${target_name}.stdout"
+  local stderr_path="${work_dir}/ssh-${source_name}-to-${target_name}.stderr"
+  tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" || return 1
+  grep -Fxq "${target_name}" "${stdout_path}"
+}
+
+tailscale_peer_has_ssh_host_keys() {
+  local source_name="$1"
+  local target_name="$2"
+  local status_json
+  status_json="$(docker exec "${source_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    peer = (status["Peer"] || {}).each_value.find { |p| p["HostName"] == ARGV.fetch(0) }
+    keys = Array(peer && (peer["SSH_HostKeys"] || peer["SSHHostKeys"] || peer["sshHostKeys"]))
+    exit(keys.empty? ? 1 : 0)
+  ' "${target_name}" <<<"${status_json}"
+}
+
+wait_for_ssh_host_keys() {
+  local source_name="$1"
+  local target_name="$2"
+  local deadline=$((SECONDS + ssh_host_key_timeout_secs))
+  until tailscale_peer_has_ssh_host_keys "${source_name}" "${target_name}"; do
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 write_registration_id() {
   local client_name="$1"
   local output_path="$2"
@@ -427,6 +524,13 @@ fi
 
 echo "::group::start stock tailscale client"
 for client_name in "${client_names[@]}"; do
+  client_entry='update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
+  if ((install_openssh_client)); then
+    client_entry="apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; ${client_entry}"
+  fi
+  if [[ -n "${ssh_user}" ]]; then
+    client_entry="id '${ssh_user}' >/dev/null 2>&1 || adduser -D -h '/home/${ssh_user}' -s /bin/sh '${ssh_user}' >/tmp/adduser-${ssh_user}.log 2>&1; ${client_entry}"
+  fi
   docker run -d \
     --name "${client_name}" \
     --hostname "${client_name}" \
@@ -434,7 +538,7 @@ for client_name in "${client_names[@]}"; do
     -v "${work_dir}/state/tls.crt:/usr/local/share/ca-certificates/headscale-rs.crt:ro" \
     --entrypoint /bin/sh \
     "${image}" \
-    -ceu 'update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
+    -ceu "${client_entry}" \
     >/dev/null
 
   wait_for "tailscaled local socket ${client_name}" \
@@ -458,6 +562,9 @@ for idx in "${!client_names[@]}"; do
   fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  if ((enable_tailscale_ssh_flag)); then
+    up_args+=(--ssh)
   fi
   if [[ "${login_mode}" == "web" && -n "${preauth_tags}" ]]; then
     up_args+=("--advertise-tags=${preauth_tags}")
@@ -540,6 +647,9 @@ if ((do_reauth_after_login)); then
     )
     if [[ -n "${reauth_tags}" ]]; then
       reauth_args+=("--advertise-tags=${reauth_tags}")
+    fi
+    if ((enable_tailscale_ssh_flag)); then
+      reauth_args+=(--ssh)
     fi
     up_status=0
     docker exec "${client_name}" "${reauth_args[@]}" \
@@ -835,6 +945,101 @@ if [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]]; then
       puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
     end
   ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_ssh_matrix}" ]]; then
+  echo "::group::assert tailscale ssh matrix"
+  IFS=',' read -r -a ssh_checks <<<"${expected_ssh_matrix}"
+  ssh_results=()
+  for raw_check in "${ssh_checks[@]}"; do
+    check="${raw_check//[[:space:]]/}"
+    if [[ ! "${check}" =~ ^([0-9]+):([0-9]+):(allow|deny|timeout)$ ]]; then
+      echo "REAL_CLIENT_EXPECT_SSH_MATRIX entries must be source_index:target_index:allow|deny|timeout, got ${raw_check}" >&2
+      exit 2
+    fi
+    source_idx="${BASH_REMATCH[1]}"
+    target_idx="${BASH_REMATCH[2]}"
+    expected_ssh="${BASH_REMATCH[3]}"
+    if ((source_idx < 1 || source_idx > client_count || target_idx < 1 || target_idx > client_count)); then
+      echo "SSH matrix index out of range for ${client_count} clients: ${check}" >&2
+      exit 2
+    fi
+    source_name="${client_names[$((source_idx - 1))]}"
+    target_name="${client_names[$((target_idx - 1))]}"
+    stdout_path="${work_dir}/ssh-${source_name}-to-${target_name}-${expected_ssh}.stdout"
+    stderr_path="${work_dir}/ssh-${source_name}-to-${target_name}-${expected_ssh}.stderr"
+
+    # TODO(real-client SSH): when this fails, the control plane is not
+    # re-emitting peer sshHostKeys in MapNode.HostInfo;
+    # `tailscale ssh` fails strict host-key checking before policy
+    # allow/deny evaluation can run.
+    if ! wait_for_ssh_host_keys "${source_name}" "${target_name}"; then
+      docker exec "${source_name}" tailscale status --json >"${work_dir}/ssh-${source_name}-status-missing-hostkeys.json" || true
+      echo "timed out waiting for ${source_name} to learn ${target_name} SSH host keys; tailscale ssh cannot run strict host-key checks without peer sshHostKeys" >&2
+      exit 1
+    fi
+
+    case "${expected_ssh}" in
+      allow)
+        if ! wait_for "tailscale ssh ${source_name} to ${target_name}" \
+          "tailscale_ssh_succeeded '${source_name}' '${target_name}'"; then
+          cat "${work_dir}/ssh-${source_name}-to-${target_name}.stderr" >&2 || true
+          dump_client_debug "${source_name}"
+          dump_client_debug "${target_name}"
+          exit 1
+        fi
+        cp "${work_dir}/ssh-${source_name}-to-${target_name}.stdout" "${stdout_path}"
+        cp "${work_dir}/ssh-${source_name}-to-${target_name}.stderr" "${stderr_path}"
+        ;;
+      deny)
+        ssh_status=0
+        tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" ||
+          ssh_status="$?"
+        if ((ssh_status == 0)); then
+          echo "expected tailscale ssh ${source_name} to ${target_name} to be denied" >&2
+          exit 1
+        fi
+        if [[ -s "${stdout_path}" ]]; then
+          echo "expected denied tailscale ssh stdout to be empty, got:" >&2
+          cat "${stdout_path}" >&2
+          exit 1
+        fi
+        if ! grep -Eq 'Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node' "${stderr_path}"; then
+          echo "expected tailscale ssh denial stderr, got:" >&2
+          cat "${stderr_path}" >&2 || true
+          exit 1
+        fi
+        ;;
+      timeout)
+        ssh_status=0
+        tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" ||
+          ssh_status="$?"
+        if ((ssh_status == 0)); then
+          echo "expected tailscale ssh ${source_name} to ${target_name} to time out" >&2
+          exit 1
+        fi
+        if [[ -s "${stdout_path}" ]]; then
+          echo "expected timed-out tailscale ssh stdout to be empty, got:" >&2
+          cat "${stdout_path}" >&2
+          exit 1
+        fi
+        if grep -Eq 'Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node' "${stderr_path}"; then
+          echo "expected packet-filter timeout, got SSH policy denial:" >&2
+          cat "${stderr_path}" >&2 || true
+          exit 1
+        fi
+        if ! grep -Eq 'Connection timed out|Operation timed out' "${stderr_path}" &&
+          ((ssh_status != 124 && ssh_status != 137 && ssh_status != 143)); then
+          echo "expected tailscale ssh timeout status/stderr, got status ${ssh_status}:" >&2
+          cat "${stderr_path}" >&2 || true
+          exit 1
+        fi
+        ;;
+    esac
+    ssh_results+=("${source_name}->${target_name}:${expected_ssh}")
+  done
+  ruby -rjson -e 'puts JSON.pretty_generate({ssh_checks: ARGV})' "${ssh_results[@]}"
   echo "::endgroup::"
 fi
 

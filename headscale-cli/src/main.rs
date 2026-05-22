@@ -130,6 +130,12 @@ enum Commands {
     /// Check the health of the Headscale server.
     Health,
 
+    /// Print the version.
+    Version,
+
+    /// Test the configuration.
+    Configtest,
+
     /// Check control plane status (legacy health probe — not the admin
     /// surface; uses the wire layer's `/health` endpoint).
     Status {
@@ -313,6 +319,10 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             .await
             .map_err(Into::into),
         Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
+        Commands::Version => {
+            print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)
+        }
+        Commands::Configtest => configtest(config.as_ref()).map_err(MainError::Other),
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -365,6 +375,77 @@ fn option_is_empty(value: Option<&String>) -> bool {
 
 fn non_empty_clone(value: Option<&String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty()).cloned()
+}
+
+fn configtest(config: Option<&CliConfig>) -> Result<()> {
+    config.context("--config is required for configtest")?;
+    Ok(())
+}
+
+fn print_version(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
+    let version = VersionInfo::current();
+    if fmt.is_structured() {
+        match fmt {
+            headscale_cli::admin::OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&version)?);
+            }
+            headscale_cli::admin::OutputFormat::JsonLine => {
+                println!("{}", serde_json::to_string(&version)?);
+            }
+            headscale_cli::admin::OutputFormat::Yaml => {
+                print!("{}", serde_yaml::to_string(&version)?);
+            }
+            headscale_cli::admin::OutputFormat::Table => unreachable!(),
+        }
+    } else {
+        print!("{}", version.human());
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct VersionInfo {
+    version: &'static str,
+    commit: &'static str,
+    #[serde(rename = "buildTime")]
+    build_time: &'static str,
+    rust: RustInfo,
+    dirty: bool,
+}
+
+#[derive(serde::Serialize)]
+struct RustInfo {
+    version: &'static str,
+    os: &'static str,
+    arch: &'static str,
+}
+
+impl VersionInfo {
+    fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            commit: option_env!("HEADSCALE_RS_COMMIT").unwrap_or("unknown"),
+            build_time: option_env!("HEADSCALE_RS_BUILD_TIME").unwrap_or("unknown"),
+            rust: RustInfo {
+                version: option_env!("RUSTC_VERSION").unwrap_or("unknown"),
+                os: std::env::consts::OS,
+                arch: std::env::consts::ARCH,
+            },
+            dirty: option_env!("HEADSCALE_RS_DIRTY").is_some_and(|value| value == "true"),
+        }
+    }
+
+    fn human(&self) -> String {
+        format!(
+            "headscale-rs version {}\ncommit: {}\nbuild time: {}\nbuilt with: rust {} {}/{}\n",
+            self.version,
+            self.commit,
+            self.build_time,
+            self.rust.version,
+            self.rust.os,
+            self.rust.arch
+        )
+    }
 }
 
 /// Serializable identity wrapper for CLI persistence.
@@ -628,6 +709,32 @@ mod tests {
                 action: DebugCmd::CreateNode { .. }
             }
         ));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_version_and_configtest_commands() {
+        let parsed = Cli::try_parse_from(["headscale", "version"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Version));
+
+        let parsed = Cli::try_parse_from(["headscale", "configtest"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Configtest));
+    }
+
+    #[test]
+    fn version_output_matches_rust_runtime_shape() {
+        let version = VersionInfo::current();
+
+        assert_eq!(version.version, env!("CARGO_PKG_VERSION"));
+        assert!(!version.commit.is_empty());
+        assert!(!version.build_time.is_empty());
+        assert_eq!(version.rust.os, std::env::consts::OS);
+        assert!(version.human().contains("headscale-rs version"));
+    }
+
+    #[test]
+    fn configtest_requires_loaded_config() {
+        assert!(configtest(None).is_err());
+        assert!(configtest(Some(&CliConfig::default())).is_ok());
     }
 
     #[test]

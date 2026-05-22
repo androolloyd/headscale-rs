@@ -2248,6 +2248,7 @@ mod upstream_tests {
         let node_key_hex = "77".repeat(32);
         let machine_key_hex = "88".repeat(32);
         let body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Expiry": "2026-06-01T00:00:00Z",
             "Hostinfo": {
@@ -2278,6 +2279,7 @@ mod upstream_tests {
         assert_eq!(registration_cache.len(), 1);
 
         let followup_body = serde_json::json!({
+            "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
             "Followup": pending_response.auth_url,
         });

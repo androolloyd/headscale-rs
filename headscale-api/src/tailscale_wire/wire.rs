@@ -42,6 +42,26 @@ use serde_json::Value;
 pub const TAGGED_DEVICES_USER_ID: u64 = 2_147_455_555;
 pub const TAGGED_DEVICES_LOGIN_NAME: &str = "tagged-devices";
 pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
+/// Mirrors upstream headscale-go `capver.MinSupportedCapabilityVersion`.
+pub const MIN_SUPPORTED_CAPABILITY_VERSION: u32 = 113;
+
+pub(crate) fn is_supported_capability_version(version: u32) -> bool {
+    version >= MIN_SUPPORTED_CAPABILITY_VERSION
+}
+
+pub(crate) fn unsupported_client_error(version: u32) -> String {
+    format!(
+        "unsupported client version: {} ({version})",
+        tailscale_version_for_capability(version).unwrap_or("")
+    )
+}
+
+fn tailscale_version_for_capability(version: u32) -> Option<&'static str> {
+    match version {
+        113 => Some("v1.80"),
+        _ => None,
+    }
+}
 
 /// One registered machine's state, kept in the in-memory
 /// `MachineRegistry` after a successful `register`.

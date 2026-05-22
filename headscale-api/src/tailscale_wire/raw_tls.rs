@@ -631,13 +631,16 @@ mod tests {
         let server_pub = state.server_noise_key.public_bytes();
 
         // Build the initiation frame the way a real client would.
-        let mut init = state.server_noise_key.build_initiator(&server_pub).unwrap();
+        let mut init = state
+            .server_noise_key
+            .build_initiator_for_version(&server_pub, 113)
+            .unwrap();
         let mut init_body = vec![0u8; 1024];
         let n = init.write_message(b"", &mut init_body).unwrap();
         init_body.truncate(n);
         // Upstream layout: [version:u16be][type=1:u8][len:u16be][body...]
         let mut init_frame = Vec::new();
-        init_frame.extend_from_slice(&39u16.to_be_bytes());
+        init_frame.extend_from_slice(&113u16.to_be_bytes());
         init_frame.push(MsgType::Initiation as u8);
         init_frame.extend_from_slice(&(init_body.len() as u16).to_be_bytes());
         init_frame.extend_from_slice(&init_body);

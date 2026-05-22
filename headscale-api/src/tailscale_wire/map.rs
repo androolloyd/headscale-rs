@@ -69,7 +69,8 @@ use super::register::record_to_map_node;
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PeerChange,
-    PortRange, UserProfile, stable_id_from_key, strip_key_prefix,
+    PortRange, UserProfile, is_supported_capability_version, stable_id_from_key, strip_key_prefix,
+    unsupported_client_error,
 };
 use super::{MachineRecord, WireState};
 
@@ -549,6 +550,9 @@ pub async fn handle_map(
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    if let Err(resp) = reject_unsupported_capability(req.version) {
+        return resp;
+    }
     let node_key_hex = match strip_key_prefix(&node_key_path) {
         Some(h) => h.to_string(),
         None => node_key_path.clone(),
@@ -573,6 +577,9 @@ pub async fn handle_map_flat(
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    if let Err(resp) = reject_unsupported_capability(req.version) {
+        return resp;
+    }
     let node_key_hex = match strip_key_prefix(&req.node_key) {
         Some(h) => h.to_string(),
         None => req.node_key.clone(),
@@ -1104,6 +1111,19 @@ fn validate_map_machine_key(
         .into_response())
 }
 
+fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
+    if is_supported_capability_version(version) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: unsupported_client_error(version),
+        }),
+    )
+        .into_response())
+}
+
 /// Rebuild an incremental peer update for an in-flight `Stream:true`
 /// `/machine/map` poller after the registry changes. Upstream
 /// headscale sends the initial stream response as a full `Peers`
@@ -1471,7 +1491,7 @@ mod tests {
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({ "Version": 112 })).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -1490,11 +1510,11 @@ mod tests {
         // own node has the requester's IP
         let node = mr.node.as_ref().expect("own node present");
         assert_eq!(node.addresses[0], "100.64.0.10/32");
-        assert_eq!(node.cap, 112);
+        assert_eq!(node.cap, 113);
         assert_eq!(mr.peers.len(), 1);
         assert_eq!(mr.peers[0].addresses[0], "100.64.0.11/32");
         assert_eq!(mr.peers[0].name, "peer-b");
-        assert_eq!(mr.peers[0].cap, 112);
+        assert_eq!(mr.peers[0].cap, 113);
         assert_eq!(mr.domain, "");
         assert_eq!(mr.collect_services, Some(false));
         assert!(mr.control_time.is_some());
@@ -1514,6 +1534,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_rejects_unsupported_capability_version_before_node_lookup() {
+        let (state, _dir) = fixture();
+        let node_key = "a2".repeat(32);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "Version": 112 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "unsupported client version:  (112)");
+    }
+
+    #[tokio::test]
     async fn map_requires_noise_machine_key() {
         let (state, _dir) = fixture();
         let node_key = "a0".repeat(32);
@@ -1526,7 +1571,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{node_key}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -1546,7 +1591,7 @@ mod tests {
             .method("POST")
             .uri(format!("/machine/nodekey:{node_key}/map"))
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(b"{}".to_vec()))
+            .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
             .unwrap();
         req.extensions_mut()
             .insert(NoisePeerMachineKey("11".repeat(32)));
@@ -1600,7 +1645,7 @@ mod tests {
                     .uri(format!("/machine/nodekey:{server}/map"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -1640,7 +1685,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{server}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -1709,7 +1754,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{server}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -1763,7 +1808,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{router_key}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -1813,7 +1858,7 @@ mod tests {
                     .uri(format!("/machine/nodekey:{alice}/map"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -1863,6 +1908,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
                             "OmitPeers": true,
                             "Hostinfo": {
                                 "RoutableIPs": [
@@ -1923,7 +1969,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{alice}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -1953,6 +1999,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
                             "OmitPeers": true,
                             "Hostinfo": {
                                 "Hostname": "new-host",
@@ -2055,6 +2102,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
                             "OmitPeers": true,
                             "DiscoKey": disco_key,
                             "Endpoints": endpoints,
@@ -2126,7 +2174,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2159,7 +2207,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2209,7 +2257,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2277,7 +2325,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{}/map", "ff".repeat(32)))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2310,7 +2358,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2338,7 +2386,7 @@ mod tests {
         let app = router(state);
         let req = serde_json::json!({
             "NodeKey": format!("nodekey:{a}"),
-            "Version": 39,
+            "Version": 113,
         });
         let resp = app
             .oneshot(
@@ -2374,7 +2422,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{a}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2393,7 +2441,7 @@ mod tests {
                     .method("POST")
                     .uri("/machine/map")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -2434,7 +2482,7 @@ mod tests {
 
         let app = router(state.clone());
         let public_app = public_router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -2552,7 +2600,7 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2623,7 +2671,7 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 112 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2692,7 +2740,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2741,7 +2789,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2814,7 +2862,7 @@ mod tests {
         );
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 112 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -2845,7 +2893,7 @@ mod tests {
         );
 
         let update_req = serde_json::json!({
-            "Version": 39,
+            "Version": 113,
             "OmitPeers": true,
             "Hostinfo": {
                 "RoutableIPs": ["10.30.1.0/24"]
@@ -2885,7 +2933,7 @@ mod tests {
         let peer = &mr.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&router_key));
         assert_eq!(peer.name, "router");
-        assert_eq!(peer.cap, 112);
+        assert_eq!(peer.cap, 113);
         assert!(
             peer.hostinfo
                 .routable_ips
@@ -2918,7 +2966,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -2948,7 +2996,7 @@ mod tests {
 
         let new_endpoints = vec!["10.0.0.10:41641".to_string(), "10.0.0.20:41641".to_string()];
         let update_req = serde_json::json!({
-            "Version": 39,
+            "Version": 113,
             "OmitPeers": true,
             "DiscoKey": format!("discokey:{}", "1a".repeat(32)),
             "Endpoints": &new_endpoints,
@@ -3006,7 +3054,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -3038,7 +3086,7 @@ mod tests {
         );
 
         let update_req = serde_json::json!({
-            "Version": 39,
+            "Version": 113,
             "OmitPeers": true,
             "DiscoKey": &new_disco,
         });
@@ -3101,7 +3149,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
-        let stream_req = serde_json::json!({ "Stream": true, "Version": 39 });
+        let stream_req = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -3138,7 +3186,7 @@ mod tests {
         );
 
         let update_req = serde_json::json!({
-            "Version": 39,
+            "Version": 113,
             "OmitPeers": true,
             "Hostinfo": {
                 "NetInfo": {
@@ -3201,7 +3249,7 @@ mod tests {
 
         let app = router(state.clone());
         let public_app = public_router(state);
-        let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113 });
         let resp = app
             .clone()
             .oneshot(
@@ -3332,7 +3380,7 @@ mod tests {
 
         // Peer-a posts a /map call with DiscoKey + Endpoints + NetInfo set.
         let req_a = serde_json::json!({
-            "Version": 39,
+            "Version": 113,
             "DiscoKey": &disco_a,
             "Endpoints": &endpoints_a,
             "Hostinfo": {
@@ -3367,7 +3415,7 @@ mod tests {
         // HomeDERP, Hostinfo.NetInfo, and Tailscale SSH host keys on its
         // MapNode entry. Pins both the wire-tag spelling and the payload
         // value.
-        let req_b = serde_json::json!({ "Version": 39 });
+        let req_b = serde_json::json!({ "Version": 113 });
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -3476,7 +3524,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{server}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -3526,7 +3574,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{node_key}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -3576,7 +3624,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{node_key}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await
@@ -3621,7 +3669,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/machine/nodekey:{node_key}/map"))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
                     .unwrap(),
             )
             .await

@@ -63,6 +63,7 @@ use snow::{Builder, params::NoiseParams};
 
 use super::be_transport::{BeNoiseStream, BeTransport};
 use super::controlbase::{FrameHeader, Framed, MsgType};
+use super::wire::{is_supported_capability_version, unsupported_client_error};
 use super::{WireError, WireState};
 
 /// Machine key learned from the client's TS2021 Noise static key.
@@ -189,12 +190,24 @@ impl ServerNoiseKey {
         &self,
         remote_static: &[u8; 32],
     ) -> Result<snow::HandshakeState, WireError> {
+        self.build_initiator_for_version(remote_static, NOISE_CAPABILITY_VERSION)
+    }
+
+    /// Build an IK initiator targeting `remote_static` with an
+    /// explicit protocol version in the prologue. This is primarily
+    /// useful for parity tests that need to exercise the current
+    /// upstream-supported client capability floor.
+    pub fn build_initiator_for_version(
+        &self,
+        remote_static: &[u8; 32],
+        protocol_version: u16,
+    ) -> Result<snow::HandshakeState, WireError> {
         let priv_g = self.private.lock();
         let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
         Builder::new(params)
             .local_private_key(&priv_g)
             .remote_public_key(remote_static)
-            .prologue(&prologue_bytes(NOISE_CAPABILITY_VERSION))
+            .prologue(&prologue_bytes(protocol_version))
             .build_initiator()
             .map_err(noise_err)
     }
@@ -489,6 +502,7 @@ where
         len = init_body.len(),
         "ts2021 received initiation"
     );
+    reject_unsupported_noise_capability(proto_version)?;
 
     // Step 2: drive Noise IK responder. The prologue must be derived
     // from the client-advertised protocol version, not a server
@@ -865,6 +879,7 @@ where
         len = init_body.len(),
         "ts2021/be received initiation"
     );
+    reject_unsupported_noise_capability(proto_version)?;
 
     // Step 2: drive Noise IK responder via snow (handshake stays
     // spec-faithful).
@@ -980,6 +995,14 @@ fn responder_remote_static_hex(responder: &snow::HandshakeState) -> Result<Strin
         )));
     }
     Ok(hex::encode(remote))
+}
+
+fn reject_unsupported_noise_capability(protocol_version: u16) -> Result<(), WireError> {
+    let version = u32::from(protocol_version);
+    if is_supported_capability_version(version) {
+        return Ok(());
+    }
+    Err(WireError::Noise(unsupported_client_error(version)))
 }
 
 /// Decode a pre-fetched controlbase-framed Initiation (the bytes that
@@ -1139,6 +1162,16 @@ mod tests {
         // sourced in the module doc.
         let p = prologue_bytes(39);
         assert_eq!(p, b"Tailscale Control Protocol v39".to_vec());
+    }
+
+    #[test]
+    fn unsupported_noise_capability_is_rejected() {
+        let err = reject_unsupported_noise_capability(112).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "noise handshake: unsupported client version:  (112)"
+        );
+        reject_unsupported_noise_capability(113).unwrap();
     }
 
     #[tokio::test]

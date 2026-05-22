@@ -3,11 +3,20 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result};
-use tokio::net::{UnixListener, UnixStream};
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
+use tokio_stream::{
+    StreamExt,
+    wrappers::{TcpListenerStream, UnixListenerStream},
+};
+use tonic::transport::server::Connected;
 
 use headscale_api::admin::{
     PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
@@ -18,6 +27,7 @@ use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
+use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::SanConfig;
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, RegistrationCache,
@@ -37,6 +47,8 @@ pub(crate) struct RunServerConfig {
     pub tls_hostname: Option<String>,
     pub unix_socket: PathBuf,
     pub unix_socket_permission: u32,
+    pub grpc_listen_addr: String,
+    pub grpc_allow_insecure: bool,
     pub oidc: OidcConfig,
 }
 
@@ -56,6 +68,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     tracing::info!("  State dir: {}", cfg.state_dir.display());
     tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
     tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
+    tracing::info!("  Remote gRPC: {}", remote_grpc_status(&cfg));
 
     let server_url = cfg.server_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -84,19 +97,31 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .as_deref()
         .map(|addr| parse_socket_addr(addr, "https_listen"))
         .transpose()?;
+    let grpc_addr = parse_socket_addr(&cfg.grpc_listen_addr, "grpc_listen_addr")?;
     let tls_hostname = cfg
         .tls_hostname
+        .clone()
         .unwrap_or_else(|| hostname_from_server_url(server_url));
+    let sans = SanConfig::with_hostname(tls_hostname);
     let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
         http_addr,
         https_addr,
         state_dir: cfg.state_dir.clone(),
-        sans: SanConfig::with_hostname(tls_hostname),
+        sans: sans.clone(),
         oidc: runtime.oidc,
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
+    let remote_grpc_security = remote_grpc_security(&cfg, &sans)?;
+    let remote_grpc_listener = match remote_grpc_security {
+        Some(security) => Some((
+            bind_tcp_grpc_listener(grpc_addr).await?,
+            grpc_addr,
+            security,
+        )),
+        None => None,
+    };
 
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
@@ -106,8 +131,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         cfg.unix_socket.clone(),
         runtime.admin_service.clone(),
     );
+    let remote_grpc = remote_grpc_listener.map(|(listener, addr, security)| {
+        spawn_remote_grpc_listener(listener, addr, runtime.admin_service.clone(), security)
+    });
     tracing::info!("Headscale-compatible Tailscale control plane ready");
-    await_serve_handle(handle, local_grpc).await
+    await_serve_handle(handle, local_grpc, remote_grpc).await
 }
 
 struct PersistentWireRuntime {
@@ -193,6 +221,77 @@ fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
     grpc_gateway::router(runtime.admin_service.clone())
 }
 
+#[derive(Clone)]
+enum RemoteGrpcSecurity {
+    Insecure,
+    Tls(TlsAcceptor),
+}
+
+struct ConnectedTlsStream(TlsStream<TcpStream>);
+
+impl Connected for ConnectedTlsStream {
+    type ConnectInfo = ();
+
+    fn connect_info(&self) -> Self::ConnectInfo {}
+}
+
+impl AsyncRead for ConnectedTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ConnectedTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+fn remote_grpc_status(cfg: &RunServerConfig) -> String {
+    if cfg.https_listen.is_some() {
+        format!("{} (TLS)", cfg.grpc_listen_addr)
+    } else if cfg.grpc_allow_insecure {
+        format!("{} (insecure)", cfg.grpc_listen_addr)
+    } else {
+        "<disabled>".to_string()
+    }
+}
+
+fn remote_grpc_security(
+    cfg: &RunServerConfig,
+    sans: &SanConfig,
+) -> Result<Option<RemoteGrpcSecurity>> {
+    if cfg.https_listen.is_some() {
+        let material = tls::load_or_generate(&cfg.state_dir, sans)
+            .context("load TLS material for remote gRPC")?;
+        let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
+            .context("build remote gRPC TLS config")?;
+        return Ok(Some(RemoteGrpcSecurity::Tls(TlsAcceptor::from(Arc::new(
+            grpc_tls,
+        )))));
+    }
+    if cfg.grpc_allow_insecure {
+        return Ok(Some(RemoteGrpcSecurity::Insecure));
+    }
+    Ok(None)
+}
+
 async fn bind_unix_grpc_listener(path: &Path, permission: u32) -> Result<UnixListener> {
     ensure_parent_dir(path)?;
     if path.exists() {
@@ -217,6 +316,12 @@ async fn bind_unix_grpc_listener(path: &Path, permission: u32) -> Result<UnixLis
     Ok(listener)
 }
 
+async fn bind_tcp_grpc_listener(addr: SocketAddr) -> Result<TcpListener> {
+    TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind remote gRPC TCP listener {addr}"))
+}
+
 fn spawn_local_grpc_listener(
     listener: UnixListener,
     path: PathBuf,
@@ -233,6 +338,49 @@ fn spawn_local_grpc_listener(
             .serve_with_incoming(incoming)
             .await
             .with_context(|| format!("serve admin gRPC Unix socket {}", path.display()))
+    })
+}
+
+fn spawn_remote_grpc_listener(
+    listener: TcpListener,
+    addr: SocketAddr,
+    service: HeadscaleAdminService,
+    security: RemoteGrpcSecurity,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let reflection =
+            HeadscaleAdminService::reflection_service().context("build gRPC reflection service")?;
+        tracing::info!(%addr, "admin gRPC listening on TCP");
+        match security {
+            RemoteGrpcSecurity::Insecure => {
+                let incoming = TcpListenerStream::new(listener);
+                tonic::transport::Server::builder()
+                    .add_service(service.into_authenticated_service_server())
+                    .add_service(reflection)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .with_context(|| format!("serve remote gRPC TCP listener {addr}"))
+            }
+            RemoteGrpcSecurity::Tls(acceptor) => {
+                let incoming = TcpListenerStream::new(listener).then(move |accepted| {
+                    let acceptor = acceptor.clone();
+                    async move {
+                        let stream = accepted?;
+                        acceptor
+                            .accept(stream)
+                            .await
+                            .map(ConnectedTlsStream)
+                            .map_err(std::io::Error::other)
+                    }
+                });
+                tonic::transport::Server::builder()
+                    .add_service(service.into_authenticated_service_server())
+                    .add_service(reflection)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .with_context(|| format!("serve remote gRPC TCP listener {addr}"))
+            }
+        }
     })
 }
 
@@ -275,6 +423,13 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn parse_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
+    let normalized;
+    let value = if value.starts_with(':') {
+        normalized = format!("0.0.0.0{value}");
+        normalized.as_str()
+    } else {
+        value
+    };
     value
         .parse()
         .with_context(|| format!("Invalid {field} address: {value}"))
@@ -283,17 +438,33 @@ fn parse_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
 async fn await_serve_handle(
     handle: serve::ServeHandle,
     local_grpc: tokio::task::JoinHandle<Result<()>>,
+    remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
     let serve::ServeHandle { http, https, .. } = handle;
-    match https {
-        Some(https) => {
+    match (https, remote_grpc) {
+        (Some(https), Some(remote_grpc)) => {
+            tokio::select! {
+                result = http => flatten_listener_result(result, "http"),
+                result = https => flatten_listener_result(result, "https"),
+                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
+                result = remote_grpc => flatten_anyhow_task_result(result, "remote grpc"),
+            }
+        }
+        (Some(https), None) => {
             tokio::select! {
                 result = http => flatten_listener_result(result, "http"),
                 result = https => flatten_listener_result(result, "https"),
                 result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
             }
         }
-        None => {
+        (None, Some(remote_grpc)) => {
+            tokio::select! {
+                result = http => flatten_listener_result(result, "http"),
+                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
+                result = remote_grpc => flatten_anyhow_task_result(result, "remote grpc"),
+            }
+        }
+        (None, None) => {
             tokio::select! {
                 result = http => flatten_listener_result(result, "http"),
                 result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
@@ -399,7 +570,7 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header},
+        http::{Request as HttpRequest, StatusCode, header},
     };
     use headscale_api::generated::{
         HealthRequest, headscale_service_client::HeadscaleServiceClient,
@@ -408,7 +579,14 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
-    use tonic::transport::{Channel, Endpoint, Uri};
+    use tonic::{
+        Request as TonicRequest,
+        transport::{Channel, Endpoint, Uri},
+    };
+    use tonic_reflection::pb::v1::{
+        ServerReflectionRequest, server_reflection_client::ServerReflectionClient,
+        server_reflection_request::MessageRequest, server_reflection_response::MessageResponse,
+    };
     use tower::ServiceExt;
     use tower::service_fn;
 
@@ -509,7 +687,7 @@ mod tests {
         let missing_auth = app
             .clone()
             .oneshot(
-                Request::builder()
+                HttpRequest::builder()
                     .uri("/api/v1/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -520,7 +698,7 @@ mod tests {
 
         let authed = app
             .oneshot(
-                Request::builder()
+                HttpRequest::builder()
                     .uri("/api/v1/health")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
@@ -580,6 +758,145 @@ mod tests {
         let _ = handle.await;
     }
 
+    async fn tcp_grpc_channel(addr: SocketAddr) -> Channel {
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
+    }
+
+    async fn reflected_service_names(channel: Channel) -> Vec<String> {
+        let mut client = ServerReflectionClient::new(channel);
+        let request = ServerReflectionRequest {
+            host: String::new(),
+            message_request: Some(MessageRequest::ListServices(String::new())),
+        };
+        let mut inbound = client
+            .server_reflection_info(TonicRequest::new(tokio_stream::once(request)))
+            .await
+            .unwrap()
+            .into_inner();
+        let response = inbound.next().await.unwrap().unwrap();
+        match response.message_response.unwrap() {
+            MessageResponse::ListServicesResponse(services) => services
+                .service
+                .into_iter()
+                .map(|service| service.name)
+                .collect(),
+            other => panic!("unexpected reflection response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_grpc_listener_requires_api_key_and_serves_reflection() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let token = headscale_db::api_keys::create_with_cost(
+            db.pool(),
+            headscale_db::api_keys::CreateParams { expiration: None },
+            headscale_db::api_keys::BCRYPT_COST_TEST,
+        )
+        .await
+        .unwrap()
+        .plaintext;
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+        )
+        .await
+        .unwrap();
+        let listener = bind_tcp_grpc_listener("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = spawn_remote_grpc_listener(
+            listener,
+            addr,
+            runtime.admin_service.clone(),
+            RemoteGrpcSecurity::Insecure,
+        );
+
+        let channel = tcp_grpc_channel(addr).await;
+        let err = HeadscaleServiceClient::new(channel.clone())
+            .health(HealthRequest {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+        let mut request = TonicRequest::new(HealthRequest {});
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let response = HeadscaleServiceClient::new(channel.clone())
+            .health(request)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.database_connectivity);
+
+        let services = reflected_service_names(channel).await;
+        assert!(
+            services
+                .iter()
+                .any(|s| s == "headscale.v1.HeadscaleService")
+        );
+        assert!(
+            services
+                .iter()
+                .any(|s| s == "grpc.reflection.v1.ServerReflection")
+        );
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[test]
+    fn remote_grpc_security_tracks_upstream_enablement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = RunServerConfig {
+            listen: "127.0.0.1:0".into(),
+            db_path: dir.path().join("db.sqlite"),
+            mesh_cidr: "100.64.0.0/10".into(),
+            server_url: Some("https://headscale.example".into()),
+            state_dir: dir.path().join("state"),
+            https_listen: None,
+            tls_hostname: None,
+            unix_socket: dir.path().join("state/headscale.sock"),
+            unix_socket_permission: 0o700,
+            grpc_listen_addr: ":50443".into(),
+            grpc_allow_insecure: false,
+            oidc: OidcConfig::default(),
+        };
+        let sans = SanConfig::with_hostname("headscale.example");
+
+        assert!(remote_grpc_security(&cfg, &sans).unwrap().is_none());
+        cfg.grpc_allow_insecure = true;
+        assert!(matches!(
+            remote_grpc_security(&cfg, &sans).unwrap(),
+            Some(RemoteGrpcSecurity::Insecure)
+        ));
+        cfg.grpc_allow_insecure = false;
+        cfg.https_listen = Some("127.0.0.1:0".into());
+        assert!(matches!(
+            remote_grpc_security(&cfg, &sans).unwrap(),
+            Some(RemoteGrpcSecurity::Tls(_))
+        ));
+    }
+
+    #[test]
+    fn socket_addr_parser_accepts_upstream_leading_colon_listens() {
+        assert_eq!(
+            parse_socket_addr(":50443", "grpc_listen_addr").unwrap(),
+            "0.0.0.0:50443".parse::<SocketAddr>().unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn non_oidc_server_requires_public_server_url_before_binding() {
         let dir = tempfile::tempdir().unwrap();
@@ -593,6 +910,8 @@ mod tests {
             tls_hostname: None,
             unix_socket: dir.path().join("state/headscale.sock"),
             unix_socket_permission: 0o700,
+            grpc_listen_addr: "127.0.0.1:0".into(),
+            grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
         })
         .await

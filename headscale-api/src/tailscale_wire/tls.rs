@@ -208,7 +208,19 @@ fn write_atomic(p: &Path, bytes: &[u8], mode: u32) -> Result<(), WireError> {
     Ok(())
 }
 
+pub fn build_grpc_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, WireError> {
+    build_server_config_with_alpn(cert_pem, key_pem, vec![b"h2".to_vec()])
+}
+
 fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, WireError> {
+    build_server_config_with_alpn(cert_pem, key_pem, vec![b"http/1.1".to_vec()])
+}
+
+fn build_server_config_with_alpn(
+    cert_pem: &str,
+    key_pem: &str,
+    alpn_protocols: Vec<Vec<u8>>,
+) -> Result<ServerConfig, WireError> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .map_err(|e| WireError::Internal(format!("parse cert pem: {e}")))?;
@@ -236,7 +248,7 @@ fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, Wi
     // HTTP/2 via ALPN, the client can no longer send an Upgrade
     // header (RFC 7540 forbids it) and the noise dial fails with
     // `early eof` on the server side.
-    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    cfg.alpn_protocols = alpn_protocols;
     Ok(cfg)
 }
 

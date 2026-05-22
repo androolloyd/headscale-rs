@@ -235,6 +235,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     .map_or(defaults.unix_socket_permission, |s| {
                         s.unix_socket_permission
                     }),
+                grpc_listen_addr: server_config
+                    .map_or(defaults.grpc_listen_addr, |s| s.grpc_listen_addr.clone()),
+                grpc_allow_insecure: server_config.is_some_and(|s| s.grpc_allow_insecure),
                 oidc: config
                     .as_ref()
                     .map_or_else(headscale_core::config::OidcConfig::default, |c| {
@@ -409,6 +412,8 @@ mesh_cidr = "100.64.0.0/10"
 # tls_hostname = "headscale.example"
 # unix_socket = "/var/run/headscale/headscale.sock"
 # unix_socket_permission = 504
+# grpc_listen_addr = ":50443"
+# grpc_allow_insecure = false
 
 # DERP relay servers for NAT traversal
 [[server.derp_servers]]

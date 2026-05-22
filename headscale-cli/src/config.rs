@@ -50,6 +50,12 @@ pub(crate) struct ServerConfig {
     /// Filesystem permission applied to the local gRPC Unix socket.
     #[serde(default = "default_unix_socket_permission")]
     pub unix_socket_permission: u32,
+    /// Optional remote gRPC TCP listen address.
+    #[serde(default = "default_grpc_listen_addr")]
+    pub grpc_listen_addr: String,
+    /// Allow remote gRPC without TLS.
+    #[serde(default)]
+    pub grpc_allow_insecure: bool,
     /// DERP relay servers
     #[serde(default)]
     pub derp_servers: Vec<DerpServerConfig>,
@@ -206,6 +212,10 @@ fn default_unix_socket_permission() -> u32 {
     0o770
 }
 
+fn default_grpc_listen_addr() -> String {
+    ":50443".to_string()
+}
+
 fn default_mesh_cidr() -> String {
     "100.64.0.0/10".to_string()
 }
@@ -246,6 +256,8 @@ impl Default for ServerConfig {
             tls_hostname: None,
             unix_socket: default_unix_socket(),
             unix_socket_permission: default_unix_socket_permission(),
+            grpc_listen_addr: default_grpc_listen_addr(),
+            grpc_allow_insecure: false,
             derp_servers: Vec::new(),
         }
     }
@@ -348,6 +360,8 @@ state_dir = "/srv/headscale"
 tls_hostname = "headscale.example"
 unix_socket = "/srv/headscale/headscale.sock"
 unix_socket_permission = 448
+grpc_listen_addr = "127.0.0.1:50443"
+grpc_allow_insecure = true
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -366,6 +380,8 @@ unix_socket_permission = 448
             PathBuf::from("/srv/headscale/headscale.sock")
         );
         assert_eq!(server.unix_socket_permission, 0o700);
+        assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
+        assert!(server.grpc_allow_insecure);
     }
 
     #[test]

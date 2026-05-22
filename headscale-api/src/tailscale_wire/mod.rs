@@ -41,7 +41,7 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
     response::Response as AxumResponse,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -1302,6 +1302,11 @@ pub fn router(state: WireState) -> Router {
         )
         .route("/metrics", get(basic_handlers::handle_metrics))
         .route("/verify", post(basic_handlers::handle_verify))
+        .route("/derp/probe", any(basic_handlers::handle_derp_probe))
+        .route(
+            "/derp/latency-check",
+            any(basic_handlers::handle_derp_probe),
+        )
         .route(
             "/debug/overview",
             get(basic_handlers::handle_debug_overview),

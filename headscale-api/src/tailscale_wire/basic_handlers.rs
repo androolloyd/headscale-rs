@@ -9,7 +9,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -159,6 +159,20 @@ pub async fn handle_verify(State(state): State<WireState>, raw: Bytes) -> Respon
         body,
     )
         .into_response()
+}
+
+pub async fn handle_derp_probe(method: Method) -> Response {
+    match method {
+        Method::GET | Method::HEAD => {
+            let mut resp = StatusCode::OK.into_response();
+            resp.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("*"),
+            );
+            resp
+        }
+        _ => (StatusCode::METHOD_NOT_ALLOWED, "bogus probe method").into_response(),
+    }
 }
 
 pub async fn handle_fallback(uri: Uri) -> Response {
@@ -2469,6 +2483,78 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"Bad Request: invalid JSON\n");
+    }
+
+    #[tokio::test]
+    async fn derp_probe_get_matches_headscale_go_probe() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/derp/probe")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derp_latency_check_head_matches_headscale_go_probe() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("HEAD")
+                    .uri("/derp/latency-check")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derp_probe_rejects_post_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/derp/probe")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"bogus probe method");
     }
 
     #[tokio::test]

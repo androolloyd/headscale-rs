@@ -179,7 +179,10 @@ pub mod upstream {
         RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
-    use crate::policy::{PolicyStore, parse_hujson_policy, validate_requested_tags_for_node};
+    use crate::policy::{
+        PolicyCheckNode, PolicyDoc, PolicyStore, check_policy_semantics, parse_hujson_policy,
+        validate_requested_tags_for_node,
+    };
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
     };
@@ -420,6 +423,20 @@ pub mod upstream {
                 .into_iter()
                 .find(|node| machine_numeric_id(node) == node_id)
                 .ok_or_else(|| Status::not_found("node not found"))
+        }
+
+        async fn validate_candidate_policy(
+            &self,
+            doc: &PolicyDoc,
+            context: &str,
+        ) -> Result<(), Status> {
+            let machines = self.machines.list().await;
+            let nodes = machines
+                .iter()
+                .map(policy_check_node_from_machine)
+                .collect::<Vec<_>>();
+            check_policy_semantics(doc, &nodes)
+                .map_err(|e| Status::invalid_argument(format!("{context}: {e}")))
         }
 
         async fn debug_machine_record(
@@ -1088,6 +1105,8 @@ pub mod upstream {
             }
             let doc = parse_hujson_policy(&policy)
                 .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
+            self.validate_candidate_policy(&doc, "setting policy")
+                .await?;
             let (policy, updated_at) = match &self.policy_mode {
                 PolicyMode::Database => {
                     let policy_persistence = self.policy_persistence.as_ref().ok_or_else(|| {
@@ -1129,8 +1148,10 @@ pub mod upstream {
         ) -> Result<Response<CheckPolicyResponse>, Status> {
             self.authorize(&request).await?;
             let policy = request.into_inner().policy;
-            parse_hujson_policy(&policy)
+            let doc = parse_hujson_policy(&policy)
                 .map_err(|e| Status::invalid_argument(format!("checking policy: {e}")))?;
+            self.validate_candidate_policy(&doc, "checking policy")
+                .await?;
             Ok(Response::new(CheckPolicyResponse {}))
         }
 
@@ -1404,6 +1425,15 @@ pub mod upstream {
             addresses.push(ipv6.clone());
         }
         addresses
+    }
+
+    fn policy_check_node_from_machine(machine: &MachineAdminRecord) -> PolicyCheckNode {
+        PolicyCheckNode {
+            name: machine.name.clone(),
+            user: (!machine.user.is_empty()).then(|| machine.user.clone()),
+            addrs: node_ip_addresses(machine),
+            tags: machine.tags.clone(),
+        }
     }
 
     fn machine_numeric_id(machine: &MachineAdminRecord) -> u64 {
@@ -3658,6 +3688,127 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_evaluates_policy_tests_before_success() {
+        let (service, machines) = admin_service_with_machines().await;
+        let alice_key = "91".repeat(32);
+        let server_key = "92".repeat(32);
+        machines.upsert(
+            alice_key.clone(),
+            MachineRecord::new_at(
+                Utc::now(),
+                alice_key,
+                "93".repeat(32),
+                "alice".into(),
+                "alice-laptop".into(),
+                Ipv4Addr::new(100, 64, 0, 1),
+                false,
+            ),
+        );
+        machines.upsert(
+            server_key.clone(),
+            MachineRecord::new_at(
+                Utc::now(),
+                server_key,
+                "94".repeat(32),
+                "bob".into(),
+                "server".into(),
+                Ipv4Addr::new(100, 64, 0, 2),
+                false,
+            ),
+        );
+
+        let passing = r#"{
+          "acls": [
+            {"action": "accept", "proto": "tcp", "src": ["alice@"], "dst": ["100.64.0.2:22"]}
+          ],
+          "tests": [
+            {"src": "alice@", "accept": ["100.64.0.2:22"], "deny": ["100.64.0.2:80"]}
+          ]
+        }"#;
+        service
+            .check_policy(Request::new(CheckPolicyRequest {
+                policy: passing.into(),
+            }))
+            .await
+            .unwrap();
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: passing.into(),
+            }))
+            .await
+            .unwrap();
+
+        let failing = r#"{
+          "acls": [
+            {"action": "accept", "proto": "tcp", "src": ["alice@"], "dst": ["100.64.0.2:22"]}
+          ],
+          "tests": [
+            {"src": "alice@", "accept": ["100.64.0.2:80"]}
+          ]
+        }"#;
+        let err = service
+            .check_policy(Request::new(CheckPolicyRequest {
+                policy: failing.into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("cannot reach accept destination"));
+
+        let err = service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: failing.into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("cannot reach accept destination"));
+
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, passing);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_grpc_rejects_ssh_tests_semantic_gap_explicitly() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "95".repeat(32);
+        machines.upsert(
+            node_key.clone(),
+            MachineRecord::new_at(
+                Utc::now(),
+                node_key,
+                "96".repeat(32),
+                "alice".into(),
+                "alice-laptop".into(),
+                Ipv4Addr::new(100, 64, 0, 3),
+                false,
+            ),
+        );
+        let raw = r#"{
+          "ssh": [
+            {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]}
+          ],
+          "sshTests": [
+            {"src": "alice@", "dst": ["autogroup:self"], "accept": ["root"]}
+          ]
+        }"#;
+
+        let err = service
+            .check_policy(Request::new(CheckPolicyRequest { policy: raw.into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message()
+                .contains("sshTests semantic evaluation is not implemented yet")
+        );
     }
 
     #[tokio::test]

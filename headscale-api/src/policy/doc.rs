@@ -15,5 +15,5 @@
 
 pub use headscale_api_acl::{
     AclAction as PolicyAction, AclDoc as PolicyDoc, AclRule as PolicyRule, AutoApprovers,
-    NodeAttrGrant, NodeView, PortRef, SshRule,
+    NodeAttrGrant, NodeView, PolicyTest, PortRef, SshPolicyTest, SshRule,
 };

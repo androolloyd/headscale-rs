@@ -1727,9 +1727,26 @@ mod registry_tests {
 /// (for `register`) or via possession of a registered node-key (for
 /// `map`).
 pub fn router(state: WireState) -> Router {
+    router_with_optional_oidc(state, None)
+}
+
+/// Build the wire router with the OIDC auth provider mounted.
+///
+/// This mirrors headscale-go's routing switch: when OIDC is configured,
+/// `/register/{registration_id}` starts the OIDC auth-code flow instead
+/// of rendering the CLI registration instruction page, and
+/// `/oidc/callback` is present on the public control listener.
+pub fn router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRuntime) -> Router {
+    router_with_optional_oidc(state, Some(oidc))
+}
+
+fn router_with_optional_oidc(
+    state: WireState,
+    oidc: Option<crate::oidc::OidcAuthRuntime>,
+) -> Router {
     let knock_cfg = state.knock.clone();
     let metrics_registry = Arc::clone(&state.machines);
-    let inner = Router::new()
+    let mut inner = Router::new()
         .route("/robots.txt", get(basic_handlers::handle_robots))
         .route("/health", get(basic_handlers::handle_health))
         .route("/version", get(basic_handlers::handle_version))
@@ -1828,11 +1845,37 @@ pub fn router(state: WireState) -> Router {
             get(basic_handlers::handle_debug_policy_manager),
         )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
-        .route("/key", get(key_handler::handle_key))
-        .route(
+        .route("/key", get(key_handler::handle_key));
+
+    inner = if let Some(oidc) = oidc {
+        let register_oidc = oidc.clone();
+        let callback_oidc = oidc;
+        inner
+            .route(
+                "/register/:registration_id",
+                get(move |axum::extract::Path(registration_id): axum::extract::Path<String>| {
+                    let oidc = register_oidc.clone();
+                    async move { crate::oidc::handle_register(oidc, registration_id).await }
+                }),
+            )
+            .route(
+                "/oidc/callback",
+                get(
+                    move |headers: axum::http::HeaderMap,
+                          query: axum::extract::Query<crate::oidc::OidcCallbackQuery>| {
+                        let oidc = callback_oidc.clone();
+                        async move { crate::oidc::handle_callback(oidc, headers, query).await }
+                    },
+                ),
+            )
+    } else {
+        inner.route(
             "/register/:registration_id",
             get(basic_handlers::handle_web_register),
         )
+    };
+
+    let inner = inner
         .route("/ts2021", post(noise::handle_ts2021_post))
         .route(
             "/machine/:node_key/register",

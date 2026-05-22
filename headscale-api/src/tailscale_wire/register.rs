@@ -808,10 +808,11 @@ mod tests {
     use crate::tailscale_wire::{
         MachineRegistry, RedeemOk, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey},
-        router,
+        router, router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
     };
     use axum::body::to_bytes;
+    use std::collections::BTreeMap;
     use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -843,6 +844,20 @@ mod tests {
         })
     }
 
+    fn oidc_runtime() -> crate::oidc::OidcAuthRuntime {
+        crate::oidc::OidcAuthRuntime::new(crate::oidc::OidcAuthConfig {
+            authorization_endpoint: "https://issuer.example/oauth2/auth".into(),
+            client_id: "headscale-rs".into(),
+            redirect_url: "https://headscale.example/oidc/callback".into(),
+            scopes: vec!["openid".into(), "profile".into(), "email".into()],
+            extra_params: BTreeMap::from([("domain_hint".into(), "example.com".into())]),
+            pkce: crate::oidc::OidcPkceConfig {
+                enabled: true,
+                method: crate::oidc::OidcPkceMethod::S256,
+            },
+        })
+    }
+
     #[test]
     fn record_to_map_node_emits_approved_routes() {
         let mut record = MachineRecord::new_at(
@@ -869,6 +884,56 @@ mod tests {
         );
         assert_eq!(node.hostinfo.os, "linux");
         assert_eq!(node.hostinfo.os_version, "6.8");
+    }
+
+    #[tokio::test]
+    async fn oidc_router_register_starts_auth_code_flow() {
+        let (state, _redeemer, _dir) = fixture();
+        let oidc = oidc_runtime();
+        let app = router_with_oidc(state, oidc.clone());
+        let registration_id = "a".repeat(24);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/register/{registration_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.starts_with("https://issuer.example/oauth2/auth?"));
+        assert!(location.contains("client_id=headscale-rs"));
+        assert!(
+            location.contains("redirect_uri=https%3A%2F%2Fheadscale.example%2Foidc%2Fcallback")
+        );
+        assert!(location.contains("code_challenge_method=S256"));
+        assert!(location.contains("domain_hint=example.com"));
+        let state = location
+            .split_once("state=")
+            .and_then(|(_, rest)| rest.split('&').next())
+            .expect("auth URL includes state");
+        assert_eq!(
+            oidc.registration(state).unwrap().registration_id,
+            registration_id
+        );
+        assert_eq!(
+            resp.headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .count(),
+            2
+        );
     }
 
     #[test]

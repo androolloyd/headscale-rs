@@ -26,6 +26,7 @@ full = [
     "dep:prost",
     "dep:prost-types",
     "dep:reqwest",
+    "dep:jsonwebtoken",
     "dep:futures",
 ]
 # Admin GUI v0 — `admin::router()` returns an axum Router with
@@ -78,6 +79,7 @@ sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "sqlite
 # Gateway dependencies (only when `full` is on; otherwise the wire
 # layer doesn't need them).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
 tower = { version = "0.5", features = ["util"] }
 futures = { version = "0.3", optional = true }
 

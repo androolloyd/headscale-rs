@@ -1,10 +1,10 @@
 //! OIDC helpers that mirror headscale-go's auth-provider behavior.
 //!
-//! The full token-exchange callback flow is still wired separately. This
-//! module keeps both the pure pieces and the auth-code start path testable
-//! against upstream semantics: claim authorization, issuer/subject
-//! identifiers, UserInfo merging, node-expiry selection, state/nonce cookies,
-//! PKCE challenge generation, and auth URL construction.
+//! The final user/node handoff is still wired separately. This module keeps
+//! both the pure pieces and the auth-code path testable against upstream
+//! semantics: claim authorization, issuer/subject identifiers, UserInfo
+//! merging, node-expiry selection, state/nonce cookies, PKCE challenge
+//! generation, auth URL construction, token exchange, and ID-token validation.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -255,6 +255,18 @@ pub enum OidcRuntimeError {
     StateCookieMismatch,
     #[error("registration not found")]
     RegistrationNotFound,
+    #[error("invalid code")]
+    InvalidCode,
+    #[error("no id_token")]
+    MissingIdToken,
+    #[error("failed to verify id_token")]
+    IdTokenVerificationFailed,
+    #[error("nonce not found in IDToken")]
+    NonceMissingInToken,
+    #[error("nonce not found")]
+    NonceCookieMissing,
+    #[error("nonce did not match")]
+    NonceCookieMismatch,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -654,17 +666,229 @@ pub async fn handle_callback(
         Err(err) => return oidc_error_response(status_for_runtime_error(&err), err.to_string()),
     }
 
-    if runtime.registration(&query.state).is_none() {
+    let Some(registration) = runtime.registration(&query.state) else {
         return oidc_error_response(
             status_for_runtime_error(&OidcRuntimeError::RegistrationNotFound),
             OidcRuntimeError::RegistrationNotFound.to_string(),
         );
+    };
+    #[cfg(not(feature = "full"))]
+    let _ = registration;
+
+    #[cfg(feature = "full")]
+    {
+        let token = match exchange_oauth2_token(
+            &runtime.config,
+            &query.code,
+            registration.verifier.as_deref(),
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(err) => {
+                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+            }
+        };
+
+        let id_token = match verify_id_token(&runtime.config, &token.id_token).await {
+            Ok(id_token) => id_token,
+            Err(err) => {
+                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+            }
+        };
+
+        match validate_nonce_cookie(&headers, &id_token.nonce) {
+            Ok(()) => {}
+            Err(err) => {
+                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+            }
+        }
     }
 
     oidc_error_response(
         StatusCode::NOT_IMPLEMENTED,
-        "OIDC token exchange is not implemented".to_string(),
+        "OIDC callback completion is not implemented".to_string(),
     )
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Deserialize)]
+struct OidcTokenResponse {
+    #[serde(default)]
+    id_token: String,
+}
+
+#[cfg(feature = "full")]
+async fn exchange_oauth2_token(
+    cfg: &OidcAuthConfig,
+    code: &str,
+    verifier: Option<&str>,
+) -> Result<OidcTokenResponse, OidcRuntimeError> {
+    let client = reqwest::Client::new();
+
+    for auth_in_header in [true, false] {
+        let mut form = vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), code.to_string()),
+            ("redirect_uri".to_string(), cfg.redirect_url.clone()),
+        ];
+        if let Some(verifier) = verifier {
+            form.push(("code_verifier".to_string(), verifier.to_string()));
+        }
+        if !auth_in_header {
+            form.push(("client_id".to_string(), cfg.client_id.clone()));
+            form.push(("client_secret".to_string(), cfg.client_secret.clone()));
+        }
+
+        let request = client.post(&cfg.token_endpoint).form(&form);
+        let request = if auth_in_header {
+            request.header(
+                reqwest::header::AUTHORIZATION,
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(format!(
+                        "{}:{}",
+                        form_encode(&cfg.client_id),
+                        form_encode(&cfg.client_secret)
+                    ))
+                ),
+            )
+        } else {
+            request
+        };
+
+        let response = request
+            .send()
+            .await
+            .map_err(|_| OidcRuntimeError::InvalidCode)?;
+        if !response.status().is_success() {
+            if auth_in_header {
+                continue;
+            }
+            return Err(OidcRuntimeError::InvalidCode);
+        }
+
+        let token = response
+            .json::<OidcTokenResponse>()
+            .await
+            .map_err(|_| OidcRuntimeError::InvalidCode)?;
+        if token.id_token.is_empty() {
+            return Err(OidcRuntimeError::MissingIdToken);
+        }
+        return Ok(token);
+    }
+
+    Err(OidcRuntimeError::InvalidCode)
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Deserialize)]
+struct OidcJwks {
+    #[serde(default)]
+    keys: Vec<OidcJwk>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Deserialize)]
+struct OidcJwk {
+    #[serde(default)]
+    kid: Option<String>,
+    #[serde(default)]
+    kty: String,
+    #[serde(default)]
+    n: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Deserialize)]
+struct OidcIdTokenClaims {
+    #[serde(flatten)]
+    claims: OidcClaims,
+    #[serde(default)]
+    nonce: String,
+    exp: i64,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug)]
+struct VerifiedOidcIdToken {
+    #[allow(dead_code)]
+    claims: OidcClaims,
+    nonce: String,
+    #[allow(dead_code)]
+    expiry: DateTime<Utc>,
+}
+
+#[cfg(feature = "full")]
+async fn verify_id_token(
+    cfg: &OidcAuthConfig,
+    raw_id_token: &str,
+) -> Result<VerifiedOidcIdToken, OidcRuntimeError> {
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+
+    let header =
+        decode_header(raw_id_token).map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
+    let jwks = reqwest::Client::new()
+        .get(&cfg.jwks_uri)
+        .send()
+        .await
+        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
+    if !jwks.status().is_success() {
+        return Err(OidcRuntimeError::IdTokenVerificationFailed);
+    }
+    let jwks = jwks
+        .json::<OidcJwks>()
+        .await
+        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
+
+    let key = jwks
+        .keys
+        .iter()
+        .find(|key| {
+            key.kty == "RSA"
+                && match (&header.kid, &key.kid) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+        })
+        .and_then(|key| Some((key.n.as_ref()?, key.e.as_ref()?)))
+        .and_then(|(n, e)| DecodingKey::from_rsa_components(n, e).ok())
+        .ok_or(OidcRuntimeError::IdTokenVerificationFailed)?;
+
+    if !matches!(
+        header.alg,
+        Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512
+    ) {
+        return Err(OidcRuntimeError::IdTokenVerificationFailed);
+    }
+
+    let mut validation = Validation::new(header.alg);
+    validation.set_audience(std::slice::from_ref(&cfg.client_id));
+    validation.set_issuer(std::slice::from_ref(&cfg.issuer));
+
+    let token = decode::<OidcIdTokenClaims>(raw_id_token, &key, &validation)
+        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
+    if token.claims.nonce.is_empty() {
+        return Err(OidcRuntimeError::NonceMissingInToken);
+    }
+
+    let Some(expiry) = DateTime::<Utc>::from_timestamp(token.claims.exp, 0) else {
+        return Err(OidcRuntimeError::IdTokenVerificationFailed);
+    };
+
+    Ok(VerifiedOidcIdToken {
+        claims: token.claims.claims,
+        nonce: token.claims.nonce,
+        expiry,
+    })
 }
 
 pub fn clean_identifier(identifier: &str) -> String {
@@ -816,6 +1040,23 @@ fn validate_state_cookie(headers: &HeaderMap, state: &str) -> Result<(), OidcRun
     }
 }
 
+#[cfg(feature = "full")]
+fn validate_nonce_cookie(headers: &HeaderMap, nonce: &str) -> Result<(), OidcRuntimeError> {
+    if nonce.is_empty() {
+        return Err(OidcRuntimeError::NonceMissingInToken);
+    }
+
+    let expected_name = cookie_name("nonce", nonce);
+    let Some(actual) = cookie_value(headers, &expected_name) else {
+        return Err(OidcRuntimeError::NonceCookieMissing);
+    };
+    if actual == nonce {
+        Ok(())
+    } else {
+        Err(OidcRuntimeError::NonceCookieMismatch)
+    }
+}
+
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
@@ -830,8 +1071,14 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
     match err {
         OidcRuntimeError::InvalidRegistrationId
         | OidcRuntimeError::MissingCodeOrState
-        | OidcRuntimeError::StateCookieMissing => StatusCode::BAD_REQUEST,
-        OidcRuntimeError::StateCookieMismatch => StatusCode::FORBIDDEN,
+        | OidcRuntimeError::StateCookieMissing
+        | OidcRuntimeError::MissingIdToken
+        | OidcRuntimeError::NonceMissingInToken
+        | OidcRuntimeError::NonceCookieMissing => StatusCode::BAD_REQUEST,
+        OidcRuntimeError::StateCookieMismatch
+        | OidcRuntimeError::InvalidCode
+        | OidcRuntimeError::IdTokenVerificationFailed
+        | OidcRuntimeError::NonceCookieMismatch => StatusCode::FORBIDDEN,
         OidcRuntimeError::RegistrationNotFound => StatusCode::NOT_FOUND,
     }
 }
@@ -1445,6 +1692,144 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_exchanges_code_verifies_id_token_and_nonce_before_completion() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url) = oidc_callback_fixture(token.clone(), captured_form.clone()).await;
+
+        let mut config = auth_config(OidcPkceConfig {
+            enabled: true,
+            method: OidcPkceMethod::S256,
+        });
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        let runtime = OidcAuthRuntime::new(config);
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        let verifier = runtime
+            .registration(&start.state)
+            .unwrap()
+            .verifier
+            .unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            response_body(response).await,
+            "OIDC callback completion is not implemented"
+        );
+        let form = captured_form.read();
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(form.get("code").map(String::as_str), Some("auth-code"));
+        assert_eq!(
+            form.get("redirect_uri").map(String::as_str),
+            Some("https://headscale.example/oidc/callback")
+        );
+        assert_eq!(
+            form.get("code_verifier").map(String::as_str),
+            Some(verifier.as_str())
+        );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_rejects_missing_nonce_cookie_after_verified_id_token() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        let runtime = OidcAuthRuntime::new(config);
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", cookie_name("state", &start.state), start.state)
+                .parse()
+                .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response_body(response).await, "nonce not found");
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_rejects_unverified_id_token() {
+        let token = Arc::new(RwLock::new("not-a-jwt".to_string()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url) = oidc_callback_fixture(token, captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        let runtime = OidcAuthRuntime::new(config);
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", cookie_name("state", &start.state), start.state)
+                .parse()
+                .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response_body(response).await, "failed to verify id_token");
+    }
+
     #[test]
     fn oidc_claim_identifier_matches_headscale_go_cleanup() {
         for (input, expected) in [
@@ -1653,4 +2038,142 @@ mod tests {
         .unwrap();
         assert!(parsed.email_verified);
     }
+
+    #[cfg(feature = "full")]
+    async fn oidc_callback_fixture(
+        token: Arc<RwLock<String>>,
+        captured_form: Arc<RwLock<BTreeMap<String, String>>>,
+    ) -> (tokio::task::JoinHandle<()>, String) {
+        use axum::Json;
+        use axum::extract::Form;
+        use axum::routing::{get, post};
+
+        let token_route = token.clone();
+        let captured_route = captured_form.clone();
+        let app = axum::Router::new()
+            .route(
+                "/token",
+                post(
+                    move |headers: HeaderMap, Form(form): Form<BTreeMap<String, String>>| {
+                        let token = token_route.clone();
+                        let captured = captured_route.clone();
+                        async move {
+                            assert!(
+                                headers
+                                    .get(header::AUTHORIZATION)
+                                    .and_then(|value| value.to_str().ok())
+                                    .is_some_and(|value| value.starts_with("Basic "))
+                            );
+                            *captured.write() = form;
+                            Json(serde_json::json!({
+                                "access_token": "access-token",
+                                "token_type": "Bearer",
+                                "id_token": token.read().clone(),
+                            }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/jwks",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "keys": [{
+                            "kty": "RSA",
+                            "kid": "test-key",
+                            "use": "sig",
+                            "alg": "RS256",
+                            "n": TEST_RSA_MODULUS,
+                            "e": "AQAB",
+                        }]
+                    }))
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (handle, base_url)
+    }
+
+    #[cfg(feature = "full")]
+    async fn response_body(response: Response) -> String {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[cfg(feature = "full")]
+    fn signed_id_token(nonce: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+
+        #[derive(Serialize)]
+        struct Claims<'a> {
+            iss: &'a str,
+            sub: &'a str,
+            aud: &'a str,
+            exp: i64,
+            iat: i64,
+            nonce: &'a str,
+            name: &'a str,
+            email: &'a str,
+            email_verified: bool,
+        }
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key".into());
+        encode(
+            &header,
+            &Claims {
+                iss: "https://issuer.example",
+                sub: "subject",
+                aud: "headscale-rs",
+                exp: 4_102_444_800,
+                iat: 1_700_000_000,
+                nonce,
+                name: "Alice Smith",
+                email: "alice@example.com",
+                email_verified: true,
+            },
+            &EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "full")]
+    const TEST_RSA_MODULUS: &str = "13IZNgtofWGSQJkweQHBUDYhhX3bATj4ymKH5eDV5-clp8r411X8VnwjjxNwllYLL3o1KKoRHATXOyctIXBaMc4sUHdJVMbHdtNhm0GbxVxcRj5RtSmE8iuHWMdK8miq6drcduxdTaNCz407Ch0TF4MEipgIxqWQKmqvl8mGCh0He8GsgK2gbdQSE8g5iq3nRIn3mc_602YpMOiSxcVP3XfBeMYHdMJ0fQ83i79dclyIN5hqUjCIpXjt6nH8sRmeVubHon2Histd70SvyMChK68MUOQ_IT3y7-LKY-3hRHze5B-ap7F7v2Q99zCvEcdX8LCAFbiLG56dPax6rBQjoQ";
+
+    #[cfg(feature = "full")]
+    const TEST_RSA_PRIVATE_KEY: &str = "\
+-----BEGIN PRIVATE KEY-----\n\
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDXchk2C2h9YZJA\n\
+mTB5AcFQNiGFfdsBOPjKYofl4NXn5yWnyvjXVfxWfCOPE3CWVgsvejUoqhEcBNc7\n\
+Jy0hcFoxzixQd0lUxsd202GbQZvFXFxGPlG1KYTyK4dYx0ryaKrp2tx27F1No0LP\n\
+jTsKHRMXgwSKmAjGpZAqaq+XyYYKHQd7wayAraBt1BITyDmKredEifeZz/rTZikw\n\
+6JLFxU/dd8F4xgd0wnR9DzeLv11yXIg3mGpSMIileO3qcfyxGZ5W5seifYeKy13v\n\
+RK/IwKErrwxQ5D8hPfLv4spj7eFEfN7kH5qnsXu/ZD33MK8Rx1fwsIAVuIsbnp09\n\
+rHqsFCOhAgMBAAECggEAMmxzZxk7buDntHPGCwQ0pNvOc6pVmA8n92IhMVWyarDI\n\
+OOHB5NAsm2c5gVKI7r6bppSBHY/UKk0dvKv6HZHoojCBYaHRiWRuqapmdUphNUtd\n\
+E1mhkPdzNKSobEhUi7Cgk9QT9kdyvOmBiQcicscEQWP6K5/Sqf904uCOUUWqt/HO\n\
+XizTA4LB9u2Y55qvPGz/9CG/7zShbX2Lw7YJUm2ndA3tZi473uOpszF61yFz14zW\n\
+I4wienSEQQpZdcQSuC3Lk8tG9Kz+zWi+fHzSNx8NX9yXnzYNZFiiN7eP7iiUIh9q\n\
+e0MkwhEUQ51cOO+c0TqbXwnCPyYlIhe8q7wTs7kSuQKBgQDzgjzxPtSg5FmjHzpd\n\
+AQvjqD5+xLqY0p0GGFXi0eLvkfTEEOEB41A186bxH+pePVFkA0yyVSpU+2aQJWXv\n\
+puWjg3z+LvtJ74cBv7ZyQh37SkquZw1Yg8iyDIuccJxEBemffJ18Arne1c2ZZh17\n\
+ukeKgWa5MJhgmW59aNdQ/HhG7QKBgQDif1X/CcXhUzFiSuPica3B7t2GfEzCE8M/\n\
+5hBe+0lltzsqRE8rYr0Y+m3fwCuRi5p2wU4ljG7x55kJwi8mesbsQQK/MisJHjMU\n\
+TmkNM25bsde8qFyPq4kfM6PTdBUMsnQG+O0pLj7VBWZ6ZxoyopbEK1lpJg9c4ihm\n\
+mx1KM5SlBQKBgQDr6BmoUglmUbMxX/iHz5K4G+9nmql3klsDY6IZGuMy2wD4za1e\n\
+ydyUWBc8dIH2iIsITFYKUo2vRNsI/OIzeUnxzlnSWquh5kayAAv9x2YKY9/T9Awu\n\
+24UcUSEUDtik4eGCXBSp5m4xnooPealIi5/xZAmjkZudwicTofUvBVh0xQKBgQDL\n\
+4ngU9kUsSekgY+2y/0W8VzsOPoISChwuPvjppyYw67nUmFzz3xP9kiCp06DkiVho\n\
+IiYoYrvUAfie8i/jYY4DSZohZhWbRZYRZ2vlODDVVcevyZZYtb7fWWrVg58XKOSN\n\
+CjLiaQCiXRQchwbsIbO5rpPztRELOYHIq0S4cKoTyQKBgQCps8B1Im7HRiohw/Jh\n\
+B7ur2garaZVSBJcYOXPGv+lrKYXrMlg/KZ4nQCvncqxHg9PvlxmpPmzIAthVYhki\n\
+YFK5FWw3FdAIuCrN0K9IXMOWXByuJtgCHOttx4fu24fuyQ2t5N4q5CfQHUyJAgtQ\n\
+Tg59Qj49HbnFm11JVyqd490zKQ==\n\
+-----END PRIVATE KEY-----\n";
 }

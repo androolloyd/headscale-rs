@@ -111,7 +111,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         runtime_from_core_oidc(&cfg.oidc, server_url)
             .await
             .context("build OIDC runtime")?,
-    )?;
+    )
+    .await?;
 
     let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let https_addr = cfg
@@ -142,7 +143,7 @@ struct PersistentWireRuntime {
     oidc: Option<OidcAuthRuntime>,
 }
 
-fn build_persistent_wire_runtime(
+async fn build_persistent_wire_runtime(
     pool: &sqlx::SqlitePool,
     state_dir: &Path,
     server_url: &str,
@@ -156,10 +157,18 @@ fn build_persistent_wire_runtime(
     let wire_registry = Arc::new(MachineRegistry::new());
     let registration_cache = Arc::new(RegistrationCache::new());
     let policy = Arc::new(PolicyStore::new());
+    let hydrated = machines
+        .hydrate_wire_registry(&wire_registry)
+        .await
+        .context("hydrate wire registry from SQLite nodes")?;
+    tracing::info!(
+        nodes = hydrated,
+        "hydrated persisted nodes into wire registry"
+    );
     let oidc = oidc.map(|runtime| {
         let handler = PersistentOidcRegistrationHandler::new(
             registration_cache.clone(),
-            machines,
+            machines.clone(),
             policy.clone(),
         )
         .with_wire_registry(wire_registry.clone());
@@ -306,6 +315,7 @@ mod tests {
             "https://headscale.example",
             Some(oidc_runtime()),
         )
+        .await
         .unwrap();
 
         assert!(runtime.oidc.is_some());
@@ -317,6 +327,64 @@ mod tests {
             Some("https://headscale.example")
         );
         assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_hydrates_existing_sqlite_nodes() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let user = headscale_db::users::create(
+            db.pool(),
+            headscale_db::users::CreateParams {
+                name: "alice".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: serde_json::json!({
+                    "Hostname": "alice-laptop",
+                    "RoutableIPs": ["10.0.0.0/24"],
+                    "OS": "linux",
+                    "App": "1.80.0",
+                }),
+                ipv4: Some("100.64.0.9".into()),
+                hostname: "alice-laptop".into(),
+                given_name: "alice-laptop".into(),
+                user_id: Some(user.id),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                approved_routes: vec!["10.0.0.0/24".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            Some(oidc_runtime()),
+        )
+        .await
+        .unwrap();
+
+        let wire = runtime.state.machines.get(&"aa".repeat(32)).unwrap();
+        assert_eq!(wire.machine_key_hex, "bb".repeat(32));
+        assert_eq!(wire.hostname, "alice-laptop");
+        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.ipv4.to_string(), "100.64.0.9");
+        assert_eq!(wire.os, "linux");
+        assert_eq!(wire.os_version, "1.80.0");
+        assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(wire.register_method, 2);
     }
 
     #[test]

@@ -356,6 +356,26 @@ impl PersistentMachineAdmin {
         &self.pool
     }
 
+    pub async fn hydrate_wire_registry(
+        &self,
+        registry: &MachineRegistry,
+    ) -> Result<usize, MachineAdminError> {
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+        let mut hydrated = 0usize;
+        for row in rows {
+            let record = self.row_to_record(row).await;
+            if record.id.trim().is_empty() {
+                continue;
+            }
+            let wire = machine_admin_record_to_wire(&record);
+            registry.upsert(wire.node_key_hex.clone(), wire);
+            hydrated += 1;
+        }
+        Ok(hydrated)
+    }
+
     pub async fn create_or_update_auth_path(
         &self,
         mut record: MachineAdminRecord,
@@ -1357,6 +1377,30 @@ mod tests {
             created.node_id
         );
         assert_eq!(admin.get("1").await.unwrap().id, "aa".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_hydrates_wire_registry_from_go_nodes() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let mut record = persistent_record();
+        record.tags = vec!["tag:prod".into()];
+        record.approved_routes = vec!["10.0.0.0/24".into()];
+        let created = admin.create(record).await.unwrap();
+        let registry = MachineRegistry::new();
+
+        let hydrated = admin.hydrate_wire_registry(&registry).await.unwrap();
+
+        assert_eq!(hydrated, 1);
+        let wire = registry.get(&created.id).unwrap();
+        assert_eq!(wire.node_key_hex, created.id);
+        assert_eq!(wire.machine_key_hex, created.machine_key_hex);
+        assert_eq!(wire.hostname, "alice-laptop");
+        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.ipv4.to_string(), "100.64.0.9");
+        assert_eq!(wire.forced_tags, vec!["tag:prod"]);
+        assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(wire.register_method, 2);
     }
 
     #[tokio::test]

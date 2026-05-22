@@ -654,17 +654,8 @@ impl PersistentMachineAdmin {
             created_at: row.created_at.max(0) as u64,
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
-            os: host_info
-                .get("OS")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            version: host_info
-                .get("OSVersion")
-                .or_else(|| host_info.get("App"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
+            os: os_from_host_info(&host_info),
+            version: version_from_host_info(&host_info),
             tags: row.tag_list(),
             routes,
             approved_routes: row.approved_route_list(),
@@ -717,6 +708,8 @@ impl PersistentMachineAdmin {
             false,
         );
         record.replace_host_info(host_info_from_value(&host_info));
+        record.os = os_from_host_info(&host_info);
+        record.os_version = version_from_host_info(&host_info);
         if !name.is_empty() {
             record.hostname = name;
         }
@@ -1484,6 +1477,23 @@ fn preferred_derp_from_host_info(host_info: &Value) -> i32 {
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .unwrap_or_default()
+}
+
+fn os_from_host_info(host_info: &Value) -> String {
+    host_info
+        .get("OS")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn version_from_host_info(host_info: &Value) -> String {
+    host_info
+        .get("OSVersion")
+        .or_else(|| host_info.get("App"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn host_info_from_value(host_info: &Value) -> HostInfo {

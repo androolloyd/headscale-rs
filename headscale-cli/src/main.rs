@@ -15,6 +15,7 @@ use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod mockoidc;
 mod node;
 mod server;
 
@@ -139,6 +140,9 @@ enum Commands {
         #[command(subcommand)]
         action: GenerateCmd,
     },
+
+    /// Runs a mock OIDC server for testing.
+    Mockoidc,
 
     /// Check the health of the Headscale server.
     Health,
@@ -274,7 +278,10 @@ impl From<anyhow::Error> for MainError {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), MainError> {
-    let skip_config_load = matches!(cli.command, Commands::Version | Commands::Completion { .. });
+    let skip_config_load = matches!(
+        cli.command,
+        Commands::Version | Commands::Completion { .. } | Commands::Mockoidc
+    );
     let config = if skip_config_load {
         None
     } else if let Some(config_path) = &cli.config {
@@ -384,6 +391,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             GenerateCmd::PrivateKey => print_private_key(connect.fmt().map_err(MainError::Admin)?)
                 .map_err(MainError::Other),
         },
+        Commands::Mockoidc => mockoidc::run().await.map_err(MainError::Other),
         Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
         Commands::Version => {
             print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)
@@ -866,6 +874,12 @@ mod tests {
 
         let parsed = Cli::try_parse_from(["headscale", "health"]).unwrap();
         assert!(matches!(parsed.command, Commands::Health));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_mockoidc_command() {
+        let parsed = Cli::try_parse_from(["headscale", "mockoidc"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Mockoidc));
     }
 
     #[test]

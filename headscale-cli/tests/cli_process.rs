@@ -42,6 +42,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "policy",
         "debug",
         "generate",
+        "mockoidc",
         "health",
         "version",
         "completion",
@@ -84,6 +85,26 @@ fn serve_alias_and_debug_create_node_help_are_accepted() {
     assert!(out.contains("--key"));
     assert!(out.contains("--name"));
     assert!(out.contains("--route"));
+}
+
+#[test]
+fn mockoidc_help_and_missing_env_do_not_load_config() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+
+    let help = headscale_in(&["mockoidc", "--help"], cwd.path(), home.path());
+    assert!(help.status.success(), "stderr: {}", stderr(&help));
+    assert!(stdout(&help).contains("mock OIDC server"));
+
+    let missing_env = headscale_in(&["mockoidc"], cwd.path(), home.path());
+    assert!(!missing_env.status.success());
+    let err = stderr(&missing_env);
+    assert!(
+        err.contains("MOCKOIDC_CLIENT_ID not defined"),
+        "stderr: {err}"
+    );
+    assert!(!err.contains("Failed to load config"), "stderr: {err}");
 }
 
 #[test]

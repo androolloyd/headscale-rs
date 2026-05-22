@@ -66,7 +66,7 @@ local-ip-address = { workspace = true }
 httpmock = "0.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
-tonic-reflection = "0.12.3"
+tonic-reflection = "0.14"
 
 [lints]
 workspace = true

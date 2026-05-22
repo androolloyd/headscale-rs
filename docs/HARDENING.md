@@ -29,14 +29,16 @@ for manifest in \
 done
 ./scripts/coverage.sh
 cargo deny check advisories licenses sources
-cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
 cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
 ./scripts/headscale_go_diff.sh
 ```
 
 `cargo audit` is lockfile-only and currently reports `RUSTSEC-2023-0071`
-through `sqlx`'s optional MySQL backend. The workspace enables sqlite, not
-MySQL, and the feature-aware `cargo deny check advisories` gate is clean.
+and `RUSTSEC-2026-0097` through optional `sqlx` MySQL/Postgres and
+`reqwest` QUIC packages. The workspace enables sqlite and HTTP over Rustls,
+not those optional backends, and the feature-aware
+`cargo deny check advisories` gate is clean.
 
 ## Fuzzing
 

@@ -22,6 +22,7 @@ full = [
     "dep:headscale-resources",
     "dep:headscale-payments",
     "dep:tonic",
+    "dep:tonic-prost",
     "dep:tonic-reflection",
     "dep:prost",
     "dep:prost-types",
@@ -51,9 +52,10 @@ tracing.workspace = true
 thiserror.workspace = true
 axum = "0.7"
 tonic = { workspace = true, optional = true }
-tonic-reflection = { version = "0.12.3", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+tonic-reflection = { version = "0.14", optional = true }
 prost = { workspace = true, optional = true }
-prost-types = { version = "0.13", optional = true }
+prost-types = { version = "0.14", optional = true }
 
 headscale-core = { workspace = true, optional = true }
 headscale-identity = { workspace = true, optional = true }
@@ -200,7 +202,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

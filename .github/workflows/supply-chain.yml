@@ -24,12 +24,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-audit
       - run: cargo generate-lockfile
-      # `cargo audit` is lockfile-only and currently reports
-      # RUSTSEC-2023-0071 through sqlx's optional MySQL backend even
-      # though this workspace enables only sqlite. The feature-aware
-      # `cargo deny check advisories` job below remains authoritative
-      # for the active dependency graph.
-      - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+      # `cargo audit` is lockfile-only and currently reports advisories
+      # through optional `sqlx` MySQL/Postgres and `reqwest` QUIC packages
+      # that are not enabled by this sqlite-only workspace. The
+      # feature-aware `cargo deny check advisories` job below remains
+      # authoritative for the active dependency graph.
+      - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
       - run: cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
 
   deny:

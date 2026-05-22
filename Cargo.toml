@@ -106,8 +106,8 @@ multibase = "0.9"
 base64 = "0.22"
 
 # Networking
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+prost = "0.14"
 axum = "0.8"
 
 # Database

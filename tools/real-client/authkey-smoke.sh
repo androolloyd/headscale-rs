@@ -18,6 +18,7 @@ expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
+expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
@@ -51,6 +52,16 @@ esac
 if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
   echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
   exit 2
+fi
+if [[ -n "${expected_primary_sticky_route}" ]]; then
+  if [[ -z "${expected_primary_failover_route}" ]]; then
+    echo "REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE requires REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE" >&2
+    exit 2
+  fi
+  if [[ "${expected_primary_sticky_route}" != "${expected_primary_failover_route}" ]]; then
+    echo "REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE must match REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE" >&2
+    exit 2
+  fi
 fi
 case "${expected_set_tags_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -801,6 +812,62 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
     })
   ' "${work_dir}/machines-before-failover.json" "${work_dir}/debug-routes-before-failover.json" "${work_dir}/machines-after-failover.json" "${work_dir}/debug-routes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_key}" "${expected_machine_count}"
   echo "::endgroup::"
+
+  if [[ -n "${expected_primary_sticky_route}" ]]; then
+    echo "::group::assert primary route sticky return"
+    routes_json="$(ruby -rjson -e 'puts JSON.generate({routes: [ARGV.fetch(0)]})' "${expected_primary_sticky_route}")"
+    curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${failover_node_key}/routes" \
+      -H 'content-type: application/json' \
+      -d "${routes_json}" \
+      >"${work_dir}/sticky-reapprove-old-primary.json"
+    curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-sticky.json"
+    curl -fsS -H 'accept: application/json' \
+      "http://127.0.0.1:${http_port}/debug/routes" \
+      >"${work_dir}/debug-routes-after-sticky.json"
+    ruby -rjson -e '
+      route = ARGV.fetch(3)
+      returned_node_key = ARGV.fetch(4)
+      expected_count = Integer(ARGV.fetch(5))
+
+      def stable_id_from_key(hex)
+        h = 0xcbf29ce484222325
+        hex.each_byte do |byte|
+          h ^= byte
+          h = (h * 0x100000001b3) & 0xffffffffffffffff
+        end
+        h & 0x7fffffffffffffff
+      end
+
+      after_failover = JSON.parse(File.read(ARGV.fetch(0)))
+      after_sticky = JSON.parse(File.read(ARGV.fetch(1)))
+      machines = JSON.parse(File.read(ARGV.fetch(2)))
+      failover_owner = after_failover.fetch("primary_routes").fetch(route)
+      sticky_owner = after_sticky.fetch("primary_routes").fetch(route) {
+        abort("missing primary route #{route.inspect} after sticky return")
+      }
+      returned_id = stable_id_from_key(returned_node_key.sub(/\Anodekey:/, ""))
+      abort("returned node unexpectedly stole #{route}: #{sticky_owner.inspect}") if sticky_owner == returned_id
+      abort("expected sticky owner #{failover_owner.inspect}, got #{sticky_owner.inspect}") unless sticky_owner == failover_owner
+
+      returned = machines.find { |machine| machine.fetch("node_key") == returned_node_key }
+      abort("missing returned machine #{returned_node_key}") unless returned
+      abort("returned machine missing approved route #{route}") unless Array(returned["approved_routes"]).include?(route)
+      abort("returned machine missing available route #{route}") unless Array(returned["available_routes"]).include?(route)
+
+      active_candidates = after_sticky.fetch("available_routes").select do |_node_id, routes|
+        Array(routes).include?(route)
+      end
+      abort("expected #{expected_count} active candidates after sticky return, got #{active_candidates.length}") unless active_candidates.length == expected_count
+
+      puts JSON.pretty_generate({
+        returned_node_key: returned_node_key,
+        returned_id: returned_id,
+        sticky_owner: sticky_owner,
+        debug_routes: after_sticky,
+      })
+    ' "${work_dir}/debug-routes-after-failover.json" "${work_dir}/debug-routes-after-sticky.json" "${work_dir}/machines-after-sticky.json" "${expected_primary_sticky_route}" "${failover_node_key}" "${expected_machine_count}"
+    echo "::endgroup::"
+  fi
 fi
 
 if [[ -n "${expected_primary_withdraw_route}" ]]; then

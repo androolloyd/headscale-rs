@@ -19,6 +19,7 @@ expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
+expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
@@ -53,6 +54,16 @@ esac
 if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
   echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
   exit 2
+fi
+if [[ -n "${expected_primary_sticky_route}" ]]; then
+  if [[ -z "${expected_primary_failover_route}" ]]; then
+    echo "REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE requires REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE" >&2
+    exit 2
+  fi
+  if [[ "${expected_primary_sticky_route}" != "${expected_primary_failover_route}" ]]; then
+    echo "REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE must match REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE" >&2
+    exit 2
+  fi
 fi
 case "${expected_set_tags_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -893,6 +904,57 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
     })
   ' "${work_dir}/nodes-before-failover.json" "${work_dir}/nodes-after-failover.json" "${expected_primary_failover_route}" "${failover_node_id}" "${expected_machine_count}"
   echo "::endgroup::"
+
+  if [[ -n "${expected_primary_sticky_route}" ]]; then
+    echo "::group::assert primary route sticky return"
+    "${headscale_bin}" -c "${config_path}" -o json nodes approve-routes \
+      --identifier "${failover_node_id}" \
+      --routes "${expected_primary_sticky_route}" \
+      >"${work_dir}/sticky-reapprove-old-primary.json"
+    "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-after-sticky.json"
+    ruby -rjson -e '
+      route = ARGV.fetch(2)
+      returned_node_id = Integer(ARGV.fetch(3))
+      expected_count = Integer(ARGV.fetch(4))
+
+      after_failover_payload = JSON.parse(File.read(ARGV.fetch(0)))
+      after_failover_nodes = after_failover_payload.is_a?(Array) ? after_failover_payload : after_failover_payload.fetch("nodes")
+      after_sticky_payload = JSON.parse(File.read(ARGV.fetch(1)))
+      after_sticky_nodes = after_sticky_payload.is_a?(Array) ? after_sticky_payload : after_sticky_payload.fetch("nodes")
+      abort("expected #{expected_count} nodes after sticky return, got #{after_sticky_nodes.length}") unless after_sticky_nodes.length == expected_count
+
+      failover_primary = after_failover_nodes.select do |node|
+        Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+      end
+      sticky_primary = after_sticky_nodes.select do |node|
+        Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+      end
+      abort("expected exactly one primary node after failover, got #{failover_primary.length}") unless failover_primary.length == 1
+      abort("expected exactly one primary node after sticky return, got #{sticky_primary.length}") unless sticky_primary.length == 1
+      failover_owner = Integer(failover_primary.fetch(0).fetch("id"))
+      sticky_owner = Integer(sticky_primary.fetch(0).fetch("id"))
+      abort("returned node unexpectedly stole #{route}: #{sticky_owner}") if sticky_owner == returned_node_id
+      abort("expected sticky owner #{failover_owner}, got #{sticky_owner}") unless sticky_owner == failover_owner
+
+      returned = after_sticky_nodes.find { |node| Integer(node.fetch("id")) == returned_node_id }
+      abort("missing returned node #{returned_node_id}") unless returned
+      abort("returned node missing approved route #{route}") unless Array(returned["approvedRoutes"] || returned["approved_routes"]).include?(route)
+      abort("returned node missing available route #{route}") unless Array(returned["availableRoutes"] || returned["available_routes"]).include?(route)
+
+      active_candidates = after_sticky_nodes.select do |node|
+        Array(node["availableRoutes"] || node["available_routes"]).include?(route) &&
+          Array(node["approvedRoutes"] || node["approved_routes"]).include?(route)
+      end
+      abort("expected #{expected_count} active candidates after sticky return, got #{active_candidates.length}") unless active_candidates.length == expected_count
+
+      puts JSON.pretty_generate({
+        returned_node_id: returned_node_id,
+        sticky_owner: sticky_owner,
+        nodes: after_sticky_nodes,
+      })
+    ' "${work_dir}/nodes-after-failover.json" "${work_dir}/nodes-after-sticky.json" "${expected_primary_sticky_route}" "${failover_node_id}" "${expected_machine_count}"
+    echo "::endgroup::"
+  fi
 fi
 
 if [[ -n "${expected_primary_withdraw_route}" ]]; then

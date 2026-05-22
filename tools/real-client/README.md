@@ -308,6 +308,15 @@ tools/real-client/route-primary-failover-smoke.sh
 tools/real-client/route-primary-failover-headscale-go-smoke.sh
 ```
 
+The sticky primary-route scenario performs that failover, then re-approves the
+old primary owner and asserts that the current primary remains sticky instead
+of being stolen back:
+
+```sh
+tools/real-client/route-primary-sticky-smoke.sh
+tools/real-client/route-primary-sticky-headscale-go-smoke.sh
+```
+
 The primary-route withdrawal scenario instead asks the current primary client
 to stop advertising the route with `tailscale set --advertise-routes=` and
 asserts that another advertising router takes over:
@@ -323,6 +332,8 @@ Additional knobs:
 - `REAL_CLIENT_EXPECT_PRIMARY_ROUTE` defaults to `REAL_CLIENT_ROUTE`.
 - `REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE` defaults to `REAL_CLIENT_ROUTE`
   in the failover wrappers.
+- `REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE` defaults to `REAL_CLIENT_ROUTE`
+  in the sticky wrapper and must match the failover route.
 - `REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE` defaults to `REAL_CLIENT_ROUTE`
   in the withdrawal wrappers.
 

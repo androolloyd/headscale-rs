@@ -3465,6 +3465,50 @@ mod tests {
         assert!(node.cap_map.contains_key("ssh"));
     }
 
+    #[tokio::test]
+    async fn map_response_applies_randomize_client_port_to_cap_map() {
+        let (state, _dir) = fixture();
+        let node_key = "de".repeat(32);
+        let rec = MachineRecord::new_at(
+            chrono::Utc::now(),
+            node_key.clone(),
+            String::new(),
+            "alice".into(),
+            "laptop".into(),
+            Ipv4Addr::new(100, 64, 0, 15),
+            false,
+        );
+        state.machines.upsert(node_key.clone(), rec);
+        let peer_key = "e0".repeat(32);
+        insert_peer(&state, &peer_key, "peer", 16);
+
+        let raw_policy = r"
+            version = 1
+            randomizeClientPort = true
+        ";
+        let doc = crate::policy::PolicyDoc::from_toml(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(b"{}".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+        assert_default_cap_map(node);
+        assert!(node.cap_map.contains_key("randomize-client-port"));
+    }
+
     /// Compatibility sample: a hand-built MapResponse, run through
     /// `build_framed_chunk`, must round-trip through the upstream
     /// decoding rule — `[u32 LE size][zstd(JSON)]` → `Node` present.

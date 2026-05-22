@@ -720,6 +720,7 @@ mod tests {
             ipsets: BTreeMap::new(),
             auto_approvers: AutoApprovers::default(),
             node_attrs: Vec::new(),
+            randomize_client_port: false,
             ssh: Vec::new(),
             rules,
         }

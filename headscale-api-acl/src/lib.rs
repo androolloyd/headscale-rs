@@ -242,6 +242,11 @@ pub struct AclDoc {
     /// `node_attrs` / `nodeAttrs`.
     #[serde(default, alias = "nodeAttrs")]
     pub node_attrs: Vec<NodeAttrGrant>,
+    /// Upstream `randomizeClientPort`: tailnet-wide shorthand for
+    /// stamping the `randomize-client-port` node attribute on every
+    /// node.
+    #[serde(default, alias = "randomizeClientPort")]
+    pub randomize_client_port: bool,
     /// `ssh` grants. Parsed, validated, round-tripped, and compiled by
     /// `headscale-api` into a wire SSHPolicy.
     #[serde(default)]
@@ -403,7 +408,7 @@ impl AclDoc {
                 serde_json::Value::Object(value)
             })
             .collect();
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "version": self.version,
             "groups": groups_sorted,
             "tags": tags_sorted,
@@ -433,7 +438,11 @@ impl AclDoc {
                     "ports": ports,
                 })
             }).collect::<Vec<_>>(),
-        })
+        });
+        if self.randomize_client_port {
+            value["randomize_client_port"] = serde_json::Value::Bool(true);
+        }
+        value
     }
 
     /// SHA-256 of `canonical_bytes`. Matches the on-chain
@@ -506,6 +515,7 @@ fn go_policy_field_name(field: &str) -> Option<&'static str> {
         "tagowners" => Some("tagOwners"),
         "acls" => Some("acls"),
         "autoapprovers" => Some("autoApprovers"),
+        "randomizeclientport" => Some("randomizeClientPort"),
         "ssh" => Some("ssh"),
         _ => None,
     }
@@ -1074,6 +1084,9 @@ impl AclDoc {
     /// Stable order, deduped.
     pub fn attrs_for(&self, node: &NodeView<'_>) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        if self.randomize_client_port {
+            out.push("randomize-client-port".to_string());
+        }
         for grant in &self.node_attrs {
             if self.principal_matches(&grant.target, node, None) {
                 for a in &grant.attr {
@@ -2252,6 +2265,46 @@ mod tests {
         assert!(doc.attrs_for(&bob).is_empty());
     }
 
+    #[test]
+    fn attrs_for_randomize_client_port_applies_to_every_node() {
+        let doc = AclDoc {
+            version: 1,
+            randomize_client_port: true,
+            ..Default::default()
+        };
+
+        let tagged = vec!["tag:server".into()];
+        let user_node = NodeView::new("100.64.0.1").with_user("alice@example.com");
+        let tagged_node = NodeView::new("100.64.0.2").with_tags(&tagged);
+
+        assert_eq!(doc.attrs_for(&user_node), vec!["randomize-client-port"]);
+        assert_eq!(doc.attrs_for(&tagged_node), vec!["randomize-client-port"]);
+    }
+
+    #[test]
+    fn attrs_for_randomize_client_port_merges_with_node_attrs() {
+        let mut doc = AclDoc {
+            version: 1,
+            randomize_client_port: true,
+            ..Default::default()
+        };
+        doc.node_attrs.push(NodeAttrGrant {
+            target: vec!["tag:server".into()],
+            attr: vec![
+                "randomize-client-port".into(),
+                "disable-captive-portal-detection".into(),
+            ],
+        });
+
+        let tags = vec!["tag:server".into()];
+        let node = NodeView::new("100.64.0.1").with_tags(&tags);
+
+        assert_eq!(
+            doc.attrs_for(&node),
+            vec!["disable-captive-portal-detection", "randomize-client-port"]
+        );
+    }
+
     // --- autoApprovers ---------------------------------------------
 
     #[test]
@@ -2432,6 +2485,22 @@ mod tests {
         assert_eq!(doc.node_attrs.len(), 2);
         assert_eq!(doc.node_attrs[0].attr, vec!["funnel"]);
         assert_eq!(doc.node_attrs[1].target, vec!["tag:exit"]);
+    }
+
+    #[test]
+    fn parses_randomize_client_port_from_toml() {
+        let doc = AclDoc::from_toml(
+            r"
+            version = 1
+            randomizeClientPort = true
+        ",
+        )
+        .unwrap();
+        assert!(doc.randomize_client_port);
+        assert_eq!(
+            doc.attrs_for(&NodeView::new("100.64.0.1")),
+            vec!["randomize-client-port"]
+        );
     }
 
     #[test]
@@ -2659,6 +2728,24 @@ mod tests {
         assert!(
             err.contains("ports") && err.contains("unknown field"),
             "ports should be rejected as unknown, got: {err}"
+        );
+    }
+
+    #[test]
+    fn hujson_accepts_randomize_client_port_like_upstream_main() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "randomizeClientPort": true,
+              "tagOwners": {"tag:server": ["alice@example.com"]},
+              "acls": []
+            }"#,
+        )
+        .unwrap();
+
+        assert!(doc.randomize_client_port);
+        assert_eq!(
+            doc.attrs_for(&NodeView::new("100.64.0.1")),
+            vec!["randomize-client-port"]
         );
     }
 

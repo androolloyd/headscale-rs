@@ -25,6 +25,10 @@ pub enum DbError {
     #[error("Constraint violation: {0}")]
     Constraint(String),
 
+    /// Unsupported headscale-go database version or migration history
+    #[error("Unsupported headscale-go database: {0}")]
+    UnsupportedHeadscaleGoDatabaseVersion(String),
+
     /// General error
     #[error("Database operation failed: {0}")]
     General(String),

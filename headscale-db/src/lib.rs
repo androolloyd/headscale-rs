@@ -18,8 +18,10 @@ pub mod preauth_keys;
 pub mod resources;
 pub mod sessions;
 pub mod users;
+mod version_guard;
 
 pub use error::{DbError, Result};
+pub use version_guard::{HEADSCALE_GO_IMPORT_BASELINE, HeadscaleGoImportCompatibility};
 
 /// Database connection pool and operations.
 pub struct Database {
@@ -62,8 +64,17 @@ impl Database {
 
     /// Run database migrations.
     pub async fn migrate(&self) -> Result<()> {
+        version_guard::check_headscale_go_import_compatibility(&self.pool).await?;
         sqlx::migrate!("./migrations").run(&self.pool).await?;
         Ok(())
+    }
+
+    /// Check whether an existing SQLite database is within the
+    /// supported headscale-go import window.
+    pub async fn check_headscale_go_import_compatibility(
+        &self,
+    ) -> Result<HeadscaleGoImportCompatibility> {
+        version_guard::check_headscale_go_import_compatibility(&self.pool).await
     }
 
     /// Get a reference to the connection pool.

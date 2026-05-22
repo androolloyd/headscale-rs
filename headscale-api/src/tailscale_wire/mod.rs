@@ -336,12 +336,16 @@ struct WireMetrics {
     mapresponse_generated: RwLock<BTreeMap<String, u64>>,
     mapresponse_sent: RwLock<BTreeMap<(String, String), u64>>,
     http_requests: RwLock<BTreeMap<(String, String, String), u64>>,
-    http_duration: RwLock<BTreeMap<String, HttpDurationMetric>>,
+    http_duration: RwLock<BTreeMap<String, HistogramMetric>>,
+    nodestore_operations: RwLock<BTreeMap<String, u64>>,
+    nodestore_operation_duration: RwLock<BTreeMap<String, HistogramMetric>>,
+    nodestore_batch_size: RwLock<HistogramMetric>,
+    nodestore_batch_duration: RwLock<HistogramMetric>,
+    nodestore_snapshot_build_duration: RwLock<HistogramMetric>,
+    nodestore_peers_calculation_duration: RwLock<HistogramMetric>,
 }
 
-const HTTP_DURATION_BUCKET_COUNT: usize = 11;
-
-pub(crate) const HTTP_DURATION_BUCKETS: [(f64, &str); HTTP_DURATION_BUCKET_COUNT] = [
+pub(crate) const PROMETHEUS_DEFAULT_BUCKETS: &[(f64, &str)] = &[
     (0.005, "0.005"),
     (0.01, "0.01"),
     (0.025, "0.025"),
@@ -355,20 +359,36 @@ pub(crate) const HTTP_DURATION_BUCKETS: [(f64, &str); HTTP_DURATION_BUCKET_COUNT
     (10.0, "10"),
 ];
 
-#[derive(Debug, Clone)]
-pub(crate) struct HttpDurationMetric {
-    pub buckets: [u64; HTTP_DURATION_BUCKET_COUNT],
+pub(crate) const NODESTORE_BATCH_SIZE_BUCKETS: &[(f64, &str)] = &[
+    (1.0, "1"),
+    (2.0, "2"),
+    (5.0, "5"),
+    (10.0, "10"),
+    (20.0, "20"),
+    (50.0, "50"),
+    (100.0, "100"),
+];
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HistogramMetric {
+    pub buckets: BTreeMap<String, u64>,
     pub count: u64,
     pub sum: f64,
 }
 
-impl Default for HttpDurationMetric {
-    fn default() -> Self {
-        Self {
-            buckets: [0; HTTP_DURATION_BUCKET_COUNT],
-            count: 0,
-            sum: 0.0,
+impl HistogramMetric {
+    fn observe(&mut self, buckets: &[(f64, &str)], value: f64) {
+        self.count += 1;
+        self.sum += value;
+        for (upper_bound, label) in buckets {
+            if value <= *upper_bound {
+                *self.buckets.entry((*label).to_string()).or_insert(0) += 1;
+            }
         }
+    }
+
+    pub(crate) fn bucket(&self, label: &str) -> u64 {
+        self.buckets.get(label).copied().unwrap_or(0)
     }
 }
 
@@ -423,12 +443,16 @@ impl MachineRegistry {
     /// once per write — but registration is rare relative to map reads
     /// in steady state, so this trade is the right one.
     pub fn upsert(&self, node_key_hex: String, rec: MachineRecord) {
+        let start = Instant::now();
         {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             next.insert(node_key_hex, rec);
             *g = Arc::new(next);
         }
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation("put", elapsed);
+        self.record_nodestore_batch(1, elapsed);
         self.wake_waiters();
     }
 
@@ -563,13 +587,37 @@ impl MachineRegistry {
         let seconds = duration.as_secs_f64();
         let mut durations = self.metrics.http_duration.write();
         let sample = durations.entry(path.to_string()).or_default();
-        sample.count += 1;
-        sample.sum += seconds;
-        for (idx, (upper_bound, _label)) in HTTP_DURATION_BUCKETS.iter().enumerate() {
-            if seconds <= *upper_bound {
-                sample.buckets[idx] += 1;
-            }
+        sample.observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
+    }
+
+    fn record_nodestore_operation(&self, operation: &str, duration: Duration) {
+        {
+            let mut operations = self.metrics.nodestore_operations.write();
+            *operations.entry(operation.to_string()).or_insert(0) += 1;
         }
+
+        let seconds = duration.as_secs_f64();
+        let mut durations = self.metrics.nodestore_operation_duration.write();
+        durations
+            .entry(operation.to_string())
+            .or_default()
+            .observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
+    }
+
+    fn record_nodestore_batch(&self, size: usize, duration: Duration) {
+        let seconds = duration.as_secs_f64();
+        self.metrics
+            .nodestore_batch_size
+            .write()
+            .observe(NODESTORE_BATCH_SIZE_BUCKETS, size as f64);
+        self.metrics
+            .nodestore_batch_duration
+            .write()
+            .observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
+        self.metrics
+            .nodestore_snapshot_build_duration
+            .write()
+            .observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
     }
 
     pub fn mapresponse_endpoint_update_metrics(&self) -> BTreeMap<String, u64> {
@@ -592,8 +640,38 @@ impl MachineRegistry {
         self.metrics.http_requests.read().clone()
     }
 
-    pub(crate) fn http_duration_metrics(&self) -> BTreeMap<String, HttpDurationMetric> {
+    pub(crate) fn http_duration_metrics(&self) -> BTreeMap<String, HistogramMetric> {
         self.metrics.http_duration.read().clone()
+    }
+
+    pub(crate) fn nodestore_operation_metrics(&self) -> BTreeMap<String, u64> {
+        self.metrics.nodestore_operations.read().clone()
+    }
+
+    pub(crate) fn nodestore_operation_duration_metrics(&self) -> BTreeMap<String, HistogramMetric> {
+        self.metrics.nodestore_operation_duration.read().clone()
+    }
+
+    pub(crate) fn nodestore_batch_size_metrics(&self) -> HistogramMetric {
+        self.metrics.nodestore_batch_size.read().clone()
+    }
+
+    pub(crate) fn nodestore_batch_duration_metrics(&self) -> HistogramMetric {
+        self.metrics.nodestore_batch_duration.read().clone()
+    }
+
+    pub(crate) fn nodestore_snapshot_build_duration_metrics(&self) -> HistogramMetric {
+        self.metrics
+            .nodestore_snapshot_build_duration
+            .read()
+            .clone()
+    }
+
+    pub(crate) fn nodestore_peers_calculation_duration_metrics(&self) -> HistogramMetric {
+        self.metrics
+            .nodestore_peers_calculation_duration
+            .read()
+            .clone()
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -603,7 +681,10 @@ impl MachineRegistry {
     /// is the cleanest shape. Use `snapshot()` if you need cross-record
     /// iteration without per-record allocation.
     pub fn get(&self, node_key_hex: &str) -> Option<MachineRecord> {
-        self.inner.read().get(node_key_hex).cloned()
+        let start = Instant::now();
+        let result = self.inner.read().get(node_key_hex).cloned();
+        self.record_nodestore_operation("get_by_key", start.elapsed());
+        result
     }
 
     /// Number of registered machines.
@@ -632,6 +713,14 @@ impl MachineRegistry {
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
     {
+        self.update_with_operation("update", f)
+    }
+
+    fn update_with_operation<R, F>(&self, operation: &str, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
+    {
+        let start = Instant::now();
         let r = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
@@ -639,6 +728,9 @@ impl MachineRegistry {
             *g = Arc::new(next);
             r
         };
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation(operation, elapsed);
+        self.record_nodestore_batch(1, elapsed);
         self.wake_waiters();
         r
     }
@@ -702,7 +794,8 @@ impl MachineRegistry {
     /// Remove a machine from the registry entirely. Mirrors
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
-        let removed = self.update_with(|map| map.remove(node_key_hex).is_some());
+        let removed =
+            self.update_with_operation("delete", |map| map.remove(node_key_hex).is_some());
         if removed {
             self.active_connections
                 .write()

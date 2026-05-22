@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
-    DerpMap, HTTP_DURATION_BUCKETS, HttpDurationMetric, MachineRecord, WireState,
+    DerpMap, HistogramMetric, MachineRecord, NODESTORE_BATCH_SIZE_BUCKETS,
+    PROMETHEUS_DEFAULT_BUCKETS, WireState,
     wire::{SshPolicy, stable_id_from_key},
 };
 
@@ -1140,7 +1141,65 @@ fn metrics_text(state: &WireState) -> String {
         "headscale_http_duration_seconds",
         "Duration of HTTP requests.",
         "path",
+        PROMETHEUS_DEFAULT_BUCKETS,
         state.machines.http_duration_metrics(),
+    );
+    append_counter_family(
+        &mut out,
+        "headscale_nodestore_operations_total",
+        "Total number of NodeStore operations",
+        "operation",
+        state.machines.nodestore_operation_metrics(),
+    );
+    append_histogram_family(
+        &mut out,
+        "headscale_nodestore_operation_duration_seconds",
+        "Duration of NodeStore operations",
+        "operation",
+        PROMETHEUS_DEFAULT_BUCKETS,
+        state.machines.nodestore_operation_duration_metrics(),
+    );
+    append_histogram(
+        &mut out,
+        "headscale_nodestore_batch_size",
+        "Size of NodeStore write batches",
+        NODESTORE_BATCH_SIZE_BUCKETS,
+        state.machines.nodestore_batch_size_metrics(),
+    );
+    append_histogram(
+        &mut out,
+        "headscale_nodestore_batch_duration_seconds",
+        "Duration of NodeStore batch processing",
+        PROMETHEUS_DEFAULT_BUCKETS,
+        state.machines.nodestore_batch_duration_metrics(),
+    );
+    append_histogram(
+        &mut out,
+        "headscale_nodestore_snapshot_build_duration_seconds",
+        "Duration of NodeStore snapshot building from nodes",
+        PROMETHEUS_DEFAULT_BUCKETS,
+        state.machines.nodestore_snapshot_build_duration_metrics(),
+    );
+    append_gauge(
+        &mut out,
+        "headscale_nodestore_nodes_total",
+        "Total number of nodes in the NodeStore",
+        snapshot.len(),
+    );
+    append_histogram(
+        &mut out,
+        "headscale_nodestore_peers_calculation_duration_seconds",
+        "Duration of peers calculation in NodeStore",
+        PROMETHEUS_DEFAULT_BUCKETS,
+        state
+            .machines
+            .nodestore_peers_calculation_duration_metrics(),
+    );
+    append_gauge(
+        &mut out,
+        "headscale_nodestore_queue_depth",
+        "Current depth of NodeStore write queue",
+        0,
     );
 
     out
@@ -1266,7 +1325,8 @@ fn append_histogram_family(
     name: &str,
     help: &str,
     label_name: &str,
-    samples: BTreeMap<String, HttpDurationMetric>,
+    buckets: &[(f64, &str)],
+    samples: BTreeMap<String, HistogramMetric>,
 ) {
     out.push_str("# HELP ");
     out.push_str(name);
@@ -1277,8 +1337,8 @@ fn append_histogram_family(
     out.push_str(name);
     out.push_str(" histogram\n");
     for (label_value, sample) in samples {
-        for (idx, (_upper_bound, le)) in HTTP_DURATION_BUCKETS.iter().enumerate() {
-            append_histogram_bucket(out, name, label_name, &label_value, le, sample.buckets[idx]);
+        for (_upper_bound, le) in buckets {
+            append_histogram_bucket(out, name, label_name, &label_value, le, sample.bucket(le));
         }
         append_histogram_bucket(out, name, label_name, &label_value, "+Inf", sample.count);
         out.push_str(name);
@@ -1298,6 +1358,43 @@ fn append_histogram_family(
         out.push_str(&sample.count.to_string());
         out.push('\n');
     }
+}
+
+fn append_histogram(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    buckets: &[(f64, &str)],
+    sample: HistogramMetric,
+) {
+    out.push_str("# HELP ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(help);
+    out.push('\n');
+    out.push_str("# TYPE ");
+    out.push_str(name);
+    out.push_str(" histogram\n");
+    for (_upper_bound, le) in buckets {
+        out.push_str(name);
+        out.push_str("_bucket{le=\"");
+        out.push_str(le);
+        out.push_str("\"} ");
+        out.push_str(&sample.bucket(le).to_string());
+        out.push('\n');
+    }
+    out.push_str(name);
+    out.push_str("_bucket{le=\"+Inf\"} ");
+    out.push_str(&sample.count.to_string());
+    out.push('\n');
+    out.push_str(name);
+    out.push_str("_sum ");
+    out.push_str(&prometheus_float(sample.sum));
+    out.push('\n');
+    out.push_str(name);
+    out.push_str("_count ");
+    out.push_str(&sample.count.to_string());
+    out.push('\n');
 }
 
 fn append_histogram_bucket(
@@ -2272,7 +2369,7 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(PROMETHEUS_TEXT_CONTENT_TYPE)
         );
-        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
 
         assert!(body.contains("# HELP headscale_nodes_registered "));
@@ -2283,6 +2380,20 @@ mod tests {
         assert!(body.contains("# TYPE headscale_mapresponse_sent_total counter"));
         assert!(body.contains("# TYPE headscale_http_requests_total counter"));
         assert!(body.contains("# TYPE headscale_http_duration_seconds histogram"));
+        assert!(body.contains("# TYPE headscale_nodestore_operations_total counter"));
+        assert!(body.contains("# TYPE headscale_nodestore_operation_duration_seconds histogram"));
+        assert!(body.contains("# TYPE headscale_nodestore_batch_size histogram"));
+        assert!(body.contains("# TYPE headscale_nodestore_batch_duration_seconds histogram"));
+        assert!(
+            body.contains("# TYPE headscale_nodestore_snapshot_build_duration_seconds histogram")
+        );
+        assert!(body.contains("# TYPE headscale_nodestore_nodes_total gauge"));
+        assert!(
+            body.contains(
+                "# TYPE headscale_nodestore_peers_calculation_duration_seconds histogram"
+            )
+        );
+        assert!(body.contains("# TYPE headscale_nodestore_queue_depth gauge"));
         assert!(body.contains("headscale_nodes_registered 0\n"));
         assert!(body.contains("headscale_nodes_online 0\n"));
         assert!(body.contains("headscale_policy_loaded 0\n"));
@@ -2355,6 +2466,51 @@ mod tests {
             "{body}",
         );
         assert!(!body.contains("path=\"/metrics\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_nodestore_metrics() {
+        let (state, _dir) = fixture_state();
+
+        let rec = record("metrics-nodestore", 43, &[], &[]);
+        state.machines.upsert(rec.node_key_hex.clone(), rec.clone());
+        assert!(state.machines.get(&rec.node_key_hex).is_some());
+        assert!(state.machines.set_expiry(
+            &rec.node_key_hex,
+            Some(Utc::now() + chrono::Duration::hours(1))
+        ));
+        assert!(state.machines.delete(&rec.node_key_hex));
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        for sample in [
+            "headscale_nodestore_operations_total{operation=\"delete\"} 1\n",
+            "headscale_nodestore_operations_total{operation=\"get_by_key\"} 1\n",
+            "headscale_nodestore_operations_total{operation=\"put\"} 1\n",
+            "headscale_nodestore_operations_total{operation=\"update\"} 1\n",
+            "headscale_nodestore_operation_duration_seconds_count{operation=\"put\"} 1\n",
+            "headscale_nodestore_batch_size_bucket{le=\"+Inf\"} 3\n",
+            "headscale_nodestore_batch_size_count 3\n",
+            "headscale_nodestore_batch_duration_seconds_count 3\n",
+            "headscale_nodestore_snapshot_build_duration_seconds_count 3\n",
+            "headscale_nodestore_nodes_total 0\n",
+            "headscale_nodestore_queue_depth 0\n",
+            "headscale_nodestore_peers_calculation_duration_seconds_count 0\n",
+        ] {
+            assert!(body.contains(sample), "missing sample {sample:?}\n{body}");
+        }
     }
 
     #[tokio::test]

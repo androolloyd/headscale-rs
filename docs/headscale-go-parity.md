@@ -19,14 +19,15 @@ Current-head audit overlay, refreshed 2026-05-22:
   4 KiB request-body limit in `72bb5f8`, and DB user/preauth delete
   semantics in `d076c8e`; CLI `auth` plus `preauthkeys delete`
   command parity in `56d4de6`; unsupported client capability
-  rejection and Noise register error-envelope parity in `004098d`.
+  rejection and Noise register error-envelope parity in `004098d`;
+  map stream compression/framing negotiation in `97e8bbd`.
 - Active P0 implementation lanes from the 2026-05-22 current-head
   audit: none; remaining work is P1/P2 plus broader full-parity
   verification.
 - Remaining P1 current-head gaps from the audit: Hostinfo/NetInfo
   preservation, IPv6 node identities, online/LastSeen poll lifecycle,
-  map compression/framing negotiation, config schema drift, semantic
-  `CheckPolicy`, and real `BackfillNodeIPs`.
+  config schema drift, semantic `CheckPolicy`, and real
+  `BackfillNodeIPs`.
 - Remaining P2 current-head gaps from the audit: ping lifecycle,
   `mockoidc`, exact CLI/help/error snapshots, broader gateway auth
   error text, and Octra-side documentation cleanup for the now-direct

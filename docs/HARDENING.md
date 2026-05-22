@@ -83,7 +83,7 @@ stock-client smokes, not comments. The current fixtures cover:
   smokes against both headscale-rs and pinned headscale-go.
 
 The next parity layer should close the remaining paired stock-client and
-serving-topology gaps: OIDC callback completion, Tailscale SSH, DERP/STUN,
-private DERP, API auth, CLI over upstream gRPC, config-driven process wiring,
-and the remaining DNS/ACL/route edge matrices tracked in
+serving-topology gaps: persisted OIDC callback completion, Tailscale SSH,
+DERP/STUN, private DERP, API auth, CLI over upstream gRPC, config-driven
+process wiring, and the remaining DNS/ACL/route edge matrices tracked in
 `docs/headscale-go-parity.md`.

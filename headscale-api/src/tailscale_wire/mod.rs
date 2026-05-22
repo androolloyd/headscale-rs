@@ -49,7 +49,9 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 
-use self::routes::{DebugRoutes, PrimaryRouteState, active_approved_routes};
+use self::routes::{
+    DebugRoutes, PrimaryRouteState, active_approved_routes, auto_approved_routes_for_node,
+};
 use self::wire::stable_id_from_key;
 
 /// Headscale-go default: pending interactive registrations are valid
@@ -57,6 +59,7 @@ use self::wire::stable_id_from_key;
 pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60);
 /// Headscale-go default cleanup tick for the registration cache.
 pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
+const REGISTER_METHOD_OIDC: i32 = 3;
 
 pub mod basic_handlers;
 pub mod be_transport;
@@ -1047,11 +1050,18 @@ impl MachineRegistry {
                 .iter()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();
-            pending.approved_routes = existing
+            let mut approved_routes = existing
                 .approved_routes
                 .into_iter()
                 .filter(|route| available.contains(route))
-                .collect();
+                .collect::<std::collections::BTreeSet<_>>();
+            approved_routes.extend(
+                pending
+                    .approved_routes
+                    .into_iter()
+                    .filter(|route| available.contains(route)),
+            );
+            pending.approved_routes = approved_routes.into_iter().collect();
 
             self.replace_node_key(&old_node_key, pending.node_key_hex.clone(), pending.clone());
         } else {
@@ -1335,7 +1345,9 @@ mod registry_tests {
     //! one number; the `--ignored` test below exposes a wall-clock
     //! comparison on demand without changing the dep graph.
     use super::*;
+    use crate::oidc::OidcRegistrationHandler;
     use std::net::Ipv4Addr;
+    use test_support::{MockIpAllocator, MockRedeemer};
 
     fn mk_record(host: u32) -> MachineRecord {
         let now = Utc::now();
@@ -1358,6 +1370,22 @@ mod registry_tests {
             available_routes: Vec::new(),
             approved_routes: Vec::new(),
             register_method: 1,
+        }
+    }
+
+    fn test_state() -> WireState {
+        let dir = tempfile::tempdir().unwrap();
+        WireState {
+            server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap()),
+            preauth: Arc::new(MockRedeemer::new()),
+            ip_allocator: Arc::new(MockIpAllocator),
+            machines: Arc::new(MachineRegistry::new()),
+            derp_map: Arc::new(wire::DerpMap::default()),
+            policy: Arc::new(crate::policy::PolicyStore::new()),
+            knock: KnockConfig::disabled(),
+            dns: Arc::new(crate::dns::DnsStore::new()),
+            public_control_url: None,
+            registration_cache: Arc::new(RegistrationCache::new()),
         }
     }
 
@@ -1394,6 +1422,91 @@ mod registry_tests {
             other => panic!("expected registered outcome, got {other:?}"),
         }
         assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_completes_pending_registration() {
+        let state = test_state();
+        let registration_id = "o".repeat(24);
+        let mut pending = mk_record(10);
+        pending.user.clear();
+        pending.expiry = None;
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+
+        let waiter = {
+            let cache = state.registration_cache.clone();
+            let registration_id = registration_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&registration_id).await })
+        };
+        tokio::task::yield_now().await;
+
+        let expiry = Utc::now() + chrono::Duration::hours(2);
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let result = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 7,
+                    name: "alice@example.com".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                expiry,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert_eq!(registered.user, "alice@example.com");
+        assert_eq!(registered.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(registered.expiry, Some(expiry));
+        assert!(state.registration_cache.get(&registration_id).is_none());
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("wire follow-up should be notified")
+            .expect("waiter task should not panic");
+        match outcome {
+            RegistrationWaitOutcome::Registered(record) => {
+                assert_eq!(record.user, "alice@example.com");
+                assert_eq!(record.register_method, REGISTER_METHOD_OIDC);
+                assert_eq!(record.expiry, Some(expiry));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_reports_expired_sessions() {
+        let handler = WireOidcRegistrationHandler {
+            state: test_state(),
+        };
+        let err = handler
+            .complete_oidc_registration(
+                &"missing".repeat(4),
+                &crate::oidc::OidcStoredUser {
+                    id: 7,
+                    name: "alice@example.com".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, crate::oidc::OidcRegistrationError::SessionExpired);
     }
 
     #[tokio::test]
@@ -1615,8 +1728,8 @@ mod registry_tests {
         pending.machine_key_hex = "same-machine".into();
         pending.user = String::new();
         pending.forced_tags = Vec::new();
-        pending.available_routes = vec!["10.0.0.0/24".into()];
-        pending.approved_routes = Vec::new();
+        pending.available_routes = vec!["10.0.0.0/24".into(), "10.1.0.0/24".into()];
+        pending.approved_routes = vec!["10.1.0.0/24".into()];
 
         let registered = reg.complete_web_registration(pending, "alice".into(), 2);
         assert_eq!(registered.node_key_hex, "new-node");
@@ -1625,7 +1738,10 @@ mod registry_tests {
         assert!(registered.forced_tags.is_empty());
         assert_eq!(registered.ipv4, old_ip);
         assert_eq!(registered.created_at, old_created_at);
-        assert_eq!(registered.approved_routes, vec!["10.0.0.0/24"]);
+        assert_eq!(
+            registered.approved_routes,
+            vec!["10.0.0.0/24", "10.1.0.0/24"]
+        );
         assert_eq!(registered.register_method, 2);
 
         assert_eq!(reg.len(), 1, "reauth must not duplicate the node");
@@ -1784,6 +1900,68 @@ pub fn router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRuntime) ->
     router_with_optional_oidc(state, Some(oidc))
 }
 
+#[derive(Clone)]
+struct WireOidcRegistrationHandler {
+    state: WireState,
+}
+
+#[async_trait]
+impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
+    async fn complete_oidc_registration(
+        &self,
+        registration_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+        node_expiry: DateTime<Utc>,
+    ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
+        let user_name = oidc_wire_user_name(user);
+        let mut pending = self
+            .state
+            .registration_cache
+            .get(registration_id)
+            .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        pending.expiry = Some(node_expiry);
+
+        pending.approved_routes = auto_approved_routes_for_node(
+            &self.state.policy,
+            &pending.ipv4.to_string(),
+            Some(&user_name),
+            &pending.forced_tags,
+            &pending.approved_routes,
+            &pending.available_routes,
+        )
+        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+
+        let new_node = self
+            .state
+            .machines
+            .get_by_machine_key_for_user(&pending.machine_key_hex, &user_name)
+            .is_none();
+        let registered =
+            self.state
+                .machines
+                .complete_web_registration(pending, user_name, REGISTER_METHOD_OIDC);
+        if self
+            .state
+            .registration_cache
+            .complete(registration_id, registered)
+        {
+            Ok(crate::oidc::OidcRegistrationResult { new_node })
+        } else {
+            Err(crate::oidc::OidcRegistrationError::SessionExpired)
+        }
+    }
+}
+
+fn oidc_wire_user_name(user: &crate::oidc::OidcStoredUser) -> String {
+    if !user.name.is_empty() {
+        user.name.clone()
+    } else if !user.email.is_empty() {
+        user.email.clone()
+    } else {
+        user.provider_identifier.clone()
+    }
+}
+
 fn router_with_optional_oidc(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
@@ -1892,6 +2070,9 @@ fn router_with_optional_oidc(
         .route("/key", get(key_handler::handle_key));
 
     inner = if let Some(oidc) = oidc {
+        let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {
+            state: state.clone(),
+        }));
         let register_oidc = oidc.clone();
         let callback_oidc = oidc;
         inner

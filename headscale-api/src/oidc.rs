@@ -102,6 +102,7 @@ pub struct OidcAuthRuntime {
     config: Arc<OidcAuthConfig>,
     registrations: Arc<OidcRegistrationCache>,
     users: Option<Arc<dyn OidcUserStore>>,
+    registration_handler: Option<Arc<dyn OidcRegistrationHandler>>,
 }
 
 impl fmt::Debug for OidcAuthRuntime {
@@ -110,6 +111,10 @@ impl fmt::Debug for OidcAuthRuntime {
             .field("config", &self.config)
             .field("registrations", &self.registrations)
             .field("users", &self.users.as_ref().map(|_| "<configured>"))
+            .field(
+                "registration_handler",
+                &self.registration_handler.as_ref().map(|_| "<configured>"),
+            )
             .finish()
     }
 }
@@ -120,6 +125,7 @@ impl OidcAuthRuntime {
             config: Arc::new(config),
             registrations: Arc::new(OidcRegistrationCache::new(DEFAULT_OIDC_AUTH_CACHE_EXPIRY)),
             users: None,
+            registration_handler: None,
         }
     }
 
@@ -131,11 +137,30 @@ impl OidcAuthRuntime {
             config: Arc::new(config),
             registrations,
             users: None,
+            registration_handler: None,
         }
     }
 
     pub fn with_user_store(mut self, users: Arc<dyn OidcUserStore>) -> Self {
         self.users = Some(users);
+        self
+    }
+
+    pub fn with_registration_handler(
+        mut self,
+        registration_handler: Arc<dyn OidcRegistrationHandler>,
+    ) -> Self {
+        self.registration_handler = Some(registration_handler);
+        self
+    }
+
+    pub fn with_registration_handler_if_unset(
+        mut self,
+        registration_handler: Arc<dyn OidcRegistrationHandler>,
+    ) -> Self {
+        if self.registration_handler.is_none() {
+            self.registration_handler = Some(registration_handler);
+        }
         self
     }
 
@@ -568,6 +593,29 @@ pub trait OidcUserStore: Send + Sync {
     ) -> Result<OidcStoredUser, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcRegistrationResult {
+    pub new_node: bool,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OidcRegistrationError {
+    #[error("login session expired, try again")]
+    SessionExpired,
+    #[error("{0}")]
+    Store(String),
+}
+
+#[async_trait::async_trait]
+pub trait OidcRegistrationHandler: Send + Sync {
+    async fn complete_oidc_registration(
+        &self,
+        registration_id: &str,
+        user: &OidcStoredUser,
+        node_expiry: DateTime<Utc>,
+    ) -> Result<OidcRegistrationResult, OidcRegistrationError>;
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OidcAuthorizationError {
     #[error("unauthorised domain")]
@@ -760,13 +808,13 @@ pub async fn handle_callback(
             let err = OidcRuntimeError::Authorization(err);
             return oidc_error_response(status_for_runtime_error(&err), err.to_string());
         }
-        let _node_expiry =
+        let node_expiry =
             determine_node_expiry(&runtime.config.policy, id_token.expiry, Utc::now());
         let profile =
             user_profile_from_claims(&claims, runtime.config.policy.email_verified_required);
-        let _user = if let Some(users) = &runtime.users {
+        let user = if let Some(users) = &runtime.users {
             match users.create_or_update_oidc_user(profile).await {
-                Ok(user) => Some(user),
+                Ok(user) => user,
                 Err(_) => {
                     return oidc_error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -775,7 +823,34 @@ pub async fn handle_callback(
                 }
             }
         } else {
-            None
+            stored_user_from_profile(profile)
+        };
+
+        if let Some(registration_handler) = &runtime.registration_handler {
+            match registration_handler
+                .complete_oidc_registration(&registration.registration_id, &user, node_expiry)
+                .await
+            {
+                Ok(result) => {
+                    return oidc_success_response(
+                        &user,
+                        if result.new_node {
+                            "Authenticated"
+                        } else {
+                            "Reauthenticated"
+                        },
+                    );
+                }
+                Err(OidcRegistrationError::SessionExpired) => {
+                    return oidc_error_response(
+                        StatusCode::GONE,
+                        "login session expired, try again".to_string(),
+                    );
+                }
+                Err(OidcRegistrationError::Store(err)) => {
+                    return oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
+                }
+            }
         };
     }
 
@@ -1205,6 +1280,75 @@ fn oidc_error_response(status: StatusCode, message: String) -> Response {
         .into_response()
 }
 
+#[cfg(feature = "full")]
+fn oidc_success_response(user: &OidcStoredUser, verb: &str) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        oidc_success_html(&user_display_name(user), verb),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "full")]
+fn oidc_success_html(user: &str, verb: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale Authentication Succeeded</title></head><body><main><h1>Signed in successfully</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
+        html_escape(verb),
+        html_escape(user)
+    )
+}
+
+#[cfg(feature = "full")]
+fn stored_user_from_profile(profile: OidcUserProfile) -> OidcStoredUser {
+    let name = if !profile.email.is_empty() {
+        profile.email.clone()
+    } else if !profile.name.is_empty() {
+        profile.name.clone()
+    } else {
+        profile.provider_identifier.clone()
+    };
+
+    OidcStoredUser {
+        id: 0,
+        name,
+        display_name: profile.display_name,
+        email: profile.email,
+        provider_identifier: profile.provider_identifier,
+        provider: profile.provider,
+        profile_pic_url: profile.profile_pic_url,
+    }
+}
+
+#[cfg(feature = "full")]
+fn user_display_name(user: &OidcStoredUser) -> String {
+    if !user.display_name.is_empty() {
+        user.display_name.clone()
+    } else if !user.email.is_empty() {
+        user.email.clone()
+    } else if !user.name.is_empty() {
+        user.name.clone()
+    } else {
+        user.provider_identifier.clone()
+    }
+}
+
+#[cfg(feature = "full")]
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn pkce_challenge(verifier: &str, method: OidcPkceMethod) -> String {
     match method {
         OidcPkceMethod::Plain => verifier.to_string(),
@@ -1336,6 +1480,12 @@ mod tests {
         fail: bool,
     }
 
+    #[derive(Debug, Default)]
+    struct MockOidcRegistrationHandler {
+        calls: RwLock<Vec<(String, OidcStoredUser, DateTime<Utc>)>>,
+        fail_expired: bool,
+    }
+
     #[async_trait::async_trait]
     impl OidcUserStore for MockOidcUserStore {
         async fn create_or_update_oidc_user(
@@ -1355,6 +1505,24 @@ mod tests {
                 provider: profile.provider,
                 profile_pic_url: profile.profile_pic_url,
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OidcRegistrationHandler for MockOidcRegistrationHandler {
+        async fn complete_oidc_registration(
+            &self,
+            registration_id: &str,
+            user: &OidcStoredUser,
+            node_expiry: DateTime<Utc>,
+        ) -> Result<OidcRegistrationResult, OidcRegistrationError> {
+            if self.fail_expired {
+                return Err(OidcRegistrationError::SessionExpired);
+            }
+            self.calls
+                .write()
+                .push((registration_id.to_string(), user.clone(), node_expiry));
+            Ok(OidcRegistrationResult { new_node: true })
         }
     }
 
@@ -2131,6 +2299,117 @@ mod tests {
         assert_eq!(
             response_body(response).await,
             "Could not create or update user"
+        );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_completes_registration_and_renders_success_page() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        config.policy.use_expiry_from_token = true;
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state.clone(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = response_body(response).await;
+        assert!(body.contains("Headscale Authentication Succeeded"));
+        assert!(body.contains("Authenticated as"));
+        assert!(body.contains("Alice Smith"));
+        assert!(body.contains("You can now close this window"));
+
+        let calls = registrations.calls.read();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "r".repeat(24));
+        assert_eq!(calls[0].1.email, "alice@example.com");
+        assert_eq!(calls[0].1.name, "alice@example.com");
+        assert_eq!(calls[0].2, Utc.timestamp_opt(4_102_444_800, 0).unwrap());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_maps_expired_registration_to_upstream_gone_response() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        let runtime = OidcAuthRuntime::new(config).with_registration_handler(Arc::new(
+            MockOidcRegistrationHandler {
+                fail_expired: true,
+                ..MockOidcRegistrationHandler::default()
+            },
+        ));
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert_eq!(
+            response_body(response).await,
+            "login session expired, try again"
         );
     }
 

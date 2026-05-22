@@ -268,6 +268,15 @@ pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Respon
         .into_response()
 }
 
+pub async fn handle_ping_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::from_stream(
+            futures_util::stream::empty::<Result<bytes::Bytes, std::convert::Infallible>>(),
+        ))
+        .expect("empty ping response body is infallible")
+}
+
 pub async fn handle_fallback(uri: Uri) -> Response {
     let path = uri.path();
     if path == "/k"

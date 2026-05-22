@@ -42,7 +42,7 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
     response::Response as AxumResponse,
-    routing::{any, get, post},
+    routing::{any, get, head, post},
 };
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -1501,6 +1501,63 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn public_ping_response_head_route_is_successful() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::HEAD)
+                    .uri("/machine/ping-response?id=ping-id")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .is_none()
+        );
+        assert!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .is_none()
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn public_ping_response_does_not_open_adjacent_machine_paths() {
+        let app = router(test_state());
+
+        for uri in [
+            "/machine/ping",
+            "/machine/ping-response/",
+            "/machine/ping-response/extra",
+            "/machine/ping-responses",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::HEAD)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND, "{uri}");
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert!(body.is_empty(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn registration_cache_completion_notifies_waiting_followups() {
         let cache = Arc::new(RegistrationCache::with_tuning(
             Duration::from_secs(60),
@@ -2260,7 +2317,11 @@ fn router_with_optional_oidc(
             get(basic_handlers::handle_debug_policy_manager),
         )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
-        .route("/key", get(key_handler::handle_key));
+        .route("/key", get(key_handler::handle_key))
+        .route(
+            "/machine/ping-response",
+            head(basic_handlers::handle_ping_response),
+        );
 
     inner = if let Some(oidc) = oidc {
         let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {

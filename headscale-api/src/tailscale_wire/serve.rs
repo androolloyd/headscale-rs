@@ -4,9 +4,10 @@
 //!
 //!   1. A plaintext HTTP listener (typically `127.0.0.1:51821`) for `GET /key`
 //!      and any other unauthenticated probe.
-//!   2. A `rustls`-terminated HTTPS listener (typically `127.0.0.1:443`) for the
-//!      `Upgrade: tailscale-control-protocol` + flat `/machine/...`
-//!      paths the v1.78+ client uses after its forced-443 dial.
+//!   2. A `rustls`-terminated HTTPS listener (typically `127.0.0.1:443`) for
+//!      the `Upgrade: tailscale-control-protocol` path the client uses after
+//!      its forced-443 dial. The `/machine/...` control paths are served
+//!      inside the Noise h2 session, not on the outer HTTP router.
 //!
 //! Both listeners serve the **same** [`router`] — the wire layer's
 //! handlers are TLS-agnostic. The TLS material is built via

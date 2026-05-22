@@ -17,7 +17,7 @@ use headscale_api::{
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, PreauthRedeemer,
         RedeemError, RedeemOk, RegisterResponse, RegistrationCache, ServerNoiseKey, WireState,
-        router_with_oidc,
+        register as wire_register_handlers, router_with_oidc,
     },
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -33,10 +33,12 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     let (state, _dir) = wire_state();
     let oidc = oidc_runtime(&provider.base_url);
     let app = router_with_oidc(state.clone(), oidc.clone());
+    let machine_app = wire_machine_router(state.clone());
     let node_key_hex = "ab".repeat(32);
 
     let initial = decode_register_response(
-        app.clone()
+        machine_app
+            .clone()
             .oneshot(register_request(&node_key_hex, None))
             .await
             .unwrap(),
@@ -87,11 +89,12 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     let verifier = registration.verifier.unwrap();
 
     let mut followup = tokio::spawn({
-        let app = app.clone();
+        let machine_app = machine_app.clone();
         let auth_url = initial.auth_url.clone();
         let node_key_hex = node_key_hex.clone();
         async move {
-            app.oneshot(register_request(&node_key_hex, Some(&auth_url)))
+            machine_app
+                .oneshot(register_request(&node_key_hex, Some(&auth_url)))
                 .await
                 .unwrap()
         }
@@ -242,6 +245,19 @@ fn register_request(node_key_hex: &str, followup: Option<&str>) -> Request<Body>
         .uri(format!("/machine/nodekey:{node_key_hex}/register"))
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
+}
+
+fn wire_machine_router(state: WireState) -> Router {
+    Router::new()
+        .route(
+            "/machine/:node_key/register",
+            post(wire_register_handlers::handle_register),
+        )
+        .route(
+            "/machine/register",
+            post(wire_register_handlers::handle_register_flat),
+        )
+        .with_state(state)
 }
 
 async fn decode_register_response(response: Response) -> RegisterResponse {

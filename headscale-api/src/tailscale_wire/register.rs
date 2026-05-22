@@ -870,8 +870,8 @@ mod tests {
     use crate::tailscale_wire::{
         MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration, RedeemOk,
         WireState,
-        noise::{NoisePeerMachineKey, ServerNoiseKey},
-        router, router_with_oidc,
+        noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as router},
+        router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
     };
     use axum::body::to_bytes;

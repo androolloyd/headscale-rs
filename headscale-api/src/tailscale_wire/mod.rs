@@ -22,11 +22,12 @@
 //! - **`POST /ts2021`** ([`noise`]) — `Upgrade:
 //!   tailscale-control-protocol` handler. Drives the Noise IK responder
 //!   on the hijacked socket + spins up h2 inside the Noise transport.
-//! - **`POST /machine/{node_key}/register`** ([`register`]) — decodes a
-//!   JSON `RegisterRequest`, redeems the presented authkey via the
-//!   injected [`PreauthRedeemer`], allocates a tailnet IP via the
+//! - **Noise-inner `POST /machine/{node_key}/register`** ([`register`]) —
+//!   decodes a JSON `RegisterRequest`, redeems the presented authkey via
+//!   the injected [`PreauthRedeemer`], allocates a tailnet IP via the
 //!   injected [`IpAllocator`].
-//! - **`POST /machine/{node_key}/map`** ([`map`]) — long-poll peer map.
+//! - **Noise-inner `POST /machine/{node_key}/map`** ([`map`]) — long-poll
+//!   peer map.
 //!
 //! See the upstream OctraVPN module's decision log (preserved in git
 //! history) for the rationale behind each wire choice.
@@ -1453,6 +1454,7 @@ mod registry_tests {
     use crate::oidc::OidcRegistrationHandler;
     use std::net::Ipv4Addr;
     use test_support::{MockIpAllocator, MockRedeemer};
+    use tower::ServiceExt;
 
     fn mk_record(host: u32) -> MachineRecord {
         let now = Utc::now();
@@ -1529,6 +1531,52 @@ mod registry_tests {
             other => panic!("expected registered outcome, got {other:?}"),
         }
         assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn public_router_does_not_mount_machine_control_paths() {
+        let state = test_state();
+        let app = router(state.clone());
+        let node_key_hex = "aa".repeat(32);
+        let body = serde_json::json!({
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Auth": { "AuthKey": "hskey-auth-public-route-regression" },
+        });
+
+        for uri in [
+            format!("/machine/nodekey:{node_key_hex}/register"),
+            "/machine/register".to_string(),
+            format!("/machine/nodekey:{node_key_hex}/map"),
+            "/machine/map".to_string(),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri(uri)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            assert_eq!(
+                resp.headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/html; charset=utf-8")
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert_eq!(
+                &body[..],
+                b"<html lang=\"en\"><head><meta charset=\"UTF-8\"><link rel=\"icon\" href=\"/favicon.ico\"></head><body></body></html>"
+            );
+        }
+
+        assert!(state.machines.is_empty());
     }
 
     #[tokio::test]
@@ -2210,17 +2258,6 @@ fn router_with_optional_oidc(
 
     let inner = inner
         .route("/ts2021", post(noise::handle_ts2021_post))
-        .route(
-            "/machine/:node_key/register",
-            post(register::handle_register),
-        )
-        .route("/machine/:node_key/map", post(map::handle_map))
-        // Flat v1.78+ paths — extract NodeKey from the request body.
-        // See `docs/tailscale-interop-blocker.md` 2026-05-19 §"Wire-format
-        // surprise". Both shapes coexist deliberately so older clients
-        // and our own integration tests keep working.
-        .route("/machine/register", post(register::handle_register_flat))
-        .route("/machine/map", post(map::handle_map_flat))
         .fallback(basic_handlers::handle_fallback)
         .with_state(state)
         .layer(middleware::from_fn(move |req: Request, next: Next| {

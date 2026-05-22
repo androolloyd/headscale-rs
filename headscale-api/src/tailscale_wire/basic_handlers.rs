@@ -2586,7 +2586,7 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MachineRegistry, WireState,
-        noise::ServerNoiseKey,
+        noise::{ServerNoiseKey, inner_router as machine_router},
         router,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::stable_id_from_key,
@@ -4354,8 +4354,8 @@ mod tests {
             .upsert(node_key.to_string(), record(node_key, 31, &[], &[]));
 
         let app = router(state.clone());
-        let stream_resp = app
-            .clone()
+        let machine_app = machine_router(state.clone());
+        let stream_resp = machine_app
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")

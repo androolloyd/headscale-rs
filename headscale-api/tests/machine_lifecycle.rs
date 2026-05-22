@@ -27,14 +27,16 @@
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode, header},
+    routing::post,
 };
 use headscale_api::admin::{
     AdminState, InMemoryPreauthAdmin, UserRegistry, WireMachineAdmin, router as admin_router,
 };
 use headscale_api::tailscale_wire::{
-    MachineRecord, MachineRegistry, WireState, router as wire_router,
+    MachineRecord, MachineRegistry, WireState, map as wire_map_handlers,
 };
 use tower::ServiceExt;
 
@@ -177,7 +179,7 @@ async fn wire_map_body(
     node_key_hex: &str,
     body: &'static str,
 ) -> (StatusCode, serde_json::Value) {
-    let router = wire_router(wire.clone());
+    let router = wire_machine_router(wire.clone());
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("/machine/nodekey:{node_key_hex}/map"))
@@ -189,6 +191,16 @@ async fn wire_map_body(
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+fn wire_machine_router(wire: WireState) -> Router {
+    Router::new()
+        .route(
+            "/machine/:node_key/map",
+            post(wire_map_handlers::handle_map),
+        )
+        .route("/machine/map", post(wire_map_handlers::handle_map_flat))
+        .with_state(wire)
 }
 
 /// Non-streaming lite endpoint update. Upstream returns 200 with no

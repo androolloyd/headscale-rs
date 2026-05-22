@@ -562,10 +562,9 @@ where
         .await
         .map_err(|e| WireError::Noise(format!("h2 handshake: {e}")))?;
 
-    // Build the router we'll dispatch to on every request. We reuse
-    // the same handlers `/key`, `/register`, `/map` get on the
-    // plaintext side — they're already axum services and don't care
-    // whether they're behind h2 or plain http.
+    // Build the machine-control router dispatched inside Noise h2.
+    // These endpoints are deliberately not mounted on the outer public
+    // router; upstream headscale only serves them behind TS2021.
     let router = inner_router(state.clone());
 
     while let Some(result) = h2_conn.accept().await {
@@ -734,8 +733,8 @@ async fn dispatch_h2_request(
 
 /// Construct an inner router that maps just the per-machine endpoints
 /// served behind /ts2021. The `/key` and `/ts2021` routes deliberately
-/// aren't mounted here — they live on the outer plaintext router.
-fn inner_router(state: WireState) -> Router {
+/// aren't mounted here — they live on the outer public router.
+pub(crate) fn inner_router(state: WireState) -> Router {
     use axum::routing::post;
     Router::new()
         // Keyed variants — kept for legacy / direct-test paths.

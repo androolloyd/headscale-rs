@@ -832,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_wire_runtime_uses_configured_dns_in_map_response() {
         use headscale_api::tailscale_wire::{
-            router,
+            map as wire_map_handlers,
             wire::{DnsRecord, MapResponse},
         };
 
@@ -908,7 +908,16 @@ mod tests {
         assert!(runtime.state.machines.get(&a).is_some());
         assert!(runtime.state.machines.get(&b).is_some());
 
-        let app = router(runtime.state);
+        let app = axum::Router::new()
+            .route(
+                "/machine/:node_key/map",
+                axum::routing::post(wire_map_handlers::handle_map),
+            )
+            .route(
+                "/machine/map",
+                axum::routing::post(wire_map_handlers::handle_map_flat),
+            )
+            .with_state(runtime.state);
         let resp = app
             .oneshot(
                 HttpRequest::builder()

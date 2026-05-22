@@ -2,8 +2,8 @@
 //!
 //! ## What this defeats
 //!
-//! Today our `/ts2021`, `/key`, and `/machine/...` endpoints accept any
-//! incoming HTTP connection that speaks the right shape. A state-level
+//! Today our `/ts2021` and `/key` endpoints accept any incoming HTTP
+//! connection that speaks the right shape. A state-level
 //! censor (the canonical example: the Great Firewall's "Tailscale
 //! fingerprint" probe pattern reported 2024–2026) sweeps candidate IPs,
 //! attempts the Noise IK handshake itself, and uses *successful*

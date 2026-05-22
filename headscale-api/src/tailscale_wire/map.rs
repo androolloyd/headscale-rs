@@ -1271,9 +1271,9 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         MachineRecord, MachineRegistry, WireState,
-        noise::ServerNoiseKey,
+        noise::{ServerNoiseKey, inner_router as router},
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
-        router,
+        router as public_router,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::DerpMap,
     };
@@ -1731,6 +1731,7 @@ mod tests {
         );
 
         let app = router(state.clone());
+        let public_app = public_router(state.clone());
         let resp = app
             .clone()
             .oneshot(
@@ -1772,7 +1773,7 @@ mod tests {
             vec!["0.0.0.0/0", "10.20.1.0/24", "::/0"]
         );
 
-        let metrics_resp = app
+        let metrics_resp = public_app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
@@ -2310,6 +2311,7 @@ mod tests {
         // Note: only peer-a registered initially.
 
         let app = router(state.clone());
+        let public_app = public_router(state.clone());
         let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
         let resp = app
             .clone()
@@ -2377,7 +2379,7 @@ mod tests {
         assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
         assert!(mr.peers_removed.is_empty());
 
-        let metrics_resp = app
+        let metrics_resp = public_app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
@@ -2395,7 +2397,7 @@ mod tests {
 
         drop(body);
 
-        let metrics_resp = app
+        let metrics_resp = public_app
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/metrics")
@@ -3075,7 +3077,8 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
         insert_peer(&state, &b, "peer-b", 11);
 
-        let app = router(state);
+        let app = router(state.clone());
+        let public_app = public_router(state);
         let req_body = serde_json::json!({ "Stream": true, "Version": 39 });
         let resp = app
             .clone()
@@ -3115,7 +3118,7 @@ mod tests {
         let decoded = decode_framed(&chunk);
         assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
 
-        let metrics_resp = app
+        let metrics_resp = public_app
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/metrics")

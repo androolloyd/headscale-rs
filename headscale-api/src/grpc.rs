@@ -1659,8 +1659,7 @@ mod upstream_tests {
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
         MachineRegistry, RegistrationCache, RegistrationWaitOutcome, WireState,
-        noise::ServerNoiseKey,
-        router,
+        noise::{ServerNoiseKey, inner_router as machine_router},
         test_support::{MockIpAllocator, MockRedeemer},
     };
 
@@ -2245,7 +2244,7 @@ mod upstream_tests {
             public_control_url: Some("https://headscale.example".into()),
             registration_cache: registration_cache.clone(),
         };
-        let app = router(state.clone());
+        let app = machine_router(state.clone());
         let node_key_hex = "77".repeat(32);
         let body = serde_json::json!({
             "NodeKey": format!("nodekey:{node_key_hex}"),

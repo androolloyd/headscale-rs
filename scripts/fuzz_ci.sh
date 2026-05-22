@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fuzz_dir="${FUZZ_DIR:-${repo_root}/headscale-core/fuzz}"
+runs="${FUZZ_RUNS:-10000}"
+max_total_time="${FUZZ_MAX_TOTAL_TIME:-}"
+timeout_secs="${FUZZ_TIMEOUT_SECS:-30}"
+rss_limit_mb="${FUZZ_RSS_LIMIT_MB:-4096}"
+
+cd "${fuzz_dir}"
+
+targets=()
+if [[ -n "${FUZZ_TARGETS:-}" ]]; then
+  read -r -a targets <<< "${FUZZ_TARGETS}"
+elif [[ -n "${FUZZ_TARGET:-}" ]]; then
+  targets=("${FUZZ_TARGET}")
+else
+  while IFS= read -r target; do
+    [[ -n "${target}" ]] && targets+=("${target}")
+  done < <(cargo fuzz list)
+fi
+
+if ((${#targets[@]} == 0)); then
+  echo "no fuzz targets found" >&2
+  exit 2
+fi
+
+group_start() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::group::$*"
+  else
+    echo "==> $*"
+  fi
+}
+
+group_end() {
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::endgroup::"
+  fi
+}
+
+for target in "${targets[@]}"; do
+  group_start "build ${target}"
+  set +e
+  cargo fuzz build "${target}"
+  status="$?"
+  set -e
+  group_end
+
+  if ((status != 0)); then
+    exit "${status}"
+  fi
+done
+
+mkdir -p logs
+for target in "${targets[@]}"; do
+  mkdir -p "logs/${target}"
+
+  fuzz_args=(
+    "-timeout=${timeout_secs}"
+    "-rss_limit_mb=${rss_limit_mb}"
+  )
+  if [[ -n "${max_total_time}" ]]; then
+    fuzz_args+=("-max_total_time=${max_total_time}")
+    log_name="max-${max_total_time}.log"
+    run_label="${max_total_time}s"
+  else
+    fuzz_args+=("-runs=${runs}")
+    log_name="runs-${runs}.log"
+    run_label="${runs} inputs"
+  fi
+
+  group_start "run ${target} (${run_label})"
+  set +e
+  cargo fuzz run "${target}" -- "${fuzz_args[@]}" 2>&1 | tee "logs/${target}/${log_name}"
+  status="${PIPESTATUS[0]}"
+  set -e
+  group_end
+
+  if ((status != 0)); then
+    exit "${status}"
+  fi
+done

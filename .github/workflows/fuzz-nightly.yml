@@ -19,30 +19,32 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  targets:
+    name: discover fuzz targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: targets
+        run: |
+          set -euo pipefail
+          matrix="$(python3 scripts/fuzz_targets.py --matrix)"
+          printf 'matrix=%s\n' "${matrix}" >> "${GITHUB_OUTPUT}"
+
   fuzz:
     name: ${{ matrix.target }}
+    needs: targets
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        target:
-          - fuzz_acl
-          - fuzz_derp
-          - fuzz_endpoint
-          - fuzz_ip_packet
-          - fuzz_keys
-          - fuzz_metering
-          - fuzz_policy_hujson
-          - fuzz_routing
-          - fuzz_stun
-          - fuzz_tailscale_wire
-          - fuzz_transport
-          - fuzz_tun
-          - fuzz_wireguard
+      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
     env:
-      MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
-      RSS_LIMIT_MB: ${{ github.event.inputs.rss_limit_mb || '4096' }}
+      FUZZ_TARGET: ${{ matrix.target }}
+      FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
+      FUZZ_TIMEOUT_SECS: "30"
+      FUZZ_RSS_LIMIT_MB: ${{ github.event.inputs.rss_limit_mb || '4096' }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -52,18 +54,9 @@ jobs:
         with:
           workspaces: |
             headscale-core/fuzz -> target
-      - run: cargo install cargo-fuzz
+      - run: cargo install cargo-fuzz --locked
       - name: Run fuzz target
-        working-directory: headscale-core/fuzz
-        run: |
-          set -euo pipefail
-          mkdir -p "logs/${{ matrix.target }}"
-          cargo fuzz build "${{ matrix.target }}"
-          cargo fuzz run "${{ matrix.target }}" -- \
-            -max_total_time="${MAX_TOTAL_TIME}" \
-            -timeout=30 \
-            -rss_limit_mb="${RSS_LIMIT_MB}" \
-            2>&1 | tee "logs/${{ matrix.target }}/run.log"
+        run: ./scripts/fuzz_ci.sh
       - name: Upload fuzz logs and artifacts
         if: always()
         uses: actions/upload-artifact@v7

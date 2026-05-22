@@ -121,6 +121,8 @@ jobs:
     timeout-minutes: 35
     env:
       FUZZ_RUNS: "10000"
+      FUZZ_TIMEOUT_SECS: "30"
+      FUZZ_RSS_LIMIT_MB: "4096"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -130,26 +132,18 @@ jobs:
         with:
           workspaces: |
             headscale-core/fuzz -> target
-      - run: cargo install cargo-fuzz
-      - name: Build all fuzz targets
-        working-directory: headscale-core/fuzz
-        run: |
-          set -euo pipefail
-          cargo fuzz list | tee /tmp/headscale-fuzz-targets
-          while IFS= read -r target; do
-            echo "::group::build ${target}"
-            cargo fuzz build "${target}"
-            echo "::endgroup::"
-          done < /tmp/headscale-fuzz-targets
+      - run: cargo install cargo-fuzz --locked
       - name: 10k run all fuzz targets
-        working-directory: headscale-core/fuzz
-        run: |
-          set -euo pipefail
-          while IFS= read -r target; do
-            echo "::group::run ${target} (${FUZZ_RUNS} inputs)"
-            cargo fuzz run "${target}" -- -runs="${FUZZ_RUNS}"
-            echo "::endgroup::"
-          done < /tmp/headscale-fuzz-targets
+        run: ./scripts/fuzz_ci.sh
+      - name: Upload fuzz failure logs and artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-ci-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            headscale-core/fuzz/logs/
+            headscale-core/fuzz/artifacts/
 
   parity:
     name: headscale-go parity

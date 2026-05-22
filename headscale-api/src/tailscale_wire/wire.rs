@@ -79,7 +79,7 @@ fn tailscale_version_for_capability(version: u32) -> Option<&'static str> {
 /// | `RegisterMethod == "authkey-ephemeral"`          | `ephemeral`        |
 /// | `CreatedAt time.Time`                            | `created_at`       |
 /// | `ForcedTags []string`                            | `forced_tags`      |
-/// | `Hostinfo.Hostname/OS/OSVersion`                 | `hostname`/`os`/`os_version` |
+/// | `Hostinfo`                                       | `host_info` plus compatibility projections |
 /// | `Hostinfo.sshHostKeys`                           | `ssh_host_keys`    |
 ///
 /// `Expiry` is reflected into map-node `KeyExpiry`/`Expired` state.
@@ -104,6 +104,11 @@ pub struct MachineRecord {
     pub os: String,
     /// Client operating system version from `Hostinfo.OSVersion`.
     pub os_version: String,
+    /// Full Hostinfo snapshot last supplied by register/map. The scalar
+    /// fields below remain as compatibility projections for existing admin
+    /// paths, but peer map responses and persistent `host_info` writes should
+    /// use this richer value.
+    pub host_info: HostInfo,
     /// Allocated tailnet IPv4 in the CGNAT range.
     pub ipv4: std::net::Ipv4Addr,
     /// Wall 7: client's `DiscoKey` (`discokey:<hex>` X25519 public).
@@ -234,9 +239,13 @@ impl MachineRecord {
             node_key_hex,
             machine_key_hex,
             user,
-            hostname,
+            hostname: hostname.clone(),
             os: String::new(),
             os_version: String::new(),
+            host_info: HostInfo {
+                hostname,
+                ..HostInfo::default()
+            },
             ipv4,
             disco_key: None,
             endpoints: Vec::new(),
@@ -251,6 +260,48 @@ impl MachineRecord {
             ssh_host_keys: Vec::new(),
             register_method: 1,
         }
+    }
+
+    /// Replace the stored Hostinfo snapshot and refresh compatibility
+    /// projections that older admin/runtime paths still read directly.
+    pub fn replace_host_info(&mut self, host_info: HostInfo) {
+        self.hostname.clone_from(&host_info.hostname);
+        self.os.clone_from(&host_info.os);
+        self.os_version.clone_from(&host_info.os_version);
+        self.available_routes.clone_from(&host_info.routable_ips);
+        self.ssh_host_keys.clone_from(&host_info.ssh_host_keys);
+        self.home_derp = host_info
+            .net_info
+            .as_ref()
+            .map(|net_info| net_info.preferred_derp)
+            .unwrap_or_default();
+        self.host_info = host_info;
+    }
+
+    /// Hostinfo as emitted to clients and persisted to the Go-shaped
+    /// `nodes.host_info` column. This keeps the full client-supplied snapshot
+    /// while reflecting route/SSH/DERP projections that may be updated by
+    /// admin or map code.
+    pub fn host_info_for_node(&self) -> HostInfo {
+        let mut host_info = self.host_info.clone();
+        if host_info.hostname.is_empty() {
+            host_info.hostname.clone_from(&self.hostname);
+        }
+        if host_info.os.is_empty() {
+            host_info.os.clone_from(&self.os);
+        }
+        if host_info.os_version.is_empty() {
+            host_info.os_version.clone_from(&self.os_version);
+        }
+        host_info.routable_ips.clone_from(&self.available_routes);
+        host_info.ssh_host_keys.clone_from(&self.ssh_host_keys);
+        if self.home_derp != 0 {
+            host_info
+                .net_info
+                .get_or_insert_with(NetInfo::default)
+                .preferred_derp = self.home_derp;
+        }
+        host_info
     }
 }
 
@@ -464,7 +515,7 @@ pub struct TpmInfo {
     pub family_indicator: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct HostInfo {
     /// Tailscale client version string.

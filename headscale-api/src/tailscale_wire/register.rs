@@ -261,6 +261,7 @@ async fn register_inner(
     }
 
     let RegisterHostInfoParts {
+        mut host_info,
         hostname,
         os: requested_os,
         os_version: requested_os_version,
@@ -349,6 +350,14 @@ async fn register_inner(
                     existing.home_derp,
                 )
             });
+    preserve_net_info_from_existing(
+        &mut host_info,
+        existing_machine.as_ref().map(|(_, existing)| existing),
+    );
+    let home_derp = host_info
+        .net_info
+        .as_ref()
+        .map_or(home_derp, |net_info| net_info.preferred_derp);
     let ssh_host_keys = if requested_ssh_host_keys.is_empty() {
         existing_machine
             .as_ref()
@@ -387,6 +396,7 @@ async fn register_inner(
         hostname,
         os,
         os_version,
+        host_info,
         ipv4,
         // Wall 7: DiscoKey + Endpoints arrive on the `/map` call, not
         // on register. New registrations start empty; same-machine
@@ -458,6 +468,7 @@ async fn register_interactive(
     body: RegisterRequest,
 ) -> axum::response::Response {
     let RegisterHostInfoParts {
+        host_info,
         hostname,
         os,
         os_version,
@@ -481,6 +492,7 @@ async fn register_interactive(
         hostname,
         os,
         os_version,
+        host_info,
         ipv4,
         disco_key: None,
         endpoints: Vec::new(),
@@ -512,6 +524,7 @@ async fn register_interactive(
 }
 
 struct RegisterHostInfoParts {
+    host_info: HostInfo,
     hostname: String,
     os: String,
     os_version: String,
@@ -538,15 +551,23 @@ fn register_hostinfo_parts(
                 .into_response()
         })?
         .unwrap_or_default();
+    let mut host_info = hostinfo.cloned().unwrap_or_default();
+    host_info.routable_ips.clone_from(&available_routes);
     Ok(RegisterHostInfoParts {
-        hostname: hostinfo.map(|h| h.hostname.clone()).unwrap_or_default(),
-        os: hostinfo.map(|h| h.os.clone()).unwrap_or_default(),
-        os_version: hostinfo.map(|h| h.os_version.clone()).unwrap_or_default(),
+        hostname: host_info.hostname.clone(),
+        os: host_info.os.clone(),
+        os_version: host_info.os_version.clone(),
         available_routes,
-        ssh_host_keys: hostinfo
-            .map(|h| h.ssh_host_keys.clone())
-            .unwrap_or_default(),
+        ssh_host_keys: host_info.ssh_host_keys.clone(),
+        host_info,
     })
+}
+
+fn preserve_net_info_from_existing(host_info: &mut HostInfo, existing: Option<&MachineRecord>) {
+    if host_info.net_info.is_some() {
+        return;
+    }
+    host_info.net_info = existing.and_then(|existing| existing.host_info_for_node().net_info);
 }
 
 fn requested_tags_for_body(body: &RegisterRequest) -> Vec<String> {
@@ -845,19 +866,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             .chain(rec.approved_routes.iter().cloned())
             .collect(),
         primary_routes: rec.approved_routes.clone(),
-        hostinfo: HostInfo {
-            hostname: rec.hostname.clone(),
-            os: rec.os.clone(),
-            os_version: rec.os_version.clone(),
-            routable_ips: rec.available_routes.clone(),
-            request_tags: Vec::new(),
-            ssh_host_keys: rec.ssh_host_keys.clone(),
-            net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
-                preferred_derp: rec.home_derp,
-                ..crate::tailscale_wire::wire::NetInfo::default()
-            }),
-            ..HostInfo::default()
-        },
+        hostinfo: rec.host_info_for_node(),
         created: Some(rec.created_at),
         key_expiry: rec.expiry,
         cap: 0,
@@ -1288,7 +1297,17 @@ mod tests {
         state.registration_store = Some(machines);
         let app = router(state.clone());
         let node_key_hex = "16".repeat(32);
-        let body = req_body(&node_key_hex, &key.key);
+        let mut body = req_body(&node_key_hex, &key.key);
+        body["Hostinfo"]["IPNVersion"] = serde_json::json!("1.82.0-register");
+        body["Hostinfo"]["Distro"] = serde_json::json!("fedora");
+        body["Hostinfo"]["NetInfo"] = serde_json::json!({
+            "PreferredDERP": 44,
+            "WorkingUDP": true,
+            "LinkType": "wifi",
+            "DERPLatency": {
+                "44-v4": 0.034
+            }
+        });
 
         let resp = app
             .oneshot(
@@ -1317,11 +1336,24 @@ mod tests {
         let host_info = raw.host_info_value();
         assert_eq!(host_info["OS"], "linux");
         assert_eq!(host_info["OSVersion"], "6.6");
+        assert_eq!(host_info["IPNVersion"], "1.82.0-register");
+        assert_eq!(host_info["Distro"], "fedora");
+        assert_eq!(host_info["NetInfo"]["PreferredDERP"], 44);
+        assert_eq!(host_info["NetInfo"]["WorkingUDP"], true);
+        assert_eq!(host_info["NetInfo"]["LinkType"], "wifi");
+        assert_eq!(host_info["NetInfo"]["DERPLatency"]["44-v4"], 0.034);
 
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(rec.user, "alice");
         assert_eq!(rec.os, "linux");
         assert_eq!(rec.os_version, "6.6");
+        assert_eq!(rec.host_info.ipn_version, "1.82.0-register");
+        assert_eq!(rec.host_info.distro, "fedora");
+        let net_info = rec.host_info.net_info.expect("registry NetInfo");
+        assert_eq!(net_info.preferred_derp, 44);
+        assert_eq!(net_info.working_udp, Some(true));
+        assert_eq!(net_info.link_type, "wifi");
+        assert_eq!(net_info.derp_latency.get("44-v4"), Some(&0.034));
     }
 
     #[cfg(feature = "admin")]

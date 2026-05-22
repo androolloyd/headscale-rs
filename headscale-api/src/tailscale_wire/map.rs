@@ -70,14 +70,37 @@ use serde::Serialize;
 use super::register::record_to_map_node;
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
-    DebugConfig, DnsConfig, FilterRule, MapNode, MapRequest, MapResponse, NetPortRange, PeerChange,
-    PortRange, UserProfile, is_supported_capability_version, stable_id_from_key, strip_key_prefix,
-    unsupported_client_error,
+    DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
+    PeerChange, PortRange, UserProfile, is_supported_capability_version, stable_id_from_key,
+    strip_key_prefix, unsupported_client_error,
 };
 use super::{MachineRecord, WireState};
 
 use crate::dns::{DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
+
+fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
+    let mut merged = serde_json::to_value(current).unwrap_or_default();
+    let mut update = serde_json::to_value(requested).unwrap_or_default();
+    if let Some(fields) = update.as_object_mut() {
+        for key in ["Hostname", "OS", "OSVersion"] {
+            if fields
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(str::is_empty)
+            {
+                fields.remove(key);
+            }
+        }
+        fields.remove("RoutableIPs");
+    }
+    if let (Some(merged), Some(update)) = (merged.as_object_mut(), update.as_object()) {
+        for (key, value) in update {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(merged).unwrap_or_else(|_| requested.clone())
+}
 
 const MAP_COMPRESSION_ZSTD: &str = "zstd";
 
@@ -654,15 +677,17 @@ async fn map_inner(
         own.last_seen = touched.last_seen;
     }
 
-    // Wall 7: persist client-provided DiscoKey, Endpoints, and
-    // Hostinfo.NetInfo.PreferredDERP from `MapRequest` into the
+    // Wall 7/P1: persist client-provided DiscoKey, Endpoints, and
+    // the full Hostinfo snapshot from `MapRequest` into the
     // `MachineRecord` so subsequent map calls for OTHER peers see them
     // on this peer's `MapNode`. Stock `tailscale` v1.78+ sends the
     // disco/endpoint values on every map call (initial + refresh); we
     // treat any non-empty value as a fresh overwrite, and `None` /
     // empty as "keep what was there." This means a client that omits
     // the fields on one call doesn't accidentally clear what previous
-    // calls established.
+    // calls established. If Hostinfo is present but omits NetInfo,
+    // preserve the prior NetInfo like headscale-go's
+    // `netInfoFromMapRequest`.
     //
     // `upsert` on the registry notifies waiters, which wakes any
     // peer's streaming `/map` so they pick up the new disco/endpoint
@@ -681,29 +706,6 @@ async fn map_inner(
         record_changed = true;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
-        if !hostinfo.hostname.is_empty() && own.hostname != hostinfo.hostname {
-            own.hostname = hostinfo.hostname.clone();
-            record_changed = true;
-        }
-        if !hostinfo.os.is_empty() && own.os != hostinfo.os {
-            own.os = hostinfo.os.clone();
-            record_changed = true;
-        }
-        if !hostinfo.os_version.is_empty() && own.os_version != hostinfo.os_version {
-            own.os_version = hostinfo.os_version.clone();
-            record_changed = true;
-        }
-        if let Some(net_info) = hostinfo.net_info.as_ref()
-            && own.home_derp != net_info.preferred_derp
-        {
-            own.home_derp = net_info.preferred_derp;
-            record_changed = true;
-        }
-        if !hostinfo.ssh_host_keys.is_empty() && own.ssh_host_keys != hostinfo.ssh_host_keys {
-            own.ssh_host_keys.clone_from(&hostinfo.ssh_host_keys);
-            record_changed = true;
-        }
-
         let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
             Ok(routes) => routes,
             Err(e) => {
@@ -716,6 +718,8 @@ async fn map_inner(
                     .into_response();
             }
         };
+        let mut hostinfo = host_info_for_map_update(&own.host_info_for_node(), hostinfo);
+        hostinfo.routable_ips.clone_from(&announced_routes);
         let addr = own.ipv4.to_string();
         let user = (!own.user.is_empty()).then_some(own.user.as_str());
         let approved_routes = match auto_approved_routes_for_node(
@@ -737,8 +741,8 @@ async fn map_inner(
                     .into_response();
             }
         };
-        if own.available_routes != announced_routes {
-            own.available_routes = announced_routes;
+        if own.host_info_for_node() != hostinfo {
+            own.replace_host_info(hostinfo);
             record_changed = true;
         }
         if own.approved_routes != approved_routes {
@@ -2128,6 +2132,7 @@ mod tests {
         let ssh_host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIpersisted";
 
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
@@ -2140,13 +2145,20 @@ mod tests {
                             "DiscoKey": disco_key,
                             "Endpoints": endpoints,
                             "Hostinfo": {
+                                "IPNVersion": "1.82.0-test",
                                 "Hostname": "persisted-host",
                                 "OS": "linux",
                                 "OSVersion": "6.8",
+                                "Distro": "nixos",
                                 "RoutableIPs": ["10.70.0.0/24"],
                                 "sshHostKeys": [ssh_host_key],
                                 "NetInfo": {
-                                    "PreferredDERP": 901
+                                    "PreferredDERP": 901,
+                                    "WorkingUDP": true,
+                                    "LinkType": "wired",
+                                    "DERPLatency": {
+                                        "901-v4": 0.012
+                                    }
                                 }
                             }
                         }))
@@ -2171,21 +2183,74 @@ mod tests {
         assert_eq!(host_info["Hostname"], "persisted-host");
         assert_eq!(host_info["OS"], "linux");
         assert_eq!(host_info["OSVersion"], "6.8");
+        assert_eq!(host_info["IPNVersion"], "1.82.0-test");
+        assert_eq!(host_info["Distro"], "nixos");
         assert_eq!(host_info["RoutableIPs"][0], "10.70.0.0/24");
         assert_eq!(host_info["NetInfo"]["PreferredDERP"], 901);
+        assert_eq!(host_info["NetInfo"]["WorkingUDP"], true);
+        assert_eq!(host_info["NetInfo"]["LinkType"], "wired");
+        assert_eq!(host_info["NetInfo"]["DERPLatency"]["901-v4"], 0.012);
         assert_eq!(host_info["sshHostKeys"][0], ssh_host_key);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{}/map", record.node_key_hex))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "IPNVersion": "1.82.0-test",
+                                "Hostname": "persisted-host",
+                                "OS": "linux",
+                                "OSVersion": "6.9",
+                                "Distro": "nixos",
+                                "RoutableIPs": ["10.70.0.0/24"],
+                                "sshHostKeys": [ssh_host_key]
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let row = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{}", record.node_key_hex),
+        )
+        .await
+        .unwrap();
+        let host_info = row.host_info_value();
+        assert_eq!(host_info["OSVersion"], "6.9");
+        assert_eq!(host_info["NetInfo"]["PreferredDERP"], 901);
+        assert_eq!(host_info["NetInfo"]["WorkingUDP"], true);
+        assert_eq!(host_info["NetInfo"]["LinkType"], "wired");
+        assert_eq!(host_info["NetInfo"]["DERPLatency"]["901-v4"], 0.012);
 
         let hydrated = MachineRegistry::new();
         machines.hydrate_wire_registry(&hydrated).await.unwrap();
         let wire = hydrated.get(&record.node_key_hex).unwrap();
         assert_eq!(wire.hostname, "persisted-host");
         assert_eq!(wire.os, "linux");
-        assert_eq!(wire.os_version, "6.8");
+        assert_eq!(wire.os_version, "6.9");
         assert_eq!(wire.disco_key.as_deref(), Some(disco_key.as_str()));
         assert_eq!(wire.endpoints, endpoints);
         assert_eq!(wire.home_derp, 901);
         assert_eq!(wire.available_routes, vec!["10.70.0.0/24"]);
         assert_eq!(wire.ssh_host_keys, vec![ssh_host_key]);
+        assert_eq!(wire.host_info.ipn_version, "1.82.0-test");
+        assert_eq!(wire.host_info.distro, "nixos");
+        let net_info = wire.host_info.net_info.expect("hydrated NetInfo");
+        assert_eq!(net_info.preferred_derp, 901);
+        assert_eq!(net_info.working_udp, Some(true));
+        assert_eq!(net_info.link_type, "wired");
+        assert_eq!(net_info.derp_latency.get("901-v4"), Some(&0.012));
     }
 
     #[tokio::test]

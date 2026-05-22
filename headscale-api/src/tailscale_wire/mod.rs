@@ -1461,6 +1461,12 @@ mod registry_tests {
             hostname: format!("host-{host}"),
             os: "linux".to_string(),
             os_version: "test".to_string(),
+            host_info: wire::HostInfo {
+                hostname: format!("host-{host}"),
+                os: "linux".to_string(),
+                os_version: "test".to_string(),
+                ..wire::HostInfo::default()
+            },
             ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
             disco_key: Some(format!("disco-{host:08x}")),
             endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],

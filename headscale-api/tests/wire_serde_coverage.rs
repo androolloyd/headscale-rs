@@ -91,6 +91,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         os: "linux".into(),
         os_version: "6.6".into(),
         routable_ips: vec!["10.0.0.0/24".into()],
+        request_tags: vec!["tag:server".into()],
         net_info: Some(NetInfo { preferred_derp: 7 }),
     };
     let v: Value = serde_json::to_value(&h).unwrap();
@@ -101,6 +102,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     // `OSVersion` not `OsVersion`.
     assert_eq!(v["OSVersion"], "6.6");
     assert_eq!(v["RoutableIPs"], serde_json::json!(["10.0.0.0/24"]));
+    assert_eq!(v["RequestTags"], serde_json::json!(["tag:server"]));
     assert_eq!(v["NetInfo"]["PreferredDERP"], 7);
     assert!(v.get("OsVersion").is_none());
 }
@@ -112,7 +114,20 @@ fn hostinfo_round_trip_preserves_unset_fields_as_empty_strings() {
     assert_eq!(h.hostname, "");
     assert_eq!(h.os, "");
     assert_eq!(h.os_version, "");
+    assert!(h.request_tags.is_empty());
     assert!(h.net_info.is_none());
+}
+
+#[test]
+fn hostinfo_round_trips_request_tags() {
+    let h: HostInfo = serde_json::from_str(r#"{"RequestTags":["tag:server","tag:db"]}"#).unwrap();
+    assert_eq!(h.request_tags, vec!["tag:server", "tag:db"]);
+
+    let v: Value = serde_json::to_value(&h).unwrap();
+    assert_eq!(
+        v["RequestTags"],
+        serde_json::json!(["tag:server", "tag:db"])
+    );
 }
 
 #[test]

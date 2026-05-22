@@ -307,6 +307,10 @@ pub struct HostInfo {
     /// Subnet routes advertised by the client.
     #[serde(default, rename = "RoutableIPs")]
     pub routable_ips: Vec<String>,
+    /// ACL tags requested by the client, e.g. `tailscale up
+    /// --advertise-tags=tag:server`.
+    #[serde(default, rename = "RequestTags", skip_serializing_if = "Vec::is_empty")]
+    pub request_tags: Vec<String>,
     /// NAT/check results advertised by the client. We currently persist
     /// the preferred DERP field for map-node and stream-patch parity.
     #[serde(default, rename = "NetInfo", skip_serializing_if = "Option::is_none")]
@@ -1292,6 +1296,7 @@ mod tests {
                 os: "linux".into(),
                 os_version: "6.6".into(),
                 routable_ips: Vec::new(),
+                request_tags: Vec::new(),
                 net_info: None,
             }),
             followup: None,

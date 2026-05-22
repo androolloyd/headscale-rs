@@ -177,7 +177,7 @@ pub mod upstream {
         RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
-    use crate::policy::{PolicyStore, parse_hujson_policy};
+    use crate::policy::{NodeView, PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::MachineRecord;
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
@@ -733,6 +733,7 @@ pub mod upstream {
                 .ok_or_else(|| Status::not_found("registration not found"))?;
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
+            apply_requested_tags(&self.policy, &mut record)?;
 
             let node = self
                 .machines
@@ -1384,6 +1385,38 @@ pub mod upstream {
         Ok(())
     }
 
+    pub(super) fn apply_requested_tags(
+        policy: &PolicyStore,
+        record: &mut MachineAdminRecord,
+    ) -> Result<(), Status> {
+        if record.tags.is_empty() {
+            return Ok(());
+        }
+
+        record.tags.sort();
+        record.tags.dedup();
+        let node = NodeView {
+            addr: Some(record.ipv4.as_str()),
+            user: Some(record.user.as_str()),
+            tags: &[],
+        };
+        let invalid_tags = record
+            .tags
+            .iter()
+            .filter(|tag| validate_tag(tag).is_err() || !policy.node_can_have_tag(&node, tag))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !invalid_tags.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "requested tags [{}] are invalid or not permitted",
+                invalid_tags.join(" ")
+            )));
+        }
+
+        record.expiry = None;
+        Ok(())
+    }
+
     fn user_record_to_proto(user: &UserRecord) -> ProtoUser {
         ProtoUser {
             id: user.id,
@@ -1425,10 +1458,10 @@ mod upstream_tests {
     use tonic::Request;
     use tower::ServiceExt;
 
-    use super::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
+    use super::upstream::{DatabaseHealthCheck, HeadscaleAdminService, apply_requested_tags};
     use crate::admin::{
-        ApiKeyAdmin, ApiKeyMintRequest, PersistentApiKeyAdmin, PersistentMachineAdmin,
-        PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
+        ApiKeyAdmin, ApiKeyMintRequest, MachineAdminRecord, PersistentApiKeyAdmin,
+        PersistentMachineAdmin, PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
     };
     use crate::generated::headscale_service_server::HeadscaleService;
     use crate::generated::{
@@ -1440,7 +1473,7 @@ mod upstream_tests {
         RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
         SetTagsRequest,
     };
-    use crate::policy::PolicyStore;
+    use crate::policy::{PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
         MachineRegistry, RegistrationCache, WireState,
@@ -1824,6 +1857,12 @@ mod upstream_tests {
         db.migrate().await.expect("migrate");
         let machines = Arc::new(MachineRegistry::new());
         let registration_cache = Arc::new(RegistrationCache::new());
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
         let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
         let service = HeadscaleAdminService::with_user_admin(
             users.clone(),
@@ -1832,7 +1871,7 @@ mod upstream_tests {
                 PersistentPreauthAdmin::new_for_test(db.pool().clone())
                     .with_user_admin(users.clone()),
             ),
-            PolicyStore::new(),
+            policy.clone(),
             Arc::new(WireMachineAdmin::new(machines.clone())),
         )
         .with_registration_cache(registration_cache.clone());
@@ -1854,7 +1893,7 @@ mod upstream_tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: machines.clone(),
             derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
-            policy: Arc::new(crate::policy::PolicyStore::new()),
+            policy: Arc::new(policy),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: Some("https://headscale.example".into()),
@@ -1864,7 +1903,12 @@ mod upstream_tests {
         let node_key_hex = "77".repeat(32);
         let body = serde_json::json!({
             "NodeKey": format!("nodekey:{node_key_hex}"),
-            "Hostinfo": { "Hostname": "wire-pending", "RoutableIPs": ["10.77.0.0/24"] }
+            "Expiry": "2026-06-01T00:00:00Z",
+            "Hostinfo": {
+                "Hostname": "wire-pending",
+                "RoutableIPs": ["10.77.0.0/24"],
+                "RequestTags": ["tag:server", "tag:server"]
+            }
         });
         let resp = app
             .clone()
@@ -1928,10 +1972,18 @@ mod upstream_tests {
             .expect("registered node");
         assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(registered.name, "wire-pending");
+        assert_eq!(registered.tags, vec!["tag:server"]);
+        assert!(registered.expiry.is_none());
         assert_eq!(registered.available_routes, vec!["10.77.0.0/24"]);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
         assert!(registration_cache.is_empty());
-        assert_eq!(machines.get(&node_key_hex).unwrap().user, "alice");
+        let stored = machines.get(&node_key_hex).unwrap();
+        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.forced_tags, vec!["tag:server"]);
+        assert!(
+            stored.expiry.is_none(),
+            "tagged RequestTags registration disables node-key expiry"
+        );
 
         let followup_resp = followup_task
             .await
@@ -1941,7 +1993,8 @@ mod upstream_tests {
         let followup_response: crate::tailscale_wire::RegisterResponse =
             serde_json::from_slice(&raw).unwrap();
         assert!(followup_response.machine_authorized);
-        assert_eq!(followup_response.user.login_name, "alice");
+        assert_eq!(followup_response.user.login_name, "tagged-devices");
+        assert_eq!(followup_response.login.login_name, "tagged-devices");
         assert!(followup_response.auth_url.is_empty());
     }
 
@@ -2233,6 +2286,39 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn upstream_node_grpc_request_tags_require_tag_owner_policy() {
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let mut record = MachineAdminRecord {
+            node_id: 0,
+            id: "dd".repeat(32),
+            name: "bob-laptop".into(),
+            user: "bob".into(),
+            ipv4: "100.64.0.7".into(),
+            online: true,
+            last_seen: 0,
+            created_at: 0,
+            expiry: Some(1_780_000_000),
+            machine_key_hex: "bb".repeat(32),
+            os: "unknown".into(),
+            version: "unknown".into(),
+            tags: vec!["tag:server".into()],
+            routes: Vec::new(),
+            approved_routes: Vec::new(),
+            register_method: RegisterMethod::Cli as i32,
+            expired: false,
+        };
+
+        let err = apply_requested_tags(&policy, &mut record).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("requested tags [tag:server]"));
     }
 
     #[tokio::test]

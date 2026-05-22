@@ -10,7 +10,12 @@
       "OldNodeKey": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
       "NLKey": "nlpub:3333333333333333333333333333333333333333333333333333333333333333",
       "Auth": { "AuthKey": "hskey-auth-rotation" },
-      "Hostinfo": { "Hostname": "rotation-peer", "OS": "linux", "OSVersion": "6.10" },
+      "Hostinfo": {
+        "Hostname": "rotation-peer",
+        "OS": "linux",
+        "OSVersion": "6.10",
+        "RequestTags": ["tag:server", "tag:db"]
+      },
       "Followup": "https://headscale.example/register/3oYCOZYA2zZmGB4PQ7aHBaMi",
       "Tailnet": "required:tail.example",
       "Ephemeral": true,

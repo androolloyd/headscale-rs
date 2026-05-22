@@ -156,6 +156,7 @@ async fn register_inner(
     body: RegisterRequest,
 ) -> axum::response::Response {
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
+    let requested_tags = requested_tags_for_body(&body);
     let now = chrono::Utc::now();
 
     if let Some(expiry) = body.expiry {
@@ -252,6 +253,10 @@ async fn register_inner(
         }
     };
     let user = redeemed.user.clone();
+
+    if !requested_tags.is_empty() {
+        return invalid_requested_tags_response(&requested_tags);
+    }
 
     let (hostname, available_routes) = match hostname_and_routes(&body) {
         Ok(parts) => parts,
@@ -391,6 +396,7 @@ async fn register_interactive(
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
+    let requested_tags = requested_tags_for_body(&body);
     let ipv4 = match allocate_register_ip(&state, &format!("pending:{node_key_hex}")) {
         Ok(ip) => ip,
         Err(resp) => return resp,
@@ -410,7 +416,7 @@ async fn register_interactive(
         last_seen: now,
         ephemeral: body.ephemeral,
         created_at: now,
-        forced_tags: Vec::new(),
+        forced_tags: requested_tags,
         available_routes,
         approved_routes: Vec::new(),
         register_method: 0,
@@ -454,6 +460,34 @@ fn hostname_and_routes(
         })?
         .unwrap_or_default();
     Ok((hostname, available_routes))
+}
+
+fn requested_tags_for_body(body: &RegisterRequest) -> Vec<String> {
+    body.hostinfo
+        .as_ref()
+        .map(|hostinfo| normalize_requested_tags(&hostinfo.request_tags))
+        .unwrap_or_default()
+}
+
+fn normalize_requested_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn invalid_requested_tags_response(tags: &[String]) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: format!(
+                "requested tags [{}] are invalid or not permitted",
+                tags.join(" ")
+            ),
+        }),
+    )
+        .into_response()
 }
 
 fn merge_existing_approved_routes(
@@ -679,6 +713,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
             os: String::new(),
             os_version: String::new(),
             routable_ips: rec.available_routes.clone(),
+            request_tags: Vec::new(),
             net_info: (rec.home_derp != 0).then_some(crate::tailscale_wire::wire::NetInfo {
                 preferred_derp: rec.home_derp,
             }),
@@ -903,6 +938,37 @@ mod tests {
             rec.expiry.is_none(),
             "tagged preauth registrations disable node-key expiry"
         );
+    }
+
+    #[tokio::test]
+    async fn authkey_preauth_rejects_client_requested_tags() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-request-tags";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "18".repeat(32);
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Hostinfo"]["RequestTags"] = serde_json::json!(["tag:server", "tag:server", "tag:db"]);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            ev["error"],
+            "requested tags [tag:db tag:server] are invalid or not permitted"
+        );
+        assert!(state.machines.get(&node_key_hex).is_none());
     }
 
     #[tokio::test]

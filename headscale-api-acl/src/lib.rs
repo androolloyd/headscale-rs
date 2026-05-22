@@ -958,6 +958,32 @@ impl AclDoc {
         self.attrs_for(node)
     }
 
+    /// True if the loaded `tagOwners` policy permits `node` to claim
+    /// `tag` during client-requested registration tagging.
+    pub fn node_can_have_tag(&self, node: &NodeView<'_>, tag: &str) -> bool {
+        let Some(owners) = self.tag_owners.get(tag) else {
+            return false;
+        };
+        owners
+            .iter()
+            .any(|owner| self.tag_owner_matches(node, owner))
+    }
+
+    fn tag_owner_matches(&self, node: &NodeView<'_>, owner: &str) -> bool {
+        if owner.contains('@') {
+            return node.user.is_some_and(|user| user_matches(owner, user));
+        }
+        if let Some(group) = owner.strip_prefix("group:") {
+            let Some(members) = self.groups.get(owner).or_else(|| self.groups.get(group)) else {
+                return false;
+            };
+            return members
+                .iter()
+                .any(|member| self.tag_owner_matches(node, member));
+        }
+        false
+    }
+
     /// True if `node` should have a route covering `prefix`
     /// auto-approved per the `autoApprovers.routes` map.
     pub fn auto_approves_route(&self, node: &NodeView<'_>, prefix: &str) -> bool {
@@ -2665,5 +2691,54 @@ mod tests {
     fn expand_principal_literal_returns_itself() {
         let d = AclDoc::empty();
         assert_eq!(d.expand_principal("oct1xyz"), vec!["oct1xyz"]);
+    }
+
+    #[test]
+    fn node_can_have_tag_allows_direct_user_owner() {
+        let mut d = AclDoc::empty();
+        d.tag_owners
+            .insert("tag:router".into(), vec!["alice@".into()]);
+        let node = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &[],
+        };
+
+        assert!(d.node_can_have_tag(&node, "tag:router"));
+    }
+
+    #[test]
+    fn node_can_have_tag_allows_group_owner() {
+        let mut d = AclDoc::empty();
+        d.groups
+            .insert("group:admins".into(), vec!["alice@".into()]);
+        d.tag_owners
+            .insert("tag:db".into(), vec!["group:admins".into()]);
+        let node = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &[],
+        };
+
+        assert!(d.node_can_have_tag(&node, "tag:db"));
+    }
+
+    #[test]
+    fn node_can_have_tag_denies_wrong_user_missing_policy_and_tag_owners() {
+        let mut d = AclDoc::empty();
+        d.tag_owners
+            .insert("tag:router".into(), vec!["alice@".into()]);
+        d.tag_owners
+            .insert("tag:ops".into(), vec!["tag:router".into()]);
+        let tags = vec!["tag:router".to_string()];
+        let node = NodeView {
+            addr: None,
+            user: Some("bob"),
+            tags: &tags,
+        };
+
+        assert!(!d.node_can_have_tag(&node, "tag:router"));
+        assert!(!d.node_can_have_tag(&node, "tag:missing"));
+        assert!(!d.node_can_have_tag(&node, "tag:ops"));
     }
 }

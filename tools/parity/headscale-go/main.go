@@ -278,10 +278,11 @@ type userProfileSummary struct {
 }
 
 type hostInfoSummary struct {
-	Hostname      string `json:"hostname,omitempty"`
-	OS            string `json:"os,omitempty"`
-	OSVersion     string `json:"os_version,omitempty"`
-	PreferredDERP int    `json:"preferred_derp,omitempty"`
+	Hostname      string   `json:"hostname,omitempty"`
+	OS            string   `json:"os,omitempty"`
+	OSVersion     string   `json:"os_version,omitempty"`
+	RequestTags   []string `json:"request_tags,omitempty"`
+	PreferredDERP int      `json:"preferred_derp,omitempty"`
 }
 
 type filterRuleOut struct {
@@ -1079,6 +1080,7 @@ func summarizeHostInfo(hostinfo tailcfg.HostinfoView) *hostInfoSummary {
 		Hostname:      hostinfo.Hostname(),
 		OS:            hostinfo.OS(),
 		OSVersion:     hostinfo.OSVersion(),
+		RequestTags:   hostinfo.RequestTags().AsSlice(),
 		PreferredDERP: preferredDERP,
 	}
 }

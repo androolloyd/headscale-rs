@@ -164,6 +164,26 @@ fn node_attrs_for_collects_via_canonical_doc() {
     assert_eq!(store.node_attrs_for(&plain), vec!["funnel".to_string()]);
 }
 
+#[test]
+fn node_can_have_tag_delegates_to_canonical_doc() {
+    let store = PolicyStore::new();
+    let alice = NodeView::new("100.64.0.1").with_user("alice");
+    assert!(!store.node_can_have_tag(&alice, "tag:server"));
+
+    let raw = r#"{
+        "version": 1,
+        "groups": {"group:admins": ["alice@"]},
+        "tagOwners": {"tag:server": ["group:admins"]},
+        "rules": []
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    store.set(doc, raw.to_string());
+
+    let bob = NodeView::new("100.64.0.2").with_user("bob");
+    assert!(store.node_can_have_tag(&alice, "tag:server"));
+    assert!(!store.node_can_have_tag(&bob, "tag:server"));
+}
+
 // ---------------------------------------------------------------------------
 // auto_approves_route / auto_approves_exit_node
 // ---------------------------------------------------------------------------

@@ -176,6 +176,18 @@ impl PolicyStore {
         })
     }
 
+    /// True iff the loaded policy permits `node` to claim `tag`
+    /// through `tagOwners`. No loaded policy means no client-requested
+    /// tag is assignable.
+    pub fn node_can_have_tag(&self, node: &NodeView<'_>, tag: &str) -> bool {
+        self.inner
+            .state
+            .read()
+            .doc
+            .as_ref()
+            .is_some_and(|doc| doc.node_can_have_tag(node, tag))
+    }
+
     /// Capability flags `node` should receive per the loaded policy's
     /// `node_attrs` block. Empty vec when no policy is loaded.
     ///

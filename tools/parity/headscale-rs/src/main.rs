@@ -440,6 +440,8 @@ struct HostInfoSummary {
     os: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     os_version: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    request_tags: Vec<String>,
     #[serde(skip_serializing_if = "is_zero_i32")]
     preferred_derp: i32,
 }
@@ -1673,6 +1675,7 @@ fn summarize_hostinfo(hostinfo: HostInfo) -> HostInfoSummary {
         hostname: hostinfo.hostname,
         os: hostinfo.os,
         os_version: hostinfo.os_version,
+        request_tags: hostinfo.request_tags,
         preferred_derp: hostinfo
             .net_info
             .map(|net_info| net_info.preferred_derp)

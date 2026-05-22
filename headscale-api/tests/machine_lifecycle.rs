@@ -212,12 +212,12 @@ fn wire_machine_router(wire: WireState) -> Router {
 /// Non-streaming lite endpoint update. Upstream returns 200 with no
 /// map body, including for nodes whose key has expired.
 async fn wire_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
-    wire_map_body(wire, node_key_hex, r#"{"OmitPeers":true}"#).await
+    wire_map_body(wire, node_key_hex, r#"{"Version":113,"OmitPeers":true}"#).await
 }
 
 /// Full non-streaming map snapshot.
 async fn wire_full_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, serde_json::Value) {
-    wire_map_body(wire, node_key_hex, "{}").await
+    wire_map_body(wire, node_key_hex, r#"{"Version":113}"#).await
 }
 
 /// `GET /api/v1/machines/{id}` returning the decoded JSON.

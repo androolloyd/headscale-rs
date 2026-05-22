@@ -1279,7 +1279,7 @@ fn create_params_for_auth_path(
         return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
     };
     let mut params = create_params_for_wire_record(&canonical, user_id, auth_key_id);
-    params.ipv6 = record.ipv6.clone();
+    params.ipv6.clone_from(&record.ipv6);
     params
 }
 

@@ -113,22 +113,34 @@ evidence, not claims about uninspected code.
 | P2 | CLI over upstream gRPC | headscale-go CLI connects via config, Unix socket by default, remote gRPC with API key/TLS, and exposes `serve`, `version`, `configtest`, `dumpConfig`, `debug create-node`, users, nodes, preauthkeys, apikeys, and policy commands | Rust CLI has HTTP-admin wrappers, aliases, and output formats for several groups, plus extra Octra-era commands | Add help/output/error snapshots against pinned headscale-go, switch admin commands to upstream gRPC connection modes, cover missing command groups and flags, and keep Octra-only commands out of parity claims |
 | P2 | API auth and error text | upstream grpc-gateway and gRPC auth return specific unauthenticated/status bodies and parser errors before handlers run | Rust covers bearer auth and Go base-0 uint64 parsing, with remaining exact query/body/error cases open | Add table-driven gateway and gRPC tests for missing/invalid bearer, malformed query/body JSON, path parser failures, status JSON fields, and CLI-visible error text |
 
+## Parallel Workstreams
+
+These streams are independent enough to run in separate worktrees. Keep
+file ownership narrow when splitting them across agents.
+
+| Stream | Scope | Primary files | Exit criteria |
+| --- | --- | --- | --- |
+| Control-plane topology | Add optional remote TCP gRPC serving with API-key auth, TLS/insecure config, and reflection; keep the local Unix socket unauthenticated and permission-protected like upstream. | `headscale-cli/src/server.rs`, `headscale-cli/src/config.rs`, `headscale-cli/src/main.rs`, `headscale-api/src/grpc.rs` | Remote `Health`/admin RPC tests pass against production `headscale server`; config parses upstream-shaped gRPC fields; local Unix health remains bearerless. |
+| CLI transport parity | Move admin commands from legacy HTTP wrappers toward upstream gRPC connection modes: Unix socket by default, remote address with API key/TLS/insecure, and upstream output/error snapshots. | `headscale-cli/src/admin/**`, `headscale-cli/tests/**`, `headscale-cli/src/config.rs` | CLI tests prove Unix-socket gRPC commands against production server and preserve Octra-only commands outside parity claims. |
+| Runtime DNS and DERP config | Stop hard-coding empty `DERPMap` and `DnsStore::new()` in production; build map/DNS state from config, then add client-visible MagicDNS/DERP tests. | `headscale-cli/src/server.rs`, `headscale-api/src/dns.rs`, `headscale-api/src/tailscale_wire/**`, `tools/real-client/**` | Full map responses from production include configured DERP and MagicDNS; paired stock-client rows cover split DNS/private DERP setup. |
+| Embedded DERP/STUN | Add the real embedded DERP relay and UDP STUN serving path, including verify-client admission and TLS/server-url behavior. | `headscale-api/src/tailscale_wire/serve.rs`, `headscale-api/src/tailscale_wire/basic_handlers.rs`, `headscale-core/src/derp.rs`, `headscale-core/src/stun.rs` | Paired `derp-relay`, `stun`, and `private-derp` real-client rows pass against Rust and pinned headscale-go. |
+| Lifecycle and route correctness | Wire production ephemeral GC, preserve route approvals across reauth even when not currently advertised, and tighten map-change batching/reason coverage. | `headscale-api/src/tailscale_wire/register.rs`, `headscale-api/src/tailscale_wire/map.rs`, `headscale-api/src/tailscale_wire/mod.rs` | Tests prove absent-route reauth keeps DB approvals, expired/ephemeral nodes disappear from peers, and streaming deltas match upstream-visible behavior. |
+| CI, fuzz, and coverage gates | Enforce stronger parity in CI: `--all-targets` tests, selected real-client rows, stale-corpus checks, coverage thresholds, and an explicit formal-verification status. | `.github/workflows/**`, `scripts/**`, `headscale-core/fuzz/**`, `tools/real-client/**` | PR CI runs 10k fuzz plus stale-corpus check, selected Docker smokes, all-target tests, and coverage floor; docs state Lean/formal proof is absent until restored. |
+
 ## Next Implementation Order
 
-1. Extend the now-passing production OIDC stock-client smokes with
-   persisted policy/route propagation in the same process.
-2. Prove persistent web/CLI and OIDC interactive registration through
-   the production serving topology, including stock-client smokes and
-   restart/reload coverage for shared node/user IDs, auth-key FKs, route
-   approvals, forced tags, and map projection.
-3. Wire the full upstream serving topology from config: public HTTP,
-   grpc-gateway `/api/v1`, Unix-socket gRPC, optional external gRPC with
-   auth/TLS or insecure mode, reflection, debug/metrics, TLS/ACME, and
-   DERP/STUN.
-4. Add or broaden the missing paired real-client suites for remaining
-   Tailscale SSH edges, DERP/STUN/private DERP, API auth, CLI over
-   gRPC, and the remaining DNS/ACL/route edge matrices.
-5. Tighten exactness gaps: grpc-gateway parser/error text, CLI
-   help/output/error snapshots, config search/validation, policy
-   validator edge cases, map batching/state-change reasons, and
-   capability negotiation.
+1. Finish the control-plane topology stream: optional remote gRPC,
+   config parsing, auth/TLS or insecure mode, and production tests.
+2. Start CLI transport parity on top of that listener work: Unix-socket
+   gRPC by default, remote gRPC config, and upstream help/output/error
+   snapshots.
+3. Wire production DNS and DERP map config into the live wire runtime,
+   then add paired split-DNS/private-DERP stock-client rows.
+4. Add the embedded DERP/STUN serving path and paired relay/STUN
+   real-client coverage.
+5. Tighten lifecycle/runtime edges: ephemeral GC in production, route
+   approval preservation on reauth, and explicit map-change batching.
+6. Harden CI so the parity work stays enforced: selected real-client
+   rows on PRs, scheduled full matrix, stale fuzz-corpus checks,
+   coverage thresholds, and an explicit formal-verification gate once
+   the Lean workspace exists again.

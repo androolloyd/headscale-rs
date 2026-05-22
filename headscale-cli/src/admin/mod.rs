@@ -239,70 +239,99 @@ pub enum NodesCmd {
     /// List registered nodes (optionally filter by user).
     #[command(alias = "ls")]
     List {
-        #[arg(long)]
+        #[arg(short = 'u', long)]
         user: Option<String>,
     },
     /// List advertised, approved, and serving routes on nodes.
     #[command(name = "list-routes", alias = "routes", alias = "lsr")]
     ListRoutes {
-        /// Restrict to one node ID.
+        /// Restrict to one node ID. gRPC mode requires the numeric identifier.
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
         id: Option<String>,
     },
-    /// Show one node by node_key hex or hostname.
+    /// Show one node by numeric identifier. Legacy HTTP also accepts node_key hex or hostname.
+    #[command(alias = "get")]
     Show {
-        #[arg(value_name = "ID_OR_NAME")]
-        id_or_name: String,
+        #[arg(value_name = "ID")]
+        id_or_name: Option<String>,
+    },
+    /// Register a pending node with a user and node key.
+    Register {
+        #[arg(short = 'u', long)]
+        user: String,
+        #[arg(short = 'k', long)]
+        key: String,
     },
     /// Mark a node expired. Without `--at`, expires immediately
     /// (forces re-register on the node's next /map). With `--at`,
     /// schedules expiry for the supplied ISO-8601 timestamp.
+    #[command(alias = "logout", alias = "exp", alias = "e")]
     Expire {
+        /// Node identifier (ID). Positional form is kept for legacy compatibility.
         #[arg(value_name = "ID")]
-        id: String,
+        id: Option<String>,
+        /// Node identifier (ID).
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        identifier: Option<String>,
         /// ISO-8601 timestamp to schedule expiry at. Defaults to "now".
-        #[arg(long, value_name = "ISO8601")]
-        at: Option<String>,
-    },
-    /// Force-logout a node — clears Noise/disco keys + stamps
-    /// expiry=now so the next /map round-trip returns a logout
-    /// response. Mirrors upstream `headscale nodes logout`.
-    Logout {
-        #[arg(value_name = "ID")]
-        id: String,
+        #[arg(short = 'e', long = "expiry", alias = "at", value_name = "RFC3339")]
+        expiry: Option<String>,
     },
     /// Rename a node (operator-driven hostname rewrite).
     Rename {
-        #[arg(value_name = "ID")]
-        id: String,
+        /// New hostname in upstream form, or node ID in legacy positional form.
+        #[arg(value_name = "NEW_NAME_OR_ID")]
+        value: String,
+        /// New hostname when using the legacy `rename ID HOSTNAME` form.
         #[arg(value_name = "HOSTNAME")]
-        hostname: String,
+        legacy_hostname: Option<String>,
+        /// Node identifier (ID).
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        identifier: Option<String>,
     },
     /// Replace the node's forced-tags list. Empty list clears the
     /// override; tags are matched by exact string against the policy.
     #[command(alias = "tag", alias = "t")]
     Tags {
+        /// Node identifier (ID). Positional form is kept for legacy compatibility.
         #[arg(value_name = "ID")]
-        id: String,
+        id: Option<String>,
+        /// Node identifier (ID).
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        identifier: Option<String>,
         /// Comma-separated tag list, e.g. `tag:prod,tag:web`.
-        #[arg(value_name = "TAGS", value_delimiter = ',')]
+        #[arg(short = 't', long = "tags", value_delimiter = ',')]
         tags: Vec<String>,
+        /// Legacy positional comma-separated tag list.
+        #[arg(value_name = "TAGS", value_delimiter = ',')]
+        legacy_tags: Vec<String>,
     },
     /// Replace the approved routes for a node.
     #[command(name = "approve-routes")]
     ApproveRoutes {
-        /// Node ID.
+        /// Node ID. gRPC mode requires the numeric identifier.
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
         id: String,
         /// Comma-separated route list. Empty list removes approvals.
-        #[arg(short = 'r', long = "routes", value_delimiter = ',')]
+        #[arg(short = 'r', long = "routes", alias = "route", value_delimiter = ',')]
         routes: Vec<String>,
     },
     /// Delete a node.
     #[command(alias = "del")]
     Delete {
+        /// Node identifier (ID). Positional form is kept for legacy compatibility.
         #[arg(value_name = "ID")]
-        id: String,
+        id: Option<String>,
+        /// Node identifier (ID).
+        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        identifier: Option<String>,
+    },
+    /// Backfill missing node IP addresses.
+    #[command(name = "backfillips")]
+    BackfillIps {
+        /// Confirm the backfill operation. The global --force flag also confirms.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -467,20 +496,111 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
 }
 
 pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminError> {
-    let client = conn.build_client()?;
     let fmt = conn.fmt()?;
+    if conn.should_use_legacy_http_for_migrated_commands() {
+        let client = conn.build_client()?;
+        return match cmd {
+            NodesCmd::List { user } => nodes::list(&client, user.as_deref(), fmt).await,
+            NodesCmd::ListRoutes { id } => nodes::list_routes(&client, id.as_deref(), fmt).await,
+            NodesCmd::Show { id_or_name } => match id_or_name {
+                Some(id_or_name) => nodes::show(&client, id_or_name, fmt).await,
+                None => nodes::list(&client, None, fmt).await,
+            },
+            NodesCmd::Register { .. } => Err(AdminError::Local(
+                "node register requires the upstream gRPC transport".into(),
+            )),
+            NodesCmd::Expire {
+                id,
+                identifier,
+                expiry,
+            } => {
+                let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+                nodes::expire(&client, id, expiry.as_deref()).await
+            }
+            NodesCmd::Rename {
+                value,
+                legacy_hostname,
+                identifier,
+            } => {
+                let (id, hostname) = nodes::select_rename_args(
+                    value,
+                    legacy_hostname.as_deref(),
+                    identifier.as_deref(),
+                )?;
+                nodes::rename(&client, id, hostname).await
+            }
+            NodesCmd::Tags {
+                id,
+                identifier,
+                tags,
+                legacy_tags,
+            } => {
+                let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+                nodes::tags(&client, id, nodes::merged_tags(tags, legacy_tags)).await
+            }
+            NodesCmd::ApproveRoutes { id, routes } => {
+                nodes::approve_routes(&client, id, routes.clone(), fmt).await
+            }
+            NodesCmd::Delete { id, identifier } => {
+                let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+                nodes::delete(&client, id).await
+            }
+            NodesCmd::BackfillIps { .. } => Err(AdminError::Local(
+                "nodes backfillips requires the upstream gRPC transport".into(),
+            )),
+        };
+    }
+
+    let mut client = conn.build_grpc_client().await?;
     match cmd {
-        NodesCmd::List { user } => nodes::list(&client, user.as_deref(), fmt).await,
-        NodesCmd::ListRoutes { id } => nodes::list_routes(&client, id.as_deref(), fmt).await,
-        NodesCmd::Show { id_or_name } => nodes::show(&client, id_or_name, fmt).await,
-        NodesCmd::Expire { id, at } => nodes::expire(&client, id, at.as_deref()).await,
-        NodesCmd::Logout { id } => nodes::logout(&client, id).await,
-        NodesCmd::Rename { id, hostname } => nodes::rename(&client, id, hostname).await,
-        NodesCmd::Tags { id, tags } => nodes::tags(&client, id, tags.clone()).await,
-        NodesCmd::ApproveRoutes { id, routes } => {
-            nodes::approve_routes(&client, id, routes.clone(), fmt).await
+        NodesCmd::List { user } => nodes::list_grpc(&mut client, user.as_deref(), fmt).await,
+        NodesCmd::ListRoutes { id } => {
+            nodes::list_routes_grpc(&mut client, id.as_deref(), fmt).await
         }
-        NodesCmd::Delete { id } => nodes::delete(&client, id).await,
+        NodesCmd::Show { id_or_name } => match id_or_name {
+            Some(id_or_name) => nodes::show_grpc(&mut client, id_or_name, fmt).await,
+            None => nodes::list_grpc(&mut client, None, fmt).await,
+        },
+        NodesCmd::Register { user, key } => nodes::register_grpc(&mut client, user, key, fmt).await,
+        NodesCmd::Expire {
+            id,
+            identifier,
+            expiry,
+        } => {
+            let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+            nodes::expire_grpc(&mut client, id, expiry.as_deref(), fmt).await
+        }
+        NodesCmd::Rename {
+            value,
+            legacy_hostname,
+            identifier,
+        } => {
+            let (id, hostname) = nodes::select_rename_args(
+                value,
+                legacy_hostname.as_deref(),
+                identifier.as_deref(),
+            )?;
+            nodes::rename_grpc(&mut client, id, hostname, fmt).await
+        }
+        NodesCmd::Tags {
+            id,
+            identifier,
+            tags,
+            legacy_tags,
+        } => {
+            let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+            nodes::tags_grpc(&mut client, id, nodes::merged_tags(tags, legacy_tags), fmt).await
+        }
+        NodesCmd::ApproveRoutes { id, routes } => {
+            nodes::approve_routes_grpc(&mut client, id, routes.clone(), fmt).await
+        }
+        NodesCmd::Delete { id, identifier } => {
+            let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
+            nodes::delete_grpc(&mut client, id).await
+        }
+        NodesCmd::BackfillIps { confirm } => {
+            nodes::backfillips_grpc(&mut client, *confirm || conn.force, fmt).await
+        }
     }
 }
 
@@ -615,6 +735,18 @@ mod tests {
         action: UsersCmd,
     }
 
+    #[derive(Parser)]
+    struct NodesHarness {
+        #[arg(long, global = true)]
+        server: Option<String>,
+        #[arg(long, global = true)]
+        address: Option<String>,
+        #[arg(long, global = true)]
+        force: bool,
+        #[command(subcommand)]
+        action: NodesCmd,
+    }
+
     #[test]
     fn exit_code_mapping_covers_every_variant() {
         assert_eq!(
@@ -718,6 +850,151 @@ mod tests {
             force: false,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());
+    }
+
+    #[test]
+    fn nodes_accept_upstream_node_command_shapes() {
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "list", "-u", "alice"])
+                .unwrap()
+                .action,
+            NodesCmd::List { user } if user.as_deref() == Some("alice")
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "show"])
+                .unwrap()
+                .action,
+            NodesCmd::Show { id_or_name: None }
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "get", "42"])
+                .unwrap()
+                .action,
+            NodesCmd::Show { id_or_name: Some(id_or_name) } if id_or_name == "42"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "register",
+                "-u",
+                "alice",
+                "-k",
+                "nodekey:abc",
+            ])
+            .unwrap()
+            .action,
+            NodesCmd::Register { user, key } if user == "alice" && key == "nodekey:abc"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "expire",
+                "-i",
+                "42",
+                "-e",
+                "2025-08-27T10:00:00Z",
+            ])
+            .unwrap()
+            .action,
+            NodesCmd::Expire {
+                id: None,
+                identifier: Some(identifier),
+                expiry: Some(expiry),
+            } if identifier == "42" && expiry == "2025-08-27T10:00:00Z"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "logout", "-i", "42"])
+                .unwrap()
+                .action,
+            NodesCmd::Expire {
+                id: None,
+                identifier: Some(identifier),
+                expiry: None,
+            } if identifier == "42"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "rename", "node-new", "-i", "42"])
+                .unwrap()
+                .action,
+            NodesCmd::Rename {
+                value,
+                legacy_hostname: None,
+                identifier: Some(identifier),
+            } if value == "node-new" && identifier == "42"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "tag",
+                "-i",
+                "42",
+                "-t",
+                "tag:prod,tag:web",
+            ])
+            .unwrap()
+            .action,
+            NodesCmd::Tags {
+                id: None,
+                identifier: Some(identifier),
+                tags,
+                legacy_tags,
+            } if identifier == "42"
+                && tags == vec!["tag:prod".to_string(), "tag:web".to_string()]
+                && legacy_tags.is_empty()
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "delete", "-i", "42"])
+                .unwrap()
+                .action,
+            NodesCmd::Delete {
+                id: None,
+                identifier: Some(identifier),
+            } if identifier == "42"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "approve-routes",
+                "--identifier",
+                "42",
+                "--route",
+                "10.0.0.0/24,192.168.0.0/24",
+            ])
+            .unwrap()
+            .action,
+            NodesCmd::ApproveRoutes { id, routes }
+                if id == "42"
+                    && routes == vec![
+                        "10.0.0.0/24".to_string(),
+                        "192.168.0.0/24".to_string()
+                    ]
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "--force", "backfillips"]).unwrap(),
+            NodesHarness {
+                force: true,
+                action: NodesCmd::BackfillIps { confirm: false },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn nodes_parser_keeps_explicit_legacy_server_flag_available() {
+        let parsed = NodesHarness::try_parse_from([
+            "headscale",
+            "--server",
+            "http://127.0.0.1:51822",
+            "show",
+            "node-key-hex",
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.server.as_deref(), Some("http://127.0.0.1:51822"));
+        assert!(matches!(
+            parsed.action,
+            NodesCmd::Show { id_or_name: Some(id_or_name) } if id_or_name == "node-key-hex"
+        ));
     }
 
     #[test]

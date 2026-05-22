@@ -1,16 +1,22 @@
-//! `headscale nodes {list,show,expire,delete}` — wraps the
-//! `/api/v1/machines` admin surface. (Upstream `headscale` historically
-//! called these "machines"; the v1 GUI exposes them under that name,
-//! but the CLI verb is `nodes` to match upstream's modern naming.)
+//! `headscale nodes` over upstream-compatible gRPC.
+//!
+//! Supplying `--server` keeps the legacy `/api/v1/machines` transport
+//! available for older admin HTTP deployments. Upstream historically called
+//! these "machines"; the v1 GUI exposes them under that name, but the CLI verb
+//! is `nodes` to match upstream's modern naming.
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::MachineAdminRecord;
+use headscale_api::generated::{BackfillNodeIPsResponse, Node as GrpcNode};
 use headscale_api::tailscale_wire::routes::{active_exit_routes, primary_routes_by_node};
 use headscale_api::tailscale_wire::wire::stable_id_from_key;
+use serde::Serialize;
 
 use super::AdminError;
 use super::client::AdminClient;
+use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured, print_table};
 
 pub async fn list(
@@ -152,6 +158,244 @@ pub async fn delete(client: &AdminClient, id: &str) -> Result<(), AdminError> {
     Ok(())
 }
 
+pub fn select_node_id<'a>(
+    positional: Option<&'a str>,
+    identifier: Option<&'a str>,
+) -> Result<&'a str, AdminError> {
+    match (positional, identifier) {
+        (Some(_), Some(_)) => Err(AdminError::Local(
+            "use either positional node ID or --identifier, not both".into(),
+        )),
+        (Some(id), None) | (None, Some(id)) if !id.trim().is_empty() => Ok(id),
+        _ => Err(AdminError::Local(
+            "node identifier is required; use --identifier".into(),
+        )),
+    }
+}
+
+pub fn select_rename_args<'a>(
+    value: &'a str,
+    legacy_hostname: Option<&'a str>,
+    identifier: Option<&'a str>,
+) -> Result<(&'a str, &'a str), AdminError> {
+    if let Some(identifier) = identifier {
+        if legacy_hostname.is_some() {
+            return Err(AdminError::Local(
+                "rename with --identifier accepts only NEW_NAME".into(),
+            ));
+        }
+        return Ok((identifier, value));
+    }
+
+    let hostname = legacy_hostname.ok_or_else(|| {
+        AdminError::Local("rename requires --identifier ID NEW_NAME or legacy ID HOSTNAME".into())
+    })?;
+    Ok((value, hostname))
+}
+
+pub fn merged_tags(flags: &[String], positional: &[String]) -> Vec<String> {
+    flags
+        .iter()
+        .chain(positional.iter())
+        .filter(|tag| !tag.is_empty())
+        .cloned()
+        .collect()
+}
+
+pub async fn list_grpc(
+    client: &mut GrpcAdminClient,
+    user_filter: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let nodes: Vec<NodeOutput> = client
+        .list_nodes(user_filter)
+        .await?
+        .into_iter()
+        .map(NodeOutput::from)
+        .collect();
+    if fmt.is_structured() {
+        print_structured(fmt, &nodes)?;
+    } else {
+        render_grpc_nodes(&nodes);
+    }
+    Ok(())
+}
+
+pub async fn list_routes_grpc(
+    client: &mut GrpcAdminClient,
+    id: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let mut nodes = if let Some(id) = id {
+        vec![NodeOutput::from(client.get_node(parse_node_id(id)?).await?)]
+    } else {
+        client
+            .list_nodes(None)
+            .await?
+            .into_iter()
+            .map(NodeOutput::from)
+            .collect()
+    };
+    nodes.retain(|n| !n.available_routes.is_empty() || !n.approved_routes.is_empty());
+    if fmt.is_structured() {
+        print_structured(fmt, &nodes)?;
+    } else {
+        render_grpc_routes(&nodes);
+    }
+    Ok(())
+}
+
+pub async fn show_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node = NodeOutput::from(client.get_node(parse_node_id(id)?).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        render_grpc_one(&node);
+    }
+    Ok(())
+}
+
+pub async fn register_grpc(
+    client: &mut GrpcAdminClient,
+    user: &str,
+    key: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node = NodeOutput::from(client.register_node(user, key).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Node registered");
+        render_grpc_one(&node);
+    }
+    Ok(())
+}
+
+pub async fn expire_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    at: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    let expiry = match at {
+        Some(at) => Some(parse_rfc3339_unix(at)?),
+        None => Some(current_unix_i64()),
+    };
+    let node = NodeOutput::from(client.expire_node(node_id, expiry, false).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else if let Some(at) = at {
+        println!("Scheduled expiry on node '{node_id}' at {at}");
+    } else {
+        println!("Expired node '{node_id}'");
+    }
+    Ok(())
+}
+
+pub async fn logout_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    let node = NodeOutput::from(
+        client
+            .expire_node(node_id, Some(current_unix_i64()), false)
+            .await?,
+    );
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Forced logout on node '{node_id}'");
+    }
+    Ok(())
+}
+
+pub async fn rename_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    hostname: &str,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    let node = NodeOutput::from(client.rename_node(node_id, hostname).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Renamed node '{node_id}' to '{hostname}'");
+    }
+    Ok(())
+}
+
+pub async fn tags_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    tags: Vec<String>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    let node = NodeOutput::from(client.set_tags(node_id, tags.clone()).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else if tags.is_empty() {
+        println!("Cleared forced tags on node '{node_id}'");
+    } else {
+        println!("Set forced tags on node '{node_id}': {}", tags.join(", "));
+    }
+    Ok(())
+}
+
+pub async fn approve_routes_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    routes: Vec<String>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    let node = NodeOutput::from(client.set_approved_routes(node_id, routes).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Node updated");
+        render_grpc_routes(&[node]);
+    }
+    Ok(())
+}
+
+pub async fn delete_grpc(client: &mut GrpcAdminClient, id: &str) -> Result<(), AdminError> {
+    let node_id = parse_node_id(id)?;
+    client.delete_node(node_id).await?;
+    println!("Deleted node '{node_id}'");
+    Ok(())
+}
+
+pub async fn backfillips_grpc(
+    client: &mut GrpcAdminClient,
+    confirmed: bool,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let response = client.backfill_node_ips(confirmed).await?;
+    if fmt.is_structured() {
+        let output = BackfillOutput {
+            changes: response.changes,
+        };
+        print_structured(fmt, &output)?;
+    } else if response.changes.is_empty() {
+        println!("No node IPs required backfill.");
+    } else {
+        println!("Backfilled node IPs:");
+        for change in response.changes {
+            println!("  {change}");
+        }
+    }
+    Ok(())
+}
+
 /// Tiny helper: POST a JSON body and discard the (possibly empty)
 /// response. The admin route returns `204 No Content` on success; on
 /// `400`/`404` we want the error body surfaced through the standard
@@ -284,6 +528,183 @@ fn route_node_id(n: &MachineAdminRecord) -> u64 {
     }
 }
 
+fn render_grpc_nodes(nodes: &[NodeOutput]) {
+    if nodes.is_empty() {
+        println!("No nodes registered.");
+        return;
+    }
+    let rows: Vec<Vec<String>> = nodes
+        .iter()
+        .map(|n| {
+            vec![
+                n.id.to_string(),
+                n.name.clone(),
+                n.user.clone(),
+                n.ip_addresses.join("\n"),
+                if n.online {
+                    "online".into()
+                } else {
+                    "offline".into()
+                },
+                if n.expired { "yes".into() } else { "no".into() },
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "NAME", "USER", "IP ADDRESSES", "STATUS", "EXPIRED"],
+        &rows,
+    );
+}
+
+fn render_grpc_one(n: &NodeOutput) {
+    println!("Node:");
+    println!("  ID:           {}", n.id);
+    println!("  Name:         {}", n.name);
+    if !n.given_name.is_empty() && n.given_name != n.name {
+        println!("  Given name:   {}", n.given_name);
+    }
+    println!("  User:         {}", n.user);
+    println!("  IP addresses: {}", n.ip_addresses.join(", "));
+    println!("  Online:       {}", n.online);
+    println!("  Expired:      {}", n.expired);
+    println!("  Last seen:    {}", n.last_seen.as_deref().unwrap_or("-"));
+    println!("  Created:      {}", n.created_at.as_deref().unwrap_or("-"));
+    println!("  Expiry:       {}", n.expiry.as_deref().unwrap_or("-"));
+    if !n.machine_key.is_empty() {
+        println!("  Machine key:  {}", n.machine_key);
+    }
+    if !n.node_key.is_empty() {
+        println!("  Node key:     {}", n.node_key);
+    }
+    if !n.tags.is_empty() {
+        println!("  Tags:         {}", n.tags.join(", "));
+    }
+    if !n.available_routes.is_empty() {
+        println!("  Available:    {}", n.available_routes.join(", "));
+    }
+    if !n.approved_routes.is_empty() {
+        println!("  Approved:     {}", n.approved_routes.join(", "));
+    }
+}
+
+fn render_grpc_routes(nodes: &[NodeOutput]) {
+    if nodes.is_empty() {
+        println!("No routes advertised or approved.");
+        return;
+    }
+    let rows: Vec<Vec<String>> = nodes
+        .iter()
+        .map(|n| {
+            vec![
+                n.id.to_string(),
+                n.name.clone(),
+                n.approved_routes.join("\n"),
+                n.available_routes.join("\n"),
+                n.subnet_routes.join("\n"),
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "HOSTNAME", "APPROVED", "AVAILABLE", "SUBNET ROUTES"],
+        &rows,
+    );
+}
+
+fn parse_node_id(id: &str) -> Result<u64, AdminError> {
+    id.parse::<u64>().map_err(|_| {
+        AdminError::Local(format!(
+            "upstream gRPC node commands require a numeric node identifier, got '{id}'"
+        ))
+    })
+}
+
+fn parse_rfc3339_unix(value: &str) -> Result<i64, AdminError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|time| time.timestamp())
+        .map_err(|e| AdminError::Local(format!("invalid RFC3339 timestamp '{value}': {e}")))
+}
+
+fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn current_unix_i64() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    i64::try_from(now).unwrap_or(i64::MAX)
+}
+
+fn is_expired(expiry: Option<&prost_types::Timestamp>) -> bool {
+    expiry.is_some_and(|ts| ts.seconds <= current_unix_i64())
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NodeOutput {
+    id: u64,
+    name: String,
+    given_name: String,
+    user: String,
+    machine_key: String,
+    node_key: String,
+    disco_key: String,
+    ip_addresses: Vec<String>,
+    online: bool,
+    tags: Vec<String>,
+    approved_routes: Vec<String>,
+    available_routes: Vec<String>,
+    subnet_routes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_seen: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expiry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    expired: bool,
+    register_method: i32,
+}
+
+impl From<GrpcNode> for NodeOutput {
+    fn from(node: GrpcNode) -> Self {
+        Self {
+            id: node.id,
+            name: node.name,
+            given_name: node.given_name,
+            user: node.user.map_or_else(String::new, |user| user.name),
+            machine_key: node.machine_key,
+            node_key: node.node_key,
+            disco_key: node.disco_key,
+            ip_addresses: node.ip_addresses,
+            online: node.online,
+            tags: node.tags,
+            approved_routes: node.approved_routes,
+            available_routes: node.available_routes,
+            subnet_routes: node.subnet_routes,
+            last_seen: timestamp_rfc3339(node.last_seen.as_ref()),
+            expiry: timestamp_rfc3339(node.expiry.as_ref()),
+            created_at: timestamp_rfc3339(node.created_at.as_ref()),
+            expired: is_expired(node.expiry.as_ref()),
+            register_method: node.register_method,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct BackfillOutput {
+    changes: Vec<String>,
+}
+
+impl From<BackfillNodeIPsResponse> for BackfillOutput {
+    fn from(response: BackfillNodeIPsResponse) -> Self {
+        Self {
+            changes: response.changes,
+        }
+    }
+}
+
 /// Truncate the node_key-hex ID to its first 12 chars for the table
 /// view — full ID is 64 chars and dominates the row otherwise. The
 /// `show` view keeps the full string.
@@ -310,6 +731,69 @@ mod tests {
     #[test]
     fn short_id_leaves_short_strings_alone() {
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn parse_node_id_accepts_numeric_identifier() {
+        assert_eq!(parse_node_id("42").unwrap(), 42);
+        assert!(matches!(
+            parse_node_id("node-key"),
+            Err(AdminError::Local(_))
+        ));
+    }
+
+    #[test]
+    fn selector_helpers_accept_upstream_and_legacy_forms() {
+        assert_eq!(select_node_id(None, Some("42")).unwrap(), "42");
+        assert_eq!(select_node_id(Some("node-key"), None).unwrap(), "node-key");
+        assert!(select_node_id(Some("1"), Some("2")).is_err());
+
+        assert_eq!(
+            select_rename_args("new-name", None, Some("42")).unwrap(),
+            ("42", "new-name")
+        );
+        assert_eq!(
+            select_rename_args("42", Some("legacy-name"), None).unwrap(),
+            ("42", "legacy-name")
+        );
+
+        assert_eq!(
+            merged_tags(
+                &["tag:prod".to_string()],
+                &["tag:web".to_string(), String::new()]
+            ),
+            vec!["tag:prod".to_string(), "tag:web".to_string()]
+        );
+    }
+
+    #[test]
+    fn grpc_node_output_formats_timestamps_and_user() {
+        let node = GrpcNode {
+            id: 7,
+            name: "node-one".into(),
+            user: Some(headscale_api::generated::User {
+                id: 1,
+                name: "alice".into(),
+                ..Default::default()
+            }),
+            ip_addresses: vec!["100.64.0.1".into()],
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+            expiry: Some(prost_types::Timestamp {
+                seconds: 1,
+                nanos: 0,
+            }),
+            ..Default::default()
+        };
+
+        let output = NodeOutput::from(node);
+
+        assert_eq!(output.id, 7);
+        assert_eq!(output.user, "alice");
+        assert_eq!(output.created_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert!(output.expired);
     }
 
     fn route_record(id: &str, routes: &[&str], approved_routes: &[&str]) -> MachineAdminRecord {

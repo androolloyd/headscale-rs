@@ -158,10 +158,18 @@ mod tests {
                 .unwrap();
         match parsed.cmd {
             AdminCmd::Nodes {
-                action: NodesCmd::Tags { id, tags },
+                action:
+                    NodesCmd::Tags {
+                        id,
+                        identifier,
+                        tags,
+                        legacy_tags,
+                    },
             } => {
-                assert_eq!(id, "abc123");
-                assert_eq!(tags, vec!["tag:web"]);
+                assert_eq!(id.as_deref(), Some("abc123"));
+                assert_eq!(identifier, None);
+                assert!(tags.is_empty());
+                assert_eq!(legacy_tags, vec!["tag:web"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }

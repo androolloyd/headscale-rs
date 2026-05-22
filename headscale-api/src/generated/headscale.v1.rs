@@ -250,6 +250,9 @@ pub struct ExpireNodeRequest {
     pub node_id: u64,
     #[prost(message, optional, tag = "2")]
     pub expiry: ::core::option::Option<::prost_types::Timestamp>,
+    /// When true, sets expiry to null (node will never expire).
+    #[prost(bool, tag = "3")]
+    pub disable_expiry: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExpireNodeResponse {
@@ -2980,6 +2983,13 @@ pub struct GetPolicyResponse {
     #[prost(message, optional, tag = "2")]
     pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPolicyRequest {
+    #[prost(string, tag = "1")]
+    pub policy: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPolicyResponse {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthRequest {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3676,6 +3686,30 @@ pub mod headscale_service_client {
                 .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "SetPolicy"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn check_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CheckPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/CheckPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "CheckPolicy"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn health(
             &mut self,
             request: impl tonic::IntoRequest<super::HealthRequest>,
@@ -3872,6 +3906,13 @@ pub mod headscale_service_server {
             request: tonic::Request<super::SetPolicyRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SetPolicyResponse>,
+            tonic::Status,
+        >;
+        async fn check_policy(
+            &self,
+            request: tonic::Request<super::CheckPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPolicyResponse>,
             tonic::Status,
         >;
         async fn health(
@@ -5044,6 +5085,51 @@ pub mod headscale_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/CheckPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckPolicySvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::CheckPolicyRequest>
+                    for CheckPolicySvc<T> {
+                        type Response = super::CheckPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CheckPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::check_policy(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckPolicySvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

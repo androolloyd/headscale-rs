@@ -37,6 +37,7 @@ service HeadscaleService {
 
   rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
   rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
+  rpc CheckPolicy(CheckPolicyRequest) returns (CheckPolicyResponse);
 
   rpc Health(HealthRequest) returns (HealthResponse);
 }

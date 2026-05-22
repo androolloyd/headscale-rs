@@ -22,13 +22,13 @@ use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
 use crate::generated::{
-    ApiKey, BackfillNodeIPsRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest,
-    CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest,
-    DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest,
-    ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest,
-    ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest, Node, PreAuthKey, RegisterMethod,
-    RegisterNodeRequest, RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest,
-    SetPolicyRequest, SetTagsRequest, User,
+    ApiKey, BackfillNodeIPsRequest, CheckPolicyRequest, CreateApiKeyRequest,
+    CreatePreAuthKeyRequest, CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest,
+    DeleteNodeRequest, DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest,
+    ExpireNodeRequest, ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest,
+    ListApiKeysRequest, ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest, Node,
+    PreAuthKey, RegisterMethod, RegisterNodeRequest, RenameNodeRequest, RenameUserRequest,
+    SetApprovedRoutesRequest, SetPolicyRequest, SetTagsRequest, User,
 };
 use crate::grpc::upstream::HeadscaleAdminService;
 
@@ -79,6 +79,7 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/node/:node_id/expire", post(expire_node))
         .route("/api/v1/node/:node_id/rename/:new_name", post(rename_node))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
+        .route("/api/v1/policy/check", post(check_policy))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             http_authentication_middleware,
@@ -628,11 +629,20 @@ async fn expire_node(
         Ok(expiry) => expiry,
         Err(status) => return status_response(&status),
     };
+    let disable_expiry =
+        match query_bool(raw_query.as_deref(), "disableExpiry", &["disable_expiry"]) {
+            Ok(disable_expiry) => disable_expiry,
+            Err(status) => return status_response(&status),
+        };
     match state
         .service
         .expire_node(tonic_request(
             &headers,
-            ExpireNodeRequest { node_id, expiry },
+            ExpireNodeRequest {
+                node_id,
+                expiry,
+                disable_expiry,
+            },
         ))
         .await
     {
@@ -741,6 +751,29 @@ async fn set_policy(
                 "updatedAt": timestamp_json(response.updated_at.as_ref()),
             }))
         }
+        Err(status) => status_response(&status),
+    }
+}
+
+async fn check_policy(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
+    let policy = match string_field(&value, &["policy"], "policy") {
+        Ok(policy) => policy,
+        Err(status) => return status_response(&status),
+    };
+    match state
+        .service
+        .check_policy(tonic_request(&headers, CheckPolicyRequest { policy }))
+        .await
+    {
+        Ok(_) => json_ok(json!({})),
         Err(status) => status_response(&status),
     }
 }
@@ -1208,6 +1241,22 @@ fn query_timestamp(
         )));
     }
     Ok(Some(prost_types::Timestamp { seconds, nanos }))
+}
+
+fn query_bool(query: Option<&str>, name: &str, aliases: &[&str]) -> Result<bool, Status> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Ok(false);
+    };
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    for (key, value) in pairs {
+        if key == name || aliases.iter().any(|alias| key == *alias) {
+            return value.parse::<bool>().map_err(|e| {
+                Status::invalid_argument(format!("type mismatch, parameter: {key}, error: {e}"))
+            });
+        }
+    }
+    Ok(false)
 }
 
 fn json_ok(value: Value) -> Response {

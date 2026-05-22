@@ -239,6 +239,9 @@ impl MachineAdmin for NoopMachines {
     ) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }
+    async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        Err(MachineAdminError::NotFound(id.to_string()))
+    }
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
         Err(MachineAdminError::NotFound(id.to_string()))
     }

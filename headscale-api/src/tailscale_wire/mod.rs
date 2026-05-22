@@ -1517,7 +1517,7 @@ mod registry_tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                expiry,
+                Some(expiry),
             )
             .await
             .unwrap();
@@ -1560,7 +1560,7 @@ mod registry_tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc::now(),
+                Some(Utc::now()),
             )
             .await
             .unwrap_err();
@@ -1970,7 +1970,7 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
         &self,
         registration_id: &str,
         user: &crate::oidc::OidcStoredUser,
-        node_expiry: DateTime<Utc>,
+        node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
         let user_name = oidc_wire_user_name(user);
         let mut pending = self
@@ -1978,7 +1978,7 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             .registration_cache
             .get(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
-        pending.expiry = Some(node_expiry);
+        pending.expiry = node_expiry;
 
         pending.approved_routes = auto_approved_routes_for_node(
             &self.state.policy,

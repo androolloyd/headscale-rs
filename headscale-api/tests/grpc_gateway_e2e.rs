@@ -834,6 +834,41 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .clone()
         .oneshot(req(
             Method::POST,
+            &format!("/api/v1/node/{node_id}/expire?disableExpiry=true"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert!(body["node"]["expiry"].is_null());
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!(
+                "/api/v1/node/{node_id}/expire?disable_expiry=true&expiry=2030-01-02T03%3A04%3A05Z"
+            ),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = body_json(resp).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot set both disable_expiry and expiry")
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
             "/api/v1/node/backfillips?confirmed=true",
             Some(&token),
             Body::empty(),
@@ -1227,7 +1262,22 @@ async fn grpc_gateway_policy_round_trips_protojson_body() {
     assert_eq!(body["policy"], policy);
     assert!(body["updatedAt"].as_str().unwrap().ends_with('Z'));
 
+    let candidate = r#"{"acls":[]}"#;
     let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/policy/check",
+            Some(&token),
+            Body::from(serde_json::json!({ "policy": candidate }).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .clone()
         .oneshot(req(
             Method::GET,
             "/api/v1/policy",
@@ -1240,6 +1290,19 @@ async fn grpc_gateway_policy_round_trips_protojson_body() {
     let body = body_json(resp).await;
     assert_eq!(body["policy"], policy);
     assert!(body["updatedAt"].as_str().unwrap().ends_with('Z'));
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/policy/check",
+            Some(&token),
+            Body::from(serde_json::json!({ "policy": "{" }).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], 3);
 }
 
 #[tokio::test]

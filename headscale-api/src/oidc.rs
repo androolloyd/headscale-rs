@@ -496,7 +496,11 @@ pub struct OidcClaims {
     pub iss: String,
     #[serde(default, rename = "name")]
     pub name: String,
-    #[serde(default, rename = "groups")]
+    #[serde(
+        default,
+        rename = "groups",
+        deserialize_with = "deserialize_flexible_string_vec_default"
+    )]
     pub groups: Vec<String>,
     #[serde(default, rename = "email")]
     pub email: String,
@@ -559,7 +563,11 @@ pub struct OidcUserInfo {
         deserialize_with = "deserialize_flexible_bool"
     )]
     pub email_verified: bool,
-    #[serde(default, rename = "groups")]
+    #[serde(
+        default,
+        rename = "groups",
+        deserialize_with = "deserialize_optional_flexible_string_vec"
+    )]
     pub groups: Option<Vec<String>>,
     #[serde(default, rename = "picture")]
     pub picture: String,
@@ -613,7 +621,7 @@ pub trait OidcRegistrationHandler: Send + Sync {
         &self,
         registration_id: &str,
         user: &OidcStoredUser,
-        node_expiry: DateTime<Utc>,
+        node_expiry: Option<DateTime<Utc>>,
     ) -> Result<OidcRegistrationResult, OidcRegistrationError>;
 }
 
@@ -699,11 +707,16 @@ pub fn determine_node_expiry(
     cfg: &OidcPolicyConfig,
     id_token_expiry: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> DateTime<Utc> {
+) -> Option<DateTime<Utc>> {
     if cfg.use_expiry_from_token {
-        id_token_expiry
+        Some(id_token_expiry)
+    } else if oidc_expiry_disabled(cfg.expiry) {
+        None
     } else {
-        now + cfg.expiry
+        Some(
+            now.checked_add_signed(cfg.expiry)
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+        )
     }
 }
 
@@ -1453,6 +1466,10 @@ fn looks_like_simple_email_address(email: &str) -> bool {
     !local.is_empty() && !domain.is_empty() && !email.chars().any(char::is_whitespace)
 }
 
+fn oidc_expiry_disabled(expiry: Duration) -> bool {
+    expiry <= Duration::seconds(0) || expiry.num_nanoseconds() == Some(i64::MAX)
+}
+
 fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -1471,6 +1488,33 @@ where
     }
 }
 
+fn deserialize_flexible_string_vec_default<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_flexible_string_vec(deserializer).map(Option::unwrap_or_default)
+}
+
+fn deserialize_optional_flexible_string_vec<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexibleStringVec {
+        Vec(Vec<String>),
+        String(String),
+    }
+
+    match Option::<FlexibleStringVec>::deserialize(deserializer)? {
+        Some(FlexibleStringVec::Vec(value)) => Ok(Some(value)),
+        Some(FlexibleStringVec::String(value)) => Ok(Some(vec![value])),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,9 +1527,11 @@ mod tests {
         fail: bool,
     }
 
+    type OidcRegistrationCall = (String, OidcStoredUser, Option<DateTime<Utc>>);
+
     #[derive(Debug, Default)]
     struct MockOidcRegistrationHandler {
-        calls: RwLock<Vec<(String, OidcStoredUser, DateTime<Utc>)>>,
+        calls: RwLock<Vec<OidcRegistrationCall>>,
         fail_expired: bool,
     }
 
@@ -1517,7 +1563,7 @@ mod tests {
             &self,
             registration_id: &str,
             user: &OidcStoredUser,
-            node_expiry: DateTime<Utc>,
+            node_expiry: Option<DateTime<Utc>>,
         ) -> Result<OidcRegistrationResult, OidcRegistrationError> {
             if self.fail_expired {
                 return Err(OidcRegistrationError::SessionExpired);
@@ -2362,7 +2408,10 @@ mod tests {
         assert_eq!(calls[0].0, "r".repeat(24));
         assert_eq!(calls[0].1.email, "alice@example.com");
         assert_eq!(calls[0].1.name, "alice@example.com");
-        assert_eq!(calls[0].2, Utc.timestamp_opt(4_102_444_800, 0).unwrap());
+        assert_eq!(
+            calls[0].2,
+            Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap())
+        );
     }
 
     #[cfg(feature = "full")]
@@ -2572,6 +2621,22 @@ mod tests {
     }
 
     #[test]
+    fn oidc_userinfo_and_claims_accept_single_group_string() {
+        let mut claims: OidcClaims =
+            serde_json::from_str(r#"{"sub":"sub","email":"id@example.com","groups":"id-group"}"#)
+                .unwrap();
+        assert_eq!(claims.groups, vec!["id-group"]);
+
+        let userinfo: OidcUserInfo = serde_json::from_str(
+            r#"{"sub":"sub","email":"user@example.com","groups":"userinfo-group"}"#,
+        )
+        .unwrap();
+        merge_userinfo_claims(&mut claims, Some(&userinfo));
+        assert_eq!(claims.email, "user@example.com");
+        assert_eq!(claims.groups, vec!["userinfo-group"]);
+    }
+
+    #[test]
     fn oidc_expiry_uses_token_or_config_like_upstream() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let token_expiry = Utc.timestamp_opt(1_700_003_600, 0).unwrap();
@@ -2581,14 +2646,24 @@ mod tests {
         };
         assert_eq!(
             determine_node_expiry(&cfg, token_expiry, now),
-            now + cfg.expiry
+            Some(now + cfg.expiry)
         );
 
         let cfg = OidcPolicyConfig {
             use_expiry_from_token: true,
             ..cfg
         };
-        assert_eq!(determine_node_expiry(&cfg, token_expiry, now), token_expiry);
+        assert_eq!(
+            determine_node_expiry(&cfg, token_expiry, now),
+            Some(token_expiry)
+        );
+
+        let cfg = OidcPolicyConfig {
+            expiry: Duration::nanoseconds(i64::MAX),
+            use_expiry_from_token: false,
+            ..cfg
+        };
+        assert_eq!(determine_node_expiry(&cfg, token_expiry, now), None);
     }
 
     #[test]
@@ -2648,6 +2723,98 @@ mod tests {
             true,
         );
         assert_eq!(invalid.name, "");
+    }
+
+    #[test]
+    fn user_profile_from_json_matches_upstream_from_claim_cases() {
+        for (name, json, email_verified_required, expected) in [
+            (
+                "string-bool-false",
+                r#"{
+                    "sub": "test3",
+                    "email": "test3@test.no",
+                    "email_verified": "false"
+                }"#,
+                true,
+                OidcUserProfile {
+                    name: String::new(),
+                    display_name: String::new(),
+                    email: String::new(),
+                    provider_identifier: "/test3".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+            ),
+            (
+                "allow-unverified-email",
+                r#"{
+                    "sub": "test4",
+                    "email": "test4@test.no",
+                    "email_verified": "false"
+                }"#,
+                false,
+                OidcUserProfile {
+                    name: String::new(),
+                    display_name: String::new(),
+                    email: "test4@test.no".into(),
+                    provider_identifier: "/test4".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+            ),
+            (
+                "azure-double-slash-issuer",
+                r#"{
+                    "iss": "https://login.microsoftonline.com//v2.0",
+                    "email": "user@domain.com",
+                    "name": "XXXXXX XXXX",
+                    "preferred_username": "user@domain.com",
+                    "sub": "I-70OQnj3TogrNSfkZQqB3f7dGwyBWSm1dolHNKrMzQ"
+                }"#,
+                true,
+                OidcUserProfile {
+                    name: "user@domain.com".into(),
+                    display_name: "XXXXXX XXXX".into(),
+                    email: String::new(),
+                    provider_identifier: "https://login.microsoftonline.com/v2.0/I-70OQnj3TogrNSfkZQqB3f7dGwyBWSm1dolHNKrMzQ".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+            ),
+            (
+                "casbin-profile-picture-and-groups",
+                r#"{
+                    "sub": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    "iss": "https://oidc.example.com/",
+                    "preferred_username": "user001",
+                    "name": "User001",
+                    "email": "user001@example.com",
+                    "email_verified": true,
+                    "picture": "https://cdn.casbin.org/img/casbin.svg",
+                    "groups": "org1/department1"
+                }"#,
+                true,
+                OidcUserProfile {
+                    name: "user001".into(),
+                    display_name: "User001".into(),
+                    email: "user001@example.com".into(),
+                    provider_identifier: "https://oidc.example.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: "https://cdn.casbin.org/img/casbin.svg".into(),
+                },
+            ),
+        ] {
+            let claims: OidcClaims = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                claims.groups.len(),
+                usize::from(name == "casbin-profile-picture-and-groups")
+            );
+            assert_eq!(
+                user_profile_from_claims(&claims, email_verified_required),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

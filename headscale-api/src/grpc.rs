@@ -163,19 +163,20 @@ pub mod upstream {
     };
     use crate::generated::headscale_service_server::{HeadscaleService, HeadscaleServiceServer};
     use crate::generated::{
-        ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CreateApiKeyRequest,
-        CreateApiKeyResponse, CreatePreAuthKeyRequest, CreatePreAuthKeyResponse, CreateUserRequest,
-        CreateUserResponse, DebugCreateNodeRequest, DebugCreateNodeResponse, DeleteApiKeyRequest,
-        DeleteApiKeyResponse, DeleteNodeRequest, DeleteNodeResponse, DeletePreAuthKeyRequest,
-        DeletePreAuthKeyResponse, DeleteUserRequest, DeleteUserResponse, ExpireApiKeyRequest,
-        ExpireApiKeyResponse, ExpireNodeRequest, ExpireNodeResponse, ExpirePreAuthKeyRequest,
-        ExpirePreAuthKeyResponse, GetNodeRequest, GetNodeResponse, GetPolicyRequest,
-        GetPolicyResponse, HealthRequest, HealthResponse, ListApiKeysRequest, ListApiKeysResponse,
-        ListNodesRequest, ListNodesResponse, ListPreAuthKeysRequest, ListPreAuthKeysResponse,
-        ListUsersRequest, ListUsersResponse, Node, PreAuthKey, RegisterMethod, RegisterNodeRequest,
-        RegisterNodeResponse, RenameNodeRequest, RenameNodeResponse, RenameUserRequest,
-        RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
-        SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
+        ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CheckPolicyRequest,
+        CheckPolicyResponse, CreateApiKeyRequest, CreateApiKeyResponse, CreatePreAuthKeyRequest,
+        CreatePreAuthKeyResponse, CreateUserRequest, CreateUserResponse, DebugCreateNodeRequest,
+        DebugCreateNodeResponse, DeleteApiKeyRequest, DeleteApiKeyResponse, DeleteNodeRequest,
+        DeleteNodeResponse, DeletePreAuthKeyRequest, DeletePreAuthKeyResponse, DeleteUserRequest,
+        DeleteUserResponse, ExpireApiKeyRequest, ExpireApiKeyResponse, ExpireNodeRequest,
+        ExpireNodeResponse, ExpirePreAuthKeyRequest, ExpirePreAuthKeyResponse, GetNodeRequest,
+        GetNodeResponse, GetPolicyRequest, GetPolicyResponse, HealthRequest, HealthResponse,
+        ListApiKeysRequest, ListApiKeysResponse, ListNodesRequest, ListNodesResponse,
+        ListPreAuthKeysRequest, ListPreAuthKeysResponse, ListUsersRequest, ListUsersResponse, Node,
+        PreAuthKey, RegisterMethod, RegisterNodeRequest, RegisterNodeResponse, RenameNodeRequest,
+        RenameNodeResponse, RenameUserRequest, RenameUserResponse, SetApprovedRoutesRequest,
+        SetApprovedRoutesResponse, SetPolicyRequest, SetPolicyResponse, SetTagsRequest,
+        SetTagsResponse, User as ProtoUser,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy, validate_requested_tags_for_node};
     use crate::tailscale_wire::routes::{
@@ -803,17 +804,29 @@ pub mod upstream {
         ) -> Result<Response<ExpireNodeResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
+            if body.disable_expiry && body.expiry.is_some() {
+                return Err(Status::invalid_argument(
+                    "cannot set both disable_expiry and expiry",
+                ));
+            }
             let node = self.machine_by_id(body.node_id).await?;
-            let expiry = body
-                .expiry
-                .as_ref()
-                .map(timestamp_to_datetime)
-                .transpose()?
-                .unwrap_or_else(chrono::Utc::now);
-            self.machines
-                .expire_at(&node.id, Some(expiry))
-                .await
-                .map_err(machine_error_to_status)?;
+            if body.disable_expiry {
+                self.machines
+                    .disable_expiry(&node.id)
+                    .await
+                    .map_err(machine_error_to_status)?;
+            } else {
+                let expiry = body
+                    .expiry
+                    .as_ref()
+                    .map(timestamp_to_datetime)
+                    .transpose()?
+                    .unwrap_or_else(chrono::Utc::now);
+                self.machines
+                    .expire_at(&node.id, Some(expiry))
+                    .await
+                    .map_err(machine_error_to_status)?;
+            }
             let node = self
                 .machines
                 .get(&node.id)
@@ -1035,6 +1048,17 @@ pub mod upstream {
                 policy,
                 updated_at: Some(unix_to_timestamp(updated_at)),
             }))
+        }
+
+        async fn check_policy(
+            &self,
+            request: Request<CheckPolicyRequest>,
+        ) -> Result<Response<CheckPolicyResponse>, Status> {
+            self.authorize(&request).await?;
+            let policy = request.into_inner().policy;
+            parse_hujson_policy(&policy)
+                .map_err(|e| Status::invalid_argument(format!("checking policy: {e}")))?;
+            Ok(Response::new(CheckPolicyResponse {}))
         }
 
         async fn health(
@@ -1539,13 +1563,13 @@ mod upstream_tests {
     };
     use crate::generated::headscale_service_server::HeadscaleService;
     use crate::generated::{
-        BackfillNodeIPsRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
-        DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest, DeletePreAuthKeyRequest,
-        DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest, ExpirePreAuthKeyRequest,
-        GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListNodesRequest,
-        ListPreAuthKeysRequest, ListUsersRequest, RegisterMethod, RegisterNodeRequest,
-        RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
-        SetTagsRequest,
+        BackfillNodeIPsRequest, CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest,
+        CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest,
+        DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest,
+        ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest,
+        ListApiKeysRequest, ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest,
+        RegisterMethod, RegisterNodeRequest, RenameNodeRequest, RenameUserRequest,
+        SetApprovedRoutesRequest, SetPolicyRequest, SetTagsRequest,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
@@ -2707,6 +2731,7 @@ mod upstream_tests {
                     seconds: 4_102_444_800,
                     nanos: 0,
                 }),
+                disable_expiry: false,
             }))
             .await
             .unwrap()
@@ -2714,6 +2739,32 @@ mod upstream_tests {
             .node
             .expect("expired node");
         assert_eq!(expired.expiry.as_ref().unwrap().seconds, 4_102_444_800);
+
+        let unexpired = service
+            .expire_node(Request::new(ExpireNodeRequest {
+                node_id,
+                expiry: None,
+                disable_expiry: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("unexpired node");
+        assert!(unexpired.expiry.is_none());
+
+        let err = service
+            .expire_node(Request::new(ExpireNodeRequest {
+                node_id,
+                expiry: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_800,
+                    nanos: 0,
+                }),
+                disable_expiry: true,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         service
             .delete_node(Request::new(DeleteNodeRequest { node_id }))
@@ -3244,8 +3295,32 @@ mod upstream_tests {
         assert_eq!(got.policy, raw);
         assert!(got.updated_at.is_some());
 
+        service
+            .check_policy(Request::new(CheckPolicyRequest { policy: raw.into() }))
+            .await
+            .unwrap();
+        let candidate = r#"{"acls":[]}"#;
+        service
+            .check_policy(Request::new(CheckPolicyRequest {
+                policy: candidate.into(),
+            }))
+            .await
+            .unwrap();
+        let got_after_check = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got_after_check.policy, raw);
+
         let err = service
             .set_policy(Request::new(SetPolicyRequest { policy: "{".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .check_policy(Request::new(CheckPolicyRequest { policy: "{".into() }))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);

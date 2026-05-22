@@ -171,6 +171,8 @@ pub trait MachineAdmin: Send + Sync {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError>;
+    /// Clear node-key expiry so the node never expires.
+    async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError>;
     /// Back-compat shim: expire immediately. Default impl forwards to
     /// `expire_at(id, None)`. Existing call sites that took the old
     /// single-arg signature keep working.
@@ -723,7 +725,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         &self,
         registration_id: &str,
         user: &crate::oidc::OidcStoredUser,
-        node_expiry: DateTime<Utc>,
+        node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
         let pending = self
             .registration_cache
@@ -731,7 +733,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
         let mut record = machine_admin_record_from_wire(&pending);
         record.user = oidc_user_name(user);
-        record.expiry = Some(node_expiry.timestamp().max(0) as u64);
+        record.expiry = node_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
         record.register_method = REGISTER_METHOD_OIDC;
 
         let result = self
@@ -891,6 +893,14 @@ impl MachineAdmin for PersistentMachineAdmin {
         let row = self.row_by_slug(id).await?;
         let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
         headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
+            .await
+            .map(|_| ())
+            .map_err(|e| db_error_to_machine(e, id))
+    }
+
+    async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, None)
             .await
             .map(|_| ())
             .map_err(|e| db_error_to_machine(e, id))
@@ -1070,6 +1080,17 @@ impl MachineAdmin for WireMachineAdmin {
         // a logout response. `None` ⇒ expire immediately.
         let stamp = expiry.unwrap_or_else(Utc::now);
         if !self.registry.set_expiry(id, Some(stamp)) {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
+            return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        self.expired.write().remove(id);
+        if !self.registry.set_expiry(id, None) {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
@@ -2157,7 +2178,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                expiry,
+                Some(expiry),
             )
             .await
             .unwrap();
@@ -2249,7 +2270,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                expiry,
+                Some(expiry),
             )
             .await
             .unwrap();
@@ -2383,7 +2404,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap();
@@ -2445,7 +2466,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap();
@@ -2509,7 +2530,7 @@ mod tests {
                     provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
                     profile_pic_url: String::new(),
                 },
-                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+                Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
             .unwrap_err();

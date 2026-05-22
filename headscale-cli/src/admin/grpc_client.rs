@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::generated::{
-    ApiKey, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest, DeleteApiKeyRequest,
-    DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest, ListApiKeysRequest,
-    ListPreAuthKeysRequest, ListUsersRequest, PreAuthKey, RenameUserRequest, User,
+    ApiKey, CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
+    DeleteApiKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpirePreAuthKeyRequest,
+    GetPolicyRequest, GetPolicyResponse, ListApiKeysRequest, ListPreAuthKeysRequest,
+    ListUsersRequest, PreAuthKey, RenameUserRequest, SetPolicyRequest, SetPolicyResponse, User,
     headscale_service_client::HeadscaleServiceClient,
 };
 use hyper_util::rt::TokioIo;
@@ -153,6 +154,35 @@ impl GrpcAdminClient {
         let request = self.request(ExpirePreAuthKeyRequest { id })?;
         self.client
             .expire_pre_auth_key(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?;
+        Ok(())
+    }
+
+    pub async fn get_policy(&mut self) -> Result<GetPolicyResponse, AdminError> {
+        let request = self.request(GetPolicyRequest {})?;
+        Ok(self
+            .client
+            .get_policy(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner())
+    }
+
+    pub async fn set_policy(&mut self, policy: String) -> Result<SetPolicyResponse, AdminError> {
+        let request = self.request(SetPolicyRequest { policy })?;
+        Ok(self
+            .client
+            .set_policy(request)
+            .await
+            .map_err(|status| status_to_admin_error(&status))?
+            .into_inner())
+    }
+
+    pub async fn check_policy(&mut self, policy: String) -> Result<(), AdminError> {
+        let request = self.request(CheckPolicyRequest { policy })?;
+        self.client
+            .check_policy(request)
             .await
             .map_err(|status| status_to_admin_error(&status))?;
         Ok(())
@@ -658,6 +688,42 @@ mod tests {
         assert_eq!(listed[0].id, key.id);
 
         client.expire_pre_auth_key(key.id).await.unwrap();
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn grpc_client_uses_local_unix_socket_for_policy_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("headscale.sock");
+        let machines = Arc::new(MachineRegistry::new());
+        let service = HeadscaleAdminService::with_user_admin(
+            Arc::new(UserRegistry::new()),
+            Arc::new(NoopApiKeyAdmin),
+            Arc::new(InMemoryPreauthAdmin::new()),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(machines)),
+        );
+        let listener = UnixListener::bind(&socket).unwrap();
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await
+        });
+
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+            .await
+            .unwrap();
+        let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#.to_string();
+        client.check_policy(raw.clone()).await.unwrap();
+        let set = client.set_policy(raw.clone()).await.unwrap();
+        assert_eq!(set.policy, raw);
+        assert!(set.updated_at.is_some());
+        let got = client.get_policy().await.unwrap();
+        assert_eq!(got.policy, raw);
+        assert!(client.check_policy("{".into()).await.is_err());
 
         handle.abort();
         let _ = handle.await;

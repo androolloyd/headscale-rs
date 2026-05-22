@@ -1,20 +1,18 @@
 //! `headscale policy {get,set,check}`.
 //!
-//! `get` / `set` round-trip the policy document with the admin
-//! surface. `check` runs locally — it parses + validates the file
-//! without touching the server. The admin endpoint (wired up
-//! alongside the wire-layer `MapResponse.PacketFilter` plumbing)
-//! answers PUT with `{"applied": true, "rules": <n>}` on success
-//! and `400 {"error": …}` on a hujson schema violation. GET returns
-//! `{loaded, policy, raw}` where `raw` is the operator's exact
-//! source bytes (comments + trailing commas preserved). The CLI
-//! displays whichever fields the server emits; the missing-field
-//! paths default sensibly so older servers still work.
+//! The upstream-compatible path uses the gRPC `GetPolicy`, `SetPolicy`,
+//! and `CheckPolicy` RPCs by default. Supplying explicit `--server` keeps
+//! the legacy admin HTTP behavior, where `check` remains local-only.
 
 use std::path::Path;
 
+use chrono::{DateTime, SecondsFormat, Utc};
+use headscale_api::generated::{GetPolicyResponse, SetPolicyResponse};
+use serde::Serialize;
+
 use super::AdminError;
 use super::client::AdminClient;
+use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured};
 
 pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
@@ -32,6 +30,19 @@ pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminErr
         {
             println!("---");
             println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+pub async fn get_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+    let response = PolicyOutput::from(client.get_policy().await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &response)?;
+    } else {
+        print!("{}", response.policy);
+        if !response.policy.ends_with('\n') {
+            println!();
         }
     }
     Ok(())
@@ -57,6 +68,21 @@ pub async fn set(client: &AdminClient, path: &Path, fmt: OutputFormat) -> Result
     Ok(())
 }
 
+pub async fn set_grpc(
+    client: &mut GrpcAdminClient,
+    path: &Path,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let body = read_policy_file(path)?;
+    let response = PolicySetOutput::from(client.set_policy(body).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &response)?;
+    } else {
+        println!("Policy applied: true");
+    }
+    Ok(())
+}
+
 /// Local-only validation. Reads the file, strips hujson `//` line
 /// comments + trailing commas, then ensures the result parses as
 /// `serde_json::Value`. The check is intentionally permissive — we
@@ -69,6 +95,13 @@ pub fn check(path: &Path) -> Result<(), AdminError> {
     Ok(())
 }
 
+pub async fn check_grpc(client: &mut GrpcAdminClient, path: &Path) -> Result<(), AdminError> {
+    let raw = read_policy_file(path)?;
+    client.check_policy(raw).await?;
+    println!("Policy at {} validates OK.", path.display());
+    Ok(())
+}
+
 fn read_policy_file(path: &Path) -> Result<String, AdminError> {
     std::fs::read_to_string(path).map_err(|e| {
         AdminError::Local(format!(
@@ -76,6 +109,47 @@ fn read_policy_file(path: &Path) -> Result<String, AdminError> {
             path.display()
         ))
     })
+}
+
+fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyOutput {
+    policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+impl From<GetPolicyResponse> for PolicyOutput {
+    fn from(response: GetPolicyResponse) -> Self {
+        Self {
+            policy: response.policy,
+            updated_at: timestamp_rfc3339(response.updated_at.as_ref()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PolicySetOutput {
+    applied: bool,
+    policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+impl From<SetPolicyResponse> for PolicySetOutput {
+    fn from(response: SetPolicyResponse) -> Self {
+        Self {
+            applied: true,
+            policy: response.policy,
+            updated_at: timestamp_rfc3339(response.updated_at.as_ref()),
+        }
+    }
 }
 
 /// Run the local-only parse. Exposed so the unit tests can exercise
@@ -200,5 +274,17 @@ mod tests {
     #[test]
     fn check_policy_str_rejects_garbage() {
         assert!(check_policy_str("not json {").is_err());
+    }
+
+    #[test]
+    fn policy_output_formats_timestamp_as_rfc3339() {
+        let output = PolicyOutput::from(GetPolicyResponse {
+            policy: "{\"acls\":[]}".into(),
+            updated_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+        });
+        assert_eq!(output.updated_at.as_deref(), Some("2024-01-01T00:00:00Z"));
     }
 }

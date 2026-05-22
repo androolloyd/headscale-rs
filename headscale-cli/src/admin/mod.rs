@@ -573,16 +573,26 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
 }
 
 pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), AdminError> {
+    let fmt = conn.fmt()?;
+    if conn.should_use_legacy_http_for_migrated_commands() {
+        return match cmd {
+            PolicyCmd::Check { path } => policy::check(path),
+            PolicyCmd::Get => {
+                let client = conn.build_client()?;
+                policy::get(&client, fmt).await
+            }
+            PolicyCmd::Set { path } => {
+                let client = conn.build_client()?;
+                policy::set(&client, path, fmt).await
+            }
+        };
+    }
+
+    let mut client = conn.build_grpc_client().await?;
     match cmd {
-        PolicyCmd::Check { path } => policy::check(path),
-        PolicyCmd::Get => {
-            let client = conn.build_client()?;
-            policy::get(&client, conn.fmt()?).await
-        }
-        PolicyCmd::Set { path } => {
-            let client = conn.build_client()?;
-            policy::set(&client, path, conn.fmt()?).await
-        }
+        PolicyCmd::Check { path } => policy::check_grpc(&mut client, path).await,
+        PolicyCmd::Get => policy::get_grpc(&mut client, fmt).await,
+        PolicyCmd::Set { path } => policy::set_grpc(&mut client, path, fmt).await,
     }
 }
 

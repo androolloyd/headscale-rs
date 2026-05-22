@@ -265,7 +265,8 @@ pub enum NodesCmd {
     },
     /// Mark a node expired. Without `--at`, expires immediately
     /// (forces re-register on the node's next /map). With `--at`,
-    /// schedules expiry for the supplied ISO-8601 timestamp.
+    /// schedules expiry for the supplied ISO-8601 timestamp. With
+    /// `--disable`, clears key expiry so the node never expires.
     #[command(alias = "logout", alias = "exp", alias = "e")]
     Expire {
         /// Node identifier (ID). Positional form is kept for legacy compatibility.
@@ -277,6 +278,9 @@ pub enum NodesCmd {
         /// ISO-8601 timestamp to schedule expiry at. Defaults to "now".
         #[arg(short = 'e', long = "expiry", alias = "at", value_name = "RFC3339")]
         expiry: Option<String>,
+        /// Disable key expiry for this node.
+        #[arg(short = 'd', long = "disable")]
+        disable: bool,
     },
     /// Rename a node (operator-driven hostname rewrite).
     Rename {
@@ -537,7 +541,13 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
                 id,
                 identifier,
                 expiry,
+                disable,
             } => {
+                if *disable {
+                    return Err(AdminError::Local(
+                        "node expiry disable requires the upstream gRPC transport".into(),
+                    ));
+                }
                 let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
                 nodes::expire(&client, id, expiry.as_deref()).await
             }
@@ -590,9 +600,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
             id,
             identifier,
             expiry,
+            disable,
         } => {
             let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
-            nodes::expire_grpc(&mut client, id, expiry.as_deref(), fmt).await
+            nodes::expire_grpc(&mut client, id, expiry.as_deref(), *disable, fmt).await
         }
         NodesCmd::Rename {
             value,
@@ -620,10 +631,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
         }
         NodesCmd::Delete { id, identifier } => {
             let id = nodes::select_node_id(id.as_deref(), identifier.as_deref())?;
-            nodes::delete_grpc(&mut client, id).await
+            nodes::delete_grpc(&mut client, id, conn.force, fmt).await
         }
         NodesCmd::BackfillIps { confirm } => {
-            nodes::backfillips_grpc(&mut client, *confirm || conn.force, fmt).await
+            nodes::backfillips_grpc(&mut client, *confirm, conn.force, fmt).await
         }
     }
 }
@@ -983,6 +994,7 @@ mod tests {
                 id: None,
                 identifier: Some(identifier),
                 expiry: Some(expiry),
+                disable: false,
             } if identifier == "42" && expiry == "2025-08-27T10:00:00Z"
         ));
         assert!(matches!(
@@ -993,6 +1005,18 @@ mod tests {
                 id: None,
                 identifier: Some(identifier),
                 expiry: None,
+                disable: false,
+            } if identifier == "42"
+        ));
+        assert!(matches!(
+            NodesHarness::try_parse_from(["headscale", "expire", "-i", "42", "--disable"])
+                .unwrap()
+                .action,
+            NodesCmd::Expire {
+                id: None,
+                identifier: Some(identifier),
+                expiry: None,
+                disable: true,
             } if identifier == "42"
         ));
         assert!(matches!(

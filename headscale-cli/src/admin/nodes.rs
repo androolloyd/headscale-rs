@@ -6,6 +6,7 @@
 //! is `nodes` to match upstream's modern naming.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::MachineAdminRecord;
@@ -226,17 +227,21 @@ pub async fn list_routes_grpc(
     id: Option<&str>,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let mut nodes = if let Some(id) = id {
-        vec![NodeOutput::from(client.get_node(parse_node_id(id)?).await?)]
-    } else {
-        client
-            .list_nodes(None)
-            .await?
-            .into_iter()
-            .map(NodeOutput::from)
-            .collect()
-    };
-    nodes.retain(|n| !n.available_routes.is_empty() || !n.approved_routes.is_empty());
+    let requested_id = id.map(parse_node_id).transpose()?;
+    let mut nodes: Vec<NodeOutput> = client
+        .list_nodes(None)
+        .await?
+        .into_iter()
+        .map(NodeOutput::from)
+        .collect();
+    if let Some(requested_id) = requested_id {
+        nodes.retain(|n| n.id == requested_id);
+    }
+    nodes.retain(|n| {
+        !n.subnet_routes.is_empty()
+            || !n.available_routes.is_empty()
+            || !n.approved_routes.is_empty()
+    });
     if fmt.is_structured() {
         print_structured(fmt, &nodes)?;
     } else {
@@ -296,9 +301,20 @@ pub async fn expire_grpc(
     client: &mut GrpcAdminClient,
     id: &str,
     at: Option<&str>,
+    disable_expiry: bool,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let node_id = parse_node_id(id)?;
+    if disable_expiry {
+        let node = NodeOutput::from(client.expire_node(node_id, None, true).await?);
+        if fmt.is_structured() {
+            print_structured(fmt, &node)?;
+        } else {
+            println!("Node expiry disabled");
+        }
+        return Ok(());
+    }
+
     let expiry = match at {
         Some(at) => Some(parse_rfc3339_unix(at)?),
         None => Some(current_unix_i64()),
@@ -384,19 +400,38 @@ pub async fn approve_routes_grpc(
     Ok(())
 }
 
-pub async fn delete_grpc(client: &mut GrpcAdminClient, id: &str) -> Result<(), AdminError> {
+pub async fn delete_grpc(
+    client: &mut GrpcAdminClient,
+    id: &str,
+    force: bool,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
     let node_id = parse_node_id(id)?;
+    let node = NodeOutput::from(client.get_node(node_id).await?);
+    if !force && !confirm_action(&format!("Do you want to remove the node {}?", node.name))? {
+        print_result(fmt, "Node not deleted")?;
+        return Ok(());
+    }
+
     client.delete_node(node_id).await?;
-    println!("Deleted node '{node_id}'");
+    print_result(fmt, "Node deleted")?;
     Ok(())
 }
 
 pub async fn backfillips_grpc(
     client: &mut GrpcAdminClient,
     confirmed: bool,
+    force: bool,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let response = client.backfill_node_ips(confirmed).await?;
+    if !force
+        && !confirmed
+        && !confirm_action("Are you sure that you want to assign/remove IPs to/from nodes?")?
+    {
+        return Ok(());
+    }
+
+    let response = client.backfill_node_ips(true).await?;
     if fmt.is_structured() {
         let output = BackfillOutput {
             changes: response.changes,
@@ -556,8 +591,15 @@ fn render_grpc_nodes(nodes: &[NodeOutput]) {
             vec![
                 n.id.to_string(),
                 n.name.clone(),
+                n.given_name.clone(),
+                short_key(&n.machine_key),
+                short_key(&n.node_key),
                 n.user.clone(),
+                n.tags.join("\n"),
                 n.ip_addresses.join("\n"),
+                n.ephemeral.to_string(),
+                n.last_seen.clone().unwrap_or_default(),
+                n.expiry.clone().unwrap_or_else(|| "N/A".into()),
                 if n.online {
                     "online".into()
                 } else {
@@ -568,7 +610,21 @@ fn render_grpc_nodes(nodes: &[NodeOutput]) {
         })
         .collect();
     print_table(
-        &["ID", "NAME", "USER", "IP ADDRESSES", "STATUS", "EXPIRED"],
+        &[
+            "ID",
+            "HOSTNAME",
+            "NAME",
+            "MACHINEKEY",
+            "NODEKEY",
+            "USER",
+            "TAGS",
+            "IP ADDRESSES",
+            "EPHEMERAL",
+            "LAST SEEN",
+            "EXPIRATION",
+            "CONNECTED",
+            "EXPIRED",
+        ],
         &rows,
     );
 }
@@ -584,6 +640,7 @@ fn render_grpc_one(n: &NodeOutput) {
     println!("  IP addresses: {}", n.ip_addresses.join(", "));
     println!("  Online:       {}", n.online);
     println!("  Expired:      {}", n.expired);
+    println!("  Ephemeral:    {}", n.ephemeral);
     println!("  Last seen:    {}", n.last_seen.as_deref().unwrap_or("-"));
     println!("  Created:      {}", n.created_at.as_deref().unwrap_or("-"));
     println!("  Expiry:       {}", n.expiry.as_deref().unwrap_or("-"));
@@ -622,7 +679,13 @@ fn render_grpc_routes(nodes: &[NodeOutput]) {
         })
         .collect();
     print_table(
-        &["ID", "HOSTNAME", "APPROVED", "AVAILABLE", "SUBNET ROUTES"],
+        &[
+            "ID",
+            "HOSTNAME",
+            "APPROVED",
+            "AVAILABLE",
+            "SERVING (PRIMARY)",
+        ],
         &rows,
     );
 }
@@ -655,6 +718,36 @@ fn current_unix_i64() -> i64 {
     i64::try_from(now).unwrap_or(i64::MAX)
 }
 
+fn confirm_action(prompt: &str) -> Result<bool, AdminError> {
+    eprint!("{prompt} [y/n] ");
+    io::stderr()
+        .flush()
+        .map_err(|e| AdminError::Local(format!("write confirmation prompt: {e}")))?;
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .map_err(|e| AdminError::Local(format!("read confirmation response: {e}")))?;
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "sure"
+    ))
+}
+
+fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
+    #[derive(Serialize)]
+    struct ResultOutput<'a> {
+        #[serde(rename = "Result")]
+        result: &'a str,
+    }
+
+    if fmt.is_structured() {
+        print_structured(fmt, &ResultOutput { result: message })
+    } else {
+        println!("{message}");
+        Ok(())
+    }
+}
+
 fn is_expired(expiry: Option<&prost_types::Timestamp>) -> bool {
     expiry.is_some_and(|ts| ts.seconds <= current_unix_i64())
 }
@@ -674,6 +767,7 @@ struct NodeOutput {
     approved_routes: Vec<String>,
     available_routes: Vec<String>,
     subnet_routes: Vec<String>,
+    ephemeral: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_seen: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,6 +794,7 @@ impl From<GrpcNode> for NodeOutput {
             approved_routes: node.approved_routes,
             available_routes: node.available_routes,
             subnet_routes: node.subnet_routes,
+            ephemeral: node.pre_auth_key.as_ref().is_some_and(|key| key.ephemeral),
             last_seen: timestamp_rfc3339(node.last_seen.as_ref()),
             expiry: timestamp_rfc3339(node.expiry.as_ref()),
             created_at: timestamp_rfc3339(node.created_at.as_ref()),
@@ -731,6 +826,13 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+fn short_key(key: &str) -> String {
+    let Some((prefix, body)) = key.split_once(':') else {
+        return short_id(key);
+    };
+    format!("{prefix}:{}", short_id(body))
 }
 
 #[cfg(test)]
@@ -802,6 +904,10 @@ mod tests {
                 seconds: 1,
                 nanos: 0,
             }),
+            pre_auth_key: Some(headscale_api::generated::PreAuthKey {
+                ephemeral: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -810,6 +916,7 @@ mod tests {
         assert_eq!(output.id, 7);
         assert_eq!(output.user, "alice");
         assert_eq!(output.created_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert!(output.ephemeral);
         assert!(output.expired);
     }
 

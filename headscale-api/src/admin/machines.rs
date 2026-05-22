@@ -315,6 +315,13 @@ pub struct PersistentOidcRegistrationHandler {
     wire_registry: Option<Arc<MachineRegistry>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthPathRegistrationResult {
+    pub record: MachineAdminRecord,
+    pub new_node: bool,
+    pub replaced_node_key_hex: Option<String>,
+}
+
 impl PersistentOidcRegistrationHandler {
     pub fn new(
         registration_cache: Arc<RegistrationCache>,
@@ -353,7 +360,7 @@ impl PersistentMachineAdmin {
         &self,
         mut record: MachineAdminRecord,
         policy: &PolicyStore,
-    ) -> Result<(MachineAdminRecord, bool), MachineAdminError> {
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -396,6 +403,7 @@ impl PersistentMachineAdmin {
         });
 
         if let Some(existing) = existing {
+            let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
             match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
                 Ok(row) if row.id != existing.id => {
                     return Err(MachineAdminError::BadRequest("node already exists".into()));
@@ -425,7 +433,13 @@ impl PersistentMachineAdmin {
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
-            Ok((self.row_to_record(row).await, false))
+            let record = self.row_to_record(row).await;
+            Ok(AuthPathRegistrationResult {
+                replaced_node_key_hex: (replaced_node_key_hex != record.id)
+                    .then_some(replaced_node_key_hex),
+                record,
+                new_node: false,
+            })
         } else {
             record.approved_routes = auto_approved_routes_for_node(
                 policy,
@@ -436,7 +450,13 @@ impl PersistentMachineAdmin {
                 &record.routes,
             )
             .map_err(MachineAdminError::BadRequest)?;
-            self.create(record).await.map(|record| (record, true))
+            self.create(record)
+                .await
+                .map(|record| AuthPathRegistrationResult {
+                    record,
+                    new_node: true,
+                    replaced_node_key_hex: None,
+                })
         }
     }
 
@@ -559,20 +579,30 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         record.expiry = Some(node_expiry.timestamp().max(0) as u64);
         record.register_method = REGISTER_METHOD_OIDC;
 
-        let (created, new_node) = self
+        let result = self
             .machines
             .create_or_update_auth_path(record, &self.policy)
             .await
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        let wire_record = machine_admin_record_to_wire(&created);
+        let wire_record = machine_admin_record_to_wire(&result.record);
         if let Some(registry) = &self.wire_registry {
-            registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+            if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                registry.replace_node_key(
+                    old_node_key_hex,
+                    wire_record.node_key_hex.clone(),
+                    wire_record.clone(),
+                );
+            } else {
+                registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+            }
         }
         if self
             .registration_cache
             .complete(registration_id, wire_record)
         {
-            Ok(crate::oidc::OidcRegistrationResult { new_node })
+            Ok(crate::oidc::OidcRegistrationResult {
+                new_node: result.new_node,
+            })
         } else {
             Err(crate::oidc::OidcRegistrationError::SessionExpired)
         }
@@ -1334,12 +1364,14 @@ mod tests {
         pending.ipv4 = "100.64.99.99".into();
         pending.expiry = Some(4_102_444_800);
 
-        let (updated, new_node) = admin
+        let result = admin
             .create_or_update_auth_path(pending, &PolicyStore::new())
             .await
             .unwrap();
+        let updated = result.record;
 
-        assert!(!new_node);
+        assert!(!result.new_node);
+        assert_eq!(result.replaced_node_key_hex, Some("aa".repeat(32)));
         assert_eq!(updated.node_id, created.node_id);
         assert_eq!(updated.id, "cc".repeat(32));
         assert_eq!(updated.machine_key_hex, created.machine_key_hex);
@@ -1444,6 +1476,64 @@ mod tests {
             }
             other => panic!("unexpected registration outcome: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_rekeys_live_registry() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let created = admin.create(persistent_record()).await.unwrap();
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        registry.upsert(created.id.clone(), machine_admin_record_to_wire(&created));
+
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "dd".repeat(32),
+            created.machine_key_hex.clone(),
+            String::new(),
+            "alice-oidc".into(),
+            Ipv4Addr::new(100, 64, 99, 99),
+            false,
+        );
+        pending.available_routes = vec!["10.30.0.0/24".into()];
+        let registration_id = "q".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin.clone(),
+            Arc::new(PolicyStore::new()),
+        )
+        .with_wire_registry(registry.clone());
+        let result = handler
+            .complete_oidc_registration(
+                &registration_id,
+                &crate::oidc::OidcStoredUser {
+                    id: 1,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/subject".into(),
+                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                Utc.timestamp_opt(4_102_444_800, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.new_node);
+        assert!(registry.get(&created.id).is_none());
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.ipv4.to_string(), created.ipv4);
+        assert_eq!(wire.machine_key_hex, created.machine_key_hex);
+        assert_eq!(wire.user, "alice");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

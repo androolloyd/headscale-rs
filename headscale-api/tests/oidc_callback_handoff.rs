@@ -301,7 +301,7 @@ async fn spawn_mock_oidc_provider() -> MockOidcProvider {
     let base_url = format!("http://{}", listener.local_addr().unwrap());
 
     let app = oidc_provider_router(
-        base_url.clone(),
+        &base_url,
         token_nonce.clone(),
         captured_form.clone(),
         captured_userinfo_auth.clone(),
@@ -320,12 +320,12 @@ async fn spawn_mock_oidc_provider() -> MockOidcProvider {
 }
 
 fn oidc_provider_router(
-    issuer: String,
+    issuer: &str,
     token_nonce: Arc<RwLock<String>>,
     captured_form: Arc<RwLock<BTreeMap<String, String>>>,
     captured_userinfo_auth: Arc<RwLock<Option<String>>>,
 ) -> Router {
-    let token_issuer = issuer.clone();
+    let token_issuer = issuer.to_string();
     let token_nonce_route = token_nonce;
     let captured_form_route = captured_form;
     let userinfo_auth_route = captured_userinfo_auth;

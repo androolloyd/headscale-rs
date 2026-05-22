@@ -1,10 +1,13 @@
 //! Server mode - runs the control plane.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::net::{UnixListener, UnixStream};
+use tokio_stream::wrappers::UnixListenerStream;
 
 use headscale_api::admin::{
     PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
@@ -32,6 +35,8 @@ pub(crate) struct RunServerConfig {
     pub state_dir: PathBuf,
     pub https_listen: Option<String>,
     pub tls_hostname: Option<String>,
+    pub unix_socket: PathBuf,
+    pub unix_socket_permission: u32,
     pub oidc: OidcConfig,
 }
 
@@ -50,6 +55,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     tracing::info!("  Database: {}", cfg.db_path.display());
     tracing::info!("  State dir: {}", cfg.state_dir.display());
     tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
+    tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
 
     let server_url = cfg.server_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -85,16 +91,23 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let serve_cfg = serve::ServeConfig {
         http_addr,
         https_addr,
-        state_dir: cfg.state_dir,
+        state_dir: cfg.state_dir.clone(),
         sans: SanConfig::with_hostname(tls_hostname),
         oidc: runtime.oidc,
     };
+    let local_grpc_listener =
+        bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
 
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
+    let local_grpc = spawn_local_grpc_listener(
+        local_grpc_listener,
+        cfg.unix_socket.clone(),
+        runtime.admin_service.clone(),
+    );
     tracing::info!("Headscale-compatible Tailscale control plane ready");
-    await_serve_handle(handle).await
+    await_serve_handle(handle, local_grpc).await
 }
 
 struct PersistentWireRuntime {
@@ -180,6 +193,49 @@ fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
     grpc_gateway::router(runtime.admin_service.clone())
 }
 
+async fn bind_unix_grpc_listener(path: &Path, permission: u32) -> Result<UnixListener> {
+    ensure_parent_dir(path)?;
+    if path.exists() {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("inspect Unix gRPC socket {}", path.display()))?;
+        if !metadata.file_type().is_socket() {
+            anyhow::bail!(
+                "Refusing to replace non-socket Unix gRPC path {}",
+                path.display()
+            );
+        }
+        match UnixStream::connect(path).await {
+            Ok(_) => anyhow::bail!("Unix gRPC socket {} is already in use", path.display()),
+            Err(_) => std::fs::remove_file(path)
+                .with_context(|| format!("remove stale Unix gRPC socket {}", path.display()))?,
+        }
+    }
+    let listener = UnixListener::bind(path)
+        .with_context(|| format!("bind Unix gRPC socket {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(permission))
+        .with_context(|| format!("chmod Unix gRPC socket {}", path.display()))?;
+    Ok(listener)
+}
+
+fn spawn_local_grpc_listener(
+    listener: UnixListener,
+    path: PathBuf,
+    service: HeadscaleAdminService,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let reflection =
+            HeadscaleAdminService::reflection_service().context("build gRPC reflection service")?;
+        let incoming = UnixListenerStream::new(listener);
+        tracing::info!(path = %path.display(), "admin gRPC listening on Unix socket");
+        tonic::transport::Server::builder()
+            .add_service(service.into_service_server())
+            .add_service(reflection)
+            .serve_with_incoming(incoming)
+            .await
+            .with_context(|| format!("serve admin gRPC Unix socket {}", path.display()))
+    })
+}
+
 async fn load_persisted_policy(pool: &sqlx::SqlitePool, policy: &PolicyStore) -> Result<bool> {
     let Some(row) = headscale_db::policies::get_latest(pool)
         .await
@@ -224,21 +280,41 @@ fn parse_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
         .with_context(|| format!("Invalid {field} address: {value}"))
 }
 
-async fn await_serve_handle(handle: serve::ServeHandle) -> Result<()> {
+async fn await_serve_handle(
+    handle: serve::ServeHandle,
+    local_grpc: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
     let serve::ServeHandle { http, https, .. } = handle;
     match https {
         Some(https) => {
             tokio::select! {
                 result = http => flatten_listener_result(result, "http"),
                 result = https => flatten_listener_result(result, "https"),
+                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
             }
         }
-        None => flatten_listener_result(http.await, "http"),
+        None => {
+            tokio::select! {
+                result = http => flatten_listener_result(result, "http"),
+                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
+            }
+        }
     }
 }
 
 fn flatten_listener_result(
     result: std::result::Result<std::result::Result<(), std::io::Error>, tokio::task::JoinError>,
+    label: &str,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err).with_context(|| format!("{label} listener failed")),
+        Err(err) => Err(err).with_context(|| format!("{label} listener task failed")),
+    }
+}
+
+fn flatten_anyhow_task_result(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
     label: &str,
 ) -> Result<()> {
     match result {
@@ -325,10 +401,16 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use headscale_api::generated::{
+        HealthRequest, headscale_service_client::HeadscaleServiceClient,
+    };
     use headscale_api::oidc::{OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig};
+    use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
+    use tonic::transport::{Channel, Endpoint, Uri};
     use tower::ServiceExt;
+    use tower::service_fn;
 
     fn oidc_runtime() -> OidcAuthRuntime {
         OidcAuthRuntime::new(OidcAuthConfig {
@@ -452,6 +534,52 @@ mod tests {
         assert_eq!(body["databaseConnectivity"], true);
     }
 
+    async fn unix_grpc_channel(path: PathBuf) -> Channel {
+        Endpoint::try_from("http://[::]:50051")
+            .unwrap()
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move {
+                    let stream = UnixStream::connect(path).await?;
+                    Ok::<_, std::io::Error>(TokioIo::new(stream))
+                }
+            }))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_unix_grpc_listener_serves_health_without_api_key() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("headscale.sock");
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+        )
+        .await
+        .unwrap();
+        let listener = bind_unix_grpc_listener(&socket_path, 0o700).await.unwrap();
+        let handle =
+            spawn_local_grpc_listener(listener, socket_path.clone(), runtime.admin_service.clone());
+
+        let channel = unix_grpc_channel(socket_path.clone()).await;
+        let response = HeadscaleServiceClient::new(channel)
+            .health(HealthRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.database_connectivity);
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
     #[tokio::test]
     async fn non_oidc_server_requires_public_server_url_before_binding() {
         let dir = tempfile::tempdir().unwrap();
@@ -463,6 +591,8 @@ mod tests {
             state_dir: dir.path().join("state"),
             https_listen: None,
             tls_hostname: None,
+            unix_socket: dir.path().join("state/headscale.sock"),
+            unix_socket_permission: 0o700,
             oidc: OidcConfig::default(),
         })
         .await

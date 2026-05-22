@@ -24,6 +24,8 @@ anyhow.workspace = true
 thiserror.workspace = true
 axum = "0.7"
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
+tonic.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
 
 headscale-core = { workspace = true }
 # The admin subcommands (users / nodes / preauthkeys / policy / tailnet)
@@ -61,6 +63,7 @@ httpmock = "0.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [lints]
 workspace = true

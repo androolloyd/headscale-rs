@@ -44,6 +44,12 @@ pub(crate) struct ServerConfig {
     /// Optional TLS certificate DNS SAN. Defaults to the host in `server_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_hostname: Option<String>,
+    /// Local gRPC Unix socket used by upstream-shaped admin clients.
+    #[serde(default = "default_unix_socket")]
+    pub unix_socket: PathBuf,
+    /// Filesystem permission applied to the local gRPC Unix socket.
+    #[serde(default = "default_unix_socket_permission")]
+    pub unix_socket_permission: u32,
     /// DERP relay servers
     #[serde(default)]
     pub derp_servers: Vec<DerpServerConfig>,
@@ -192,6 +198,14 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from("/var/lib/headscale")
 }
 
+fn default_unix_socket() -> PathBuf {
+    PathBuf::from("/var/run/headscale/headscale.sock")
+}
+
+fn default_unix_socket_permission() -> u32 {
+    0o770
+}
+
 fn default_mesh_cidr() -> String {
     "100.64.0.0/10".to_string()
 }
@@ -230,6 +244,8 @@ impl Default for ServerConfig {
             state_dir: default_state_dir(),
             https_listen: None,
             tls_hostname: None,
+            unix_socket: default_unix_socket(),
+            unix_socket_permission: default_unix_socket_permission(),
             derp_servers: Vec::new(),
         }
     }
@@ -330,6 +346,8 @@ https_listen = "0.0.0.0:443"
 server_url = "https://headscale.example"
 state_dir = "/srv/headscale"
 tls_hostname = "headscale.example"
+unix_socket = "/srv/headscale/headscale.sock"
+unix_socket_permission = 448
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -343,6 +361,11 @@ tls_hostname = "headscale.example"
         );
         assert_eq!(server.state_dir, PathBuf::from("/srv/headscale"));
         assert_eq!(server.tls_hostname.as_deref(), Some("headscale.example"));
+        assert_eq!(
+            server.unix_socket,
+            PathBuf::from("/srv/headscale/headscale.sock")
+        );
+        assert_eq!(server.unix_socket_permission, 0o700);
     }
 
     #[test]

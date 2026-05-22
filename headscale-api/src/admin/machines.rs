@@ -1237,7 +1237,7 @@ fn create_params_for_wire_record(
     let admin = machine_admin_record_from_wire(record);
     let mut params = create_params_for_record_with_auth_key(&admin, user_id, auth_key_id);
     params.disco_key = record.disco_key.clone().unwrap_or_default();
-    params.endpoints = record.endpoints.clone();
+    params.endpoints.clone_from(&record.endpoints);
     params.host_info = host_info_for_wire_record(record);
     params
 }

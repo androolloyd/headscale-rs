@@ -230,6 +230,11 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
                 https_listen: server_config.and_then(|s| s.https_listen.clone()),
                 tls_hostname: server_config.and_then(|s| s.tls_hostname.clone()),
+                unix_socket: server_config.map_or(defaults.unix_socket, |s| s.unix_socket.clone()),
+                unix_socket_permission: server_config
+                    .map_or(defaults.unix_socket_permission, |s| {
+                        s.unix_socket_permission
+                    }),
                 oidc: config
                     .as_ref()
                     .map_or_else(headscale_core::config::OidcConfig::default, |c| {
@@ -402,6 +407,8 @@ mesh_cidr = "100.64.0.0/10"
 # state_dir = "/var/lib/headscale"
 # https_listen = "0.0.0.0:443"
 # tls_hostname = "headscale.example"
+# unix_socket = "/var/run/headscale/headscale.sock"
+# unix_socket_permission = 504
 
 # DERP relay servers for NAT traversal
 [[server.derp_servers]]

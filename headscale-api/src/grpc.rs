@@ -2462,7 +2462,7 @@ mod upstream_tests {
             host_info
                 .get("NetInfo")
                 .and_then(|v| v.get("PreferredDERP"))
-                .and_then(|v| v.as_i64()),
+                .and_then(serde_json::Value::as_i64),
             Some(8)
         );
         assert_eq!(host_info.get("OS").and_then(|v| v.as_str()), Some("linux"));

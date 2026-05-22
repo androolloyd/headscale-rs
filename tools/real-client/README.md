@@ -242,7 +242,10 @@ tools/real-client/oidc-headscale-go-smoke.sh
 
 Both scripts assert that the client reaches a logged-in netmap and that SQLite
 records one OIDC-registered node plus the expected OIDC user profile. The
-headscale-go script also checks the upstream `headscale nodes list` JSON output.
+Rust script also configures the production local gRPC Unix socket at a short
+`/tmp/hsrs-*.sock` path, overrideable with `REAL_CLIENT_HEADSCALE_RS_SOCKET`;
+the headscale-go script checks the upstream
+`headscale nodes list` JSON output.
 
 Useful knobs:
 

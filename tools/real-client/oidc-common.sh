@@ -47,10 +47,12 @@ config_path="${work_dir}/headscale-config"
 db_path="${work_dir}/db.sqlite"
 tls_cert_path=""
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
+headscale_rs_socket_path="${REAL_CLIENT_HEADSCALE_RS_SOCKET:-/tmp/hsrs-${run_id}.sock}"
 headscale_go_socket_path=""
 
 cleanup() {
   docker rm -f "${client_name}" >/dev/null 2>&1 || true
+  rm -f "${headscale_rs_socket_path}"
   if [[ -n "${headscale_go_socket_path}" ]]; then
     rm -f "${headscale_go_socket_path}"
   fi
@@ -202,6 +204,8 @@ server_url = "${control_url}"
 state_dir = "${work_dir}/state"
 db_path = "${db_path}"
 tls_hostname = "host.docker.internal"
+unix_socket = "${headscale_rs_socket_path}"
+unix_socket_permission = 448
 
 [oidc]
 issuer = "http://127.0.0.1:${oidc_port}/oidc"

@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct CliConfig {
     /// Server mode configuration
     pub server: Option<ServerConfig>,
+    /// Upstream-compatible operator CLI gRPC settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<AdminCliConfig>,
+    /// Upstream-compatible local gRPC Unix socket path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_socket: Option<PathBuf>,
     /// Node mode configuration
     pub node: Option<NodeConfig>,
     /// Logging configuration
@@ -22,6 +28,20 @@ pub(crate) struct CliConfig {
     /// OpenID Connect configuration
     #[serde(default, skip_serializing_if = "oidc_config_is_default")]
     pub oidc: OidcConfig,
+}
+
+/// Operator CLI configuration used by upstream `headscale` admin commands.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct AdminCliConfig {
+    /// Remote gRPC address. Empty means use the local Unix socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// API key used for remote gRPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Disable TLS certificate verification for remote gRPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure: Option<bool>,
 }
 
 /// Server (control plane) configuration.
@@ -364,6 +384,8 @@ method = "plain"
     #[test]
     fn loads_server_wire_runtime_fields() {
         let source = r#"
+unix_socket = "/run/headscale/admin.sock"
+
 [server]
 listen = "127.0.0.1:51821"
 https_listen = "0.0.0.0:443"
@@ -377,6 +399,10 @@ grpc_allow_insecure = true
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        assert_eq!(
+            config.unix_socket.as_deref(),
+            Some(Path::new("/run/headscale/admin.sock"))
+        );
         let server = config.server.unwrap();
 
         assert_eq!(server.listen, "127.0.0.1:51821");
@@ -394,6 +420,26 @@ grpc_allow_insecure = true
         assert_eq!(server.unix_socket_permission, 0o700);
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
+    }
+
+    #[test]
+    fn loads_upstream_cli_grpc_toml() {
+        let source = r#"
+[cli]
+address = "headscale.example:50443"
+api_key = "hskey-api-abcdefghijkl-secret"
+insecure = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let cli = config.cli.unwrap();
+
+        assert_eq!(cli.address.as_deref(), Some("headscale.example:50443"));
+        assert_eq!(
+            cli.api_key.as_deref(),
+            Some("hskey-api-abcdefghijkl-secret")
+        );
+        assert_eq!(cli.insecure, Some(true));
     }
 
     #[test]

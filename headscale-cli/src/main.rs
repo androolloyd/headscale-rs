@@ -46,6 +46,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the control plane server.
+    #[command(alias = "serve")]
     Server {
         /// Listen address for the API.
         #[arg(short, long, default_value = "0.0.0.0:8080")]
@@ -120,6 +121,9 @@ enum Commands {
         #[command(subcommand)]
         action: TailnetCmd,
     },
+
+    /// Check the health of the Headscale server.
+    Health,
 
     /// Check control plane status (legacy health probe — not the admin
     /// surface; uses the wire layer's `/health` endpoint).
@@ -214,6 +218,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
     } else {
         None
     };
+    let connect = merged_connect_args(&cli.connect, config.as_ref());
 
     match cli.command {
         Commands::Server {
@@ -281,24 +286,25 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             IdentityAction::Show { file } => identity_show(&file).await.map_err(MainError::Other),
         },
 
-        Commands::Users { action } => admin::run_users(&cli.connect, &action)
+        Commands::Users { action } => admin::run_users(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Nodes { action } => admin::run_nodes(&cli.connect, &action)
+        Commands::Nodes { action } => admin::run_nodes(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Preauthkeys { action } => admin::run_preauthkeys(&cli.connect, &action)
+        Commands::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Apikeys { action } => admin::run_apikeys(&cli.connect, &action)
+        Commands::Apikeys { action } => admin::run_apikeys(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Policy { action } => admin::run_policy(&cli.connect, &action)
+        Commands::Policy { action } => admin::run_policy(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Tailnet { action } => admin::run_tailnet(&cli.connect, &action)
+        Commands::Tailnet { action } => admin::run_tailnet(&connect, &action)
             .await
             .map_err(Into::into),
+        Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -314,6 +320,43 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
 
         Commands::InitConfig { output } => init_config(&output).await.map_err(MainError::Other),
     }
+}
+
+fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> ConnectArgs {
+    let Some(config) = config else {
+        return connect.clone();
+    };
+
+    let mut merged = connect.clone();
+    let cli_config = config.cli.as_ref();
+
+    if option_is_empty(merged.address.as_ref()) {
+        merged.address = cli_config.and_then(|cli| non_empty_clone(cli.address.as_ref()));
+    }
+    if option_is_empty(merged.api_key.as_ref()) {
+        merged.api_key = cli_config.and_then(|cli| non_empty_clone(cli.api_key.as_ref()));
+    }
+    if !merged.insecure {
+        merged.insecure = cli_config.and_then(|cli| cli.insecure).unwrap_or(false);
+    }
+    if merged.unix_socket.is_none() {
+        merged.unix_socket = config.unix_socket.clone().or_else(|| {
+            config
+                .server
+                .as_ref()
+                .map(|server| server.unix_socket.clone())
+        });
+    }
+
+    merged
+}
+
+fn option_is_empty(value: Option<&String>) -> bool {
+    value.is_none_or(|value| value.trim().is_empty())
+}
+
+fn non_empty_clone(value: Option<&String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty()).cloned()
 }
 
 /// Serializable identity wrapper for CLI persistence.
@@ -545,5 +588,85 @@ mod tests {
             parsed.connect.fmt().unwrap(),
             headscale_cli::admin::OutputFormat::JsonLine
         );
+    }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_serve_and_health_commands() {
+        let parsed = Cli::try_parse_from(["headscale", "serve"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Server { .. }));
+
+        let parsed = Cli::try_parse_from(["headscale", "health"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Health));
+    }
+
+    #[test]
+    fn admin_connect_args_merge_upstream_cli_config() {
+        let connect = ConnectArgs {
+            server: None,
+            token: None,
+            address: None,
+            api_key: None,
+            unix_socket: None,
+            insecure: false,
+            json: false,
+            output: None,
+            force: false,
+        };
+        let config = CliConfig {
+            cli: Some(config::AdminCliConfig {
+                address: Some("headscale.example:50443".into()),
+                api_key: Some("hskey-api-abcdefghijkl-secret".into()),
+                insecure: Some(true),
+            }),
+            unix_socket: Some(PathBuf::from("/run/headscale/admin.sock")),
+            ..CliConfig::default()
+        };
+
+        let merged = merged_connect_args(&connect, Some(&config));
+
+        assert_eq!(merged.address.as_deref(), Some("headscale.example:50443"));
+        assert_eq!(
+            merged.api_key.as_deref(),
+            Some("hskey-api-abcdefghijkl-secret")
+        );
+        assert!(merged.insecure);
+        assert_eq!(
+            merged.unix_socket.as_deref(),
+            Some(PathBuf::from("/run/headscale/admin.sock").as_path())
+        );
+    }
+
+    #[test]
+    fn explicit_cli_flags_override_config_connect_args() {
+        let connect = ConnectArgs {
+            server: None,
+            token: None,
+            address: Some("flag.example:50443".into()),
+            api_key: Some("flag-key".into()),
+            unix_socket: Some(PathBuf::from("/tmp/flag.sock")),
+            insecure: true,
+            json: false,
+            output: None,
+            force: false,
+        };
+        let config = CliConfig {
+            cli: Some(config::AdminCliConfig {
+                address: Some("config.example:50443".into()),
+                api_key: Some("config-key".into()),
+                insecure: Some(false),
+            }),
+            unix_socket: Some(PathBuf::from("/tmp/config.sock")),
+            ..CliConfig::default()
+        };
+
+        let merged = merged_connect_args(&connect, Some(&config));
+
+        assert_eq!(merged.address.as_deref(), Some("flag.example:50443"));
+        assert_eq!(merged.api_key.as_deref(), Some("flag-key"));
+        assert_eq!(
+            merged.unix_socket.as_deref(),
+            Some(PathBuf::from("/tmp/flag.sock").as_path())
+        );
+        assert!(merged.insecure);
     }
 }

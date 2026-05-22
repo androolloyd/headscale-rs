@@ -38,6 +38,7 @@ pub mod users;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 pub use client::AdminClient;
 pub use grpc_client::GrpcAdminClient;
@@ -716,12 +717,34 @@ pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), Admin
     }
 }
 
+pub async fn run_health(conn: &ConnectArgs) -> Result<(), AdminError> {
+    let fmt = conn.fmt()?;
+    let mut client = conn.build_grpc_client().await?;
+    let response = client.health().await?;
+    if fmt.is_structured() {
+        output::print_structured(
+            fmt,
+            &HealthOutput {
+                database_connectivity: response.database_connectivity,
+            },
+        )?;
+    } else {
+        println!();
+    }
+    Ok(())
+}
+
 pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
     let fmt = conn.fmt()?;
     match cmd {
         TailnetCmd::Status => tailnet::status(&client, fmt).await,
     }
+}
+
+#[derive(Debug, Serialize)]
+struct HealthOutput {
+    database_connectivity: bool,
 }
 
 #[cfg(test)]

@@ -431,6 +431,29 @@ pub enum TailnetCmd {
     Status,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum DebugCmd {
+    /// Create a node that can be registered with `nodes register`.
+    #[command(name = "create-node")]
+    CreateNode {
+        /// User.
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Deprecated upstream namespace alias for user.
+        #[arg(short = 'n', long = "namespace", hide = true)]
+        namespace: Option<String>,
+        /// Registration key.
+        #[arg(short = 'k', long)]
+        key: String,
+        /// Node name.
+        #[arg(long)]
+        name: String,
+        /// List (or repeated flags) of routes to advertise.
+        #[arg(short = 'r', long = "route", value_delimiter = ',')]
+        routes: Vec<String>,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Dispatchers — invoked from `main.rs`
 // ---------------------------------------------------------------------------
@@ -734,6 +757,23 @@ pub async fn run_health(conn: &ConnectArgs) -> Result<(), AdminError> {
     Ok(())
 }
 
+pub async fn run_debug(conn: &ConnectArgs, cmd: &DebugCmd) -> Result<(), AdminError> {
+    let fmt = conn.fmt()?;
+    let mut client = conn.build_grpc_client().await?;
+    match cmd {
+        DebugCmd::CreateNode {
+            user,
+            namespace,
+            key,
+            name,
+            routes,
+        } => {
+            let user = select_debug_user(user.as_deref(), namespace.as_deref())?;
+            nodes::debug_create_node_grpc(&mut client, user, key, name, routes.clone(), fmt).await
+        }
+    }
+}
+
 pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), AdminError> {
     let client = conn.build_client()?;
     let fmt = conn.fmt()?;
@@ -745,6 +785,20 @@ pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), Adm
 #[derive(Debug, Serialize)]
 struct HealthOutput {
     database_connectivity: bool,
+}
+
+fn select_debug_user<'a>(
+    user: Option<&'a str>,
+    namespace: Option<&'a str>,
+) -> Result<&'a str, AdminError> {
+    match (user, namespace) {
+        (Some(user), None) if !user.trim().is_empty() => Ok(user),
+        (None, Some(namespace)) if !namespace.trim().is_empty() => Ok(namespace),
+        (Some(_), Some(_)) => Err(AdminError::Local(
+            "use either --user or --namespace, not both".into(),
+        )),
+        _ => Err(AdminError::Local("--user is required".into())),
+    }
 }
 
 #[cfg(test)]
@@ -768,6 +822,12 @@ mod tests {
         force: bool,
         #[command(subcommand)]
         action: NodesCmd,
+    }
+
+    #[derive(Parser)]
+    struct DebugHarness {
+        #[command(subcommand)]
+        action: DebugCmd,
     }
 
     #[test]
@@ -1071,5 +1131,55 @@ mod tests {
             UsersCmd::Rename { name, new_name, .. }
                 if name.as_deref() == Some("alice") && new_name == "bob"
         ));
+    }
+
+    #[test]
+    fn debug_accepts_upstream_create_node_shape() {
+        let parsed = DebugHarness::try_parse_from([
+            "headscale",
+            "create-node",
+            "--name",
+            "node-one",
+            "-u",
+            "alice",
+            "-k",
+            "abcdefghijklmnopqrstuvwx",
+            "-r",
+            "10.0.0.0/24",
+            "-r",
+            "10.0.1.0/24,10.0.2.0/24",
+        ])
+        .unwrap();
+
+        match parsed.action {
+            DebugCmd::CreateNode {
+                user,
+                namespace,
+                key,
+                name,
+                routes,
+            } => {
+                assert_eq!(user.as_deref(), Some("alice"));
+                assert_eq!(namespace, None);
+                assert_eq!(key, "abcdefghijklmnopqrstuvwx");
+                assert_eq!(name, "node-one");
+                assert_eq!(
+                    routes,
+                    vec![
+                        "10.0.0.0/24".to_string(),
+                        "10.0.1.0/24".to_string(),
+                        "10.0.2.0/24".to_string()
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debug_user_selection_rejects_ambiguous_or_missing_user() {
+        assert_eq!(select_debug_user(Some("alice"), None).unwrap(), "alice");
+        assert_eq!(select_debug_user(None, Some("alice")).unwrap(), "alice");
+        assert!(select_debug_user(Some("alice"), Some("legacy")).is_err());
+        assert!(select_debug_user(None, None).is_err());
     }
 }

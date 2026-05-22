@@ -14,7 +14,7 @@
 //!
 //!   * [`AdminCmd`] — a clap `Subcommand` enum that bundles every
 //!     admin verb (`users`, `nodes`, `preauthkeys`, `apikeys`, `policy`,
-//!     `tailnet`). Drop it into your top-level `clap::Parser` derive
+//!     `tailnet`, `debug`). Drop it into your top-level `clap::Parser` derive
 //!     with `#[command(subcommand)]` and the same `users list /
 //!     nodes show / preauthkeys create …` tree appears verbatim.
 //!   * [`dispatch`] — the async entry-point. Takes the parsed
@@ -33,8 +33,8 @@ pub mod admin;
 use clap::Subcommand;
 
 pub use admin::{
-    AdminClient, AdminError, ApiKeysCmd, ConnectArgs, ExitCode, NodesCmd, OutputFormat, PolicyCmd,
-    PreauthKeysCmd, TailnetCmd, UsersCmd,
+    AdminClient, AdminError, ApiKeysCmd, ConnectArgs, DebugCmd, ExitCode, NodesCmd, OutputFormat,
+    PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
 /// The full set of admin verbs exposed by the standalone `headscale`
@@ -88,6 +88,11 @@ pub enum AdminCmd {
         #[command(subcommand)]
         action: TailnetCmd,
     },
+    /// Debug and testing commands.
+    Debug {
+        #[command(subcommand)]
+        action: DebugCmd,
+    },
 }
 
 /// Dispatch an [`AdminCmd`] and return the process exit code matching
@@ -116,6 +121,7 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
         AdminCmd::Apikeys { action } => admin::run_apikeys(&connect, &action).await,
         AdminCmd::Policy { action } => admin::run_policy(&connect, &action).await,
         AdminCmd::Tailnet { action } => admin::run_tailnet(&connect, &action).await,
+        AdminCmd::Debug { action } => admin::run_debug(&connect, &action).await,
     };
     match result {
         Ok(()) => ExitCode::Success as i32,
@@ -212,6 +218,28 @@ mod tests {
             parsed.cmd,
             AdminCmd::Policy {
                 action: PolicyCmd::Set { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn embedded_admin_accepts_debug_create_node_from_upstream() {
+        let parsed = AdminHarness::try_parse_from([
+            "headscale",
+            "debug",
+            "create-node",
+            "--name",
+            "node-one",
+            "--user",
+            "alice",
+            "--key",
+            "abcdefghijklmnopqrstuvwx",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Debug {
+                action: DebugCmd::CreateNode { .. }
             }
         ));
     }

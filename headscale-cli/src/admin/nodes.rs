@@ -275,6 +275,23 @@ pub async fn register_grpc(
     Ok(())
 }
 
+pub async fn debug_create_node_grpc(
+    client: &mut GrpcAdminClient,
+    user: &str,
+    key: &str,
+    name: &str,
+    routes: Vec<String>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let node = NodeOutput::from(client.debug_create_node(user, key, name, routes).await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &node)?;
+    } else {
+        println!("Node created");
+    }
+    Ok(())
+}
+
 pub async fn expire_grpc(
     client: &mut GrpcAdminClient,
     id: &str,

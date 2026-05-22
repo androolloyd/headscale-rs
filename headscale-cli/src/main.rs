@@ -19,8 +19,8 @@ mod server;
 
 use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
-    self, AdminError, ApiKeysCmd, ConnectArgs, NodesCmd, PolicyCmd, PreauthKeysCmd, TailnetCmd,
-    UsersCmd,
+    self, AdminError, ApiKeysCmd, ConnectArgs, DebugCmd, NodesCmd, PolicyCmd, PreauthKeysCmd,
+    TailnetCmd, UsersCmd,
 };
 
 /// Headscale-rs: WireGuard mesh networking with resource accounting.
@@ -120,6 +120,11 @@ enum Commands {
     Tailnet {
         #[command(subcommand)]
         action: TailnetCmd,
+    },
+    /// Debug and testing commands.
+    Debug {
+        #[command(subcommand)]
+        action: DebugCmd,
     },
 
     /// Check the health of the Headscale server.
@@ -302,6 +307,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             .await
             .map_err(Into::into),
         Commands::Tailnet { action } => admin::run_tailnet(&connect, &action)
+            .await
+            .map_err(Into::into),
+        Commands::Debug { action } => admin::run_debug(&connect, &action)
             .await
             .map_err(Into::into),
         Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
@@ -597,6 +605,29 @@ mod tests {
 
         let parsed = Cli::try_parse_from(["headscale", "health"]).unwrap();
         assert!(matches!(parsed.command, Commands::Health));
+    }
+
+    #[test]
+    fn standalone_cli_accepts_upstream_debug_create_node_command() {
+        let parsed = Cli::try_parse_from([
+            "headscale",
+            "debug",
+            "create-node",
+            "--name",
+            "node-one",
+            "--user",
+            "alice",
+            "--key",
+            "abcdefghijklmnopqrstuvwx",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Commands::Debug {
+                action: DebugCmd::CreateNode { .. }
+            }
+        ));
     }
 
     #[test]

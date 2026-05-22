@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -127,6 +128,13 @@ enum Commands {
         action: DebugCmd,
     },
 
+    /// Generate commands.
+    #[command(alias = "gen")]
+    Generate {
+        #[command(subcommand)]
+        action: GenerateCmd,
+    },
+
     /// Check the health of the Headscale server.
     Health,
 
@@ -135,6 +143,10 @@ enum Commands {
 
     /// Test the configuration.
     Configtest,
+
+    /// Dump the current config to `/etc/headscale/config.dump.yaml`.
+    #[command(name = "dumpConfig", hide = true)]
+    DumpConfig,
 
     /// Check control plane status (legacy health probe — not the admin
     /// surface; uses the wire layer's `/health` endpoint).
@@ -166,6 +178,12 @@ enum IdentityAction {
         #[arg(short, long, default_value = "identity.json")]
         file: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum GenerateCmd {
+    /// Generate a private key for the headscale server.
+    PrivateKey,
 }
 
 #[tokio::main]
@@ -217,17 +235,21 @@ impl From<anyhow::Error> for MainError {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), MainError> {
-    // Load config file if provided. Server/node consume it today; admin
-    // parity still uses flags/env until the upstream `cli` config section is
-    // wired into ConnectArgs.
-    let config = if let Some(config_path) = &cli.config {
+    let skip_config_load = matches!(cli.command, Commands::Version);
+    let config = if skip_config_load {
+        None
+    } else if let Some(config_path) = &cli.config {
         Some(
             CliConfig::load(config_path)
                 .context("Failed to load config file")
                 .map_err(MainError::Other)?,
         )
     } else {
-        None
+        Some(
+            CliConfig::load_default()
+                .context("Failed to load config")
+                .map_err(MainError::Other)?,
+        )
     };
     let connect = merged_connect_args(&cli.connect, config.as_ref());
 
@@ -318,11 +340,16 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
         Commands::Debug { action } => admin::run_debug(&connect, &action)
             .await
             .map_err(Into::into),
+        Commands::Generate { action } => match action {
+            GenerateCmd::PrivateKey => print_private_key(connect.fmt().map_err(MainError::Admin)?)
+                .map_err(MainError::Other),
+        },
         Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
         Commands::Version => {
             print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)
         }
         Commands::Configtest => configtest(config.as_ref()).map_err(MainError::Other),
+        Commands::DumpConfig => dump_config(config.as_ref()).map_err(MainError::Other),
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -378,29 +405,78 @@ fn non_empty_clone(value: Option<&String>) -> Option<String> {
 }
 
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
-    config.context("--config is required for configtest")?;
+    let config = config.context("configuration was not loaded")?;
+    config.validate_for_configtest()?;
     Ok(())
 }
 
 fn print_version(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
     let version = VersionInfo::current();
     if fmt.is_structured() {
-        match fmt {
-            headscale_cli::admin::OutputFormat::Json => {
-                println!("{}", serde_json::to_string_pretty(&version)?);
-            }
-            headscale_cli::admin::OutputFormat::JsonLine => {
-                println!("{}", serde_json::to_string(&version)?);
-            }
-            headscale_cli::admin::OutputFormat::Yaml => {
-                print!("{}", serde_yaml::to_string(&version)?);
-            }
-            headscale_cli::admin::OutputFormat::Table => unreachable!(),
-        }
+        print_structured_value(fmt, &version)?;
     } else {
         print!("{}", version.human());
     }
     Ok(())
+}
+
+fn print_private_key(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
+    let private_key = MachinePrivateKeyOutput {
+        private_key: generate_machine_private_key(),
+    };
+    if fmt.is_structured() {
+        print_structured_value(fmt, &private_key)?;
+    } else {
+        println!("{}", private_key.private_key);
+    }
+    Ok(())
+}
+
+fn dump_config(config: Option<&CliConfig>) -> Result<()> {
+    let config = config.context("configuration was not loaded")?;
+    dump_config_to(config, &PathBuf::from("/etc/headscale/config.dump.yaml"))
+}
+
+fn dump_config_to(config: &CliConfig, path: &PathBuf) -> Result<()> {
+    let contents = serde_yaml::to_string(config)?;
+    if let Err(err) = std::fs::write(path, contents) {
+        println!("Failed to dump config");
+        return Err(err).with_context(|| format!("write config dump to {}", path.display()));
+    }
+    Ok(())
+}
+
+fn print_structured_value<T: serde::Serialize>(
+    fmt: headscale_cli::admin::OutputFormat,
+    value: &T,
+) -> Result<()> {
+    match fmt {
+        headscale_cli::admin::OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(value)?);
+        }
+        headscale_cli::admin::OutputFormat::JsonLine => {
+            println!("{}", serde_json::to_string(value)?);
+        }
+        headscale_cli::admin::OutputFormat::Yaml => {
+            print!("{}", serde_yaml::to_string(value)?);
+        }
+        headscale_cli::admin::OutputFormat::Table => unreachable!(),
+    }
+    Ok(())
+}
+
+fn generate_machine_private_key() -> String {
+    let mut key = [0_u8; 32];
+    OsRng.fill_bytes(&mut key);
+    key[0] &= 0xf8;
+    key[31] &= 127;
+    key[31] |= 64;
+    format!("privkey:{}", hex::encode(key))
+}
+
+#[derive(serde::Serialize)]
+struct MachinePrivateKeyOutput {
+    private_key: String,
 }
 
 #[derive(serde::Serialize)]
@@ -712,12 +788,34 @@ mod tests {
     }
 
     #[test]
+    fn standalone_cli_accepts_upstream_generate_private_key_command() {
+        let parsed = Cli::try_parse_from(["headscale", "generate", "private-key"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Generate {
+                action: GenerateCmd::PrivateKey
+            }
+        ));
+
+        let parsed = Cli::try_parse_from(["headscale", "gen", "private-key"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Generate {
+                action: GenerateCmd::PrivateKey
+            }
+        ));
+    }
+
+    #[test]
     fn standalone_cli_accepts_upstream_version_and_configtest_commands() {
         let parsed = Cli::try_parse_from(["headscale", "version"]).unwrap();
         assert!(matches!(parsed.command, Commands::Version));
 
         let parsed = Cli::try_parse_from(["headscale", "configtest"]).unwrap();
         assert!(matches!(parsed.command, Commands::Configtest));
+
+        let parsed = Cli::try_parse_from(["headscale", "dumpConfig"]).unwrap();
+        assert!(matches!(parsed.command, Commands::DumpConfig));
     }
 
     #[test]
@@ -734,7 +832,51 @@ mod tests {
     #[test]
     fn configtest_requires_loaded_config() {
         assert!(configtest(None).is_err());
-        assert!(configtest(Some(&CliConfig::default())).is_ok());
+        assert!(configtest(Some(&CliConfig::default())).is_err());
+
+        let config = CliConfig {
+            server: Some(ServerConfig {
+                server_url: Some("https://headscale.example".into()),
+                ..ServerConfig::default()
+            }),
+            dns: Some(headscale_api::dns::DnsConfigSpec {
+                magic_dns: false,
+                ..Default::default()
+            }),
+            ..CliConfig::default()
+        };
+        assert!(configtest(Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn generated_private_key_matches_tailscale_machine_key_shape() {
+        let key = generate_machine_private_key();
+
+        assert_eq!(key.len(), "privkey:".len() + 64);
+        assert!(key.starts_with("privkey:"));
+        let raw = hex::decode(&key["privkey:".len()..]).unwrap();
+        assert_eq!(raw.len(), 32);
+        assert_eq!(raw[0] & 7, 0);
+        assert_eq!(raw[31] & 0x80, 0);
+        assert_eq!(raw[31] & 0x40, 0x40);
+    }
+
+    #[test]
+    fn dump_config_to_writes_yaml_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.dump.yaml");
+        let config = CliConfig {
+            server: Some(ServerConfig {
+                server_url: Some("https://headscale.example".into()),
+                ..ServerConfig::default()
+            }),
+            ..CliConfig::default()
+        };
+
+        dump_config_to(&config, &path).unwrap();
+
+        let written = std::fs::read_to_string(path).unwrap();
+        assert!(written.contains("server_url: https://headscale.example"));
     }
 
     #[test]

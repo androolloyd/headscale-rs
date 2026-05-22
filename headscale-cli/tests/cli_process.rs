@@ -1,8 +1,20 @@
+use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 fn headscale(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_headscale"))
         .args(args)
+        .output()
+        .expect("run headscale binary")
+}
+
+fn headscale_in(args: &[&str], cwd: &Path, home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_headscale"))
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env_remove("HEADSCALE_CONFIG")
         .output()
         .expect("run headscale binary")
 }
@@ -28,6 +40,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "apikeys",
         "policy",
         "debug",
+        "generate",
         "health",
         "version",
         "configtest",
@@ -52,8 +65,24 @@ fn serve_alias_and_debug_create_node_help_are_accepted() {
 }
 
 #[test]
+fn generate_private_key_outputs_tailscale_machine_private_key() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = headscale_in(&["generate", "private-key"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    let key = out.trim();
+    assert!(key.starts_with("privkey:"), "stdout: {out}");
+    assert_eq!(key.len(), "privkey:".len() + 64);
+}
+
+#[test]
 fn version_json_line_is_machine_readable() {
-    let output = headscale(&["version", "-o", "json-line"]);
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+    let output = headscale_in(&["version", "-o", "json-line"], cwd.path(), home.path());
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let value: serde_json::Value =
@@ -64,9 +93,54 @@ fn version_json_line_is_machine_readable() {
 }
 
 #[test]
-fn configtest_without_loaded_config_fails_before_runtime_start() {
-    let output = headscale(&["configtest"]);
+fn configtest_loads_default_config_from_current_directory() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server:
+  server_url: "http://127.0.0.1:8080"
+dns:
+  magic_dns: false
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn configtest_without_config_fails_server_validation() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("--config is required for configtest"));
+    assert!(
+        stderr(&output).contains("server.server_url is required"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn explicit_missing_config_still_fails_as_file_load_error() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let missing = cwd.path().join("missing.yaml");
+    let output = headscale_in(
+        &["--config", missing.to_str().unwrap(), "configtest"],
+        cwd.path(),
+        home.path(),
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("Failed to load config file"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }

@@ -2,10 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use headscale_api::dns::DnsConfigSpec;
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_CONFIG_FILENAMES: &[&str] =
+    &["config.yaml", "config.yml", "config.json", "config.toml"];
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -164,11 +167,43 @@ impl CliConfig {
         Ok(config)
     }
 
+    /// Load the upstream default config search path, returning defaults when
+    /// no config file exists.
+    pub(crate) fn load_default() -> Result<Self> {
+        Self::load_default_from_dirs(default_config_dirs())
+    }
+
+    pub(crate) fn load_default_from_dirs<I, P>(dirs: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        for dir in dirs {
+            let dir = dir.as_ref();
+            for filename in DEFAULT_CONFIG_FILENAMES {
+                let candidate = dir.join(filename);
+                if candidate.is_file() {
+                    return Self::load(&candidate).with_context(|| {
+                        format!("failed to load config file {}", candidate.display())
+                    });
+                }
+            }
+        }
+
+        let mut config = Self::default();
+        config.apply_oidc_env_overrides_from(std::env::vars())?;
+        config.resolve_oidc_client_secret()?;
+        Ok(config)
+    }
+
     fn parse(contents: &str, format: ConfigFormat) -> Result<Self> {
         match format {
             ConfigFormat::Toml => toml::from_str(contents).context("failed to parse TOML config"),
             ConfigFormat::Yaml => {
                 serde_yaml::from_str(contents).context("failed to parse YAML config")
+            }
+            ConfigFormat::Json => {
+                serde_json::from_str(contents).context("failed to parse JSON config")
             }
         }
     }
@@ -197,21 +232,71 @@ impl CliConfig {
         std::fs::write(path, contents)?;
         Ok(())
     }
+
+    /// Validate the loaded config enough to catch startup-time errors without
+    /// binding listeners or opening long-running services.
+    pub(crate) fn validate_for_configtest(&self) -> Result<()> {
+        self.oidc.validate().context("invalid OIDC configuration")?;
+
+        let server = self.server.as_ref().context(
+            "server.server_url is required so clients receive absolute registration URLs",
+        )?;
+        let server_url = server
+            .server_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .context(
+                "server.server_url is required so clients receive absolute registration URLs",
+            )?;
+        if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
+            bail!("server.server_url must start with https:// or http://");
+        }
+
+        if let Some(dns) = &self.dns {
+            dns.validate().context("invalid DNS configuration")?;
+        }
+
+        if server.embedded_derp.enabled {
+            if server.embedded_derp.host_name.trim().is_empty() {
+                bail!("server.embedded_derp.host_name is required when embedded DERP is enabled");
+            }
+            if server.embedded_derp.relay_enabled()
+                && server.embedded_derp.derper_binary.as_os_str().is_empty()
+            {
+                bail!(
+                    "server.embedded_derp.derper_binary is required when embedded DERP relay is enabled"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ConfigFormat {
     Toml,
     Yaml,
+    Json,
 }
 
 impl ConfigFormat {
     fn from_path(path: &Path) -> Self {
         match path.extension().and_then(|ext| ext.to_str()) {
             Some("yaml" | "yml") => Self::Yaml,
+            Some("json") => Self::Json,
             _ => Self::Toml,
         }
     }
+}
+
+fn default_config_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/etc/headscale")];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".headscale"));
+    }
+    dirs.push(PathBuf::from("."));
+    dirs
 }
 
 fn oidc_config_is_default(config: &OidcConfig) -> bool {
@@ -439,6 +524,67 @@ insecure = true
             cli.api_key.as_deref(),
             Some("hskey-api-abcdefghijkl-secret")
         );
+        assert_eq!(cli.insecure, Some(true));
+    }
+
+    #[test]
+    fn default_config_search_uses_upstream_order() {
+        let etc_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let cwd_dir = tempfile::tempdir().unwrap();
+
+        fs::write(
+            cwd_dir.path().join("config.toml"),
+            r#"
+[cli]
+address = "cwd.example:50443"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            home_dir.path().join("config.json"),
+            r#"{"cli":{"address":"home.example:50443"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            etc_dir.path().join("config.yaml"),
+            r#"
+cli:
+  address: "etc.example:50443"
+"#,
+        )
+        .unwrap();
+
+        let config =
+            CliConfig::load_default_from_dirs([etc_dir.path(), home_dir.path(), cwd_dir.path()])
+                .unwrap();
+
+        assert_eq!(
+            config.cli.unwrap().address.as_deref(),
+            Some("etc.example:50443")
+        );
+    }
+
+    #[test]
+    fn default_config_search_returns_defaults_when_no_file_exists() {
+        let config = CliConfig::load_default_from_dirs([tempfile::tempdir().unwrap().path()])
+            .expect("load defaults");
+
+        assert!(config.server.is_none());
+        assert!(config.cli.is_none());
+        assert!(config.oidc.only_start_if_oidc_is_available);
+    }
+
+    #[test]
+    fn parses_upstream_json_config() {
+        let config = CliConfig::parse(
+            r#"{"cli":{"address":"json.example:50443","insecure":true}}"#,
+            ConfigFormat::Json,
+        )
+        .unwrap();
+
+        let cli = config.cli.unwrap();
+        assert_eq!(cli.address.as_deref(), Some("json.example:50443"));
         assert_eq!(cli.insecure, Some(true));
     }
 

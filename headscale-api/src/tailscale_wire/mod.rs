@@ -108,12 +108,16 @@ pub enum WireError {
 /// canonical Tailscale-shape `{"error": "..."}` body.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RedeemError {
-    /// Token doesn't match any minted key (or was already consumed).
+    /// Token doesn't match any minted key.
     #[error("preauth: unknown key")]
     Unknown,
     /// Token was valid at some point but its TTL has passed.
     #[error("preauth: key expired")]
     Expired,
+    /// Token is valid, but a non-reusable key has already been
+    /// consumed.
+    #[error("preauth: key already used")]
+    AlreadyUsed,
 }
 
 /// Why an IP allocation failed.
@@ -196,6 +200,18 @@ impl From<String> for RedeemOk {
 #[async_trait]
 pub trait PreauthRedeemer: Send + Sync {
     async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError>;
+
+    /// Return key metadata without consuming or validating it.
+    ///
+    /// Headscale-go first fetches the pre-auth key row and then
+    /// skips `Validate` for an already-registered same-machine,
+    /// same-user, same-node-key re-registration. Stores that can
+    /// locate used/expired keys should override this method; legacy
+    /// one-shot redeemers can keep the default and will retain their
+    /// previous strict behavior.
+    async fn lookup(&self, _key: &str) -> Option<RedeemOk> {
+        None
+    }
 }
 
 /// Allocates a tailnet IPv4 for a registering node.
@@ -1811,6 +1827,8 @@ pub(crate) mod test_support {
     #[derive(Default, Clone)]
     pub struct MockRedeemer {
         pub inner: Arc<parking_lot::RwLock<HashMap<String, RedeemOk>>>,
+        pub used: Arc<parking_lot::RwLock<HashMap<String, RedeemOk>>>,
+        pub expired: Arc<parking_lot::RwLock<HashMap<String, RedeemOk>>>,
     }
 
     impl MockRedeemer {
@@ -1819,16 +1837,37 @@ pub(crate) mod test_support {
         }
         /// Insert a plain key → user mapping (non-ephemeral, no tags).
         pub fn insert(&self, key: impl Into<String>, user: impl Into<String>) {
-            self.inner
-                .write()
-                .insert(key.into(), RedeemOk::for_user(user.into()));
+            self.insert_full(key, RedeemOk::for_user(user.into()));
         }
         /// Insert a key with explicit lifecycle metadata (ephemeral
         /// flag + tags). Used by the lifecycle tests to exercise the
         /// ephemeral-GC path.
         #[allow(dead_code)] // used by external integration tests
         pub fn insert_full(&self, key: impl Into<String>, ok: RedeemOk) {
-            self.inner.write().insert(key.into(), ok);
+            let key = key.into();
+            self.used.write().remove(&key);
+            self.expired.write().remove(&key);
+            self.inner.write().insert(key, ok);
+        }
+        pub fn insert_expired(&self, key: impl Into<String>, ok: RedeemOk) {
+            let key = key.into();
+            self.inner.write().remove(&key);
+            self.used.write().remove(&key);
+            self.expired.write().insert(key, ok);
+        }
+        pub fn expire(&self, key: &str) -> bool {
+            let ok = self
+                .inner
+                .write()
+                .remove(key)
+                .or_else(|| self.used.write().remove(key));
+            match ok {
+                Some(ok) => {
+                    self.expired.write().insert(key.to_string(), ok);
+                    true
+                }
+                None => false,
+            }
         }
         pub fn contains(&self, key: &str) -> bool {
             self.inner.read().contains_key(key)
@@ -1839,10 +1878,27 @@ pub(crate) mod test_support {
     impl PreauthRedeemer for MockRedeemer {
         async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
             let mut g = self.inner.write();
-            match g.remove(key) {
-                Some(ok) => Ok(ok),
-                None => Err(RedeemError::Unknown),
+            if let Some(ok) = g.remove(key) {
+                self.used.write().insert(key.to_string(), ok.clone());
+                return Ok(ok);
             }
+            if self.expired.read().contains_key(key) {
+                return Err(RedeemError::Expired);
+            }
+            if self.used.read().contains_key(key) {
+                return Err(RedeemError::AlreadyUsed);
+            }
+            Err(RedeemError::Unknown)
+        }
+
+        async fn lookup(&self, key: &str) -> Option<RedeemOk> {
+            if let Some(ok) = self.inner.read().get(key).cloned() {
+                return Some(ok);
+            }
+            if let Some(ok) = self.used.read().get(key).cloned() {
+                return Some(ok);
+            }
+            self.expired.read().get(key).cloned()
         }
     }
 

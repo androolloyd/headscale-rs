@@ -19,6 +19,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use sqlx::SqlitePool;
 
+use crate::tailscale_wire::{PreauthRedeemer, RedeemError, RedeemOk};
+
 use super::preauth::{PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest};
 use super::users::UserAdmin;
 use headscale_db::DbError;
@@ -125,6 +127,12 @@ impl PersistentPreauthAdmin {
         }
     }
 
+    async fn row_to_redeem_ok(&self, row: &PreauthKeyRow) -> RedeemOk {
+        RedeemOk::for_user(self.display_user_for_row(row).await)
+            .ephemeral(row.ephemeral)
+            .tags(row.tag_list())
+    }
+
     async fn row_to_admin_key(&self, row: &PreauthKeyRow) -> PreauthAdminKey {
         let key = {
             self.plaintext_cache
@@ -155,6 +163,27 @@ impl PersistentPreauthAdmin {
             tags: row.tag_list(),
             redemptions,
         }
+    }
+}
+
+#[async_trait]
+impl PreauthRedeemer for PersistentPreauthAdmin {
+    async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
+        let row = self.try_use(key).await.map_err(use_error_to_redeem)?;
+        Ok(self.row_to_redeem_ok(&row).await)
+    }
+
+    async fn lookup(&self, key: &str) -> Option<RedeemOk> {
+        let row = preauth_keys::get_by_token(&self.pool, key).await.ok()?;
+        Some(self.row_to_redeem_ok(&row).await)
+    }
+}
+
+fn use_error_to_redeem(e: UseError) -> RedeemError {
+    match e {
+        UseError::NotFound => RedeemError::Unknown,
+        UseError::Expired => RedeemError::Expired,
+        UseError::AlreadyUsed => RedeemError::AlreadyUsed,
     }
 }
 
@@ -312,6 +341,7 @@ fn db_error_to_admin(e: DbError) -> PreauthAdminError {
 mod tests {
     use super::super::users::{PersistentUserAdmin, UserAdmin};
     use super::*;
+    use crate::tailscale_wire::{PreauthRedeemer, RedeemError};
     use headscale_db::Database;
 
     async fn store() -> PersistentPreauthAdmin {
@@ -401,6 +431,25 @@ mod tests {
         let _ = s.try_use(&k.key).await.unwrap();
         let e = s.try_use(&k.key).await.unwrap_err();
         assert_eq!(e, UseError::AlreadyUsed);
+    }
+
+    #[tokio::test]
+    async fn preauth_redeemer_lookup_surfaces_used_and_expired_keys() {
+        let s = store().await;
+        let used = s.mint(alice_req()).await.unwrap();
+
+        let first = s.redeem(&used.key).await.unwrap();
+        assert_eq!(first.user, "alice");
+        let e = s.redeem(&used.key).await.unwrap_err();
+        assert_eq!(e, RedeemError::AlreadyUsed);
+        let looked_up = s.lookup(&used.key).await.unwrap();
+        assert_eq!(looked_up.user, "alice");
+
+        let expired = s.mint(alice_req()).await.unwrap();
+        s.expire_by_id(expired.id).await.unwrap();
+        let e = s.redeem(&expired.key).await.unwrap_err();
+        assert_eq!(e, RedeemError::Expired);
+        assert_eq!(s.lookup(&expired.key).await.unwrap().user, "alice");
     }
 
     #[tokio::test]

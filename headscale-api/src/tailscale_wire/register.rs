@@ -232,29 +232,26 @@ async fn register_inner(
         return register_interactive(state, node_key_hex, machine_key_hex, body).await;
     }
 
+    let machine_key_hex = machine_key_hex.unwrap_or_default();
     let redeemed = match state.preauth.redeem(authkey).await {
         Ok(ok) => ok,
-        Err(RedeemError::Unknown) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "preauth key not recognised".into(),
-                }),
-            )
-                .into_response();
-        }
-        Err(RedeemError::Expired) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "preauth key expired".into(),
-                }),
-            )
-                .into_response();
+        Err(err) => {
+            let Some(ok) = state.preauth.lookup(authkey).await else {
+                return preauth_error_response(err);
+            };
+            let Some((existing_node_key, _)) = state
+                .machines
+                .get_by_machine_key_for_user(&machine_key_hex, &ok.user)
+            else {
+                return preauth_error_response(err);
+            };
+            if existing_node_key != node_key_hex {
+                return preauth_error_response(err);
+            }
+            ok
         }
     };
     let user = redeemed.user.clone();
-    let machine_key_hex = machine_key_hex.unwrap_or_default();
 
     let (hostname, available_routes) = match hostname_and_routes(&body) {
         Ok(parts) => parts,
@@ -457,6 +454,21 @@ fn merge_existing_approved_routes(
         .collect();
     merged.extend(auto_approved_routes);
     merged.into_iter().collect()
+}
+
+fn preauth_error_response(err: RedeemError) -> axum::response::Response {
+    let error = match err {
+        RedeemError::Unknown => "preauth key not recognised",
+        RedeemError::Expired => "preauth key expired",
+        RedeemError::AlreadyUsed => "preauth key already used",
+    };
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorBody {
+            error: error.into(),
+        }),
+    )
+        .into_response()
 }
 
 fn logout_existing_node(
@@ -951,6 +963,124 @@ mod tests {
             bob_machine_key
         );
         assert!(state.machines.get(&alice_node_key).is_some());
+    }
+
+    #[tokio::test]
+    async fn authkey_existing_node_can_reregister_with_used_key() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-used-reregister";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "3c".repeat(32);
+        let machine_key_hex = "8c".repeat(32);
+
+        let body = req_body(&node_key_hex, authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!redeemer.contains(authkey));
+        assert_eq!(state.machines.len(), 1);
+
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Hostinfo"]["Hostname"] = serde_json::json!("peer-restarted");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+        assert_eq!(state.machines.len(), 1);
+        assert_eq!(
+            state.machines.get(&node_key_hex).unwrap().hostname,
+            "peer-restarted"
+        );
+
+        let attacker_node_key = "3d".repeat(32);
+        let body = req_body(&attacker_node_key, authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{attacker_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey("8d".repeat(32)));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "preauth key already used");
+        assert_eq!(state.machines.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn authkey_existing_node_can_reregister_with_expired_key() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-expiring-reregister";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "3e".repeat(32);
+        let machine_key_hex = "8e".repeat(32);
+
+        let body = req_body(&node_key_hex, authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(redeemer.expire(authkey));
+
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Hostinfo"]["Hostname"] = serde_json::json!("peer-expired-restart");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert_eq!(
+            state.machines.get(&node_key_hex).unwrap().hostname,
+            "peer-expired-restart"
+        );
+
+        let expired_new_key = "hskey-auth-expired-new-node";
+        redeemer.insert_expired(expired_new_key, RedeemOk::for_user("alice"));
+        let new_node_key = "3f".repeat(32);
+        let body = req_body(&new_node_key, expired_new_key);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{new_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey("8f".repeat(32)));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(ev["error"], "preauth key expired");
     }
 
     #[tokio::test]

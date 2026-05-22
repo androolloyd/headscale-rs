@@ -2963,6 +2963,32 @@ pub struct DeleteApiKeyRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteApiKeyResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthRegisterRequest {
+    #[prost(string, tag = "1")]
+    pub user: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub auth_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthRegisterResponse {
+    #[prost(message, optional, tag = "1")]
+    pub node: ::core::option::Option<Node>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthApproveRequest {
+    #[prost(string, tag = "1")]
+    pub auth_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthApproveResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthRejectRequest {
+    #[prost(string, tag = "1")]
+    pub auth_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthRejectResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetPolicyRequest {
     #[prost(string, tag = "1")]
     pub policy: ::prost::alloc::string::String,
@@ -3536,6 +3562,80 @@ pub mod headscale_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn auth_register(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AuthRegisterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthRegisterResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/AuthRegister",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("headscale.v1.HeadscaleService", "AuthRegister"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn auth_approve(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AuthApproveRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthApproveResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/AuthApprove",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "AuthApprove"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn auth_reject(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AuthRejectRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthRejectResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/headscale.v1.HeadscaleService/AuthReject",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("headscale.v1.HeadscaleService", "AuthReject"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn create_api_key(
             &mut self,
             request: impl tonic::IntoRequest<super::CreateApiKeyRequest>,
@@ -3864,6 +3964,27 @@ pub mod headscale_service_server {
             request: tonic::Request<super::BackfillNodeIPsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::BackfillNodeIPsResponse>,
+            tonic::Status,
+        >;
+        async fn auth_register(
+            &self,
+            request: tonic::Request<super::AuthRegisterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthRegisterResponse>,
+            tonic::Status,
+        >;
+        async fn auth_approve(
+            &self,
+            request: tonic::Request<super::AuthApproveRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthApproveResponse>,
+            tonic::Status,
+        >;
+        async fn auth_reject(
+            &self,
+            request: tonic::Request<super::AuthRejectRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthRejectResponse>,
             tonic::Status,
         >;
         async fn create_api_key(
@@ -4811,6 +4932,142 @@ pub mod headscale_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = BackfillNodeIPsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/AuthRegister" => {
+                    #[allow(non_camel_case_types)]
+                    struct AuthRegisterSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::AuthRegisterRequest>
+                    for AuthRegisterSvc<T> {
+                        type Response = super::AuthRegisterResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AuthRegisterRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::auth_register(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AuthRegisterSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/AuthApprove" => {
+                    #[allow(non_camel_case_types)]
+                    struct AuthApproveSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::AuthApproveRequest>
+                    for AuthApproveSvc<T> {
+                        type Response = super::AuthApproveResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AuthApproveRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::auth_approve(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AuthApproveSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/headscale.v1.HeadscaleService/AuthReject" => {
+                    #[allow(non_camel_case_types)]
+                    struct AuthRejectSvc<T: HeadscaleService>(pub Arc<T>);
+                    impl<
+                        T: HeadscaleService,
+                    > tonic::server::UnaryService<super::AuthRejectRequest>
+                    for AuthRejectSvc<T> {
+                        type Response = super::AuthRejectResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AuthRejectRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as HeadscaleService>::auth_reject(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AuthRejectSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -3,6 +3,7 @@ syntax = "proto3";
 package headscale.v1;
 
 import "apikey.proto";
+import "auth.proto";
 import "node.proto";
 import "policy.proto";
 import "preauthkey.proto";
@@ -29,6 +30,10 @@ service HeadscaleService {
   rpc RenameNode(RenameNodeRequest) returns (RenameNodeResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   rpc BackfillNodeIPs(BackfillNodeIPsRequest) returns (BackfillNodeIPsResponse);
+
+  rpc AuthRegister(AuthRegisterRequest) returns (AuthRegisterResponse);
+  rpc AuthApprove(AuthApproveRequest) returns (AuthApproveResponse);
+  rpc AuthReject(AuthRejectRequest) returns (AuthRejectResponse);
 
   rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
   rpc ExpireApiKey(ExpireApiKeyRequest) returns (ExpireApiKeyResponse);

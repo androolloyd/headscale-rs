@@ -163,20 +163,21 @@ pub mod upstream {
     };
     use crate::generated::headscale_service_server::{HeadscaleService, HeadscaleServiceServer};
     use crate::generated::{
-        ApiKey, BackfillNodeIPsRequest, BackfillNodeIPsResponse, CheckPolicyRequest,
-        CheckPolicyResponse, CreateApiKeyRequest, CreateApiKeyResponse, CreatePreAuthKeyRequest,
-        CreatePreAuthKeyResponse, CreateUserRequest, CreateUserResponse, DebugCreateNodeRequest,
-        DebugCreateNodeResponse, DeleteApiKeyRequest, DeleteApiKeyResponse, DeleteNodeRequest,
-        DeleteNodeResponse, DeletePreAuthKeyRequest, DeletePreAuthKeyResponse, DeleteUserRequest,
-        DeleteUserResponse, ExpireApiKeyRequest, ExpireApiKeyResponse, ExpireNodeRequest,
-        ExpireNodeResponse, ExpirePreAuthKeyRequest, ExpirePreAuthKeyResponse, GetNodeRequest,
-        GetNodeResponse, GetPolicyRequest, GetPolicyResponse, HealthRequest, HealthResponse,
-        ListApiKeysRequest, ListApiKeysResponse, ListNodesRequest, ListNodesResponse,
-        ListPreAuthKeysRequest, ListPreAuthKeysResponse, ListUsersRequest, ListUsersResponse, Node,
-        PreAuthKey, RegisterMethod, RegisterNodeRequest, RegisterNodeResponse, RenameNodeRequest,
-        RenameNodeResponse, RenameUserRequest, RenameUserResponse, SetApprovedRoutesRequest,
-        SetApprovedRoutesResponse, SetPolicyRequest, SetPolicyResponse, SetTagsRequest,
-        SetTagsResponse, User as ProtoUser,
+        ApiKey, AuthApproveRequest, AuthApproveResponse, AuthRegisterRequest, AuthRegisterResponse,
+        AuthRejectRequest, AuthRejectResponse, BackfillNodeIPsRequest, BackfillNodeIPsResponse,
+        CheckPolicyRequest, CheckPolicyResponse, CreateApiKeyRequest, CreateApiKeyResponse,
+        CreatePreAuthKeyRequest, CreatePreAuthKeyResponse, CreateUserRequest, CreateUserResponse,
+        DebugCreateNodeRequest, DebugCreateNodeResponse, DeleteApiKeyRequest, DeleteApiKeyResponse,
+        DeleteNodeRequest, DeleteNodeResponse, DeletePreAuthKeyRequest, DeletePreAuthKeyResponse,
+        DeleteUserRequest, DeleteUserResponse, ExpireApiKeyRequest, ExpireApiKeyResponse,
+        ExpireNodeRequest, ExpireNodeResponse, ExpirePreAuthKeyRequest, ExpirePreAuthKeyResponse,
+        GetNodeRequest, GetNodeResponse, GetPolicyRequest, GetPolicyResponse, HealthRequest,
+        HealthResponse, ListApiKeysRequest, ListApiKeysResponse, ListNodesRequest,
+        ListNodesResponse, ListPreAuthKeysRequest, ListPreAuthKeysResponse, ListUsersRequest,
+        ListUsersResponse, Node, PreAuthKey, RegisterMethod, RegisterNodeRequest,
+        RegisterNodeResponse, RenameNodeRequest, RenameNodeResponse, RenameUserRequest,
+        RenameUserResponse, SetApprovedRoutesRequest, SetApprovedRoutesResponse, SetPolicyRequest,
+        SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy, validate_requested_tags_for_node};
     use crate::tailscale_wire::routes::{
@@ -452,6 +453,50 @@ pub mod upstream {
                     return node_key;
                 }
             }
+        }
+
+        async fn register_node_body(
+            &self,
+            body: RegisterNodeRequest,
+        ) -> Result<RegisterNodeResponse, Status> {
+            validate_registration_id(&body.key)?;
+            let user = self
+                .users
+                .get(&body.user)
+                .await
+                .map_err(user_error_to_status)?
+                .ok_or_else(|| Status::not_found("user not found"))?;
+            let pending = self
+                .registration_cache
+                .get(&body.key)
+                .ok_or_else(|| Status::not_found("registration not found"))?;
+            let mut record = wire_record_to_machine_admin(pending.clone());
+            record.user = user.name;
+            record.register_method = RegisterMethod::Cli as i32;
+            apply_requested_tags(&self.policy, &mut record)?;
+
+            let result = self
+                .machines
+                .complete_registration(record, &self.policy, Some(pending.clone()))
+                .await
+                .map_err(machine_error_to_status)?;
+            let node = result.record;
+            let wire_record = machine_admin_to_wire_record_with_pending(&node, &pending);
+            if let Some(registry) = &self.wire_registry {
+                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                    registry.replace_node_key(
+                        old_node_key_hex,
+                        wire_record.node_key_hex.clone(),
+                        wire_record.clone(),
+                    );
+                } else {
+                    registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+                }
+            }
+            self.registration_cache.complete(&body.key, wire_record);
+            Ok(RegisterNodeResponse {
+                node: Some(machine_to_node(&node, &self.users).await?),
+            })
         }
     }
 
@@ -744,45 +789,62 @@ pub mod upstream {
             request: Request<RegisterNodeRequest>,
         ) -> Result<Response<RegisterNodeResponse>, Status> {
             self.authorize(&request).await?;
-            let body = request.into_inner();
-            validate_registration_id(&body.key)?;
-            let user = self
-                .users
-                .get(&body.user)
-                .await
-                .map_err(user_error_to_status)?
-                .ok_or_else(|| Status::not_found("user not found"))?;
-            let pending = self
-                .registration_cache
-                .get(&body.key)
-                .ok_or_else(|| Status::not_found("registration not found"))?;
-            let mut record = wire_record_to_machine_admin(pending.clone());
-            record.user = user.name;
-            record.register_method = RegisterMethod::Cli as i32;
-            apply_requested_tags(&self.policy, &mut record)?;
+            Ok(Response::new(
+                self.register_node_body(request.into_inner()).await?,
+            ))
+        }
 
-            let result = self
-                .machines
-                .complete_registration(record, &self.policy, Some(pending.clone()))
-                .await
-                .map_err(machine_error_to_status)?;
-            let node = result.record;
-            let wire_record = machine_admin_to_wire_record_with_pending(&node, &pending);
-            if let Some(registry) = &self.wire_registry {
-                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                    registry.replace_node_key(
-                        old_node_key_hex,
-                        wire_record.node_key_hex.clone(),
-                        wire_record.clone(),
-                    );
-                } else {
-                    registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
-                }
-            }
-            self.registration_cache.complete(&body.key, wire_record);
-            Ok(Response::new(RegisterNodeResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
+        async fn auth_register(
+            &self,
+            request: Request<AuthRegisterRequest>,
+        ) -> Result<Response<AuthRegisterResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let key = auth_id_cache_key(&body.auth_id)?;
+            let response = self
+                .register_node_body(RegisterNodeRequest {
+                    user: body.user,
+                    key,
+                })
+                .await?;
+            Ok(Response::new(AuthRegisterResponse {
+                node: response.node,
             }))
+        }
+
+        async fn auth_approve(
+            &self,
+            request: Request<AuthApproveRequest>,
+        ) -> Result<Response<AuthApproveResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let key = auth_id_cache_key(&body.auth_id)?;
+            if !self.registration_cache.approve_without_node(&key) {
+                return Err(Status::not_found(format!(
+                    "no pending auth session for auth_id {}",
+                    body.auth_id
+                )));
+            }
+            Ok(Response::new(AuthApproveResponse {}))
+        }
+
+        async fn auth_reject(
+            &self,
+            request: Request<AuthRejectRequest>,
+        ) -> Result<Response<AuthRejectResponse>, Status> {
+            self.authorize(&request).await?;
+            let body = request.into_inner();
+            let key = auth_id_cache_key(&body.auth_id)?;
+            if !self
+                .registration_cache
+                .reject(&key, "auth request rejected")
+            {
+                return Err(Status::not_found(format!(
+                    "no pending auth session for auth_id {}",
+                    body.auth_id
+                )));
+            }
+            Ok(Response::new(AuthRejectResponse {}))
         }
 
         async fn delete_node(
@@ -1389,14 +1451,35 @@ pub mod upstream {
         }
     }
 
+    const REGISTRATION_ID_LENGTH: usize = 24;
+    const UPSTREAM_AUTH_ID_PREFIX: &str = "hskey-authreq-";
+
     fn validate_registration_id(id: &str) -> Result<(), Status> {
-        const REGISTRATION_ID_LENGTH: usize = 24;
         if id.len() != REGISTRATION_ID_LENGTH {
             return Err(Status::invalid_argument(format!(
                 "registration ID must be {REGISTRATION_ID_LENGTH} characters long"
             )));
         }
         Ok(())
+    }
+
+    fn auth_id_cache_key(id: &str) -> Result<String, Status> {
+        if id.len() == REGISTRATION_ID_LENGTH {
+            return Ok(id.to_string());
+        }
+
+        match id.strip_prefix(UPSTREAM_AUTH_ID_PREFIX) {
+            Some(rest) if rest.len() == REGISTRATION_ID_LENGTH => Ok(rest.to_string()),
+            Some(rest) => Err(Status::invalid_argument(format!(
+                "invalid auth_id: expected {REGISTRATION_ID_LENGTH} characters after \
+                 {UPSTREAM_AUTH_ID_PREFIX:?}, got {}",
+                rest.len()
+            ))),
+            None => Err(Status::invalid_argument(format!(
+                "invalid auth_id: expected a {REGISTRATION_ID_LENGTH}-character registration ID \
+                 or an auth ID prefixed with {UPSTREAM_AUTH_ID_PREFIX:?}"
+            ))),
+        }
     }
 
     fn random_key_hex() -> String {
@@ -1563,18 +1646,19 @@ mod upstream_tests {
     };
     use crate::generated::headscale_service_server::HeadscaleService;
     use crate::generated::{
-        BackfillNodeIPsRequest, CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest,
-        CreateUserRequest, DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest,
-        DeletePreAuthKeyRequest, DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest,
-        ExpirePreAuthKeyRequest, GetNodeRequest, GetPolicyRequest, HealthRequest,
-        ListApiKeysRequest, ListNodesRequest, ListPreAuthKeysRequest, ListUsersRequest,
-        RegisterMethod, RegisterNodeRequest, RenameNodeRequest, RenameUserRequest,
-        SetApprovedRoutesRequest, SetPolicyRequest, SetTagsRequest,
+        AuthApproveRequest, AuthRegisterRequest, AuthRejectRequest, BackfillNodeIPsRequest,
+        CheckPolicyRequest, CreateApiKeyRequest, CreatePreAuthKeyRequest, CreateUserRequest,
+        DebugCreateNodeRequest, DeleteApiKeyRequest, DeleteNodeRequest, DeletePreAuthKeyRequest,
+        DeleteUserRequest, ExpireApiKeyRequest, ExpireNodeRequest, ExpirePreAuthKeyRequest,
+        GetNodeRequest, GetPolicyRequest, HealthRequest, ListApiKeysRequest, ListNodesRequest,
+        ListPreAuthKeysRequest, ListUsersRequest, RegisterMethod, RegisterNodeRequest,
+        RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
+        SetTagsRequest,
     };
     use crate::policy::{PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
-        MachineRegistry, RegistrationCache, WireState,
+        MachineRegistry, RegistrationCache, RegistrationWaitOutcome, WireState,
         noise::ServerNoiseKey,
         router,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -1892,6 +1976,9 @@ mod upstream_tests {
             .collect::<Vec<_>>();
         assert!(methods.contains(&"CreateUser"));
         assert!(methods.contains(&"RegisterNode"));
+        assert!(methods.contains(&"AuthRegister"));
+        assert!(methods.contains(&"AuthApprove"));
+        assert!(methods.contains(&"AuthReject"));
         assert!(methods.contains(&"SetApprovedRoutes"));
         assert!(methods.contains(&"Health"));
         assert!(!methods.iter().any(|method| method.contains("Version")));
@@ -1978,6 +2065,133 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_grpc_register_delegates_to_register_node() {
+        let (service, _machines) = admin_service_with_machines().await;
+        const REGISTRATION_ID: &str = "authregisterabcdefghijkl";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let debug_node = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "auth-debug".into(),
+                routes: vec!["10.42.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("debug node");
+
+        let registered = service
+            .auth_register(Request::new(AuthRegisterRequest {
+                user: "alice".into(),
+                auth_id: format!("hskey-authreq-{REGISTRATION_ID}"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.node_key, debug_node.node_key);
+        assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
+        assert_eq!(registered.available_routes, vec!["10.42.0.0/24"]);
+
+        let err = service
+            .auth_register(Request::new(AuthRegisterRequest {
+                user: "alice".into(),
+                auth_id: "short".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("invalid auth_id"));
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_grpc_approve_and_reject_signal_pending_cache() {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new()))),
+        )
+        .with_registration_cache(registration_cache.clone());
+
+        let approve_id = "a".repeat(24);
+        registration_cache.insert(
+            approve_id.clone(),
+            fixture_machine("approve-node", "", "approve-pending"),
+        );
+        let approve_wait = {
+            let registration_cache = registration_cache.clone();
+            let approve_id = approve_id.clone();
+            tokio::spawn(async move { registration_cache.wait_for_registration(&approve_id).await })
+        };
+        tokio::task::yield_now().await;
+        service
+            .auth_approve(Request::new(AuthApproveRequest {
+                auth_id: format!("hskey-authreq-{approve_id}"),
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            approve_wait.await.unwrap(),
+            RegistrationWaitOutcome::ApprovedWithoutNode
+        ));
+
+        let reject_id = "b".repeat(24);
+        registration_cache.insert(
+            reject_id.clone(),
+            fixture_machine("reject-node", "", "reject-pending"),
+        );
+        let reject_wait = {
+            let registration_cache = registration_cache.clone();
+            let reject_id = reject_id.clone();
+            tokio::spawn(async move { registration_cache.wait_for_registration(&reject_id).await })
+        };
+        tokio::task::yield_now().await;
+        service
+            .auth_reject(Request::new(AuthRejectRequest { auth_id: reject_id }))
+            .await
+            .unwrap();
+        match reject_wait.await.unwrap() {
+            RegistrationWaitOutcome::Rejected(reason) => {
+                assert_eq!(reason, "auth request rejected");
+            }
+            other => panic!("expected rejected wait outcome, got {other:?}"),
+        }
+
+        let err = service
+            .auth_approve(Request::new(AuthApproveRequest {
+                auth_id: "c".repeat(24),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(err.message().contains("no pending auth session"));
     }
 
     #[tokio::test]

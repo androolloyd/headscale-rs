@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-dst-missing-port",
+  "expect_policy_error": "hostport must contain a colon",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["*"]
+      }
+    ]
+  }
+}

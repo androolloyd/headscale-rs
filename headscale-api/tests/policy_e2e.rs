@@ -94,8 +94,8 @@ fn parses_upstream_acl_a01_fixture() {
     let doc = parse_hujson_policy(&raw).expect("a01 must parse");
     assert_eq!(doc.version, 1);
     assert_eq!(doc.rules.len(), 1);
-    assert!(doc.groups.contains_key("admins"));
-    assert!(doc.groups.contains_key("developers"));
+    assert!(doc.groups.contains_key("group:admins"));
+    assert!(doc.groups.contains_key("group:developers"));
     assert_eq!(doc.hosts["internal"], "10.0.0.0/8");
     assert!(doc.tag_owners.contains_key("tag:router"));
     assert_eq!(doc.auto_approvers.routes.len(), 2);

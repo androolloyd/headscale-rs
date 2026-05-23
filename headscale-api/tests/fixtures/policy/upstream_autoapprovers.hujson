@@ -16,6 +16,6 @@
         "exitNode": ["tag:exit"]
     },
     "groups": {
-        "admins": ["alice@example.com", "bob@example.com"]
+        "group:admins": ["alice@example.com", "bob@example.com"]
     }
 }

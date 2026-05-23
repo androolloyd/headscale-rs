@@ -1,0 +1,11 @@
+{
+  "name": "groups-validation-nested-group",
+  "expect_policy_error": "Nested groups are not allowed",
+  "policy": {
+    "groups": {
+      "group:admins": ["group:ops"],
+      "group:ops": ["alice@"]
+    },
+    "acls": []
+  }
+}

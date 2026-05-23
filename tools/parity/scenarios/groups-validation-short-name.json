@@ -1,0 +1,10 @@
+{
+  "name": "groups-validation-short-name",
+  "expect_policy_error": "Group has to start",
+  "policy": {
+    "groups": {
+      "admins": ["alice@"]
+    },
+    "acls": []
+  }
+}

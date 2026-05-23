@@ -4748,7 +4748,7 @@ mod tests {
             "tag:server": ["group:admins"]
           },
           "groups": {
-            "group:admins": ["alice"]
+            "group:admins": ["alice@"]
           },
           "autoApprovers": {
             "routes": {

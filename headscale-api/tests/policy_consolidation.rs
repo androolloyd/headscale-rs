@@ -58,7 +58,7 @@ fn raw_round_trip_preserves_url_with_double_slashes() {
     // handling. The canonical stripper must preserve `https://x//y`
     // inside a string literal verbatim.
     let store = PolicyStore::new();
-    let raw = r#"{"groups":{"x":["https://example.com//path"]},"acls":[]}"#;
+    let raw = r#"{"ssh":[{"action":"accept","src":["alice@"],"dst":["autogroup:self"],"users":["https://example.com//path"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     store.set(doc, raw.to_string());
     let returned = store.raw().expect("raw");
@@ -118,12 +118,21 @@ fn filter_rules_group_expansion_matches_pre_consolidation() {
     // canonical `AclDoc::expand_principal` must return the same Vec
     // ordering.
     let store = PolicyStore::new();
-    let raw = r#"{
-        "groups": {"admins": ["100.64.0.10", "100.64.0.11"]},
-        "acls": [{"action":"accept","proto":"tcp","src":["group:admins"],"dst":["*:22"]}]
-    }"#;
-    let doc = parse_hujson_policy(raw).unwrap();
-    store.set(doc, raw.to_string());
+    let doc = PolicyDoc {
+        groups: std::iter::once((
+            "admins".to_string(),
+            vec!["100.64.0.10".to_string(), "100.64.0.11".to_string()],
+        ))
+        .collect(),
+        rules: vec![PolicyRule {
+            action: PolicyAction::Accept,
+            src: vec!["group:admins".into()],
+            dst: vec!["*".into()],
+            ports: vec!["tcp/22".into()],
+        }],
+        ..Default::default()
+    };
+    store.set(doc, "programmatic-group-filter".to_string());
     let rules = store.filter_rules();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].src_ips, vec!["100.64.0.10", "100.64.0.11"]);
@@ -347,7 +356,7 @@ fn upstream_acls_alias_round_trips() {
     // both `rules` and `acls`. The canonical `AclDoc` keeps that
     // serde alias so an operator's upstream `juanfont/headscale`
     // policy file PUTs without renaming.
-    let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*"]}]}"#;
+    let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#;
     let doc = parse_hujson_policy(raw).unwrap();
     assert_eq!(doc.rules.len(), 1);
 }

@@ -288,6 +288,22 @@
   },
   {
     "engine": "headscale",
+    "name": "acl-validation-bare-ipv6-dst",
+    "filter": [
+
+    ],
+    "policy_error": "Invalid alias"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-dst-missing-port",
+    "filter": [
+
+    ],
+    "policy_error": "hostport must contain a colon"
+  },
+  {
+    "engine": "headscale",
     "name": "acl-validation-gre-specific-port",
     "filter": [
 
@@ -445,6 +461,30 @@
 
     ],
     "policy_error": "Tag \"tag:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "groups-validation-nested-group",
+    "filter": [
+
+    ],
+    "policy_error": "Nested groups are not allowed"
+  },
+  {
+    "engine": "headscale",
+    "name": "groups-validation-non-user-member",
+    "filter": [
+
+    ],
+    "policy_error": "Username has to contain @"
+  },
+  {
+    "engine": "headscale",
+    "name": "groups-validation-short-name",
+    "filter": [
+
+    ],
+    "policy_error": "Group has to start"
   },
   {
     "engine": "headscale",

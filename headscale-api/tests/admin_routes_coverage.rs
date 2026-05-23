@@ -707,7 +707,7 @@ async fn api_policy_validate_good_returns_rule_count() {
             {"action":"accept","proto":"tcp","src":["*"],"dst":["*:22"]},
             {"action":"accept","proto":"tcp","src":["group:a"],"dst":["*:80"]}
         ],
-        "groups": {"a": ["100.64.0.1"]}
+        "groups": {"group:a": ["alice@"]}
     }"#;
     let resp = app
         .oneshot(req_post_json("/api/v1/policy/validate", raw, Some(BEARER)))
@@ -724,7 +724,7 @@ async fn api_policy_validate_bad_returns_400() {
     let resp = app()
         .oneshot(req_post_json(
             "/api/v1/policy/validate",
-            r#"{"acls":[{"action":"nope","src":["*"],"dst":["*"]}]}"#,
+            r#"{"acls":[{"action":"nope","src":["*"],"dst":["*:*"]}]}"#,
             Some(BEARER),
         ))
         .await

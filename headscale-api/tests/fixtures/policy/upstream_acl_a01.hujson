@@ -13,10 +13,10 @@
         "exitNode": ["tag:exit"]
     },
     "groups": {
-        "admins":     ["odin@example.com"],
-        "developers": ["thor@example.org", "odin@example.com"],
-        "empty":      [],
-        "monitors":   ["freya@example.com"]
+        "group:admins":     ["odin@example.com"],
+        "group:developers": ["thor@example.org", "odin@example.com"],
+        "group:empty":      [],
+        "group:monitors":   ["freya@example.com"]
     },
     "hosts": {
         "internal":  "10.0.0.0/8",

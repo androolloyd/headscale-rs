@@ -1,0 +1,13 @@
+{
+  "name": "acl-validation-bare-ipv6-dst",
+  "expect_policy_error": "Invalid alias",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["*"],
+        "dst": ["fd7a:115c:a1e0::1"]
+      }
+    ]
+  }
+}

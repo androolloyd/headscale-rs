@@ -542,7 +542,7 @@ async fn policy_put_then_get_round_trip() {
 #[tokio::test]
 async fn policy_put_rejects_invalid_doc() {
     let (app, _) = app();
-    let bad = r#"{"acls":[{"action":"bogus","src":["*"],"dst":["*"]}]}"#;
+    let bad = r#"{"acls":[{"action":"bogus","src":["*"],"dst":["*:*"]}]}"#;
     let resp = app
         .oneshot(req_put_text("/api/v1/policy", bad, &admin_token()))
         .await

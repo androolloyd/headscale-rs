@@ -64,11 +64,11 @@ fn nested_block_comment_is_not_supported() {
 #[test]
 fn trailing_comma_before_brace_and_bracket() {
     let raw = r#"{
-        "groups": { "admins": ["100.64.0.1",], },
+        "groups": { "group:admins": ["alice@",], },
         "acls": [],
     }"#;
     let doc = parse_hujson_policy(raw).expect("parses both trailing-comma styles");
-    assert_eq!(doc.groups["admins"].len(), 1);
+    assert_eq!(doc.groups["group:admins"].len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,51 +78,71 @@ fn trailing_comma_before_brace_and_bracket() {
 #[test]
 fn escaped_quote_in_string_does_not_terminate_string() {
     let raw = r#"{
-        "groups": { "k": ["a\"b\"c"] },
-        "acls": []
+        "ssh": [{
+            "action": "accept",
+            "src": ["alice@"],
+            "dst": ["autogroup:self"],
+            "users": ["a\"b\"c"]
+        }]
     }"#;
     let doc = parse_hujson_policy(raw).expect("escaped quote preserved");
-    assert_eq!(doc.groups["k"], vec![r#"a"b"c"#]);
+    assert_eq!(doc.ssh[0].users, vec![r#"a"b"c"#]);
 }
 
 #[test]
 fn backslash_escapes_round_trip() {
     let raw = r#"{
-        "groups": { "k": ["c:\\users\\test"] },
-        "acls": []
+        "ssh": [{
+            "action": "accept",
+            "src": ["alice@"],
+            "dst": ["autogroup:self"],
+            "users": ["c:\\users\\test"]
+        }]
     }"#;
     let doc = parse_hujson_policy(raw).expect("backslash escape preserved");
-    assert!(doc.groups["k"][0].contains('\\'));
+    assert!(doc.ssh[0].users[0].contains('\\'));
 }
 
 #[test]
 fn double_slash_inside_string_is_not_a_comment() {
     let raw = r#"{
-        "groups": { "k": ["https://x.example.com/path//deep"] },
-        "acls": []
+        "ssh": [{
+            "action": "accept",
+            "src": ["alice@"],
+            "dst": ["autogroup:self"],
+            "users": ["https://x.example.com/path//deep"]
+        }]
     }"#;
     let doc = parse_hujson_policy(raw).expect("URL with // preserved");
-    assert!(doc.groups["k"][0].contains("//deep"));
+    assert!(doc.ssh[0].users[0].contains("//deep"));
 }
 
 #[test]
 fn slash_star_inside_string_is_not_a_comment() {
     let raw = r#"{
-        "groups": { "k": ["regex: a/*b*/"] },
-        "acls": []
+        "ssh": [{
+            "action": "accept",
+            "src": ["alice@"],
+            "dst": ["autogroup:self"],
+            "users": ["regex: a/*b*/"]
+        }]
     }"#;
     let doc = parse_hujson_policy(raw).expect("/* inside string preserved");
-    assert!(doc.groups["k"][0].contains("/*"));
+    assert!(doc.ssh[0].users[0].contains("/*"));
 }
 
 #[test]
 fn comma_inside_string_is_not_a_trailing_comma() {
     let raw = r#"{
-        "groups": { "k": ["a,b,c"] },
-        "acls": []
+        "ssh": [{
+            "action": "accept",
+            "src": ["alice@"],
+            "dst": ["autogroup:self"],
+            "users": ["a,b,c"]
+        }]
     }"#;
     let doc = parse_hujson_policy(raw).expect("comma inside string preserved");
-    assert_eq!(doc.groups["k"][0], "a,b,c");
+    assert_eq!(doc.ssh[0].users[0], "a,b,c");
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +181,7 @@ fn unknown_top_level_field_is_schema_error() {
 #[test]
 fn rule_missing_action_is_schema_error() {
     let raw = r#"{
-        "acls": [{"src":["*"],"dst":["*"]}]
+        "acls": [{"src":["*"],"dst":["*:*"]}]
     }"#;
     let err = parse_hujson_policy(raw).unwrap_err();
     let msg = format!("{err}");
@@ -174,7 +194,7 @@ fn rule_missing_action_is_schema_error() {
 #[test]
 fn rule_with_invalid_action_value_is_schema_error() {
     let raw = r#"{
-        "acls": [{"action":"maybe","src":["*"],"dst":["*"]}]
+        "acls": [{"action":"maybe","src":["*"],"dst":["*:*"]}]
     }"#;
     assert!(parse_hujson_policy(raw).is_err());
 }
@@ -183,7 +203,7 @@ fn rule_with_invalid_action_value_is_schema_error() {
 fn unknown_rule_field_is_schema_error() {
     // PolicyRule is `deny_unknown_fields` (see src/policy/doc.rs).
     let raw = r#"{
-        "acls": [{"action":"accept","src":["*"],"dst":["*"],"extra":1}]
+        "acls": [{"action":"accept","src":["*"],"dst":["*:*"],"extra":1}]
     }"#;
     let err = parse_hujson_policy(raw).unwrap_err();
     assert!(format!("{err}").contains("extra"));

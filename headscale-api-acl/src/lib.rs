@@ -597,8 +597,11 @@ fn normalize_go_policy_top_level(
         let Some(canonical) = go_policy_field_name(&key) else {
             return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
         };
+        if canonical == "groups" {
+            validate_go_policy_groups(&value)?;
+        }
         if canonical == "acls" {
-            reject_unknown_go_acl_fields(&value)?;
+            validate_go_acl_rules(&value)?;
         }
         if normalized.insert(canonical.to_string(), value).is_some() {
             return Err(PolicyParseError::Schema(format!(
@@ -608,6 +611,41 @@ fn normalize_go_policy_top_level(
     }
 
     Ok(serde_json::Value::Object(normalized))
+}
+
+fn validate_go_policy_groups(value: &serde_json::Value) -> Result<(), PolicyParseError> {
+    let serde_json::Value::Object(groups) = value else {
+        return Ok(());
+    };
+
+    for (group, members) in groups {
+        if !group.starts_with("group:") {
+            return Err(PolicyParseError::Schema(format!(
+                r#"Group has to start with "group:", got: {group:?}"#
+            )));
+        }
+
+        let serde_json::Value::Array(members) = members else {
+            return Ok(());
+        };
+        for member in members {
+            let Some(member) = member.as_str() else {
+                continue;
+            };
+            if member.starts_with("group:") {
+                return Err(PolicyParseError::Schema(format!(
+                    r"Nested groups are not allowed, found {member:?} inside {group:?}"
+                )));
+            }
+            if !member.contains('@') {
+                return Err(PolicyParseError::Schema(format!(
+                    "Username has to contain @, got: {member:?}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn go_policy_field_name(field: &str) -> Option<&'static str> {
@@ -628,7 +666,7 @@ fn go_policy_field_name(field: &str) -> Option<&'static str> {
     }
 }
 
-fn reject_unknown_go_acl_fields(value: &serde_json::Value) -> Result<(), PolicyParseError> {
+fn validate_go_acl_rules(value: &serde_json::Value) -> Result<(), PolicyParseError> {
     let serde_json::Value::Array(rules) = value else {
         return Ok(());
     };
@@ -642,6 +680,7 @@ fn reject_unknown_go_acl_fields(value: &serde_json::Value) -> Result<(), PolicyP
                 return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
             }
         }
+        validate_go_acl_destinations(fields)?;
     }
 
     Ok(())
@@ -657,10 +696,65 @@ fn go_acl_field_name(field: &str) -> Option<&'static str> {
     }
 }
 
+fn validate_go_acl_destinations(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), PolicyParseError> {
+    let Some(serde_json::Value::Array(destinations)) = fields.get("dst") else {
+        return Ok(());
+    };
+
+    for destination in destinations {
+        let Some(destination) = destination.as_str() else {
+            continue;
+        };
+        let (alias, port_spec) =
+            split_go_destination_and_port(destination).map_err(PolicyParseError::Schema)?;
+        validate_upstream_port_spec(port_spec).map_err(PolicyParseError::Schema)?;
+        validate_go_acl_alias_syntax(alias).map_err(PolicyParseError::Schema)?;
+    }
+
+    Ok(())
+}
+
+fn split_go_destination_and_port(input: &str) -> Result<(&str, &str), String> {
+    let Some((destination, port)) = input.rsplit_once(':') else {
+        return Err(r#"hostport must contain a colon (":")"#.to_string());
+    };
+    if destination.is_empty() {
+        return Err("input cannot start with a colon character".to_string());
+    }
+    if port.is_empty() {
+        return Err("input cannot end with a colon character".to_string());
+    }
+    Ok((destination, port))
+}
+
+fn validate_go_acl_alias_syntax(alias: &str) -> Result<(), String> {
+    if alias == "*"
+        || alias.contains('@')
+        || alias.starts_with("group:")
+        || alias.starts_with("tag:")
+        || alias.starts_with("autogroup:")
+        || alias.starts_with("ipset:")
+        || parse_cidr(alias).is_some()
+        || is_go_host_alias(alias)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        r"Invalid alias {alias:?}. An alias must be one of the supported upstream policy alias types"
+    ))
+}
+
+fn is_go_host_alias(alias: &str) -> bool {
+    !alias.contains(':')
+}
+
 fn acl_rules_from_grants(grants: &[GrantRule]) -> Result<Vec<AclRule>, String> {
     let mut out = Vec::new();
     for grant in grants {
-        if grant.ip.is_empty() {
+        if grant.ip.is_empty() || !grant.via.is_empty() {
             continue;
         }
         let mut ports = Vec::new();
@@ -2383,15 +2477,37 @@ mod tests {
     }
 
     #[test]
-    fn hujson_does_not_treat_bare_ipv6_literal_as_dst_port() {
+    fn hujson_rejects_acl_destinations_without_ports_like_headscale_go() {
+        for (dst, expected) in [
+            ("*", "hostport must contain a colon"),
+            ("tag:server", "invalid port number"),
+            ("autogroup:internet", "invalid port number"),
+        ] {
+            let raw = format!(
+                r#"{{
+                    "tagOwners": {{"tag:server": ["alice@"]}},
+                    "acls": [
+                        {{"action":"accept","src":["*"],"dst":["{dst}"]}}
+                    ]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).unwrap_err();
+            assert!(
+                format!("{err}").contains(expected),
+                "{dst} should contain {expected:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hujson_rejects_bare_ipv6_acl_destination_like_headscale_go() {
         let raw = r#"{
             "acls": [
                 {"action":"accept","src":["*"],"dst":["fd7a:115c:a1e0::1"]}
             ]
         }"#;
-        let doc = parse_hujson_policy(raw).unwrap();
-        assert_eq!(doc.rules[0].dst, vec!["fd7a:115c:a1e0::1"]);
-        assert!(doc.rules[0].ports.is_empty());
+        let err = parse_hujson_policy(raw).unwrap_err();
+        assert!(format!("{err}").contains("Invalid alias"));
     }
 
     #[test]
@@ -3267,19 +3383,18 @@ mod tests {
 
     #[test]
     fn ssh_source_rejects_circular_group_references() {
-        let err = parse_hujson_policy(
-            r#"{
-              "groups": {
-                "admins": ["group:ops"],
-                "ops": ["group:admins"]
-              },
-              "ssh": [{
-                "action": "accept",
-                "src": ["group:admins"],
-                "dst": ["autogroup:tagged"],
-                "users": ["root"]
-              }]
-            }"#,
+        let err = AclDoc::from_toml(
+            r#"
+              [groups]
+              admins = ["group:ops"]
+              ops = ["group:admins"]
+
+              [[ssh]]
+              action = "accept"
+              src = ["group:admins"]
+              dst = ["autogroup:tagged"]
+              users = ["root"]
+            "#,
         )
         .unwrap_err()
         .to_string();
@@ -3290,28 +3405,41 @@ mod tests {
     }
 
     #[test]
-    fn ssh_source_nested_groups_parse_and_expand() {
-        let doc = parse_hujson_policy(
+    fn hujson_rejects_nested_groups_like_headscale_go() {
+        let err = parse_hujson_policy(
             r#"{
               "groups": {
-                "admins": ["group:ops", "carol@"],
-                "ops": ["alice@", "group:eng"],
-                "eng": ["bob@"]
-              },
-              "ssh": [{
-                "action": "accept",
-                "src": ["group:admins"],
-                "dst": ["autogroup:tagged"],
-                "users": ["root"]
-              }]
+                "group:admins": ["group:ops", "carol@"],
+                "group:ops": ["alice@"]
+              }
             }"#,
         )
-        .unwrap();
+        .unwrap_err()
+        .to_string();
 
-        assert_eq!(
-            doc.expand_principal("group:admins"),
-            vec!["alice@", "bob@", "carol@"]
-        );
+        assert!(err.contains("Nested groups are not allowed"));
+    }
+
+    #[test]
+    fn hujson_rejects_invalid_group_names_and_members_like_headscale_go() {
+        for (name, raw, expected) in [
+            (
+                "short-group-name",
+                r#"{"groups":{"admins":["alice@"]}}"#,
+                "Group has to start",
+            ),
+            (
+                "non-user-member",
+                r#"{"groups":{"group:admins":["100.64.0.1"]}}"#,
+                "Username has to contain @",
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).expect_err(name).to_string();
+            assert!(
+                err.contains(expected),
+                "{name} should contain {expected:?}, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -3501,6 +3629,42 @@ mod tests {
     }
 
     #[test]
+    fn hujson_grants_with_via_are_not_flattened_into_acl_rules() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:router-a": ["router@"],
+                "tag:router-b": ["router@"]
+              },
+              "grants": [{
+                "src": ["tag:client"],
+                "dst": ["10.0.0.0/24"],
+                "ip": ["*"],
+                "via": ["tag:router-a"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(
+            doc.rules.is_empty(),
+            "via grants need grant-aware route checks, not flattened ACL rules"
+        );
+
+        let client_tags = vec!["tag:client".to_string()];
+        let router_a_tags = vec!["tag:router-a".to_string()];
+        let router_b_tags = vec!["tag:router-b".to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let router_a = NodeView::new("100.64.0.1").with_tags(&router_a_tags);
+        let router_b = NodeView::new("100.64.0.2").with_tags(&router_b_tags);
+        let routes = vec!["10.0.0.0/24".to_string()];
+
+        assert!(doc.can_access_node(&client, &router_a, &routes, PortRef::any()));
+        assert!(!doc.can_access_node(&client, &router_b, &routes, PortRef::any()));
+    }
+
+    #[test]
     fn hujson_accepts_public_ipsets_and_node_attrs_app_maps() {
         let doc = parse_hujson_policy(
             r#"{
@@ -3577,7 +3741,7 @@ mod tests {
 
     #[test]
     fn hujson_nil_acl_and_grants_default_deny() {
-        for raw in [r#"{}"#, r#"{"acls":[]}"#, r#"{"grants":[]}"#] {
+        for raw in ["{}", r#"{"acls":[]}"#, r#"{"grants":[]}"#] {
             let doc = parse_hujson_policy(raw).unwrap();
             assert!(doc.rules.is_empty());
             assert!(doc.grants.is_empty());
@@ -3766,17 +3930,21 @@ mod tests {
     #[test]
     fn hujson_strings_with_slashes_are_preserved() {
         let raw = r#"{
-            "groups": { "admins": ["oct://node1//net"] },
-            "acls": []
+            "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["oct://node1//net"]
+            }]
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
-        assert_eq!(doc.groups["admins"], vec!["oct://node1//net"]);
+        assert_eq!(doc.ssh[0].users, vec!["oct://node1//net"]);
     }
 
     #[test]
     fn hujson_accepts_acls_alias() {
         let raw = r#"{
-            "acls": [{"action":"accept","src":["*"],"dst":["*"]}]
+            "acls": [{"action":"accept","src":["*"],"dst":["*:*"]}]
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(doc.rules.len(), 1);

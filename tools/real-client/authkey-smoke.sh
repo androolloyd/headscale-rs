@@ -33,6 +33,7 @@ expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
+harness_ip_families="${HSRS_HARNESS_IP_FAMILIES:-ipv4-only}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
@@ -229,9 +230,9 @@ if [[ -n "${expected_peer_counts}" ]]; then
   done
 fi
 case "${expected_tailscale_ip_families}" in
-  "" | ipv4 | ipv4-only | dual | dual-stack) ;;
+  "" | ipv4 | ipv4-only | ipv6 | ipv6-only | dual | dual-stack) ;;
   *)
-    echo "REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES must be empty, ipv4-only, or dual-stack; got ${expected_tailscale_ip_families}" >&2
+    echo "REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES must be empty, ipv4-only, ipv6-only, or dual-stack; got ${expected_tailscale_ip_families}" >&2
     exit 2
     ;;
 esac
@@ -360,7 +361,7 @@ tailscale_logged_in() {
     ok = status["HaveNodeKey"] &&
       status["AuthURL"].to_s.empty? &&
       self_node["InNetworkMap"] &&
-      ips.any? { |ip| ip.start_with?("100.") }
+      !ips.empty?
     exit(ok ? 0 : 1)
   ' <<<"${status_json}"
 }
@@ -463,6 +464,7 @@ harness_args=(
   --hostname host.docker.internal
   --public-url "https://host.docker.internal:${https_port}"
   --state-dir "${work_dir}/state"
+  --ip-families "${harness_ip_families}"
 )
 if [[ -n "${base_domain}" ]]; then
   harness_args+=(--base-domain "${base_domain}")
@@ -792,7 +794,25 @@ ruby -rjson -e '
   expect_tags_exact = ARGV.fetch(8) == "true"
   expected_names = ARGV.fetch(9).split(",")
   expected_users = ARGV.fetch(10).split(",")
+  expected_families = ARGV.fetch(11)
   expected_user_by_host = expected_names.zip(expected_users).to_h
+
+  def assert_ip_families(label, ips, expected)
+    has_v4 = ips.any? { |ip| ip.to_s.include?(".") }
+    has_v6 = ips.any? { |ip| ip.to_s.include?(":") }
+    case expected
+    when ""
+      abort("#{label}: expected at least one IPv4 address, got #{ips.inspect}") unless has_v4
+    when "ipv4", "ipv4-only"
+      abort("#{label}: expected IPv4-only addresses, got #{ips.inspect}") unless has_v4 && !has_v6
+    when "ipv6", "ipv6-only"
+      abort("#{label}: expected IPv6-only addresses, got #{ips.inspect}") unless !has_v4 && has_v6
+    when "dual", "dual-stack"
+      abort("#{label}: expected dual-stack addresses, got #{ips.inspect}") unless has_v4 && has_v6
+    else
+      abort("unsupported expected IP family #{expected.inspect}")
+    end
+  end
 
   def stable_id_from_key(hex)
     h = 0xcbf29ce484222325
@@ -811,7 +831,10 @@ ruby -rjson -e '
     }
     abort("expected user #{expected_user.inspect}, got #{machine["user"].inspect}") unless machine["user"] == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
-    abort("expected CGNAT IPv4, got #{machine["ipv4"].inspect}") unless machine["ipv4"].start_with?("100.")
+    ips = Array(machine["addresses"])
+    ips << machine["ipv4"] if ips.empty? && machine["ipv4"].to_s != ""
+    ips << machine["ipv6"] if ips.empty? && machine["ipv6"].to_s != ""
+    assert_ip_families("machine #{machine["hostname"]}", ips, expected_families)
     available_routes = Array(machine["available_routes"]).sort
     unless expected_routes.empty? || available_routes == expected_routes
       abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
@@ -845,7 +868,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-  ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}"
+  ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}" "${expected_tailscale_ip_families}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then
@@ -937,6 +960,8 @@ if [[ -n "${expected_tailscale_ip_families}" ]]; then
       case expected
       when "ipv4", "ipv4-only"
         abort("#{path}: expected IPv4-only TailscaleIPs, got #{ips.inspect}") unless has_v4 && !has_v6
+      when "ipv6", "ipv6-only"
+        abort("#{path}: expected IPv6-only TailscaleIPs, got #{ips.inspect}") unless !has_v4 && has_v6
       when "dual", "dual-stack"
         abort("#{path}: expected dual-stack TailscaleIPs, got #{ips.inspect}") unless has_v4 && has_v6
       else

@@ -80,6 +80,7 @@ smoke_ids=(
   magicdns-custom-domain
   dns-disabled
   prefix-family-ipv4-only
+  prefix-family-ipv6-only
   acl-allow
   acl-empty
   acl-autogroup-self
@@ -106,6 +107,7 @@ smoke_areas=(
   dns
   dns
   dns
+  addresses
   addresses
   acl
   acl
@@ -134,6 +136,7 @@ smoke_rust_scripts=(
   tools/real-client/magicdns-custom-domain-smoke.sh
   tools/real-client/dns-disabled-smoke.sh
   tools/real-client/prefix-family-ipv4-only-smoke.sh
+  tools/real-client/prefix-family-ipv6-only-smoke.sh
   tools/real-client/acl-allow-smoke.sh
   tools/real-client/acl-empty-smoke.sh
   tools/real-client/acl-autogroup-self-smoke.sh
@@ -161,6 +164,7 @@ smoke_go_scripts=(
   tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/dns-disabled-headscale-go-smoke.sh
   tools/real-client/prefix-family-ipv4-only-headscale-go-smoke.sh
+  tools/real-client/prefix-family-ipv6-only-headscale-go-smoke.sh
   tools/real-client/acl-allow-headscale-go-smoke.sh
   tools/real-client/acl-empty-headscale-go-smoke.sh
   tools/real-client/acl-autogroup-self-headscale-go-smoke.sh
@@ -188,6 +192,7 @@ smoke_assertions=(
   "custom DNS base domain"
   "MagicDNS disabled fallback names"
   "IPv4-only prefix-family allocation"
+  "IPv6-only prefix-family allocation"
   "allowed peers visible"
   "empty ACL peer visibility edge"
   "autogroup:self peer isolation"

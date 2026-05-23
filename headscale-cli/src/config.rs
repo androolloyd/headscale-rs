@@ -379,21 +379,19 @@ impl CliConfig {
         {
             server.state_dir = state_dir_from_noise_private_key(noise_private_key_path);
         }
-        if let Some(prefix_v4) = self
-            .prefixes
-            .as_ref()
-            .and_then(|prefixes| prefixes.v4.as_ref())
-            && !prefix_v4.trim().is_empty()
-        {
-            server.mesh_cidr.clone_from(prefix_v4);
-        }
-        if let Some(prefix_v6) = self
-            .prefixes
-            .as_ref()
-            .and_then(|prefixes| prefixes.v6.as_ref())
-            && !prefix_v6.trim().is_empty()
-        {
-            server.mesh_cidr_v6 = Some(prefix_v6.clone());
+        if let Some(prefixes) = &self.prefixes {
+            let prefix_v4 = non_empty_clone(prefixes.v4.as_ref());
+            let prefix_v6 = non_empty_clone(prefixes.v6.as_ref());
+            if let Some(prefix_v4) = prefix_v4 {
+                server.mesh_cidr = prefix_v4;
+            } else if prefixes.v4.is_some() || prefix_v6.is_some() {
+                server.mesh_cidr.clear();
+            }
+            if let Some(prefix_v6) = prefix_v6 {
+                server.mesh_cidr_v6 = Some(prefix_v6);
+            } else if prefixes.v6.is_some() {
+                server.mesh_cidr_v6 = None;
+            }
         }
         if let Some(allocation) = self
             .prefixes
@@ -453,6 +451,14 @@ impl CliConfig {
                 "config error, prefixes.allocation is set to {}, which is not a valid strategy, allowed options: sequential, random",
                 server.ip_allocation
             );
+        }
+        if server.mesh_cidr.trim().is_empty()
+            && server
+                .mesh_cidr_v6
+                .as_deref()
+                .is_none_or(|prefix| prefix.trim().is_empty())
+        {
+            bail!("config error, at least one of prefixes.v4 or prefixes.v6 must be set");
         }
 
         if let Some(dns) = &self.dns {
@@ -1086,6 +1092,21 @@ database:
     }
 
     #[test]
+    fn upstream_v6_only_prefix_disables_default_ipv4_prefix() {
+        let source = r#"
+server_url: "https://headscale.example"
+prefixes:
+  v6: "fd7a:115c:a1e0::/48"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let server = config.server.unwrap();
+
+        assert_eq!(server.mesh_cidr, "");
+        assert_eq!(server.mesh_cidr_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
+    }
+
+    #[test]
     fn configtest_accepts_minimal_upstream_yaml() {
         let source = r#"
 noise:
@@ -1118,6 +1139,20 @@ dns:
         assert!(err.contains("prefixes.allocation"));
         assert!(err.contains("sequential"));
         assert!(err.contains("random"));
+    }
+
+    #[test]
+    fn configtest_rejects_config_with_no_prefix_families() {
+        let source = r#"
+server_url: "https://headscale.example"
+prefixes:
+  v4: ""
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err().to_string();
+
+        assert!(err.contains("at least one of prefixes.v4 or prefixes.v6"));
     }
 
     #[test]

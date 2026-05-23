@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc,
@@ -19,14 +19,14 @@ use axum::{
     response::IntoResponse,
     routing::{get, post, put},
 };
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use headscale_api::{
     dns::{DnsConfigSpec, DnsStore},
     policy::{NodeView, PolicyStore, parse_hujson_policy},
     tailscale_wire::{
-        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry,
-        PingTracker, PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey,
-        WireState, derp_config, routes::normalize_routes, serve,
+        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, PingTracker,
+        PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
+        derp_config, routes::normalize_routes, serve,
     },
 };
 use parking_lot::RwLock;
@@ -66,8 +66,22 @@ struct Args {
     policy: Option<PathBuf>,
     #[arg(long, env = "HSRS_HARNESS_BASE_DOMAIN")]
     base_domain: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = IpFamilies::Ipv4Only,
+        env = "HSRS_HARNESS_IP_FAMILIES"
+    )]
+    ip_families: IpFamilies,
     #[arg(long = "authkey", value_name = "KEY=USER")]
     authkeys: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IpFamilies {
+    Ipv4Only,
+    Ipv6Only,
+    DualStack,
 }
 
 #[derive(Clone)]
@@ -129,19 +143,44 @@ impl HarnessRedeemer {
     }
 }
 
-struct HarnessIpAllocator;
+struct HarnessIpAllocator {
+    families: IpFamilies,
+}
 
 impl IpAllocator for HarnessIpAllocator {
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in node_key_hex.as_bytes() {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        let h = stable_hash(node_key_hex);
         let host = ((h as u32) % ((1u32 << 22) - 3)) + 2;
         const CGNAT_BASE: u32 = 0x6440_0000;
         Ok(Ipv4Addr::from((CGNAT_BASE | host).to_be_bytes()))
     }
+
+    fn ipv4_enabled(&self) -> bool {
+        matches!(self.families, IpFamilies::Ipv4Only | IpFamilies::DualStack)
+    }
+
+    fn allocate_ipv6(&self, node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
+        if !matches!(self.families, IpFamilies::Ipv6Only | IpFamilies::DualStack) {
+            return Ok(None);
+        }
+
+        let host = (u128::from(stable_hash(node_key_hex)) % ((1u128 << 80) - 3)) + 2;
+        let addr = 0xfd7a_115c_a1e0_0000_0000_0000_0000_0000u128 | host;
+        Ok(Some(Ipv6Addr::from(addr)))
+    }
+
+    fn ipv6_enabled(&self) -> bool {
+        matches!(self.families, IpFamilies::Ipv6Only | IpFamilies::DualStack)
+    }
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in value.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +216,8 @@ struct MachineSummary {
     user: String,
     hostname: String,
     ipv4: String,
+    ipv6: String,
+    addresses: Vec<String>,
     ephemeral: bool,
     forced_tags: Vec<String>,
     available_routes: Vec<String>,
@@ -261,7 +302,9 @@ async fn main() -> Result<()> {
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(&args.state_dir)?),
         preauth: redeemer.clone(),
-        ip_allocator: Arc::new(HarnessIpAllocator),
+        ip_allocator: Arc::new(HarnessIpAllocator {
+            families: args.ip_families,
+        }),
         machines: machines.clone(),
         registration_store: None,
         derp_map,
@@ -491,7 +534,15 @@ fn machine_summary(machine: &MachineRecord) -> MachineSummary {
         },
         user: machine.user.clone(),
         hostname: machine.hostname.clone(),
-        ipv4: machine.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
+        ipv4: machine
+            .ipv4
+            .map(|addr| addr.to_string())
+            .unwrap_or_default(),
+        ipv6: machine
+            .ipv6
+            .map(|addr| addr.to_string())
+            .unwrap_or_default(),
+        addresses: machine.address_strings(),
         ephemeral: machine.ephemeral,
         forced_tags: machine.forced_tags.clone(),
         available_routes: machine.available_routes.clone(),

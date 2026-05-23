@@ -77,7 +77,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     );
     tracing::info!("  Database: {}", cfg.db_path.display());
     tracing::info!("  State dir: {}", cfg.state_dir.display());
-    tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
+    if cfg.mesh_cidr.trim().is_empty() {
+        tracing::info!("  IPv4 prefix: <disabled>");
+    } else {
+        tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
+    }
     if let Some(mesh_cidr_v6) = &cfg.mesh_cidr_v6 {
         tracing::info!("  IPv6 prefix: {}", mesh_cidr_v6);
     }
@@ -675,7 +679,7 @@ impl IpAllocationStrategy {
 }
 
 struct CidrIpAllocator {
-    ipv4: Mutex<IpFamilyAllocator>,
+    ipv4: Option<Mutex<IpFamilyAllocator>>,
     ipv6: Option<Mutex<IpFamilyAllocator>>,
     strategy: IpAllocationStrategy,
 }
@@ -720,49 +724,30 @@ impl CidrIpAllocator {
         cidr_v6: Option<&str>,
         strategy: IpAllocationStrategy,
     ) -> Result<Self> {
-        let (addr, prefix) = cidr
-            .split_once('/')
-            .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
-        let addr: Ipv4Addr = addr
-            .parse()
-            .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid IPv4 address"))?;
-        let prefix: u8 = prefix
-            .parse()
-            .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid prefix length"))?;
-        if prefix > 32 {
-            anyhow::bail!("invalid server.mesh_cidr {cidr:?}: prefix length must be <= 32");
-        }
-
-        let host_bits = 32u32 - u32::from(prefix);
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << host_bits
-        };
-        let network = u32::from(addr) & mask;
-        let end = network | !mask;
-        if end.saturating_sub(network) < 2 {
-            anyhow::bail!(
-                "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
-            );
+        let ipv4 = (!cidr.trim().is_empty())
+            .then(|| parse_ipv4_cidr(cidr))
+            .transpose()?;
+        let ipv6 = cidr_v6
+            .filter(|cidr| !cidr.trim().is_empty())
+            .map(parse_ipv6_cidr)
+            .transpose()?;
+        if ipv4.is_none() && ipv6.is_none() {
+            anyhow::bail!("config error, at least one of prefixes.v4 or prefixes.v6 must be set");
         }
 
         Ok(Self {
-            ipv4: Mutex::new(IpFamilyAllocator::new(u128::from(network), u128::from(end))),
-            ipv6: cidr_v6
-                .filter(|cidr| !cidr.trim().is_empty())
-                .map(parse_ipv6_cidr)
-                .transpose()?,
+            ipv4,
+            ipv6,
             strategy,
         })
     }
 
     fn seed_existing(&self, ipv4: Option<&str>, ipv6: Option<&str>) -> Result<()> {
-        if let Some(ipv4) = ipv4.filter(|value| !value.is_empty()) {
+        if let (Some(state), Some(ipv4)) = (&self.ipv4, ipv4.filter(|value| !value.is_empty())) {
             let ip: Ipv4Addr = ipv4
                 .parse()
                 .with_context(|| format!("parsing IPv4 address from database: {ipv4}"))?;
-            self.ipv4
+            state
                 .lock()
                 .expect("IPv4 allocator lock poisoned")
                 .used
@@ -782,6 +767,40 @@ impl CidrIpAllocator {
         }
         Ok(())
     }
+}
+
+fn parse_ipv4_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
+    let (addr, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
+    let addr: Ipv4Addr = addr
+        .parse()
+        .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid IPv4 address"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid prefix length"))?;
+    if prefix > 32 {
+        anyhow::bail!("invalid server.mesh_cidr {cidr:?}: prefix length must be <= 32");
+    }
+
+    let host_bits = 32u32 - u32::from(prefix);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << host_bits
+    };
+    let network = u32::from(addr) & mask;
+    let end = network | !mask;
+    if end.saturating_sub(network) < 2 {
+        anyhow::bail!(
+            "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
+        );
+    }
+
+    Ok(Mutex::new(IpFamilyAllocator::new(
+        u128::from(network),
+        u128::from(end),
+    )))
 }
 
 fn parse_ipv6_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
@@ -889,8 +908,12 @@ impl IpFamilyAllocator {
 impl IpAllocator for CidrIpAllocator {
     fn allocate(&self, node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
         let _ = node_key_hex;
-        let value = self
-            .ipv4
+        let Some(ipv4) = &self.ipv4 else {
+            return Err(AllocError::Internal(
+                "IPv4 allocation requested while IPv4 is disabled".into(),
+            ));
+        };
+        let value = ipv4
             .lock()
             .expect("IPv4 allocator lock poisoned")
             .allocate(self.strategy, |candidate| {
@@ -900,7 +923,7 @@ impl IpAllocator for CidrIpAllocator {
     }
 
     fn ipv4_enabled(&self) -> bool {
-        true
+        self.ipv4.is_some()
     }
 
     fn allocate_ipv6(
@@ -1646,6 +1669,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_wire_runtime_accepts_ipv6_only_prefix() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let runtime = build_persistent_wire_runtime_with_dns(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "",
+            Some("fd7a:115c:a1e0::/126"),
+            "sequential",
+            None,
+            DerpMap::default(),
+            Arc::new(DnsStore::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(!runtime.state.ip_allocator.ipv4_enabled());
+        assert!(runtime.state.ip_allocator.ipv6_enabled());
+        assert_eq!(
+            runtime
+                .state
+                .ip_allocator
+                .allocate_ipv6("new-node")
+                .unwrap(),
+            Some("fd7a:115c:a1e0::1".parse().unwrap())
+        );
+        assert!(matches!(
+            runtime.state.ip_allocator.allocate("new-node"),
+            Err(AllocError::Internal(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn persistent_wire_runtime_loads_latest_sqlite_policy() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
@@ -1717,6 +1776,22 @@ mod tests {
     }
 
     #[test]
+    fn cidr_allocator_supports_ipv6_only_prefix() {
+        let allocator = CidrIpAllocator::from_cidrs("", Some("fd7a:115c:a1e0::/126")).unwrap();
+
+        assert!(!allocator.ipv4_enabled());
+        assert!(allocator.ipv6_enabled());
+        assert!(matches!(
+            allocator.allocate("node-key"),
+            Err(AllocError::Internal(_))
+        ));
+        assert_eq!(
+            allocator.allocate_ipv6("node-key").unwrap(),
+            Some("fd7a:115c:a1e0::1".parse().unwrap())
+        );
+    }
+
+    #[test]
     fn cidr_allocator_sequential_skips_database_seeded_ips() {
         let allocator =
             CidrIpAllocator::from_cidrs("100.64.0.0/30", Some("fd7a:115c:a1e0::/126")).unwrap();
@@ -1772,6 +1847,7 @@ mod tests {
     fn cidr_allocator_rejects_invalid_or_tiny_prefixes() {
         assert!(CidrIpAllocator::from_cidr("not-a-cidr").is_err());
         assert!(CidrIpAllocator::from_cidr("100.64.0.0/32").is_err());
+        assert!(CidrIpAllocator::from_cidrs("", None).is_err());
         assert!(CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("not-a-cidr")).is_err());
         assert!(
             CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("fd7a:115c:a1e0::/128")).is_err()

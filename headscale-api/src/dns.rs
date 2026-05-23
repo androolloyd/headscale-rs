@@ -4,7 +4,7 @@
 //! before this module shipped, `MapResponse.DNSConfig` was an empty
 //! object, so stock `tailscale up` never installed its in-process
 //! MagicDNS resolver and `ssh peer-1` couldn't resolve peer hostnames
-//! to `100.64.x.x` tailnet addresses.
+//! from the netmap.
 //!
 //! ## What we mirror from upstream Go
 //!
@@ -36,16 +36,15 @@
 //! `notify_waiters()` so parked `/map` long-pollers wake and emit a
 //! refreshed `MapResponse`.
 //!
-//! ## Hostname-collision handling
+//! ## MagicDNS host records
 //!
-//! Two MachineRecords can advertise the same hostname (the client
-//! controls it; nothing enforces uniqueness on register). When we
-//! emit MagicDNS A records, the second collision gets a `-<n{id}>`
-//! suffix appended before the base domain (e.g. `peer-1.headscale.test`
-//! -> `peer-1-n42.headscale.test`). The first-seen hostname keeps the
-//! collision-free name; ordering is stable because we iterate the
-//! registry by sorted node-id. This is deterministic and matches what
-//! `juanfont/headscale` does in its `normalizeToFQDNRules` path.
+//! Headscale-go does not synthesize per-node `DNSConfig.ExtraRecords`.
+//! Peer names come from `MapNode.Name` plus `MapResponse.Domain`, and
+//! `ExtraRecords` stays limited to operator-supplied A/AAAA/CNAME
+//! records. Keeping those surfaces separate matters for live clients:
+//! `tailscale debug netmap` should show only configured extra records
+//! under `DNS.ExtraRecords`, while peers remain visible through the
+//! normal node list.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -438,8 +437,8 @@ pub struct MachineDnsRecord {
     pub hostname: String,
     pub ipv4: Option<Ipv4Addr>,
     pub ipv6: Option<Ipv6Addr>,
-    /// Stable per-tailnet node ID. Used as the collision-suffix when
-    /// two machines advertise the same hostname.
+    /// Stable per-tailnet node ID. Kept for compatibility with older
+    /// helper code that materializes synthetic records.
     pub node_id: u64,
 }
 
@@ -603,16 +602,16 @@ impl std::fmt::Debug for DnsStore {
 /// | `FallbackResolvers`         | `spec.nameservers` when `override_local_dns` is false, plus `fallback_nameservers` |
 /// | `Domains`                   | `[base_domain] ++ spec.search_domains` when base is set |
 /// | `Proxied`                   | `spec.magic_dns && base_domain is set`    |
-/// | `ExtraRecords`              | `extra` ++ MagicDNS A records when base is set |
+/// | `ExtraRecords`              | `extra` only (operator-supplied records) |
 /// | `ExitNodeFilteredSet`       | `spec.exit_node_filtered_set`             |
-/// | `AuthoritativeSuffixes`     | `spec.authoritative_suffixes` OR derived |
+/// | `AuthoritativeSuffixes`     | `spec.authoritative_suffixes`, when explicitly set |
 ///
-/// `Nameservers` / `CertDomains` are left empty — they're either
-/// deprecated (Nameservers) or out-of-scope for the P1 deliverable
-/// (CertDomains; we don't run an HTTPS MagicDNS endpoint yet).
+/// `Nameservers` / `CertDomains` are left empty by the runtime builder:
+/// the former is deprecated, and headscale-go v0.28 does not synthesize
+/// client certificate domains from the control-plane HTTPS listener.
 pub fn build_dns_config(
     spec: &DnsConfigSpec,
-    machines: &[MachineDnsRecord],
+    _machines: &[MachineDnsRecord],
     extra: &[DnsRecord],
 ) -> DnsConfig {
     let base_domain = normalise_domain(&spec.base_domain);
@@ -647,19 +646,10 @@ pub fn build_dns_config(
         }
     }
 
-    let magic_records = if magic_dns_enabled {
-        magic_dns_records(&base_domain, machines)
-    } else {
-        Vec::new()
-    };
-    let mut combined: Vec<DnsRecord> = Vec::with_capacity(extra.len() + magic_records.len());
-    combined.extend_from_slice(extra);
-    combined.extend(magic_records);
-
-    let authoritative = spec.authoritative_suffixes.as_ref().map_or_else(
-        || derive_authoritative_suffixes(spec),
-        |suffixes| normalise_domain_list(suffixes),
-    );
+    let authoritative = spec
+        .authoritative_suffixes
+        .as_ref()
+        .map_or_else(Vec::new, |suffixes| normalise_domain_list(suffixes));
 
     DnsConfig {
         resolvers,
@@ -669,7 +659,7 @@ pub fn build_dns_config(
         proxied: magic_dns_enabled,
         nameservers: Vec::new(),
         cert_domains: Vec::new(),
-        extra_records: combined,
+        extra_records: extra.to_vec(),
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
         temp_corp_issue_13969: String::new(),
         authoritative_suffixes: authoritative,
@@ -759,35 +749,14 @@ fn normalise_domain_list(input: &[String]) -> Vec<String> {
     out
 }
 
-/// Default authoritative-suffix list — the base domain plus every
-/// split-DNS suffix the operator has restricted. Operators can
-/// override this via `[dns].authoritative_suffixes` in node.toml.
-fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
-    let mut keys = std::collections::BTreeSet::new();
-    keys.extend(spec.restricted_nameservers.keys());
-    keys.extend(spec.restricted_resolvers.keys());
-
-    let mut out = Vec::with_capacity(1 + keys.len());
-    let mut seen = HashSet::new();
-    let base_domain = normalise_domain(&spec.base_domain);
-    if !base_domain.is_empty() {
-        seen.insert(base_domain.clone());
-        out.push(base_domain);
-    }
-    // Sorted for determinism — HashMap iteration order is otherwise
-    // non-deterministic and our tests would flake.
-    for suffix in keys {
-        let suffix = normalise_domain(suffix);
-        if !suffix.is_empty() && seen.insert(suffix.clone()) {
-            out.push(suffix);
-        }
-    }
-    out
-}
-
 /// Generate the per-machine A/AAAA records that make `ssh peer-1` work.
 ///
-/// Each record is `<hostname>.<base_domain> → node addresses`. The
+/// This helper is retained for compatibility with embedders that used
+/// the old synthetic-record API. Runtime `DNSConfig` parity with
+/// headscale-go does not use it; peer MagicDNS names come from
+/// `MapNode.Name` and `MapResponse.Domain`.
+///
+/// Each record is `<hostname>.<base_domain>` to node addresses. The
 /// hostname is normalised (lowercased, ASCII-only, dot-stripped) so
 /// DNS labels stay legal even if the client advertised a quirky name.
 ///
@@ -1073,33 +1042,38 @@ mod tests {
         let cfg = store.build(&[]);
         assert!(cfg.proxied);
         assert_eq!(cfg.domains, vec!["headscale.test".to_string()]);
-        // Default authoritative-suffix list contains the base domain.
-        assert!(
-            cfg.authoritative_suffixes
-                .contains(&"headscale.test".to_string())
-        );
+        assert!(cfg.authoritative_suffixes.is_empty());
     }
 
     #[test]
-    fn magic_dns_records_emit_per_machine_a_records() {
+    fn dnsconfig_extra_records_are_operator_supplied_only() {
         let machines = [machine("peer-1", 11, 1), machine("peer-2", 22, 2)];
         let store = DnsStore::from_spec(magic_spec());
+        store.set_extra_records(vec![record("ops.headscale.test", "A", "100.64.0.50")]);
         let cfg = store.build(&machines);
-        assert_eq!(cfg.extra_records.len(), 2);
-        assert!(
-            cfg.extra_records
-                .iter()
-                .any(|r| r.name == "peer-1.headscale.test" && r.value == "100.64.0.11")
+
+        assert_eq!(
+            cfg.extra_records,
+            vec![record("ops.headscale.test", "A", "100.64.0.50")]
         );
         assert!(
-            cfg.extra_records
+            !cfg.extra_records
                 .iter()
-                .any(|r| r.name == "peer-2.headscale.test" && r.value == "100.64.0.22")
+                .any(|r| r.name.starts_with("peer-"))
         );
     }
 
     #[test]
-    fn magic_dns_records_emit_aaaa_for_ipv6_only_machine() {
+    fn synthetic_magic_dns_record_helper_emits_per_machine_a_records() {
+        let machines = [machine("peer-1", 11, 1), machine("peer-2", 22, 2)];
+        let records = magic_dns_records("headscale.test", &machines);
+        assert_eq!(records.len(), 2);
+        assert!(records.contains(&record("peer-1.headscale.test", "A", "100.64.0.11")));
+        assert!(records.contains(&record("peer-2.headscale.test", "A", "100.64.0.22")));
+    }
+
+    #[test]
+    fn synthetic_magic_dns_record_helper_emits_aaaa_for_ipv6_only_machine() {
         let machines = [MachineDnsRecord {
             hostname: "v6-only".into(),
             ipv4: None,
@@ -1107,16 +1081,16 @@ mod tests {
             node_id: 66,
         }];
 
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
+        let records = magic_dns_records("headscale.test", &machines);
 
-        assert_eq!(cfg.extra_records.len(), 1);
-        assert_eq!(cfg.extra_records[0].name, "v6-only.headscale.test");
-        assert_eq!(cfg.extra_records[0].record_type, "AAAA");
-        assert_eq!(cfg.extra_records[0].value, "fd7a:115c:a1e0::66");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "v6-only.headscale.test");
+        assert_eq!(records[0].record_type, "AAAA");
+        assert_eq!(records[0].value, "fd7a:115c:a1e0::66");
     }
 
     #[test]
-    fn magic_dns_records_follow_prefix_family_presence() {
+    fn synthetic_magic_dns_record_helper_follows_prefix_family_presence() {
         let machines = [
             MachineDnsRecord {
                 hostname: "v4-only".into(),
@@ -1138,33 +1112,23 @@ mod tests {
             },
         ];
 
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
+        let records = magic_dns_records("headscale.test", &machines);
 
-        assert!(
-            cfg.extra_records
-                .contains(&record("v4-only.headscale.test", "A", "100.64.0.4",))
-        );
-        assert!(cfg.extra_records.contains(&record(
+        assert!(records.contains(&record("v4-only.headscale.test", "A", "100.64.0.4",)));
+        assert!(records.contains(&record(
             "v6-only.headscale.test",
             "AAAA",
             "fd7a:115c:a1e0::6",
         )));
+        assert!(records.contains(&record("dual.headscale.test", "A", "100.64.0.46")));
+        assert!(records.contains(&record("dual.headscale.test", "AAAA", "fd7a:115c:a1e0::46",)));
         assert!(
-            cfg.extra_records
-                .contains(&record("dual.headscale.test", "A", "100.64.0.46"))
-        );
-        assert!(cfg.extra_records.contains(&record(
-            "dual.headscale.test",
-            "AAAA",
-            "fd7a:115c:a1e0::46",
-        )));
-        assert!(
-            !cfg.extra_records
+            !records
                 .iter()
                 .any(|r| r.name == "v4-only.headscale.test" && r.record_type == "AAAA")
         );
         assert!(
-            !cfg.extra_records
+            !records
                 .iter()
                 .any(|r| r.name == "v6-only.headscale.test" && r.record_type == "A")
         );
@@ -1176,8 +1140,10 @@ mod tests {
             machine("dup", 11, 42), // higher id ⇒ collision-suffixed
             machine("dup", 22, 7),  // lower id ⇒ keeps canonical name
         ];
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
-        let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
+        let names: Vec<String> = magic_dns_records("headscale.test", &machines)
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
         assert!(names.contains(&"dup.headscale.test".to_string()));
         assert!(names.contains(&"dup-n42.headscale.test".to_string()));
     }
@@ -1189,8 +1155,10 @@ mod tests {
             machine("dup", 22, 200),
             machine("dup", 33, 50),
         ];
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
-        let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
+        let names: Vec<String> = magic_dns_records("headscale.test", &machines)
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
         assert!(names.contains(&"dup.headscale.test".to_string()));
         assert!(names.contains(&"dup-n100.headscale.test".to_string()));
         assert!(names.contains(&"dup-n200.headscale.test".to_string()));
@@ -1224,10 +1192,8 @@ mod tests {
                 node_id: 2,
             },
         ];
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
-        let collision = cfg
-            .extra_records
-            .iter()
+        let collision = magic_dns_records("headscale.test", &machines)
+            .into_iter()
             .find(|record| record.value == "100.64.0.2")
             .expect("collision record")
             .name
@@ -1247,9 +1213,9 @@ mod tests {
             ipv6: None,
             node_id: 99,
         }];
-        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
-        assert_eq!(cfg.extra_records.len(), 1);
-        assert_eq!(cfg.extra_records[0].name, "n99.headscale.test");
+        let records = magic_dns_records("headscale.test", &machines);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "n99.headscale.test");
     }
 
     #[test]
@@ -1271,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_suffixes_default_includes_base_and_split_keys() {
+    fn authoritative_suffixes_default_empty_for_headscale_go_wire_parity() {
         let mut restricted = HashMap::new();
         restricted.insert("corp.internal".to_string(), vec!["10.0.0.1".to_string()]);
         restricted.insert("ops.internal".to_string(), vec!["10.0.0.2".to_string()]);
@@ -1280,21 +1246,11 @@ mod tests {
             ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
-        // base_domain + 2 suffixes, sorted (deterministic).
-        assert_eq!(cfg.authoritative_suffixes.len(), 3);
-        assert_eq!(cfg.authoritative_suffixes[0], "headscale.test");
-        assert!(
-            cfg.authoritative_suffixes
-                .contains(&"corp.internal".to_string())
-        );
-        assert!(
-            cfg.authoritative_suffixes
-                .contains(&"ops.internal".to_string())
-        );
+        assert!(cfg.authoritative_suffixes.is_empty());
     }
 
     #[test]
-    fn authoritative_suffixes_override_replaces_default() {
+    fn authoritative_suffixes_override_is_emitted() {
         let spec = DnsConfigSpec {
             authoritative_suffixes: Some(vec!["only.this".to_string()]),
             ..magic_spec()
@@ -1456,13 +1412,7 @@ mod tests {
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert!(!cfg.proxied);
-        // Authoritative suffixes are still derived from base_domain
-        // even when MagicDNS is off — they're an independent operator
-        // signal ("don't ask upstream for these names").
-        assert!(
-            cfg.authoritative_suffixes
-                .contains(&"headscale.test".to_string())
-        );
+        assert!(cfg.authoritative_suffixes.is_empty());
     }
 
     #[test]
@@ -1506,10 +1456,7 @@ mod tests {
 
         assert_eq!(cfg.domains, vec!["headscale.test", "corp.example"]);
         assert!(cfg.routes.contains_key("corp.internal"));
-        assert_eq!(
-            cfg.authoritative_suffixes,
-            vec!["headscale.test", "corp.internal"]
-        );
+        assert!(cfg.authoritative_suffixes.is_empty());
         assert!(cfg.proxied);
     }
 

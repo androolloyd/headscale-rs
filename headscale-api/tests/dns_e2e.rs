@@ -48,7 +48,7 @@ fn write_records(path: &std::path::Path, records: &[(&str, &str, &str)]) {
 }
 
 #[test]
-fn build_dns_config_emits_magic_a_records_per_machine() {
+fn build_dns_config_keeps_extra_records_operator_supplied_only() {
     let spec = magic_spec();
     let machines = [
         MachineDnsRecord {
@@ -64,10 +64,13 @@ fn build_dns_config_emits_magic_a_records_per_machine() {
             node_id: 2,
         },
     ];
-    let cfg = build_dns_config(&spec, &machines, &[]);
-    let names: Vec<String> = cfg.extra_records.iter().map(|r| r.name.clone()).collect();
-    assert!(names.contains(&"peer-1.headscale.test".to_string()));
-    assert!(names.contains(&"peer-2.headscale.test".to_string()));
+    let extra = [DnsRecord {
+        name: "ops.headscale.test".into(),
+        record_type: "A".into(),
+        value: "100.64.0.50".into(),
+    }];
+    let cfg = build_dns_config(&spec, &machines, &extra);
+    assert_eq!(cfg.extra_records, extra);
 }
 
 #[test]
@@ -306,14 +309,11 @@ fn collision_handling_is_stable_under_node_id_reorder() {
     a_names.sort();
     b_names.sort();
     assert_eq!(a_names, b_names);
-    // And the lowest node_id keeps the canonical name regardless of
-    // input order.
-    assert!(a_names.contains(&"dup.headscale.test".to_string()));
-    assert!(a_names.contains(&"dup-n42.headscale.test".to_string()));
+    assert!(a_names.is_empty());
 }
 
 #[test]
-fn extra_records_combined_with_magic_dns_records() {
+fn extra_records_are_not_combined_with_magic_dns_records() {
     let spec = magic_spec();
     let extra = [DnsRecord {
         name: "ops.example.org".into(),
@@ -327,18 +327,7 @@ fn extra_records_combined_with_magic_dns_records() {
         node_id: 100,
     }];
     let cfg = build_dns_config(&spec, &machines, &extra);
-    // Both the operator-supplied record AND the MagicDNS record land.
-    assert_eq!(cfg.extra_records.len(), 2);
-    assert!(
-        cfg.extra_records
-            .iter()
-            .any(|r| r.name == "ops.example.org")
-    );
-    assert!(
-        cfg.extra_records
-            .iter()
-            .any(|r| r.name == "peer-a.headscale.test")
-    );
+    assert_eq!(cfg.extra_records, extra);
 }
 
 #[test]

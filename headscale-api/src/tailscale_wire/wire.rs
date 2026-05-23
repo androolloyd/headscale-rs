@@ -1459,13 +1459,12 @@ pub struct MapNode {
 /// the JSON body. The empty default (all fields zero/empty) serialises
 /// to `{}` and is byte-identical to the pre-MagicDNS shape.
 ///
-/// Field set verified against
-/// `tailscale/tailcfg/tailcfg.go::DNSConfig` at upstream `main` as of
+/// Field set verified against `tailscale/tailcfg/tailcfg.go::DNSConfig`.
 /// `AuthoritativeSuffixes` is **non-stock**: a headscale-rs operator
 /// extension allowing embedders to assert "the control plane is
 /// authoritative for these suffixes; do not ask the upstream
 /// resolver." Stock clients ignore unknown fields, so emitting it is
-/// safe; servers that don't set it never emit it.
+/// safe; the runtime builder only emits it when explicitly configured.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct DnsConfig {

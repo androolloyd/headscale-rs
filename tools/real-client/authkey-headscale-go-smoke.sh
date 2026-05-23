@@ -44,6 +44,7 @@ dns_split_nameservers_json="${REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON:-}"
 dns_fallback_nameservers_json="${REAL_CLIENT_DNS_FALLBACK_NAMESERVERS_JSON:-}"
 dns_override_local="${REAL_CLIENT_DNS_OVERRIDE_LOCAL:-}"
 expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
+expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
@@ -661,6 +662,49 @@ assert_dns_extra_record() {
       abort("expected DNS extra record #{want}, got #{records.inspect}") unless match
       puts JSON.pretty_generate(records)
     ' "${netmap_path}" "${host}" "${expected}" "${expected_type}" >"${output_path}"
+}
+
+assert_dns_extra_records_exact() {
+  local client_name="$1"
+  local expected_spec="$2"
+  local output_path="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      def parse_expectations(spec)
+        spec.split(",").reject(&:empty?).map do |entry|
+          host, expected = entry.split("=", 2)
+          abort("expected DNS extra record entry host=value, got #{entry.inspect}") if host.to_s.empty? || expected.to_s.empty?
+          type = ""
+          if expected =~ /\A(A|AAAA|CNAME):(.*)\z/
+            type = Regexp.last_match(1)
+            expected = Regexp.last_match(2)
+          end
+          [host.sub(/\.\z/, ""), type, expected]
+        end
+      end
+
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected = parse_expectations(ARGV.fetch(1))
+      records = Array(netmap.dig("DNS", "ExtraRecords")).map do |record|
+        [
+          (record["Name"] || record["name"]).to_s.sub(/\.\z/, ""),
+          (record["Type"] || record["type"]).to_s,
+          (record["Value"] || record["value"]).to_s,
+          record,
+        ]
+      end
+      unmatched = records.dup
+      expected.each do |host, type, value|
+        idx = unmatched.index do |name, record_type, record_value, _|
+          name == host && record_value == value && (type.empty? || record_type == type)
+        end
+        abort("expected DNS extra record #{host}=#{type.empty? ? value : "#{type}:#{value}"}, got #{records.map(&:last).inspect}") unless idx
+        unmatched.delete_at(idx)
+      end
+      abort("unexpected DNS extra records #{unmatched.map(&:last).inspect}; expected #{expected.inspect}") unless unmatched.empty?
+      puts JSON.pretty_generate(records.map(&:last))
+    ' "${netmap_path}" "${expected_spec}" >"${output_path}"
 }
 
 assert_dns_resolver_list() {
@@ -1566,6 +1610,21 @@ if [[ -n "${expected_dns_extra_records}" ]]; then
       }
     cat "${work_dir}/dns-${safe_host}.json"
   done
+  case "${expected_dns_extra_records_exact}" in
+    true)
+      wait_for "exact DNS extra records" \
+        "assert_dns_extra_records_exact '${resolver_client}' '${expected_dns_extra_records}' '${work_dir}/dns-extra-records-exact.json'" || {
+          dump_client_debug "${resolver_client}"
+          exit 1
+        }
+      cat "${work_dir}/dns-extra-records-exact.json"
+      ;;
+    false | "") ;;
+    *)
+      echo "REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT must be true or false, got ${expected_dns_extra_records_exact}" >&2
+      exit 2
+      ;;
+  esac
   echo "::endgroup::"
 fi
 

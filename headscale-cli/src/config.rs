@@ -12,6 +12,10 @@ use crate::derp_config::DerpConfig;
 
 const DEFAULT_CONFIG_FILENAMES: &[&str] =
     &["config.yaml", "config.yml", "config.json", "config.toml"];
+const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
+const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
+const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -765,6 +769,9 @@ impl CliConfig {
         if let Some(derp) = &mut self.derp {
             resolve_path(config_dir, &mut derp.server.private_key_path);
         }
+        if let Some(dns) = &mut self.dns {
+            resolve_optional_path(config_dir, &mut dns.extra_records_path);
+        }
         if let Some(server) = &mut self.server {
             resolve_path(config_dir, &mut server.db_path);
             resolve_path(config_dir, &mut server.state_dir);
@@ -804,9 +811,7 @@ impl CliConfig {
             .context(
                 "server.server_url is required so clients receive absolute registration URLs",
             )?;
-        if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
-            bail!("server.server_url must start with https:// or http://");
-        }
+        parse_server_url_parts(server_url)?;
         if server.ephemeral_node_inactivity_timeout_secs <= 65 {
             bail!(
                 "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 65s",
@@ -971,19 +976,34 @@ impl CliConfig {
                 .tls_letsencrypt_challenge_type
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or("HTTP-01");
+                .unwrap_or(DEFAULT_LETSENCRYPT_CHALLENGE_TYPE);
             let listen = self
                 .tls_letsencrypt_listen
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or(":http");
+                .unwrap_or(DEFAULT_LETSENCRYPT_LISTEN);
             let acme_url = self
                 .acme_url
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or("https://acme-v02.api.letsencrypt.org/directory");
+                .unwrap_or(DEFAULT_ACME_URL);
+            let cache_dir = self
+                .tls_letsencrypt_cache_dir
+                .as_ref()
+                .filter(|value| !value.as_os_str().is_empty())
+                .map_or_else(
+                    || DEFAULT_LETSENCRYPT_CACHE_DIR.to_string(),
+                    |path| path.display().to_string(),
+                );
+            let challenge_context = match challenge {
+                "HTTP-01" => {
+                    format!("HTTP-01 challenge listener {listen}")
+                }
+                "TLS-ALPN-01" => "TLS-ALPN-01 on the public TLS listener".to_string(),
+                other => format!("challenge {other} with challenge listener {listen}"),
+            };
             bail!(
-                "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured challenge {challenge} would require ACME certificate issuance using acme_url {acme_url} and challenge listener {listen}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs."
+                "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {challenge_context} would require ACME certificate issuance using acme_url {acme_url} and cache_dir {cache_dir}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs."
             );
         }
 
@@ -1175,38 +1195,44 @@ fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerUrlParts {
+    host: String,
+    port: u16,
+}
+
+fn parse_server_url_parts(raw: &str) -> Result<ServerUrlParts> {
+    let raw = raw.trim();
+    if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        bail!("server.server_url must start with https:// or http://");
+    }
+
+    let parsed = url::Url::parse(raw)
+        .with_context(|| format!("server.server_url must be a valid URL: {raw:?}"))?;
+    let host = parsed
+        .host()
+        .map(|host| match host {
+            url::Host::Domain(domain) => domain.to_string(),
+            url::Host::Ipv4(addr) => addr.to_string(),
+            url::Host::Ipv6(addr) => addr.to_string(),
+        })
+        .filter(|host| !host.trim().is_empty())
+        .with_context(|| format!("server.server_url must include a host: {raw:?}"))?;
+    let port = parsed
+        .port_or_known_default()
+        .with_context(|| format!("server.server_url must include a valid port: {raw:?}"))?;
+
+    Ok(ServerUrlParts { host, port })
+}
+
+pub(crate) fn server_url_hostname(raw: &str) -> Option<String> {
+    parse_server_url_parts(raw).ok().map(|parts| parts.host)
+}
+
 fn host_port_from_url(url: &str) -> Option<(String, u16)> {
-    let default_port = if url.starts_with("https://") {
-        443
-    } else if url.starts_with("http://") {
-        80
-    } else {
-        return None;
-    };
-    let after_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host)
-        .trim();
-    let (host, port) = if let Some(bracketed) = host.strip_prefix('[') {
-        let (addr, rest) = bracketed.split_once(']')?;
-        let port = rest
-            .strip_prefix(':')
-            .and_then(|port| port.parse().ok())
-            .unwrap_or(default_port);
-        (addr, port)
-    } else {
-        let (host, port) = host
-            .split_once(':')
-            .map_or((host, default_port), |(host, port)| {
-                (host, port.parse().unwrap_or(default_port))
-            });
-        (host, port)
-    };
-    (!host.is_empty()).then(|| (host.to_string(), port))
+    parse_server_url_parts(url)
+        .ok()
+        .map(|parts| (parts.host, parts.port))
 }
 
 #[derive(Clone, Copy)]
@@ -2392,7 +2418,26 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         );
         let err = config.validate_for_configtest().unwrap_err();
         assert!(format!("{err:#}").contains("ACME TLS is not implemented"));
-        assert!(format!("{err:#}").contains("TLS-ALPN-01"));
+        assert!(format!("{err:#}").contains("TLS-ALPN-01 on the public TLS listener"));
+        assert!(format!("{err:#}").contains("cache_dir /var/lib/headscale/cache"));
+    }
+
+    #[test]
+    fn configtest_reports_http01_acme_cache_and_listener_context() {
+        let source = r#"
+server_url: "https://headscale.example"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: "/var/lib/headscale/acme-cache"
+tls_letsencrypt_listen: ":http"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("HTTP-01 challenge listener :http"));
+        assert!(err.contains("cache_dir /var/lib/headscale/acme-cache"));
     }
 
     #[test]
@@ -2500,7 +2545,7 @@ dns:
         assert_eq!(derp.paths, [PathBuf::from("derp/map.yaml")]);
         assert_eq!(
             dns.extra_records_path.as_deref(),
-            Some(Path::new("dns/extra-records.json"))
+            Some(dir.path().join("dns/extra-records.json").as_path())
         );
     }
 
@@ -2868,6 +2913,37 @@ enabled = true
 
         assert_eq!(embedded.host_name, "headscale.example");
         assert_eq!(embedded.derp_port, 80);
+    }
+
+    #[test]
+    fn upstream_derp_derives_server_url_ipv6_and_ignores_userinfo() {
+        let source = r#"
+server_url = "https://user:pass@[2001:db8::1]:8443"
+
+[derp.server]
+enabled = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert_eq!(embedded.host_name, "2001:db8::1");
+        assert_eq!(embedded.derp_port, 8443);
+    }
+
+    #[test]
+    fn configtest_rejects_bad_server_url_port_before_derp_startup() {
+        let source = r#"
+server_url = "https://headscale.example:notaport"
+
+[derp.server]
+enabled = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("server.server_url must be a valid URL"));
     }
 
     #[test]

@@ -42,7 +42,7 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
-use crate::config::{PolicyConfig, TuningConfig, UpstreamDatabaseConfig};
+use crate::config::{PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname};
 use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
@@ -149,11 +149,23 @@ impl TlsRuntimeConfig {
     }
 
     fn unsupported_acme_message(&self) -> String {
+        let challenge = self.challenge_type_string();
+        let challenge_context = match challenge.as_str() {
+            "HTTP-01" => format!(
+                "HTTP-01 challenge listener {}",
+                self.letsencrypt_listen_string()
+            ),
+            "TLS-ALPN-01" => "TLS-ALPN-01 on the public TLS listener".to_string(),
+            other => format!(
+                "challenge {other} with challenge listener {}",
+                self.letsencrypt_listen_string()
+            ),
+        };
         format!(
-            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured challenge {} would require ACME certificate issuance using acme_url {} and challenge listener {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
-            self.challenge_type_string(),
+            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {} would require ACME certificate issuance using acme_url {} and cache_dir {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
+            challenge_context,
             self.acme_url_string(),
-            self.letsencrypt_listen_string()
+            self.cache_dir_string()
         )
     }
 }
@@ -1343,15 +1355,7 @@ async fn await_optional_anyhow_task_result(
 }
 
 fn hostname_from_server_url(server_url: &str) -> String {
-    server_url
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split(['/', ':'])
-        .next()
-        .filter(|host| !host.is_empty())
-        .unwrap_or("headscale-rs")
-        .to_string()
+    server_url_hostname(server_url).unwrap_or_else(|| "headscale-rs".to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2440,13 +2444,15 @@ regions:
             dns.routes["corp.example.org"][0].addr,
             "10.0.0.53".to_string()
         );
+        assert!(dns.cert_domains.is_empty());
+        assert_eq!(dns.extra_records.len(), 1);
         assert!(
             dns.extra_records
                 .iter()
                 .any(|record| record.name == "ops.tail.example.org")
         );
         assert!(
-            dns.extra_records
+            !dns.extra_records
                 .iter()
                 .any(|record| record.name == "peer-b.tail.example.org")
         );
@@ -2827,12 +2833,18 @@ regions:
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_run_server_config(&dir);
         cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_cache_dir = Some(dir.path().join("acme-cache"));
         cfg.tls.letsencrypt_challenge_type = Some("TLS-ALPN-01".into());
 
         let err = validate_supported_runtime_config(&cfg).unwrap_err();
+        let err = format!("{err:#}");
 
-        assert!(format!("{err:#}").contains("ACME TLS is not implemented"));
-        assert!(format!("{err:#}").contains("TLS-ALPN-01"));
+        assert!(err.contains("ACME TLS is not implemented"));
+        assert!(err.contains("TLS-ALPN-01 on the public TLS listener"));
+        assert!(err.contains(&format!(
+            "cache_dir {}",
+            dir.path().join("acme-cache").display()
+        )));
     }
 
     #[test]
@@ -3673,6 +3685,14 @@ database:
         assert_eq!(
             hostname_from_server_url("http://127.0.0.1:8080"),
             "127.0.0.1"
+        );
+        assert_eq!(
+            hostname_from_server_url("https://user:pass@[2001:db8::10]:8443"),
+            "2001:db8::10"
+        );
+        assert_eq!(
+            hostname_from_server_url("https://headscale.example:notaport"),
+            "headscale-rs"
         );
     }
 

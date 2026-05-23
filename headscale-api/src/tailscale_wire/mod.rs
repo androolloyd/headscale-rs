@@ -1229,6 +1229,30 @@ impl MachineRegistry {
         primary_routes.debug_string()
     }
 
+    /// Mark a live route candidate healthy or unhealthy. Unhealthy
+    /// marks only stick for online, non-expired nodes that currently
+    /// have approved advertised routes in the primary-route table.
+    /// Returns true when primary-route ownership changed.
+    pub fn set_route_candidate_health(&self, node_id: u64, healthy: bool) -> bool {
+        let snapshot = self.snapshot();
+        let mut primary_routes = self.primary_routes.write();
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, &snapshot);
+
+        if !healthy && !primary_routes.has_routes(node_id) {
+            return false;
+        }
+
+        let changed = primary_routes.set_node_health(node_id, healthy);
+        if changed {
+            self.wake_waiters();
+        }
+        changed
+    }
+
+    pub fn is_route_candidate_healthy(&self, node_id: u64) -> bool {
+        self.primary_routes.read().is_node_healthy(node_id)
+    }
+
     fn sync_primary_routes_for_snapshot(
         &self,
         primary_routes: &mut PrimaryRouteState,
@@ -1292,6 +1316,7 @@ impl MachineRegistry {
         if online_changed {
             machines.wake_waiters();
         }
+        machines.primary_routes.write().clear_unhealthy(node_id);
         StreamConnectionGuard {
             machines,
             node_id,
@@ -1372,6 +1397,7 @@ impl MachineRegistry {
             return;
         }
 
+        self.primary_routes.write().clear_unhealthy(node_id);
         let now = Utc::now();
         self.update_with_operation("update", |map| {
             if let Some((_node_key, rec)) = map
@@ -2209,6 +2235,20 @@ mod registry_tests {
         }
     }
 
+    fn route_record(node_key: &str, host: u32, route: &str) -> MachineRecord {
+        let mut rec = mk_record(host);
+        rec.node_key_hex = node_key.to_string();
+        rec.available_routes = vec![route.to_string()];
+        rec.approved_routes = vec![route.to_string()];
+        rec
+    }
+
+    fn stable_sorted_keys(keys: &[&str]) -> Vec<String> {
+        let mut keys: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
+        keys.sort_by_key(|key| stable_id_from_key(key));
+        keys
+    }
+
     fn test_state() -> WireState {
         let dir = tempfile::tempdir().unwrap();
         WireState {
@@ -2948,6 +2988,41 @@ mod registry_tests {
         let routes = reg.debug_routes_for_snapshot(&reg.snapshot());
         assert!(routes.available_routes.is_empty());
         assert!(routes.primary_routes.is_empty());
+    }
+
+    #[test]
+    fn registry_route_health_excludes_unhealthy_online_primary() {
+        let reg = Arc::new(MachineRegistry::new());
+        let keys = stable_sorted_keys(&["route-health-a", "route-health-b"]);
+        let route = "10.0.0.0/24";
+        reg.upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        reg.upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+
+        let first = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            first.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        assert!(reg.set_route_candidate_health(stable_id_from_key(&keys[0]), false));
+
+        let failed_over = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            failed_over.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!failed_over.contains_key(&keys[0]));
+        assert!(!reg.is_route_candidate_healthy(stable_id_from_key(&keys[0])));
     }
 
     #[test]

@@ -80,6 +80,7 @@ fn is_exit_route_str(route: &str) -> bool {
 pub struct PrimaryRouteState {
     routes: BTreeMap<u64, BTreeSet<String>>,
     primaries: BTreeMap<String, u64>,
+    unhealthy: BTreeSet<u64>,
 }
 
 /// Structured primary-route state exposed by headscale-go's
@@ -88,6 +89,8 @@ pub struct PrimaryRouteState {
 pub struct DebugRoutes {
     pub available_routes: BTreeMap<u64, Vec<String>>,
     pub primary_routes: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unhealthy_nodes: Vec<u64>,
 }
 
 impl PrimaryRouteState {
@@ -105,6 +108,7 @@ impl PrimaryRouteState {
         let routes = normalize_primary_routes(routes)?;
         if routes.is_empty() {
             self.routes.remove(&node_id);
+            self.unhealthy.remove(&node_id);
         } else {
             self.routes.insert(node_id, routes);
         }
@@ -127,6 +131,8 @@ impl PrimaryRouteState {
             }
         }
         self.routes = routes;
+        self.unhealthy
+            .retain(|node_id| self.routes.contains_key(node_id));
         Ok(self.update_primary_locked())
     }
 
@@ -151,7 +157,41 @@ impl PrimaryRouteState {
                 .map(|(node_id, routes)| (*node_id, routes.iter().cloned().collect()))
                 .collect(),
             primary_routes: self.primaries.clone(),
+            unhealthy_nodes: self.unhealthy.iter().copied().collect(),
         }
+    }
+
+    /// Mark a route candidate healthy or unhealthy and return whether
+    /// the primary-route assignments changed.
+    pub fn set_node_health(&mut self, node_id: u64, healthy: bool) -> bool {
+        let health_changed = if healthy {
+            self.unhealthy.remove(&node_id)
+        } else {
+            self.unhealthy.insert(node_id)
+        };
+
+        if !health_changed {
+            return false;
+        }
+
+        self.update_primary_locked()
+    }
+
+    /// Clear a stale unhealthy mark without recalculating primaries.
+    /// Reconnect paths use this to give a fresh session a clean slate
+    /// while preserving sticky ownership by the current healthy primary.
+    pub fn clear_unhealthy(&mut self, node_id: u64) {
+        self.unhealthy.remove(&node_id);
+    }
+
+    pub fn is_node_healthy(&self, node_id: u64) -> bool {
+        !self.unhealthy.contains(&node_id)
+    }
+
+    pub fn has_routes(&self, node_id: u64) -> bool {
+        self.routes
+            .get(&node_id)
+            .is_some_and(|routes| !routes.is_empty())
     }
 
     pub fn debug_string(&self) -> String {
@@ -187,10 +227,16 @@ impl PrimaryRouteState {
         for (route, nodes) in &available_by_route {
             if let Some(current) = self.primaries.get(route)
                 && nodes.contains(current)
+                && !self.unhealthy.contains(current)
             {
                 continue;
             }
-            if let Some(new_primary) = nodes.first() {
+
+            let new_primary = nodes
+                .iter()
+                .find(|node_id| !self.unhealthy.contains(node_id))
+                .or_else(|| nodes.first());
+            if let Some(new_primary) = new_primary {
                 self.primaries.insert(route.clone(), *new_primary);
                 changed = true;
             }
@@ -343,6 +389,10 @@ mod tests {
 
     fn primaries(state: &PrimaryRouteState) -> BTreeMap<String, u64> {
         state.primaries.clone()
+    }
+
+    fn unhealthy(state: &PrimaryRouteState) -> Vec<u64> {
+        state.unhealthy.iter().copied().collect()
     }
 
     fn map(entries: &[(u64, &[&str])]) -> BTreeMap<u64, Vec<String>> {
@@ -603,6 +653,51 @@ mod tests {
     }
 
     #[test]
+    fn unhealthy_current_primary_fails_over() {
+        let mut state = PrimaryRouteState::new();
+        assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+
+        assert!(state.set_node_health(1, false));
+
+        assert_eq!(state.primary_routes(1), Vec::<String>::new());
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+        assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 2)]));
+        assert_eq!(unhealthy(&state), vec![1]);
+    }
+
+    #[test]
+    fn recovered_lower_id_router_does_not_steal_healthy_sticky_primary() {
+        let mut state = PrimaryRouteState::new();
+        assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+        assert!(state.set_node_health(1, false));
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+
+        assert!(!state.set_node_health(1, true));
+
+        assert_eq!(state.primary_routes(1), Vec::<String>::new());
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+        assert!(unhealthy(&state).is_empty());
+    }
+
+    #[test]
+    fn all_unhealthy_candidates_fall_back_to_first_degraded_primary() {
+        let mut state = PrimaryRouteState::new();
+        assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+        assert!(state.set_node_health(1, false));
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+
+        assert!(state.set_node_health(2, false));
+
+        assert_eq!(state.primary_routes(1), p(&["10.0.0.0/24"]));
+        assert_eq!(state.primary_routes(2), Vec::<String>::new());
+        assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 1)]));
+        assert_eq!(unhealthy(&state), vec![1, 2]);
+    }
+
+    #[test]
     fn debug_routes_matches_headscale_go_shape_and_filters_exit_routes() {
         let mut state = PrimaryRouteState::new();
         state
@@ -620,6 +715,7 @@ mod tests {
                     (2, p(&["10.0.0.0/24"])),
                 ]),
                 primary_routes: primary_map(&[("10.0.0.0/24", 1), ("10.1.0.0/24", 1)]),
+                unhealthy_nodes: Vec::new(),
             }
         );
         assert_eq!(

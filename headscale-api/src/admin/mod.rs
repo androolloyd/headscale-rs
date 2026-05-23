@@ -597,7 +597,10 @@ async fn post_users_create(State(s): State<AdminState>, req: Request) -> Respons
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
     match s.users.create(form.name.trim()).await {
-        Ok(_) => Redirect::to("/admin/users").into_response(),
+        Ok(_) => {
+            s.policy.refresh();
+            Redirect::to("/admin/users").into_response()
+        }
         Err(e) => {
             Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string()))).into_response()
         }
@@ -620,7 +623,9 @@ async fn post_users_delete(
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    let _ = s.users.delete(&name).await;
+    if s.users.delete(&name).await.is_ok() {
+        s.policy.refresh();
+    }
     Redirect::to("/admin/users").into_response()
 }
 
@@ -837,7 +842,10 @@ async fn api_users_create(State(s): State<AdminState>, req: Request) -> Response
         Err(r) => return r,
     };
     match s.users.create(body.name.trim()).await {
-        Ok(rec) => (StatusCode::CREATED, Json(rec)).into_response(),
+        Ok(rec) => {
+            s.policy.refresh();
+            (StatusCode::CREATED, Json(rec)).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -855,7 +863,10 @@ async fn api_users_delete(
         return r;
     }
     match s.users.delete(&name).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            s.policy.refresh();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }

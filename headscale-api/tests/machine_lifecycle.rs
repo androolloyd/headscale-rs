@@ -67,6 +67,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
     let server = Arc::new(
         headscale_api::tailscale_wire::noise::ServerNoiseKey::load_or_generate(dir.path()).unwrap(),
     );
+    let policy = headscale_api::policy::PolicyStore::new();
 
     // Local always-fail preauth — none of the lifecycle tests register
     // via the wire layer; they insert records directly into the
@@ -103,7 +104,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         derp_map: headscale_api::tailscale_wire::DerpMapStore::shared(
             headscale_api::tailscale_wire::DerpMap::default(),
         ),
-        policy: Arc::new(headscale_api::policy::PolicyStore::new()),
+        policy: Arc::new(policy.clone()),
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
         public_control_url: None,
@@ -121,6 +122,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         .machines(Arc::new(WireMachineAdmin::new(registry)))
         .preauth(Arc::new(InMemoryPreauthAdmin::new()))
         .derp_regions(0)
+        .policy(policy)
         .build();
     (wire, admin)
 }
@@ -224,6 +226,20 @@ async fn wire_full_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, ser
     wire_map_body(wire, node_key_hex, r#"{"Version":113}"#).await
 }
 
+async fn next_stream_map(body: &mut Body) -> headscale_api::tailscale_wire::wire::MapResponse {
+    use http_body_util::BodyExt;
+
+    let frame = BodyExt::frame(body)
+        .await
+        .expect("stream frame")
+        .expect("stream frame ok");
+    let chunk = frame.into_data().expect("data frame");
+    assert!(chunk.len() >= 4, "stream frame includes length prefix");
+    let len = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
+    assert_eq!(chunk.len(), 4 + len, "framed chunk size mismatch");
+    serde_json::from_slice(&chunk[4..]).expect("map response json")
+}
+
 /// `GET /api/v1/machines/{id}` returning the decoded JSON.
 async fn admin_get(admin: &AdminState, id: &str) -> (StatusCode, serde_json::Value) {
     let router = admin_router(admin.clone());
@@ -237,6 +253,134 @@ async fn admin_get(admin: &AdminState, id: &str) -> (StatusCode, serde_json::Val
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+#[cfg(feature = "full")]
+#[tokio::test]
+async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
+    use headscale_api::generated::headscale_service_server::HeadscaleService;
+    use headscale_api::generated::{CreateUserRequest, DeleteUserRequest, RenameUserRequest};
+    use headscale_api::grpc::upstream::HeadscaleAdminService;
+    use tonic::Request as TonicRequest;
+
+    let registry = Arc::new(MachineRegistry::new());
+    let a_hex = "a1".repeat(32);
+    let b_hex = "b2".repeat(32);
+    registry.upsert(a_hex.clone(), mk_record(0xa1, "alice-node", 10, false));
+    registry.upsert(b_hex.clone(), mk_record(0xb2, "bob-node", 11, false));
+
+    let policy = headscale_api::policy::PolicyStore::new();
+    let raw = r#"{
+        "groups": {"group:renamed": ["alice@", "carol@"]},
+        "acls": [
+            {"action":"accept","src":["group:renamed"],"dst":["100.64.0.11:*"]}
+        ]
+    }"#;
+    policy.set(
+        headscale_api::policy::parse_hujson_policy(raw).expect("policy parses"),
+        raw.to_string(),
+    );
+
+    let users = UserRegistry::new();
+    let service = HeadscaleAdminService::new(
+        users,
+        Arc::new(headscale_api::admin::NoopApiKeyAdmin),
+        Arc::new(InMemoryPreauthAdmin::new()),
+        policy.clone(),
+        Arc::new(WireMachineAdmin::new(registry.clone())),
+    );
+    let wire = {
+        let (mut wire, _admin) = fixture(registry.clone());
+        wire.policy = Arc::new(policy);
+        wire
+    };
+
+    let app = wire_machine_router(wire);
+    let machine_key = registry.get(&b_hex).expect("bob node").machine_key_hex;
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/machine/nodekey:{b_hex}/map"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"Stream":true,"Version":113}"#))
+        .unwrap();
+    req.extensions_mut()
+        .insert(NoisePeerMachineKey(machine_key));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let first = next_stream_map(&mut body).await;
+    assert_eq!(first.node.as_ref().unwrap().name, "bob-node");
+
+    let create = tokio::spawn({
+        let service = service.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            service
+                .create_user(TonicRequest::new(CreateUserRequest {
+                    name: "alice".into(),
+                    display_name: String::new(),
+                    email: String::new(),
+                    picture_url: String::new(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .user
+                .expect("created user")
+        }
+    });
+    let after_create = next_stream_map(&mut body).await;
+    let created = create.await.expect("create task");
+    assert_policy_filter_mentions_bob(&after_create);
+
+    let rename = tokio::spawn({
+        let service = service.clone();
+        let old_id = created.id;
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            service
+                .rename_user(TonicRequest::new(RenameUserRequest {
+                    old_id,
+                    new_name: "carol".into(),
+                }))
+                .await
+                .unwrap();
+        }
+    });
+    let after_rename = next_stream_map(&mut body).await;
+    rename.await.expect("rename task");
+    assert_policy_filter_mentions_bob(&after_rename);
+
+    let delete = tokio::spawn({
+        let service = service.clone();
+        let id = created.id;
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            service
+                .delete_user(TonicRequest::new(DeleteUserRequest { id }))
+                .await
+                .unwrap();
+        }
+    });
+    let after_delete = next_stream_map(&mut body).await;
+    delete.await.expect("delete task");
+    assert_policy_filter_mentions_bob(&after_delete);
+}
+
+#[cfg(feature = "full")]
+fn assert_policy_filter_mentions_bob(mr: &headscale_api::tailscale_wire::wire::MapResponse) {
+    let base = mr
+        .packet_filters
+        .get("base")
+        .and_then(Option::as_ref)
+        .expect("base packet filter present");
+    assert!(
+        base.iter()
+            .flat_map(|rule| &rule.dst_ports)
+            .any(|dst| dst.ip == "100.64.0.11/32"),
+        "refreshed packet filter should include bob's node: {:?}",
+        mr.packet_filters
+    );
 }
 
 #[tokio::test]

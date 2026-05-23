@@ -263,6 +263,18 @@ impl PolicyStore {
             .map(|doc| build_peer_map_for_doc(doc, nodes))
     }
 
+    /// Wake every parked `/map` long-poller without changing the
+    /// loaded policy bytes.
+    ///
+    /// Upstream refreshes PolicyManager-derived map state on adjacent
+    /// control-plane mutations such as user CRUD. The Rust policy store
+    /// keeps the parsed policy immutable for those mutations, but the
+    /// stream still needs a full rebuild so user/profile/policy-derived
+    /// map fields are observed promptly.
+    pub fn refresh(&self) {
+        self.inner.notify.notify_waiters();
+    }
+
     /// Handle to the broadcast. Map long-pollers register
     /// `notify.notified()` futures in their `select!` loop; the next
     /// [`Self::set`] wakes them all.

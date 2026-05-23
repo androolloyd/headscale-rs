@@ -587,6 +587,7 @@ pub mod upstream {
                 )
                 .await
                 .map_err(user_error_to_status)?;
+            self.policy.refresh();
             Ok(Response::new(CreateUserResponse {
                 user: Some(user_record_to_proto(&user)),
             }))
@@ -603,6 +604,7 @@ pub mod upstream {
                 .rename_by_id(body.old_id, &body.new_name)
                 .await
                 .map_err(user_error_to_status)?;
+            self.policy.refresh();
             Ok(Response::new(RenameUserResponse {
                 user: Some(user_record_to_proto(&user)),
             }))
@@ -617,6 +619,7 @@ pub mod upstream {
                 .delete_by_id(request.into_inner().id)
                 .await
                 .map_err(user_error_to_status)?;
+            self.policy.refresh();
             Ok(Response::new(DeleteUserResponse {}))
         }
 

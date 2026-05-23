@@ -853,6 +853,66 @@ async fn api_users_full_crud_round_trip() {
 }
 
 #[tokio::test]
+async fn api_user_create_delete_refresh_policy_waiters() {
+    let policy = PolicyStore::new();
+    let raw = r#"{
+        "groups": {"group:users": ["carol@"]},
+        "acls": [
+            {"action":"accept","src":["group:users"],"dst":["*:*"]}
+        ]
+    }"#;
+    policy.set(parse_hujson_policy(raw).unwrap(), raw.to_string());
+    let app = router(fixture_state_with_policy(policy.clone()));
+
+    let (ready, parked) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn({
+        let policy = policy.clone();
+        async move {
+            let changed = policy.wait_for_change();
+            tokio::pin!(changed);
+            let _ = ready.send(());
+            changed.await;
+        }
+    });
+    parked.await.expect("create waiter parks");
+    let r = app
+        .clone()
+        .oneshot(req_post_json(
+            "/api/v1/users",
+            r#"{"name":"carol"}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("user create refreshes policy waiters")
+        .expect("waiter task succeeds");
+
+    let (ready, parked) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn({
+        let policy = policy.clone();
+        async move {
+            let changed = policy.wait_for_change();
+            tokio::pin!(changed);
+            let _ = ready.send(());
+            changed.await;
+        }
+    });
+    parked.await.expect("delete waiter parks");
+    let r = app
+        .oneshot(req_authed(Method::DELETE, "/api/v1/users/carol"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("user delete refreshes policy waiters")
+        .expect("waiter task succeeds");
+}
+
+#[tokio::test]
 async fn api_preauthkey_mint_then_expire_round_trip() {
     let app = router(fixture_state());
     let r = app

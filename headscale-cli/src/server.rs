@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rand_core::{OsRng, RngCore};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
@@ -25,7 +25,9 @@ use headscale_api::admin::{
     PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
     PersistentPreauthAdmin, PersistentUserAdmin,
 };
-use headscale_api::dns::{DnsConfigSpec, DnsStore, spawn_extra_records_watcher};
+use headscale_api::dns::{
+    DnsConfigSpec, DnsStore, parse_extra_records, spawn_extra_records_watcher,
+};
 use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
@@ -297,8 +299,23 @@ fn dns_store_from_config(spec: Option<DnsConfigSpec>) -> Result<(Arc<DnsStore>, 
     let Some(spec) = spec else {
         return Ok((Arc::new(DnsStore::new()), None));
     };
-    let extra_records_path = spec.extra_records_path.clone();
+    let extra_records_path = spec
+        .extra_records_path
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty());
     let store = DnsStore::try_from_spec(spec).context("invalid [dns] config")?;
+    if let Some(path) = &extra_records_path {
+        let meta = std::fs::metadata(path)
+            .with_context(|| format!("stat dns.extra_records_path {}", path.display()))?;
+        if meta.is_dir() {
+            bail!("dns.extra_records_path {} is a directory", path.display());
+        }
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read dns.extra_records_path {}", path.display()))?;
+        let records = parse_extra_records(&bytes)
+            .with_context(|| format!("parse dns.extra_records_path {}", path.display()))?;
+        store.set_extra_records(records);
+    }
     Ok((Arc::new(store), extra_records_path))
 }
 
@@ -1775,6 +1792,67 @@ regions:
         let (store, path) = dns_store_from_config(None).unwrap();
         assert!(path.is_none());
         assert_eq!(serde_json::to_string(&store.build(&[])).unwrap(), "{}");
+    }
+
+    #[test]
+    fn dns_store_from_config_loads_extra_records_path_before_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let records_path = dir.path().join("extra-records.json");
+        std::fs::write(
+            &records_path,
+            r#"[{"name":"ops.tail.example.org","type":"A","value":"100.64.0.50"}]"#,
+        )
+        .unwrap();
+
+        let (store, path) = dns_store_from_config(Some(DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: false,
+            extra_records_path: Some(records_path.clone()),
+            ..DnsConfigSpec::default()
+        }))
+        .unwrap();
+
+        assert_eq!(path.as_deref(), Some(records_path.as_path()));
+        assert_eq!(store.extra_records().len(), 1);
+        assert_eq!(store.extra_records()[0].name, "ops.tail.example.org");
+    }
+
+    #[test]
+    fn dns_store_from_config_rejects_invalid_extra_records_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let records_path = dir.path().join("extra-records.json");
+        std::fs::write(&records_path, "{not-json").unwrap();
+
+        let err = dns_store_from_config(Some(DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: false,
+            extra_records_path: Some(records_path),
+            ..DnsConfigSpec::default()
+        }))
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("parse dns.extra_records_path"));
+
+        let missing = dir.path().join("missing.json");
+        let err = dns_store_from_config(Some(DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: false,
+            extra_records_path: Some(missing),
+            ..DnsConfigSpec::default()
+        }))
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("stat dns.extra_records_path"));
+
+        let err = dns_store_from_config(Some(DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: false,
+            extra_records_path: Some(dir.path().to_path_buf()),
+            ..DnsConfigSpec::default()
+        }))
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("is a directory"));
     }
 
     #[tokio::test]

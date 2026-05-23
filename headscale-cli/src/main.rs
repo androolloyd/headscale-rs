@@ -1034,6 +1034,7 @@ mod tests {
             }),
             dns: Some(headscale_api::dns::DnsConfigSpec {
                 magic_dns: false,
+                override_local_dns: false,
                 ..Default::default()
             }),
             ..CliConfig::default()

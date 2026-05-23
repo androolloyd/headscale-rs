@@ -723,12 +723,7 @@ impl Default for DebugConfigInfo {
             dns_config: DebugDnsConfig {
                 magic_dns: dns_spec.magic_dns,
                 base_domain: dns_spec.base_domain.clone(),
-                // headscale-go's default is true. This field affects
-                // whether global resolvers land in Resolvers vs
-                // FallbackResolvers; headscale-rs exposes
-                // `fallback_nameservers` separately, so preserve the Go
-                // config default for the debug shape.
-                override_local_dns: true,
+                override_local_dns: dns_spec.override_local_dns,
                 nameservers: DebugNameservers {
                     global: dns_spec.nameservers.clone(),
                     split: dns_spec
@@ -1385,6 +1380,7 @@ fn debug_config_info(state: &WireState) -> DebugConfigInfo {
     info.dns_config
         .base_domain
         .clone_from(&dns_spec.base_domain);
+    info.dns_config.override_local_dns = dns_spec.override_local_dns;
     info.dns_config
         .nameservers
         .global

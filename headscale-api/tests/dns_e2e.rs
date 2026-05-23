@@ -22,6 +22,7 @@ use headscale_api::tailscale_wire::wire::{DnsRecord, MapResponse};
 fn magic_spec() -> DnsConfigSpec {
     DnsConfigSpec {
         base_domain: "headscale.test".into(),
+        override_local_dns: false,
         ..Default::default()
     }
 }
@@ -104,6 +105,7 @@ fn mapresponse_round_trip_carries_dnsconfig_fields() {
     // into a `MapResponse`, round-trip through JSON, and verify the
     // PascalCase field names land on the wire.
     let spec = DnsConfigSpec {
+        override_local_dns: true,
         nameservers: vec!["1.1.1.1".into()],
         ..magic_spec()
     };

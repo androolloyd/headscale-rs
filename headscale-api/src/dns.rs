@@ -88,6 +88,11 @@ pub struct DnsConfigSpec {
     /// `tailnet.example.org`). Defaults to empty, matching
     /// headscale-go config defaults.
     pub base_domain: String,
+    /// Whether Headscale's global resolvers replace the client's
+    /// local DNS settings. Upstream headscale-go defaults this to
+    /// `true`; when set to `false`, global resolvers are emitted as
+    /// `FallbackResolvers` instead.
+    pub override_local_dns: bool,
     /// Default resolver(s) — DNS-over-UDP `IP[:port]` literals or
     /// DNS-over-HTTPS URLs. Empty ⇒ no `Resolvers` field on the wire,
     /// the client falls back to system DNS. The deserializer accepts
@@ -146,6 +151,7 @@ impl Default for DnsConfigSpec {
         Self {
             magic_dns: default_true(),
             base_domain: default_base_domain(),
+            override_local_dns: default_true(),
             nameservers: Vec::new(),
             restricted_nameservers: HashMap::new(),
             extra_records: Vec::new(),
@@ -164,6 +170,11 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
         D: Deserializer<'de>,
     {
         let raw = RawDnsConfigSpec::deserialize(deserializer)?;
+        if raw.extra_records.is_some() && raw.extra_records_path.is_some() {
+            return Err(serde::de::Error::custom(
+                "dns.extra_records and dns.extra_records_path are mutually exclusive",
+            ));
+        }
         let (nameservers, mut restricted_nameservers) = raw.nameservers.into_parts();
         restricted_nameservers.extend(raw.restricted_nameservers);
 
@@ -178,6 +189,7 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
         Ok(Self {
             magic_dns: raw.magic_dns,
             base_domain: raw.base_domain,
+            override_local_dns: raw.override_local_dns,
             nameservers,
             restricted_nameservers,
             extra_records,
@@ -197,6 +209,7 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
 struct RawDnsConfigSpec {
     magic_dns: bool,
     base_domain: String,
+    override_local_dns: bool,
     nameservers: RawNameservers,
     restricted_nameservers: HashMap<String, Vec<String>>,
     extra_records: Option<RawExtraRecords>,
@@ -212,6 +225,7 @@ impl Default for RawDnsConfigSpec {
         Self {
             magic_dns: default_true(),
             base_domain: default_base_domain(),
+            override_local_dns: default_true(),
             nameservers: RawNameservers::default(),
             restricted_nameservers: HashMap::new(),
             extra_records: None,
@@ -284,6 +298,7 @@ impl From<LooseDnsRecord> for DnsRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsConfigError {
     MissingBaseDomainForMagicDns,
+    MissingGlobalNameserversForOverride,
 }
 
 impl std::fmt::Display for DnsConfigError {
@@ -292,6 +307,9 @@ impl std::fmt::Display for DnsConfigError {
             Self::MissingBaseDomainForMagicDns => {
                 f.write_str("dns.base_domain must be set when using MagicDNS")
             }
+            Self::MissingGlobalNameserversForOverride => f.write_str(
+                "dns.nameservers.global must be set when dns.override_local_dns is true",
+            ),
         }
     }
 }
@@ -302,6 +320,9 @@ impl DnsConfigSpec {
     pub fn validate(&self) -> Result<(), DnsConfigError> {
         if self.magic_dns && self.base_domain.trim().is_empty() {
             return Err(DnsConfigError::MissingBaseDomainForMagicDns);
+        }
+        if self.override_local_dns && self.nameservers.is_empty() {
+            return Err(DnsConfigError::MissingGlobalNameserversForOverride);
         }
 
         Ok(())
@@ -359,6 +380,7 @@ impl DnsStore {
         Self::from_spec(DnsConfigSpec {
             magic_dns: false,
             base_domain: String::new(),
+            override_local_dns: true,
             nameservers: Vec::new(),
             restricted_nameservers: HashMap::new(),
             extra_records: Vec::new(),
@@ -474,9 +496,9 @@ impl std::fmt::Debug for DnsStore {
 ///
 /// | Output                      | Source                                   |
 /// |-----------------------------|------------------------------------------|
-/// | `Resolvers`                 | `spec.nameservers` mapped to `DnsResolver` |
+/// | `Resolvers`                 | `spec.nameservers` when `override_local_dns` is true |
 /// | `Routes`                    | `spec.restricted_nameservers` (split DNS)|
-/// | `FallbackResolvers`         | `spec.fallback_nameservers`               |
+/// | `FallbackResolvers`         | `spec.nameservers` when `override_local_dns` is false, plus `fallback_nameservers` |
 /// | `Domains`                   | `[base_domain] ++ spec.search_domains` when base is set |
 /// | `Proxied`                   | `spec.magic_dns && base_domain is set`    |
 /// | `ExtraRecords`              | `extra` ++ MagicDNS A records when base is set |
@@ -493,7 +515,7 @@ pub fn build_dns_config(
 ) -> DnsConfig {
     let base_domain_set = !spec.base_domain.trim().is_empty();
     let magic_dns_enabled = spec.magic_dns && base_domain_set;
-    let resolvers = spec
+    let global_resolvers: Vec<DnsResolver> = spec
         .nameservers
         .iter()
         .map(|s| string_to_resolver(s))
@@ -508,11 +530,20 @@ pub fn build_dns_config(
             )
         })
         .collect();
-    let fallback_resolvers = spec
-        .fallback_nameservers
-        .iter()
-        .map(|s| string_to_resolver(s))
-        .collect();
+    let mut fallback_resolvers = Vec::new();
+    if !spec.override_local_dns {
+        fallback_resolvers.extend(global_resolvers.iter().cloned());
+    }
+    fallback_resolvers.extend(
+        spec.fallback_nameservers
+            .iter()
+            .map(|s| string_to_resolver(s)),
+    );
+    let resolvers = if spec.override_local_dns {
+        global_resolvers
+    } else {
+        Vec::new()
+    };
 
     // Domains: the base_domain is always first — search-resolution
     // order matters to the daemon (it walks left-to-right). Operator-
@@ -794,6 +825,7 @@ mod tests {
     fn magic_spec() -> DnsConfigSpec {
         DnsConfigSpec {
             base_domain: "headscale.test".into(),
+            override_local_dns: false,
             ..DnsConfigSpec::default()
         }
     }
@@ -803,6 +835,7 @@ mod tests {
         let s = DnsConfigSpec::default();
         assert!(s.magic_dns);
         assert_eq!(s.base_domain, "");
+        assert!(s.override_local_dns);
         assert!(s.nameservers.is_empty());
     }
 
@@ -813,6 +846,21 @@ mod tests {
             Err(DnsConfigError::MissingBaseDomainForMagicDns)
         );
         assert!(DnsStore::try_from_spec(DnsConfigSpec::default()).is_err());
+    }
+
+    #[test]
+    fn override_local_dns_requires_global_nameservers() {
+        let spec = DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: Vec::new(),
+            ..DnsConfigSpec::default()
+        };
+
+        assert_eq!(
+            spec.validate(),
+            Err(DnsConfigError::MissingGlobalNameserversForOverride)
+        );
     }
 
     #[test]
@@ -1056,6 +1104,7 @@ mod tests {
     #[test]
     fn nameservers_become_resolvers_in_wire_shape() {
         let spec = DnsConfigSpec {
+            override_local_dns: true,
             nameservers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
             ..magic_spec()
         };
@@ -1065,6 +1114,22 @@ mod tests {
         assert_eq!(cfg.resolvers[1].addr, "8.8.8.8");
         // None of these should set `use_with_exit_node` by default.
         assert!(!cfg.resolvers[0].use_with_exit_node);
+    }
+
+    #[test]
+    fn override_local_dns_false_moves_global_resolvers_to_fallbacks() {
+        let spec = DnsConfigSpec {
+            override_local_dns: false,
+            nameservers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+            ..magic_spec()
+        };
+
+        let cfg = DnsStore::from_spec(spec).build(&[]);
+
+        assert!(cfg.resolvers.is_empty());
+        assert_eq!(cfg.fallback_resolvers.len(), 2);
+        assert_eq!(cfg.fallback_resolvers[0].addr, "1.1.1.1");
+        assert_eq!(cfg.fallback_resolvers[1].addr, "8.8.8.8");
     }
 
     #[test]
@@ -1130,6 +1195,7 @@ mod tests {
     #[test]
     fn dns_config_serialises_to_pascalcase_json() {
         let spec = DnsConfigSpec {
+            override_local_dns: true,
             nameservers: vec!["1.1.1.1".to_string()],
             ..magic_spec()
         };
@@ -1209,6 +1275,7 @@ mod tests {
         let toml_src = r#"
 magic_dns = true
 base_domain = "test.example.org"
+override_local_dns = false
 search_domains = ["aux.example.org"]
 exit_node_filtered_set = ["bank.example"]
 extra_records = [
@@ -1225,6 +1292,7 @@ global = ["1.1.1.1", "8.8.8.8"]
         let spec: DnsConfigSpec = toml::from_str(toml_src).expect("toml parse");
         assert!(spec.magic_dns);
         assert_eq!(spec.base_domain, "test.example.org");
+        assert!(!spec.override_local_dns);
         assert_eq!(spec.nameservers, vec!["1.1.1.1", "8.8.8.8"]);
         assert_eq!(
             spec.restricted_nameservers.get("corp.internal").unwrap(),
@@ -1235,6 +1303,24 @@ global = ["1.1.1.1", "8.8.8.8"]
         assert_eq!(spec.extra_records.len(), 2);
         assert_eq!(spec.extra_records[0].name, "ops.test.example.org");
         assert_eq!(spec.extra_records[1].record_type, "CNAME");
+    }
+
+    #[test]
+    fn config_spec_rejects_inline_extra_records_with_path() {
+        let toml_src = r#"
+magic_dns = false
+extra_records_path = "/etc/headscale/extra-records.json"
+extra_records = [
+  { name = "ops.test.example.org", type = "A", value = "100.64.0.50" },
+]
+"#;
+        let err = toml::from_str::<DnsConfigSpec>(toml_src).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("dns.extra_records and dns.extra_records_path are mutually exclusive"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -165,6 +165,7 @@ noise:
   private_key_path: "noise_private.key"
 dns:
   magic_dns: false
+  override_local_dns: false
 "#,
     )
     .unwrap();

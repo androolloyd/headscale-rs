@@ -524,6 +524,22 @@ impl CliConfig {
         resolve_optional_path(config_dir, &mut self.tls_cert_path);
         resolve_optional_path(config_dir, &mut self.tls_key_path);
         resolve_optional_path(config_dir, &mut self.tls_letsencrypt_cache_dir);
+        if let Some(noise) = &mut self.noise {
+            resolve_optional_path(config_dir, &mut noise.private_key_path);
+        }
+        if let Some(database) = &mut self.database
+            && let Some(sqlite) = &mut database.sqlite
+        {
+            resolve_optional_path(config_dir, &mut sqlite.path);
+        }
+        if let Some(derp) = &mut self.derp {
+            resolve_path(config_dir, &mut derp.server.private_key_path);
+        }
+        if let Some(server) = &mut self.server {
+            resolve_path(config_dir, &mut server.db_path);
+            resolve_path(config_dir, &mut server.state_dir);
+            resolve_path(config_dir, &mut server.embedded_derp.derper_config_path);
+        }
         if self.policy.is_file_mode() && !self.policy.path.as_os_str().is_empty() {
             resolve_path(config_dir, &mut self.policy.path);
         }
@@ -770,6 +786,66 @@ struct RemovedConfigKey {
 }
 
 const REMOVED_CONFIG_KEYS: &[RemovedConfigKey] = &[
+    RemovedConfigKey {
+        path: &["acl_policy_path"],
+        display: "acl_policy_path",
+        replacement: Some("policy.path"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "magic_dns"],
+        display: "dns_config.magic_dns",
+        replacement: Some("dns.magic_dns"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "base_domain"],
+        display: "dns_config.base_domain",
+        replacement: Some("dns.base_domain"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "override_local_dns"],
+        display: "dns_config.override_local_dns",
+        replacement: Some("dns.override_local_dns"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "nameservers"],
+        display: "dns_config.nameservers",
+        replacement: Some("dns.nameservers.global"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "restricted_nameservers"],
+        display: "dns_config.restricted_nameservers",
+        replacement: Some("dns.nameservers.split"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "domains"],
+        display: "dns_config.domains",
+        replacement: Some("dns.search_domains"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "extra_records"],
+        display: "dns_config.extra_records",
+        replacement: Some("dns.extra_records"),
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns", "use_username_in_magic_dns"],
+        display: "dns.use_username_in_magic_dns",
+        replacement: None,
+        hint: None,
+    },
+    RemovedConfigKey {
+        path: &["dns_config", "use_username_in_magic_dns"],
+        display: "dns_config.use_username_in_magic_dns",
+        replacement: None,
+        hint: None,
+    },
     RemovedConfigKey {
         path: &["oidc", "strip_email_domain"],
         display: "oidc.strip_email_domain",
@@ -1576,6 +1652,71 @@ tls_letsencrypt_cache_dir: "cache/acme"
     }
 
     #[test]
+    fn load_resolves_upstream_relative_config_paths_from_config_file_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+
+noise:
+  private_key_path: "keys/noise.key"
+
+database:
+  type: sqlite
+  sqlite:
+    path: "data/db.sqlite"
+
+derp:
+  paths:
+    - "derp/map.yaml"
+  server:
+    private_key_path: "keys/derp.key"
+
+dns:
+  magic_dns: false
+  override_local_dns: false
+  extra_records_path: "dns/extra-records.json"
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load(&config_path).unwrap();
+        let server = config.server.as_ref().unwrap();
+        let derp = config.derp.as_ref().unwrap();
+        let dns = config.dns.as_ref().unwrap();
+
+        assert_eq!(
+            config.noise.as_ref().unwrap().private_key_path.as_deref(),
+            Some(dir.path().join("keys/noise.key").as_path())
+        );
+        assert_eq!(server.state_dir, dir.path().join("keys"));
+        assert_eq!(server.db_path, dir.path().join("data/db.sqlite"));
+        assert_eq!(
+            config
+                .database
+                .as_ref()
+                .unwrap()
+                .sqlite
+                .as_ref()
+                .unwrap()
+                .path
+                .as_deref(),
+            Some(dir.path().join("data/db.sqlite").as_path())
+        );
+        assert_eq!(
+            derp.server.private_key_path,
+            dir.path().join("keys/derp.key")
+        );
+        assert_eq!(derp.paths, [PathBuf::from("derp/map.yaml")]);
+        assert_eq!(
+            dns.extra_records_path.as_deref(),
+            Some(Path::new("dns/extra-records.json"))
+        );
+    }
+
+    #[test]
     fn configtest_rejects_too_low_ephemeral_timeout() {
         let source = r#"
 server_url: "https://headscale.example"
@@ -1972,12 +2113,52 @@ dns:
         let dns = config.dns.unwrap();
 
         assert_eq!(dns.base_domain, "tail.example.org");
+        assert!(!dns.override_local_dns);
         assert_eq!(dns.nameservers, ["1.1.1.1"]);
         assert_eq!(
             dns.restricted_nameservers.get("corp.example.org").unwrap(),
             &vec!["10.0.0.53".to_string()]
         );
         assert_eq!(dns.extra_records[0].value, "100.64.0.50");
+    }
+
+    #[test]
+    fn configtest_rejects_dns_override_without_global_nameservers() {
+        let source = r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("dns.nameservers.global"));
+    }
+
+    #[test]
+    fn rejects_dns_extra_records_and_path_together() {
+        let err = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+  extra_records_path: "/etc/headscale/extra-records.json"
+  extra_records:
+    - name: "ops.tail.example.org"
+      type: "A"
+      value: "100.64.0.50"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}")
+                .contains("dns.extra_records and dns.extra_records_path are mutually exclusive")
+        );
     }
 
     #[test]
@@ -2050,6 +2231,54 @@ oidc:
         assert!(err.contains("randomize_client_port"));
         assert!(err.contains("randomizeClientPort"));
         assert!(err.contains("policy file"));
+    }
+
+    #[test]
+    fn rejects_removed_acl_policy_path_config_key() {
+        let err = CliConfig::parse(
+            r#"
+acl_policy_path: "/etc/headscale/policy.hujson"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("acl_policy_path"));
+        assert!(err.contains("policy.path"));
+    }
+
+    #[test]
+    fn rejects_removed_dns_config_keys() {
+        let err = CliConfig::parse(
+            r#"
+dns_config:
+  nameservers:
+    - "1.1.1.1"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("dns_config.nameservers"));
+        assert!(err.contains("dns.nameservers.global"));
+    }
+
+    #[test]
+    fn rejects_removed_dns_username_magic_dns_key() {
+        let err = CliConfig::parse(
+            r"
+dns:
+  use_username_in_magic_dns: true
+",
+            ConfigFormat::Yaml,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("dns.use_username_in_magic_dns"));
+        assert!(err.contains("removed"));
     }
 
     #[test]

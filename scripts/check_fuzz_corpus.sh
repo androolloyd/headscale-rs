@@ -10,7 +10,7 @@ cd "${fuzz_dir}"
 declare -A targets=()
 while IFS= read -r target; do
   [[ -n "${target}" ]] && targets["${target}"]=1
-done < <(cargo fuzz list)
+done < <(python3 "${repo_root}/scripts/fuzz_targets.py")
 
 if ((${#targets[@]} == 0)); then
   echo "no fuzz targets found" >&2
@@ -32,7 +32,7 @@ for target in "${!checked_in_corpus_dirs[@]}"; do
 done
 
 if ((${#stale[@]} > 0)); then
-  printf 'stale checked-in fuzz corpus directories not present in cargo fuzz list:\n' >&2
+  printf 'stale checked-in fuzz corpus directories not present in fuzz manifest:\n' >&2
   printf '  %s\n' "${stale[@]}" | sort >&2
   exit 1
 fi

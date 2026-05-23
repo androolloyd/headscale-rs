@@ -55,6 +55,8 @@ jobs:
           workspaces: |
             headscale-core/fuzz -> target
       - run: cargo install cargo-fuzz --locked
+      - name: Check fuzz corpus directories
+        run: ./scripts/check_fuzz_corpus.sh
       - name: Run fuzz target
         run: ./scripts/fuzz_ci.sh
       - name: Upload fuzz logs and artifacts

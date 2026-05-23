@@ -1,0 +1,2512 @@
+[
+  {
+    "engine": "headscale",
+    "name": "acl-autogroup-self-per-node",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.30/32",
+          "fd7a:115c:a1e0::30/128"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.10/31",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::10/127",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "alice-a-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.10/31",
+              "fd7a:115c:a1e0::10/127"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.10",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::10",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ],
+            "IPProto": [
+              6,
+              17
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.30/32",
+              "fd7a:115c:a1e0::30/128"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.10/31",
+                "Ports": {
+                  "First": 80,
+                  "Last": 80
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::10/127",
+                "Ports": {
+                  "First": 80,
+                  "Last": 80
+                }
+              }
+            ],
+            "IPProto": [
+              6,
+              17
+            ]
+          }
+        ]
+      },
+      {
+        "name": "bob-a-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.20/32",
+              "fd7a:115c:a1e0::20/128"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ],
+            "IPProto": [
+              6,
+              17
+            ]
+          }
+        ]
+      },
+      {
+        "name": "tagged-router-filter",
+        "rules": [
+
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-a-peers",
+        "peers": [
+          2,
+          4
+        ]
+      },
+      {
+        "name": "alice-b-peers",
+        "peers": [
+          1,
+          4
+        ]
+      },
+      {
+        "name": "bob-a-peers",
+        "peers": [
+
+        ]
+      },
+      {
+        "name": "tagged-router-peers",
+        "peers": [
+          1,
+          2
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-comment-fields-and-protocols",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 5000,
+              "Last": 5002
+            }
+          }
+        ],
+        "IPProto": [
+          132
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          47
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-principal-resolution-matrix",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32",
+          "100.64.0.2/31",
+          "fd7a:115c:a1e0::1/128",
+          "fd7a:115c:a1e0::2/127"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::2/128",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.1/32",
+          "100.64.0.2/31",
+          "fd7a:115c:a1e0::1/128",
+          "fd7a:115c:a1e0::2/127"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::2/128",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.1/32",
+          "100.64.0.2/31",
+          "fd7a:115c:a1e0::1/128",
+          "fd7a:115c:a1e0::2/127"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.3/32",
+            "Ports": {
+              "First": 1000,
+              "Last": 1000
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::3/128",
+            "Ports": {
+              "First": 1000,
+              "Last": 1000
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-gre-specific-port",
+    "filter": [
+
+    ],
+    "policy_error": "protocol \"gre\" does not support specific ports"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-icmp-specific-port",
+    "filter": [
+
+    ],
+    "policy_error": "protocol \"icmp\" does not support specific ports"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-internet-src",
+    "filter": [
+
+    ],
+    "policy_error": "\"autogroup:internet\" used in source"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-invalid-autogroup-dst",
+    "filter": [
+
+    ],
+    "policy_error": "AutoGroup is invalid"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-nonroot-src",
+    "filter": [
+
+    ],
+    "policy_error": "autogroup \"autogroup:nonroot\" is not supported for ACL sources"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-port-invalid-number",
+    "filter": [
+
+    ],
+    "policy_error": "invalid port number"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-port-out-of-range",
+    "filter": [
+
+    ],
+    "policy_error": "port number out of range"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-port-range-inverted",
+    "filter": [
+
+    ],
+    "policy_error": "invalid port range: first port is greater than last port"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-port-zero",
+    "filter": [
+
+    ],
+    "policy_error": "first port must be >0"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-proto-invalid-name",
+    "filter": [
+
+    ],
+    "policy_error": "must be a known protocol name or valid protocol number"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-proto-leading-zero",
+    "filter": [
+
+    ],
+    "policy_error": "leading 0 not permitted"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-proto-wildcard",
+    "filter": [
+
+    ],
+    "policy_error": "proto name \"*\" not known"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-self-src",
+    "filter": [
+
+    ],
+    "policy_error": "\"autogroup:self\" used in source"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-undefined-group-src",
+    "filter": [
+
+    ],
+    "policy_error": "Group \"group:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-undefined-host-src",
+    "filter": [
+
+    ],
+    "policy_error": "Host \"missinghost\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-undefined-tag-dst",
+    "filter": [
+
+    ],
+    "policy_error": "Tag \"tag:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-unknown-autoapprover-field",
+    "filter": [
+
+    ],
+    "policy_error": "INVALID_AUTO_APPROVER_FIELD"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-unknown-policy-field",
+    "filter": [
+
+    ],
+    "policy_error": "INVALID_POLICY_FIELD"
+  },
+  {
+    "engine": "headscale",
+    "name": "acl-validation-unknown-rule-field",
+    "filter": [
+
+    ],
+    "policy_error": "INVALID_ACL_FIELD"
+  },
+  {
+    "engine": "headscale",
+    "name": "autoapprovers-validation-undefined-tag-route",
+    "filter": [
+
+    ],
+    "policy_error": "Tag \"tag:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "host-alias-tcp22",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "literal-prefix-icmp-wildcard",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          1,
+          58
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "literal-prefix-proto-number-tcp",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "literal-prefix-tcp-multiport",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "literal-prefix-tcp22",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "literal-prefix-udp-range",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 5000,
+              "Last": 5001
+            }
+          }
+        ],
+        "IPProto": [
+          17
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "peer-map-route-visibility",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "10.10.0.0/16",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "10.20.0.0/16",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-peers",
+        "peers": [
+          2
+        ]
+      },
+      {
+        "name": "approved-router-peers",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "unapproved-router-peers",
+        "peers": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "peer-map-symmetric-one-way",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-peers",
+        "peers": [
+          2
+        ]
+      },
+      {
+        "name": "server-peers",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "bob-peers",
+        "peers": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "route-autoapprove-edge-matrix",
+    "filter": [
+      {
+        "SrcIPs": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "DstPorts": [
+          {
+            "IP": "0.0.0.0/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "::/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "all-v4-policy-approves-specific-v4",
+        "approved_routes": [
+          "10.0.0.0/8"
+        ],
+        "changed": true
+      },
+      {
+        "name": "all-v4-policy-rejects-default-v4-without-exitnode",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "all-v4-policy-does-not-approve-v6",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "exitnode-group-approves-both-defaults",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      },
+      {
+        "name": "tag-exitnode-approves-both-defaults",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      },
+      {
+        "name": "exitnode-approver-does-not-approve-specific-route",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "exact-prefix-match",
+        "approved_routes": [
+          "203.0.113.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "narrower-prefix-match",
+        "approved_routes": [
+          "203.0.113.0/26"
+        ],
+        "changed": true
+      },
+      {
+        "name": "wider-prefix-rejected",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "adjacent-prefix-rejected",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "v6-specific-route-approved-by-v6-policy",
+        "approved_routes": [
+          "2001:db8::1/128"
+        ],
+        "changed": true
+      },
+      {
+        "name": "current-approved-is-preserved",
+        "approved_routes": [
+          "198.51.100.0/24",
+          "203.0.113.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "tagged-node-uses-tag-autoapprover",
+        "approved_routes": [
+          "10.10.0.0/16"
+        ],
+        "changed": true
+      },
+      {
+        "name": "tagged-node-does-not-inherit-user-group-autoapprover",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "multi-tagged-node-one-matching-tag-is-sufficient",
+        "approved_routes": [
+          "10.10.0.0/16"
+        ],
+        "changed": true
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "route-autoapprove-matrix",
+    "filter": [
+      {
+        "SrcIPs": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "DstPorts": [
+          {
+            "IP": "0.0.0.0/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "::/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "user-exact-and-subprefix-approved",
+        "approved_routes": [
+          "10.0.0.0/8",
+          "10.42.0.0/16"
+        ],
+        "changed": true
+      },
+      {
+        "name": "user-superprefix-rejected",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "plain-user-not-in-approvers-rejected",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "tagged-node-does-not-inherit-user-approver",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "tagged-node-uses-tag-approver",
+        "approved_routes": [
+          "192.168.1.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "group-exit-node-approves-defaults",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      },
+      {
+        "name": "tag-exit-node-approves-defaults",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "route-autoapprove",
+    "filter": [
+      {
+        "SrcIPs": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "DstPorts": [
+          {
+            "IP": "0.0.0.0/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "::/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "group-member-adds-subprefix-and-keeps-manual",
+        "approved_routes": [
+          "10.42.0.0/16",
+          "203.0.113.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "tagged-router-adds-tag-route",
+        "approved_routes": [
+          "172.16.4.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "plain-user-cannot-add-admin-route",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "exit-node-approves-v4-and-v6-defaults",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "route-default-route-requires-exitnode",
+    "filter": [
+      {
+        "SrcIPs": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "DstPorts": [
+          {
+            "IP": "0.0.0.0/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "::/0",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          6,
+          17
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "route-autoapprovers-do-not-grant-v4-default",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      },
+      {
+        "name": "route-autoapprovers-do-not-grant-v6-default",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-policy-matrix",
+    "filter": [
+
+    ],
+    "ssh_policies": [
+      {
+        "name": "alice-laptop",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1",
+              "100.64.0.2",
+              "fd7a:115c:a1e0::1",
+              "fd7a:115c:a1e0::2"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "bob-laptop",
+        "rules": [
+
+        ]
+      },
+      {
+        "name": "server",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "ssh-it-user": "ssh-it-user"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "deploy": "deploy",
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "db",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "admin": "admin"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 86400000000000,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-group-src-user-dst",
+    "filter": [
+
+    ],
+    "policy_error": "user destination requires source to contain only that same user"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-internet-dst",
+    "filter": [
+
+    ],
+    "policy_error": "\"autogroup:internet\" used in SSH destination"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-internet-src",
+    "filter": [
+
+    ],
+    "policy_error": "\"autogroup:internet\" used in SSH source"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-invalid-action",
+    "filter": [
+
+    ],
+    "policy_error": "invalid SSH action"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-invalid-check-period",
+    "filter": [
+
+    ],
+    "policy_error": "not a valid duration string"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-tag-src-member-dst",
+    "filter": [
+
+    ],
+    "policy_error": "tags in SSH source cannot access autogroup:member"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-tag-src-user-dst",
+    "filter": [
+
+    ],
+    "policy_error": "tags in SSH source cannot access user-owned devices"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-undefined-group-src",
+    "filter": [
+
+    ],
+    "policy_error": "Group \"group:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-undefined-tag-dst",
+    "filter": [
+
+    ],
+    "policy_error": "Tag \"tag:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-unknown-field",
+    "filter": [
+
+    ],
+    "policy_error": "INVALID_SSH_FIELD"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-unsupported-user-autogroup",
+    "filter": [
+
+    ],
+    "policy_error": "autogroup \"autogroup:invalid\" is not supported for SSH user"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-wildcard-dst",
+    "filter": [
+
+    ],
+    "policy_error": "wildcard (*) is not supported as SSH destination"
+  },
+  {
+    "engine": "headscale",
+    "name": "tag-owners-matrix",
+    "filter": [
+
+    ],
+    "tag_checks": [
+      {
+        "name": "alice-can-claim-router",
+        "allowed": true
+      },
+      {
+        "name": "bob-cannot-claim-router",
+        "allowed": false
+      },
+      {
+        "name": "alice-can-claim-db-through-group",
+        "allowed": true
+      },
+      {
+        "name": "router-tag-can-claim-ops",
+        "allowed": false
+      },
+      {
+        "name": "undefined-tag-is-denied",
+        "allowed": false
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "tagowners-nested-tag-owner",
+    "filter": [
+
+    ],
+    "tag_checks": [
+      {
+        "name": "alice-can-claim-derived-through-base",
+        "allowed": true
+      },
+      {
+        "name": "alice-can-claim-deep-through-chain",
+        "allowed": true
+      },
+      {
+        "name": "bob-can-claim-mixed-directly",
+        "allowed": true
+      },
+      {
+        "name": "carol-can-claim-mixed-through-group",
+        "allowed": true
+      },
+      {
+        "name": "dave-cannot-claim-derived",
+        "allowed": false
+      },
+      {
+        "name": "alice-cannot-claim-empty",
+        "allowed": false
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "tagowners-validation-circular-tag-owner",
+    "filter": [
+
+    ],
+    "policy_error": "circular reference detected"
+  },
+  {
+    "engine": "headscale",
+    "name": "tagowners-validation-undefined-group",
+    "filter": [
+
+    ],
+    "policy_error": "Group \"group:notdefined\" is not defined"
+  },
+  {
+    "engine": "headscale",
+    "name": "tagowners-validation-undefined-tag-owner",
+    "filter": [
+
+    ],
+    "policy_error": "references undefined tag"
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-dns-derp-extended",
+    "filter": [
+
+    ],
+    "wire": {
+      "dns_config": {
+        "Resolvers": [
+          {
+            "Addr": "https://dns.example/dns-query",
+            "BootstrapResolution": [
+              "203.0.113.53"
+            ],
+            "UseWithExitNode": true
+          }
+        ],
+        "Routes": {
+          "corp.example": [
+            {
+              "Addr": "tls://dns.corp.example",
+              "BootstrapResolution": [
+                "2001:db8::53"
+              ]
+            }
+          ],
+          "tail.example": [
+
+          ]
+        },
+        "FallbackResolvers": [
+          {
+            "Addr": "8.8.8.8"
+          }
+        ],
+        "Domains": [
+          "tail.example",
+          "corp.example"
+        ],
+        "Proxied": true,
+        "Nameservers": [
+          "100.100.100.100"
+        ],
+        "CertDomains": [
+          "node.tail.example"
+        ],
+        "ExtraRecords": [
+          {
+            "Name": "v6.tail.example",
+            "Type": "AAAA",
+            "Value": "fd7a:115c:a1e0::53"
+          },
+          {
+            "Name": "alias.tail.example",
+            "Type": "CNAME",
+            "Value": "node.tail.example"
+          }
+        ],
+        "ExitNodeFilteredSet": [
+          ".corp.example",
+          "internal.example"
+        ],
+        "TempCorpIssue13969": "https://dns.example/blocklist.txt"
+      },
+      "derp_map": {
+        "HomeParams": {
+          "RegionScore": {
+            "900": 0.75,
+            "901": 1.25
+          }
+        },
+        "Regions": {
+          "900": {
+            "RegionID": 900,
+            "RegionCode": "edge",
+            "RegionName": "Edge DERP",
+            "Latitude": 44.6488,
+            "Longitude": -63.5752,
+            "Avoid": true,
+            "NoMeasureNoHome": true,
+            "Nodes": [
+              {
+                "Name": "900a",
+                "RegionID": 900,
+                "HostName": "derp.edge.example",
+                "CertName": "sha256-raw:abc123",
+                "IPv4": "203.0.113.10",
+                "IPv6": "2001:db8::10",
+                "STUNPort": -1,
+                "DERPPort": 8443,
+                "InsecureForTests": true,
+                "STUNTestIP": "198.51.100.10",
+                "CanPort80": true
+              }
+            ]
+          }
+        },
+        "omitDefaultRegions": true
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-dns-derp-register-map",
+    "filter": [
+
+    ],
+    "wire": {
+      "dns_config": {
+        "Resolvers": [
+          {
+            "Addr": "1.1.1.1"
+          },
+          {
+            "Addr": "https://dns.example/dns-query",
+            "UseWithExitNode": true
+          }
+        ],
+        "Routes": {
+          "corp.example": [
+            {
+              "Addr": "10.0.0.53"
+            }
+          ]
+        },
+        "FallbackResolvers": [
+          {
+            "Addr": "9.9.9.9"
+          }
+        ],
+        "Domains": [
+          "tail.example",
+          "corp.example"
+        ],
+        "Proxied": true,
+        "ExtraRecords": [
+          {
+            "Name": "db.tail.example",
+            "Type": "A",
+            "Value": "100.64.0.10"
+          }
+        ],
+        "ExitNodeFilteredSet": [
+          "corp.example"
+        ]
+      },
+      "derp_map": {
+        "Regions": {
+          "900": {
+            "RegionID": 900,
+            "RegionCode": "test",
+            "RegionName": "Test DERP",
+            "Nodes": [
+              {
+                "Name": "900a",
+                "RegionID": 900,
+                "HostName": "derp.example",
+                "IPv4": "203.0.113.10",
+                "STUNPort": 3478,
+                "DERPPort": 443,
+                "InsecureForTests": true
+              }
+            ]
+          }
+        },
+        "omitDefaultRegions": true
+      },
+      "register_request": {
+        "node_key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "auth_key": "hskey-auth-test",
+        "hostinfo": {
+          "hostname": "peer",
+          "os": "linux",
+          "os_version": "6.8",
+          "preferred_derp": 900
+        },
+        "followup": "auth"
+      },
+      "register_response": {
+        "user": {
+          "id": 42,
+          "display_name": "Alice",
+          "profile_pic_url": "https://example.com/alice.png",
+          "created": "2026-05-22T12:00:00Z"
+        },
+        "login": {
+          "id": 42,
+          "provider": "octravpn-preauth",
+          "login_name": "alice",
+          "display_name": "Alice",
+          "profile_pic_url": "https://example.com/alice-login.png"
+        },
+        "node_key_expired": false,
+        "auth_url": "",
+        "machine_authorized": true
+      },
+      "map_response": {
+        "keep_alive": true,
+        "domain": "tail.example",
+        "node": {
+          "id": 7,
+          "stable_id": "n7",
+          "name": "peer.tail.example",
+          "user": 42,
+          "key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+          "machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.7/32"
+          ],
+          "allowed_ips": [
+            "100.64.0.7/32"
+          ],
+          "endpoints": [
+            "198.51.100.7:41641"
+          ],
+          "legacy_derp_string": "127.3.3.40:900",
+          "hostinfo": {
+            "hostname": "peer",
+            "os": "linux",
+            "os_version": "6.8",
+            "preferred_derp": 900
+          },
+          "machine_authorized": true,
+          "home_derp": 900
+        },
+        "peer_count": 0,
+        "packet_filter": [
+          {
+            "SrcIPs": [
+              "*"
+            ],
+            "DstPorts": [
+              {
+                "IP": "*",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ],
+        "dns_config": {
+          "Domains": [
+            "tail.example"
+          ],
+          "Proxied": true
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-hostinfo-netinfo-metadata",
+    "filter": [
+
+    ],
+    "wire": {
+      "register_request": {
+        "version": 96,
+        "node_key": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+        "auth_key": "hskey-auth-hostinfo",
+        "hostinfo": {
+          "ipn_version": "1.94.1-t000000000-g000000000",
+          "frontend_log_id": "frontend-log-1",
+          "backend_log_id": "backend-log-1",
+          "hostname": "metadata-peer",
+          "os": "linux",
+          "os_version": "6.12.0",
+          "container": true,
+          "env": "kn",
+          "distro": "ubuntu",
+          "distro_version": "24.04",
+          "distro_code_name": "noble",
+          "app": "tsnet-app",
+          "desktop": false,
+          "package": "apt",
+          "device_model": "vm",
+          "push_device_token": "push-token-1",
+          "shields_up": true,
+          "sharee_node": true,
+          "no_logs_no_support": true,
+          "wire_ingress": true,
+          "ingress_enabled": true,
+          "allows_update": true,
+          "machine": "x86_64",
+          "go_arch": "amd64",
+          "go_arch_var": "v3",
+          "go_version": "go1.25.5",
+          "routable_ips": [
+            "10.10.0.0/24",
+            "fd7a:115c:a1e0::/48"
+          ],
+          "request_tags": [
+            "tag:server"
+          ],
+          "wol_macs": [
+            "00:11:22:33:44:55"
+          ],
+          "services": [
+            {
+              "proto": "peerapi4",
+              "port": 5252
+            },
+            {
+              "proto": "tcp",
+              "port": 443,
+              "description": "https"
+            }
+          ],
+          "ssh_host_keys": [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"
+          ],
+          "cloud": "aws",
+          "userspace": false,
+          "userspace_router": true,
+          "app_connector": false,
+          "services_hash": "services-hash-1",
+          "exit_node_id": "n99",
+          "location": {
+            "country": "Canada",
+            "country_code": "CA",
+            "city": "Halifax",
+            "city_code": "YHZ",
+            "latitude": 44.6488,
+            "longitude": -63.5752,
+            "priority": 7
+          },
+          "tpm": {
+            "manufacturer": "MSFT",
+            "vendor": "Microsoft",
+            "model": 42,
+            "firmware_version": 65538,
+            "spec_revision": 184,
+            "family_indicator": "2.0"
+          },
+          "state_encrypted": true,
+          "mapping_varies_by_dest_ip": true,
+          "working_ipv6": false,
+          "os_has_ipv6": true,
+          "working_udp": true,
+          "working_icmp_v4": false,
+          "preferred_derp": 900,
+          "have_port_map": true,
+          "upnp": true,
+          "pmp": false,
+          "pcp": true,
+          "link_type": "wired",
+          "derp_latency": {
+            "900-v4": 0.012,
+            "901-v6": 0.034
+          },
+          "firewall_mode": "nft-default"
+        }
+      },
+      "map_request": {
+        "version": 96,
+        "node_key": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+        "hostinfo": {
+          "ipn_version": "1.94.1-t000000000-g000000000",
+          "hostname": "metadata-peer",
+          "os": "linux",
+          "os_version": "6.12.0",
+          "container": true,
+          "routable_ips": [
+            "10.10.0.0/24"
+          ],
+          "request_tags": [
+            "tag:server"
+          ],
+          "services": [
+            {
+              "proto": "udp",
+              "port": 53,
+              "description": "dns"
+            }
+          ],
+          "location": {
+            "country": "Canada",
+            "country_code": "CA",
+            "city": "Halifax",
+            "latitude": 44.6488,
+            "longitude": -63.5752
+          },
+          "tpm": {
+            "manufacturer": "MSFT",
+            "firmware_version": 65538,
+            "family_indicator": "2.0"
+          },
+          "working_udp": false,
+          "preferred_derp": 900,
+          "have_port_map": true,
+          "upnp": false,
+          "link_type": "wired",
+          "derp_latency": {
+            "900-v4": 0.056
+          },
+          "firewall_mode": "nft-default"
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-node-lifecycle",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_response": {
+        "keep_alive": false,
+        "domain": "tail.example",
+        "node": {
+          "id": 7,
+          "stable_id": "n7",
+          "name": "peer.tail.example",
+          "user": 42,
+          "key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+          "machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.7/32"
+          ],
+          "allowed_ips": [
+            "100.64.0.7/32"
+          ],
+          "hostinfo": {
+            "hostname": "peer",
+            "os": "linux"
+          },
+          "created": "2026-05-21T12:00:00.123456789Z",
+          "key_expiry": "2026-06-21T12:00:00.123456789Z",
+          "last_seen": "2026-05-21T12:30:00.123456789Z",
+          "online": true
+        },
+        "peer_count": 1,
+        "peers": [
+          {
+            "id": 8,
+            "stable_id": "n8",
+            "name": "router.tail.example",
+            "user": 42,
+            "key": "nodekey:0800000000000000000000000000000000000000000000000000000000000000",
+            "machine": "mkey:0900000000000000000000000000000000000000000000000000000000000000",
+            "disco_key": "discokey:0b00000000000000000000000000000000000000000000000000000000000000",
+            "addresses": [
+              "100.64.0.8/32"
+            ],
+            "allowed_ips": [
+              "10.0.0.0/24",
+              "100.64.0.8/32"
+            ],
+            "hostinfo": {
+              "hostname": "router",
+              "os": "linux"
+            },
+            "created": "2026-05-20T09:00:00Z",
+            "key_expiry": "2026-06-20T09:00:00Z",
+            "last_seen": "2026-05-21T11:59:00Z",
+            "online": false
+          }
+        ],
+        "peers_changed": [
+          {
+            "id": 9,
+            "stable_id": "n9",
+            "name": "changed.tail.example",
+            "user": 42,
+            "key": "nodekey:0900000000000000000000000000000000000000000000000000000000000000",
+            "machine": "mkey:0a00000000000000000000000000000000000000000000000000000000000000",
+            "disco_key": "discokey:0c00000000000000000000000000000000000000000000000000000000000000",
+            "addresses": [
+              "100.64.0.9/32"
+            ],
+            "allowed_ips": [
+              "100.64.0.9/32"
+            ],
+            "hostinfo": {
+              "hostname": "changed",
+              "os": "linux"
+            },
+            "created": "2026-05-19T08:00:00Z",
+            "key_expiry": "2026-06-19T08:00:00Z",
+            "last_seen": "2026-05-21T10:00:00Z"
+          }
+        ],
+        "dns_config": {
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-node-metadata",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_response": {
+        "keep_alive": false,
+        "domain": "tail.example",
+        "node": {
+          "id": 7,
+          "stable_id": "n7",
+          "name": "router.tail.example",
+          "user": 42,
+          "sharer": 84,
+          "key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+          "key_signature": "AQI=",
+          "machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.7/32"
+          ],
+          "allowed_ips": [
+            "10.0.0.0/24",
+            "100.64.0.7/32"
+          ],
+          "primary_routes": [
+            "10.0.0.0/24"
+          ],
+          "legacy_derp_string": "127.3.3.40:900",
+          "hostinfo": {
+            "hostname": "router",
+            "os": "linux",
+            "os_version": "6.8"
+          },
+          "tags": [
+            "tag:router"
+          ],
+          "online": true,
+          "machine_authorized": true,
+          "cap": 112,
+          "capabilities": [
+            "https://tailscale.com/cap/ssh"
+          ],
+          "cap_map": {
+            "funnel": [
+
+            ]
+          },
+          "expired": true,
+          "home_derp": 900,
+          "unsigned_peer_api_only": true,
+          "computed_name": "router",
+          "computed_name_with_host": "router (router-host)",
+          "data_plane_audit_log_id": "node-log-id",
+          "self_node_v4_masq_addr_for_this_peer": "100.99.99.99",
+          "self_node_v6_masq_addr_for_this_peer": "fd7a:115c:a1e0::99",
+          "is_wire_guard_only": true,
+          "is_jailed": true,
+          "exit_node_dns_resolvers": [
+            {
+              "Addr": "1.1.1.1",
+              "UseWithExitNode": true
+            }
+          ]
+        },
+        "peer_count": 0,
+        "dns_config": {
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-request-connection-handle",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_request": {
+        "version": 96,
+        "stream": true,
+        "keep_alive": true,
+        "compress": "zstd",
+        "node_key": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+        "map_session_handle": "session-connection-handle",
+        "map_session_seq": 17,
+        "disco_key": "discokey:3434343434343434343434343434343434343434343434343434343434343434",
+        "hardware_attestation_key": "hwattestpub:046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+        "hardware_attestation_key_signature": "YXR0ZXN0LXNpZw==",
+        "hardware_attestation_key_signature_timestamp": true,
+        "endpoints": [
+          "198.51.100.10:41641"
+        ],
+        "endpoint_types": [
+          1
+        ],
+        "tka_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "debug_flags": [
+          "warn-router-unhealthy"
+        ],
+        "connection_handle_for_test": "conn-test-0001",
+        "hostinfo": {
+          "hostname": "connection-handle-peer",
+          "os": "linux",
+          "os_version": "6.12"
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-request-session-userprofiles",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_request": {
+        "version": 68,
+        "stream": true,
+        "keep_alive": true,
+        "compress": "zstd",
+        "omit_peers": true,
+        "node_key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+        "map_session_handle": "session-1",
+        "map_session_seq": 7,
+        "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+        "endpoints": [
+          "198.51.100.7:41641"
+        ],
+        "endpoint_types": [
+          1
+        ],
+        "read_only": true,
+        "hostinfo": {
+          "hostname": "peer",
+          "os": "linux",
+          "os_version": "6.8",
+          "preferred_derp": 901
+        }
+      },
+      "map_response": {
+        "keep_alive": false,
+        "domain": "tail.example",
+        "node": {
+          "id": 7,
+          "stable_id": "n7",
+          "name": "peer.tail.example",
+          "user": 42,
+          "key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+          "machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.7/32"
+          ],
+          "allowed_ips": [
+            "100.64.0.7/32"
+          ],
+          "endpoints": [
+            "198.51.100.7:41641"
+          ],
+          "legacy_derp_string": "127.3.3.40:901",
+          "hostinfo": {
+            "hostname": "peer",
+            "os": "linux",
+            "os_version": "6.8",
+            "preferred_derp": 901
+          },
+          "machine_authorized": true,
+          "home_derp": 901
+        },
+        "peer_count": 0,
+        "user_profiles": [
+          {
+            "id": 42,
+            "login_name": "alice@example.com",
+            "display_name": "Alice",
+            "profile_pic_url": "https://example.com/alice.png"
+          }
+        ],
+        "dns_config": {
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-response-deltas-control",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_request": {
+        "version": 112,
+        "stream": true,
+        "keep_alive": true,
+        "map_session_handle": "sess-1",
+        "map_session_seq": 11,
+        "tka_head": "aum-head",
+        "debug_flags": [
+          "warn-ip-forwarding-off",
+          "warn-router-unhealthy"
+        ]
+      },
+      "map_response": {
+        "map_session_handle": "sess-1",
+        "seq": 12,
+        "keep_alive": true,
+        "ping_request": {
+          "URL": "https://control.example/ping/1",
+          "URLIsNoise": true,
+          "Log": true,
+          "Types": "TSMP",
+          "IP": "100.64.0.2",
+          "Payload": "AQI="
+        },
+        "pop_browser_url": "https://control.example/login",
+        "collect_services": true,
+        "peer_count": 0,
+        "peers_changed": [
+          {
+            "id": 2,
+            "stable_id": "n2",
+            "name": "peer.tail.example",
+            "user": 42,
+            "key": "nodekey:0200000000000000000000000000000000000000000000000000000000000000",
+            "machine": "mkey:0300000000000000000000000000000000000000000000000000000000000000",
+            "disco_key": "discokey:0400000000000000000000000000000000000000000000000000000000000000",
+            "addresses": [
+              "100.64.0.2/32"
+            ],
+            "allowed_ips": [
+              "100.64.0.2/32"
+            ],
+            "hostinfo": {
+              "hostname": "peer",
+              "os": "linux",
+              "os_version": "6.8"
+            },
+            "online": false,
+            "machine_authorized": true,
+            "home_derp": 1
+          }
+        ],
+        "peers_removed": [
+          3
+        ],
+        "peers_changed_patch": [
+          {
+            "NodeID": 2,
+            "DERPRegion": 1,
+            "Cap": 112,
+            "CapMap": {
+              "funnel": [
+
+              ]
+            },
+            "Endpoints": [
+              "198.51.100.2:41641"
+            ],
+            "Key": "nodekey:0500000000000000000000000000000000000000000000000000000000000000",
+            "KeySignature": "AQI=",
+            "DiscoKey": "discokey:0600000000000000000000000000000000000000000000000000000000000000",
+            "Online": false,
+            "LastSeen": "2026-05-21T12:30:00Z",
+            "KeyExpiry": "2026-06-21T12:30:00Z"
+          }
+        ],
+        "peer_seen_change": {
+          "2": true,
+          "3": false
+        },
+        "online_change": {
+          "2": false
+        },
+        "packet_filters": {
+          "base": [
+            {
+              "SrcIPs": [
+                "100.64.0.1/32"
+              ],
+              "DstPorts": [
+                {
+                  "IP": "100.64.0.2/32",
+                  "Ports": {
+                    "First": 22,
+                    "Last": 22
+                  }
+                }
+              ],
+              "IPProto": [
+                6
+              ]
+            }
+          ],
+          "old": null
+        },
+        "health": [
+          "control-plane-warning"
+        ],
+        "display_messages": {
+          "old-warning": null,
+          "router-unhealthy": {
+            "Title": "Router unhealthy",
+            "Text": "IP forwarding is disabled.",
+            "Severity": "medium",
+            "ImpactsConnectivity": true,
+            "PrimaryAction": {
+              "URL": "https://example.com/fix",
+              "Label": "Open"
+            }
+          }
+        },
+        "control_time": "2026-05-21T12:34:56Z",
+        "tka_info": {
+          "Head": "aum-head"
+        },
+        "domain_data_plane_audit_log_id": "tailnet-log-id",
+        "debug": {
+          "SleepSeconds": 1.5,
+          "DisableLogTail": true,
+          "Exit": 5
+        },
+        "control_dial_plan": {
+          "Candidates": [
+            {
+              "IP": "203.0.113.10",
+              "ACEHost": "ace.example.com",
+              "DialStartDelaySec": 0.25,
+              "DialTimeoutSec": 4.5,
+              "Priority": 10
+            }
+          ]
+        },
+        "client_version": {
+          "LatestVersion": "1.99.0",
+          "Notify": true,
+          "NotifyURL": "https://tailscale.com/download",
+          "NotifyText": "Update available"
+        },
+        "default_auto_update": true
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-map-response-ssh-policy",
+    "filter": [
+
+    ],
+    "wire": {
+      "map_response": {
+        "keep_alive": true,
+        "domain": "tail.example",
+        "node": {
+          "id": 7,
+          "stable_id": "n7",
+          "name": "server.tail.example",
+          "user": 42,
+          "key": "nodekey:0100000000000000000000000000000000000000000000000000000000000000",
+          "machine": "mkey:0200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:0300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.7/32"
+          ],
+          "allowed_ips": [
+            "100.64.0.7/32"
+          ],
+          "endpoints": [
+            "198.51.100.7:41641"
+          ],
+          "hostinfo": {
+            "hostname": "server",
+            "os": "linux",
+            "os_version": "6.8"
+          },
+          "machine_authorized": true
+        },
+        "peer_count": 0,
+        "dns_config": {
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        },
+        "ssh_policy": [
+          {
+            "principals": [
+              "100.64.0.8",
+              "100.64.0.9"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 3600000000000,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-register-map-request-peer-flags",
+    "filter": [
+
+    ],
+    "wire": {
+      "register_request": {
+        "node_key": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+        "auth_key": "hskey-auth-ephemeral",
+        "hostinfo": {
+          "hostname": "ephemeral-peer",
+          "os": "linux",
+          "os_version": "6.9"
+        },
+        "followup": "auth",
+        "ephemeral": true,
+        "requested_expiry": true
+      },
+      "register_response": {
+        "user": {
+          "id": 77,
+          "display_name": "Bob",
+          "profile_pic_url": "https://example.com/bob.png",
+          "created": "2026-05-22T12:00:00Z"
+        },
+        "login": {
+          "id": 77,
+          "provider": "octravpn-preauth",
+          "login_name": "bob",
+          "display_name": "Bob",
+          "profile_pic_url": "https://example.com/bob-login.png"
+        },
+        "node_key_expired": true,
+        "auth_url": "https://login.example/auth",
+        "machine_authorized": false,
+        "error": "expired key"
+      },
+      "map_request": {
+        "version": 96,
+        "stream": true,
+        "compress": "zstd",
+        "omit_peers": true,
+        "node_key": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+        "disco_key": "discokey:3300000000000000000000000000000000000000000000000000000000000000",
+        "endpoints": [
+          "198.51.100.10:41641",
+          "[2001:db8::10]:41641"
+        ],
+        "hostinfo": {
+          "hostname": "ephemeral-peer",
+          "os": "linux",
+          "os_version": "6.9"
+        }
+      },
+      "map_response": {
+        "keep_alive": true,
+        "domain": "tail.example",
+        "node": {
+          "id": 10,
+          "stable_id": "n10",
+          "name": "ephemeral-peer.tail.example",
+          "user": 77,
+          "key": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
+          "machine": "mkey:2200000000000000000000000000000000000000000000000000000000000000",
+          "disco_key": "discokey:3300000000000000000000000000000000000000000000000000000000000000",
+          "addresses": [
+            "100.64.0.10/32"
+          ],
+          "allowed_ips": [
+            "100.64.0.10/32"
+          ],
+          "endpoints": [
+            "198.51.100.10:41641"
+          ],
+          "hostinfo": {
+            "hostname": "ephemeral-peer",
+            "os": "linux",
+            "os_version": "6.9"
+          },
+          "machine_authorized": true
+        },
+        "peer_count": 1,
+        "peers": [
+          {
+            "id": 11,
+            "stable_id": "n11",
+            "name": "peer.tail.example",
+            "user": 78,
+            "key": "nodekey:4400000000000000000000000000000000000000000000000000000000000000",
+            "machine": "mkey:5500000000000000000000000000000000000000000000000000000000000000",
+            "disco_key": "discokey:6600000000000000000000000000000000000000000000000000000000000000",
+            "addresses": [
+              "100.64.0.11/32"
+            ],
+            "allowed_ips": [
+              "100.64.0.11/32"
+            ],
+            "endpoints": [
+              "203.0.113.11:41641"
+            ],
+            "hostinfo": {
+              "hostname": "peer",
+              "os": "darwin",
+              "os_version": "15.0"
+            },
+            "machine_authorized": true
+          }
+        ],
+        "packet_filter": [
+          {
+            "SrcIPs": [
+              "100.64.0.10/32"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.11/32",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          }
+        ],
+        "dns_config": {
+          "Domains": [
+            "tail.example"
+          ],
+          "Proxied": true
+        },
+        "derp_map": {
+          "Regions": {
+          },
+          "omitDefaultRegions": true
+        }
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-register-map-zero-node-key-defaults",
+    "filter": [
+
+    ],
+    "wire": {
+      "register_request": {
+        "version": 113,
+        "node_key": "nodekey:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "map_request": {
+        "version": 113
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-register-request-rotation-tailnet",
+    "filter": [
+
+    ],
+    "wire": {
+      "register_request": {
+        "version": 96,
+        "node_key": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+        "old_node_key": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+        "nl_key": "nlpub:3333333333333333333333333333333333333333333333333333333333333333",
+        "auth_key": "hskey-auth-rotation",
+        "hostinfo": {
+          "hostname": "rotation-peer",
+          "os": "linux",
+          "os_version": "6.10",
+          "request_tags": [
+            "tag:server",
+            "tag:db"
+          ]
+        },
+        "followup": "https://headscale.example/register/3oYCOZYA2zZmGB4PQ7aHBaMi",
+        "tailnet": "required:tail.example",
+        "ephemeral": true,
+        "requested_expiry": true
+      }
+    }
+  },
+  {
+    "engine": "headscale",
+    "name": "wire-register-signatures",
+    "filter": [
+
+    ],
+    "wire": {
+      "register_request": {
+        "version": 96,
+        "node_key": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+        "old_node_key": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+        "nl_key": "nlpub:3333333333333333333333333333333333333333333333333333333333333333",
+        "auth_key": "hskey-auth-signature",
+        "hostinfo": {
+          "hostname": "signed-peer",
+          "os": "linux",
+          "os_version": "6.12",
+          "request_tags": [
+            "tag:server"
+          ]
+        },
+        "followup": "https://headscale.example/register/signed",
+        "tailnet": "required:tail.example",
+        "ephemeral": true,
+        "requested_expiry": true,
+        "node_key_signature": "bm9kZS1zaWduYXR1cmU=",
+        "signature_type": "signature-v2",
+        "timestamp": true,
+        "device_cert": "ZGV2aWNlLWNlcnQ=",
+        "signature": "cmVnaXN0ZXItc2lnbmF0dXJl"
+      },
+      "register_response": {
+        "user": {
+          "id": 42,
+          "display_name": "Alice",
+          "profile_pic_url": "https://example.com/alice.png",
+          "created": "2026-05-22T12:00:00Z"
+        },
+        "login": {
+          "id": 42,
+          "provider": "octravpn-preauth",
+          "login_name": "alice",
+          "display_name": "Alice",
+          "profile_pic_url": "https://example.com/alice-login.png"
+        },
+        "node_key_expired": true,
+        "auth_url": "https://headscale.example/register/signed",
+        "machine_authorized": false,
+        "node_key_signature": "cmVzcG9uc2Utc2lnbmF0dXJl",
+        "error": "signature required"
+      }
+    }
+  }
+]

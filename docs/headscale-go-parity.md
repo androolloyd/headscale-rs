@@ -81,7 +81,15 @@ The default differential gate is:
 ```
 
 It compares `tools/parity/headscale-rs` with headscale-go v0.28.0
-over every checked-in `tools/parity/scenarios/*.json` scenario.
+over every checked-in `tools/parity/scenarios/*.json` scenario, then checks the
+normalized pinned golden at `tools/parity/golden/headscale-go-v0.28.0.json`.
+Current-head-only scenarios such as `grants[].via` route steering live under
+`tools/parity/current-head/` and run through the Rust golden gate until the Go
+harness baseline is intentionally rebased:
+
+```sh
+./scripts/headscale_rs_current_head_golden.sh
+```
 
 The stock-client parity matrix is:
 

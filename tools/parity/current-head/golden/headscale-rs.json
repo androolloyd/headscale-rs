@@ -1,0 +1,84 @@
+[
+  {
+    "engine": "headscale-rs",
+    "name": "route-via-steering",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1/32",
+          "100.64.0.2/31",
+          "100.64.0.4/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.1/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "100.64.0.2/31",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "100.64.0.4/32",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.3/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "10.0.0.0/24",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.4/32"
+        ],
+        "DstPorts": [
+          {
+            "IP": "10.0.0.0/24",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "client-a-via-router-a",
+        "peers": [
+          1,
+          2,
+          4
+        ]
+      },
+      {
+        "name": "client-b-via-router-b",
+        "peers": [
+          1,
+          2,
+          3
+        ]
+      }
+    ]
+  }
+]

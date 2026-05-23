@@ -7,8 +7,19 @@ runs="${FUZZ_RUNS:-10000}"
 max_total_time="${FUZZ_MAX_TOTAL_TIME:-}"
 timeout_secs="${FUZZ_TIMEOUT_SECS:-30}"
 rss_limit_mb="${FUZZ_RSS_LIMIT_MB:-4096}"
+seed="${FUZZ_SEED:-}"
 
 cd "${fuzz_dir}"
+
+declare -A valid_targets=()
+while IFS= read -r target; do
+  [[ -n "${target}" ]] && valid_targets["${target}"]=1
+done < <(python3 "${repo_root}/scripts/fuzz_targets.py")
+
+if ((${#valid_targets[@]} == 0)); then
+  echo "no fuzz targets found" >&2
+  exit 2
+fi
 
 targets=()
 if [[ -n "${FUZZ_TARGETS:-}" ]]; then
@@ -18,13 +29,22 @@ elif [[ -n "${FUZZ_TARGET:-}" ]]; then
 else
   while IFS= read -r target; do
     [[ -n "${target}" ]] && targets+=("${target}")
-  done < <(cargo fuzz list)
+  done < <(printf '%s\n' "${!valid_targets[@]}" | sort)
 fi
 
 if ((${#targets[@]} == 0)); then
   echo "no fuzz targets found" >&2
   exit 2
 fi
+
+for target in "${targets[@]}"; do
+  if [[ -z "${valid_targets[${target}]:-}" ]]; then
+    echo "unknown fuzz target: ${target}" >&2
+    echo "known fuzz targets:" >&2
+    printf '  %s\n' "${!valid_targets[@]}" | sort >&2
+    exit 2
+  fi
+done
 
 group_start() {
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
@@ -55,12 +75,16 @@ done
 
 mkdir -p logs
 for target in "${targets[@]}"; do
-  mkdir -p "logs/${target}"
+  mkdir -p "logs/${target}" "artifacts/${target}"
 
   fuzz_args=(
     "-timeout=${timeout_secs}"
     "-rss_limit_mb=${rss_limit_mb}"
+    "-print_final_stats=1"
   )
+  if [[ -n "${seed}" ]]; then
+    fuzz_args+=("-seed=${seed}")
+  fi
   if [[ -n "${max_total_time}" ]]; then
     fuzz_args+=("-max_total_time=${max_total_time}")
     log_name="max-${max_total_time}.log"

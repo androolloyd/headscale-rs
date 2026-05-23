@@ -32,6 +32,7 @@ cargo deny check advisories licenses sources
 cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
 cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
 ./scripts/headscale_go_diff.sh
+./scripts/headscale_rs_current_head_golden.sh
 ```
 
 `cargo audit` is lockfile-only and currently reports `RUSTSEC-2023-0071`
@@ -46,7 +47,10 @@ Pull-request CI runs each fuzz target with `-runs=10000`; cargo-fuzz replays
 any checked-in `headscale-core/fuzz/corpus/<target>/` seeds before generated
 inputs. The scheduled nightly workflow runs the same target list with
 `-max_total_time`, uploads logs, and keeps any crash artifacts from
-`headscale-core/fuzz/artifacts/<target>/`.
+`headscale-core/fuzz/artifacts/<target>/`. Both workflows derive the target list
+from `headscale-core/fuzz/Cargo.toml` via `scripts/fuzz_targets.py`, and
+`scripts/check_fuzz_corpus.sh` fails stale checked-in corpus directories before
+running libFuzzer.
 
 Current target surfaces:
 
@@ -79,6 +83,12 @@ stock-client smokes, not comments. The current fixtures cover:
 - `tools/parity/scenarios/*.json` differential cases against pinned
   `github.com/juanfont/headscale v0.28.0` policy, peer-map, route
   auto-approval, SSH-policy, and `tailcfg` JSON output;
+- `tools/parity/golden/headscale-go-v0.28.0.json`, which snapshots the
+  normalized pinned differential output after Rust and Go agree;
+- `tools/parity/current-head/*.json` plus
+  `tools/parity/current-head/golden/headscale-rs.json`, which keep
+  current-upstream-only policy surfaces runnable until the Go harness baseline is
+  intentionally rebased;
 - Tailscale wire acronym fields such as `AuthURL`, `DNSConfig`, `DERPMap`,
   `AllowedIPs`, `DiscoKey`, and `ID`;
 - ACL default-deny, first-match-wins, group ordering canonicalisation, hosts,

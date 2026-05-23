@@ -94,6 +94,7 @@ pub use wire::{
 // Re-export the lifecycle helper so downstream crates can spawn the GC
 // sweep without reaching into the module path.
 pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
+pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
 
 /// Error type for the Tailscale-wire handlers.
 #[derive(Debug, Error)]
@@ -1044,6 +1045,47 @@ impl MachineRegistry {
         // bumps at 1 per ns is 585 years.
         self.gen_tx.send_modify(|g| *g = g.wrapping_add(1));
         self.notify.notify_waiters();
+    }
+
+    /// Headscale-go `State.ExpireExpiredNodes` parity: find nodes whose
+    /// key-expiry crossed since the previous scheduler pass and wake
+    /// active map streams so they rebuild with `KeyExpiry`/`Expired`.
+    ///
+    /// This is intentionally notification-only. Expired nodes stay in
+    /// the registry and persistent store; auth/register paths decide
+    /// what a client must do next.
+    pub fn expire_expired_nodes_since(
+        &self,
+        last_check: DateTime<Utc>,
+    ) -> (DateTime<Utc>, Vec<String>) {
+        let started = Utc::now();
+        let expired = self.wake_expired_nodes_between(last_check, started);
+        (started, expired)
+    }
+
+    fn wake_expired_nodes_between(
+        &self,
+        last_check: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        let start = Instant::now();
+        let expired: Vec<String> = self
+            .snapshot()
+            .iter()
+            .filter_map(|(node_key, rec)| match rec.expiry {
+                Some(expiry) if expiry > last_check && expiry <= now => Some(node_key.clone()),
+                _ => None,
+            })
+            .collect();
+        if expired.is_empty() {
+            return expired;
+        }
+
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation("expire", elapsed);
+        self.record_nodestore_batch(expired.len(), elapsed);
+        self.wake_waiters();
+        expired
     }
 
     /// Insert or replace a machine record. Wakes every pending
@@ -2015,6 +2057,39 @@ pub fn spawn_ephemeral_gc(
     })
 }
 
+/// Spawn headscale-go's scheduled node-expiry notifier.
+///
+/// The task mirrors `hscontrol.Headscale.scheduledTasks`: every tick it
+/// scans the live node store for expiries that crossed after the
+/// previous pass, wakes map streams, and leaves the node rows intact.
+pub fn spawn_node_expiry_waker(
+    machines: Arc<MachineRegistry>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        let mut last_check = unix_epoch_utc();
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let (next_check, expired) = machines.expire_expired_nodes_since(last_check);
+            last_check = next_check;
+            if !expired.is_empty() {
+                tracing::trace!(
+                    target = "tailscale_wire::expiry",
+                    count = expired.len(),
+                    nodes = ?expired,
+                    "expiring nodes"
+                );
+            }
+        }
+    })
+}
+
+fn unix_epoch_utc() -> DateTime<Utc> {
+    DateTime::from_timestamp(0, 0).expect("Unix epoch timestamp is valid")
+}
+
 #[cfg(test)]
 mod registry_tests {
     //! #238: documents the new `snapshot()` allocation profile.
@@ -2456,6 +2531,59 @@ mod registry_tests {
 
         // Unknown key → false (no mutation).
         assert!(!reg.set_expiry("nk-zzz", Some(when)));
+    }
+
+    #[test]
+    fn expire_expired_nodes_since_wakes_once_and_preserves_records() {
+        let reg = MachineRegistry::new();
+        let base = Utc::now();
+        let expiry = base + chrono::Duration::seconds(10);
+        let mut rec = mk_record(1);
+        rec.expiry = Some(expiry);
+        reg.upsert("nk-a".to_string(), rec);
+        let mut gen_rx = reg.subscribe_gen();
+
+        assert!(
+            reg.wake_expired_nodes_between(base, expiry - chrono::Duration::milliseconds(1))
+                .is_empty()
+        );
+        assert!(!gen_rx.has_changed().unwrap());
+
+        assert_eq!(
+            reg.wake_expired_nodes_between(base, expiry),
+            vec!["nk-a".to_string()]
+        );
+        assert!(gen_rx.has_changed().unwrap());
+        gen_rx.borrow_and_update();
+        let stored = reg.get("nk-a").expect("expired node remains registered");
+        assert_eq!(stored.expiry, Some(expiry));
+        assert!(stored.is_expired_at(expiry));
+
+        assert!(
+            reg.wake_expired_nodes_between(expiry, expiry + chrono::Duration::seconds(1))
+                .is_empty(),
+            "strict last_check matching avoids duplicate expiry notifications"
+        );
+        assert!(!gen_rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn node_expiry_waker_emits_future_expiry_generation() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(2);
+        rec.expiry = Some(Utc::now() + chrono::Duration::milliseconds(40));
+        reg.upsert("nk-a".to_string(), rec);
+        let mut gen_rx = reg.subscribe_gen();
+
+        let handle = spawn_node_expiry_waker(reg.clone(), Duration::from_millis(5));
+        let changed = tokio::time::timeout(Duration::from_secs(2), gen_rx.changed()).await;
+        handle.abort();
+
+        changed
+            .expect("expiry waker should notify before timeout")
+            .expect("generation channel should remain open");
+        let stored = reg.get("nk-a").expect("expired node remains registered");
+        assert!(stored.is_expired_at(Utc::now()));
     }
 
     /// `rename` rewrites hostname; empty input is a no-op.

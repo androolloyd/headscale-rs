@@ -33,11 +33,13 @@ use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::SanConfig;
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    PingTracker, RegistrationCache, ServerNoiseKey, WireState, serve,
+    PingTracker, RegistrationCache, ServerNoiseKey, WireState, serve, spawn_node_expiry_waker,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 use headscale_db::Database;
+
+const NODE_EXPIRY_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunServerConfig {
@@ -135,6 +137,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         timeout = ?ephemeral_gc.inactivity_timeout(),
         "scheduled existing ephemeral nodes for garbage collection"
     );
+    let node_expiry_waker =
+        spawn_node_expiry_waker(runtime.state.machines.clone(), NODE_EXPIRY_UPDATE_INTERVAL);
 
     let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let https_addr = cfg
@@ -185,6 +189,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     });
     tracing::info!("Headscale-compatible Tailscale control plane ready");
     let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    node_expiry_waker.abort();
     ephemeral_gc.abort();
     if let Some(handle) = dns_extra_records_watcher {
         handle.abort();

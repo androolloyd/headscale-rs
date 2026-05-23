@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::Deserialize;
@@ -84,7 +84,7 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/auth/reject", post(auth_reject))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
         .route("/api/v1/policy/check", post(check_policy))
-        .fallback(grpc_gateway_not_found)
+        .route("/api/*path", any(grpc_gateway_not_found))
         .method_not_allowed_fallback(grpc_gateway_method_not_allowed)
         .layer(middleware::from_fn_with_state(
             state.clone(),

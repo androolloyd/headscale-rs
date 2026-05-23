@@ -67,7 +67,7 @@ fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
 }
 use serde::Serialize;
 
-use super::register::record_to_map_node;
+use super::register::{CAPABILITY_FILE_SHARING, record_to_map_node};
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
@@ -274,6 +274,7 @@ fn self_map_node_from_snapshot(
     online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
+    taildrop_enabled: bool,
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
     let mut own_node = record_to_map_node(own, tailnet_domain);
@@ -291,6 +292,7 @@ fn self_map_node_from_snapshot(
             .unwrap_or_default(),
     );
     apply_policy_attrs_to_map_node(&mut own_node, own, policy);
+    apply_taildrop_to_map_node(&mut own_node, taildrop_enabled);
     Some(own_node)
 }
 
@@ -300,6 +302,7 @@ fn self_map_node_for_registry(
     dns: &DnsStore,
     self_node_key: &str,
     cap_version: u32,
+    taildrop_enabled: bool,
 ) -> Option<MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -315,6 +318,7 @@ fn self_map_node_for_registry(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     )
 }
 
@@ -324,6 +328,7 @@ fn visible_peer_state_for_registry(
     dns: &DnsStore,
     self_node_key: &str,
     cap_version: u32,
+    taildrop_enabled: bool,
 ) -> BTreeMap<u64, MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -343,6 +348,7 @@ fn visible_peer_state_for_registry(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     );
     peer_state_from_nodes(&peers)
 }
@@ -449,6 +455,7 @@ fn visible_peer_map_nodes(
     online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
+    taildrop_enabled: bool,
 ) -> Vec<MapNode> {
     let mut peers: Vec<MapNode> = snapshot
         .iter()
@@ -470,6 +477,7 @@ fn visible_peer_map_nodes(
                     .unwrap_or_default(),
             );
             apply_policy_attrs_to_map_node(&mut node, rec, policy);
+            apply_taildrop_to_map_node(&mut node, taildrop_enabled);
             node
         })
         .collect();
@@ -514,6 +522,12 @@ fn apply_policy_attrs_to_map_node(
     };
     for attr in policy.node_attrs_for(&view) {
         node.cap_map.entry(attr).or_default();
+    }
+}
+
+fn apply_taildrop_to_map_node(node: &mut MapNode, taildrop_enabled: bool) {
+    if !taildrop_enabled {
+        node.cap_map.remove(CAPABILITY_FILE_SHARING);
     }
 }
 
@@ -888,6 +902,7 @@ async fn map_inner(
     let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = state.machines.online_states();
+    let taildrop_enabled = state.runtime_config.taildrop.enabled;
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
@@ -901,6 +916,7 @@ async fn map_inner(
         &online_states,
         &state.policy,
         req.version,
+        taildrop_enabled,
     ) else {
         return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
@@ -918,6 +934,7 @@ async fn map_inner(
         &online_states,
         &state.policy,
         req.version,
+        taildrop_enabled,
     );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
@@ -1008,6 +1025,7 @@ async fn map_inner(
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
+        let taildrop_enabled = state.runtime_config.taildrop.enabled;
         let derp_map_for_stream = state.derp_map.clone();
         let derp_rx = state.derp_map.subscribe();
         let dns_for_stream = state.dns.clone();
@@ -1031,6 +1049,7 @@ async fn map_inner(
                 initial_peer_ids,
                 connection_guard,
                 cap_version,
+                taildrop_enabled,
                 compression,
             ),
             move |(
@@ -1049,6 +1068,7 @@ async fn map_inner(
                 initial_peer_ids,
                 connection_guard,
                 cap_version,
+                taildrop_enabled,
                 compression,
             )| async move {
                 if let Some(initial) = first_opt {
@@ -1070,6 +1090,7 @@ async fn map_inner(
                             initial_peer_ids,
                             connection_guard,
                             cap_version,
+                            taildrop_enabled,
                             compression,
                         ),
                     ));
@@ -1094,6 +1115,7 @@ async fn map_inner(
                             initial_peer_ids,
                             connection_guard,
                             cap_version,
+                            taildrop_enabled,
                             compression,
                         ),
                     ));
@@ -1126,7 +1148,7 @@ async fn map_inner(
                         if res.is_err() {
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, compression, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
+                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, taildrop_enabled, compression, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
                         }
                     }
                     () = &mut policy_changed => {
@@ -1134,9 +1156,9 @@ async fn map_inner(
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "policy"),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "policy"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
                     }
                     () = &mut dns_changed => {
@@ -1144,9 +1166,9 @@ async fn map_inner(
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "config"),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "config"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
                     }
                     res = derp_rx.changed() => {
@@ -1157,9 +1179,9 @@ async fn map_inner(
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else {
                             (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "config"),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "config"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
                         }
                     }
@@ -1204,6 +1226,7 @@ async fn map_inner(
                         initial_peer_ids,
                         connection_guard,
                         cap_version,
+                        taildrop_enabled,
                         compression,
                     ),
                 ))
@@ -1287,6 +1310,7 @@ fn rebuild_peer_delta_chunk(
     self_node_key: &str,
     dns: &Arc<DnsStore>,
     cap_version: u32,
+    taildrop_enabled: bool,
     compression: MapFrameCompression,
     last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
@@ -1325,6 +1349,7 @@ fn rebuild_peer_delta_chunk(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     );
     let self_node_changed = match (&current_self_node, last_self_node) {
         (Some(current), Some(previous)) => {
@@ -1343,6 +1368,7 @@ fn rebuild_peer_delta_chunk(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     );
     let current_peer_state = peer_state_from_nodes(&peers_changed);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
@@ -1413,6 +1439,7 @@ fn rebuild_map_chunk(
     derp_map: &Arc<crate::tailscale_wire::DerpMapStore>,
     dns: &Arc<DnsStore>,
     cap_version: u32,
+    taildrop_enabled: bool,
     compression: MapFrameCompression,
     response_type: &str,
 ) -> Vec<u8> {
@@ -1439,6 +1466,7 @@ fn rebuild_map_chunk(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     ) else {
         return build_keepalive_chunk(compression);
     };
@@ -1452,6 +1480,7 @@ fn rebuild_map_chunk(
         &online_states,
         policy,
         cap_version,
+        taildrop_enabled,
     );
     let dns_config = build_dns_for_snapshot(dns, &snapshot);
     let user_profiles =
@@ -4331,6 +4360,66 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let node = mr.node.as_ref().expect("own node present");
         assert_default_cap_map(node);
+    }
+
+    #[tokio::test]
+    async fn map_response_removes_file_sharing_cap_when_taildrop_is_disabled() {
+        let (mut state, _dir) = fixture();
+        let mut runtime_config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        runtime_config.taildrop.enabled = false;
+        state.runtime_config = Arc::new(runtime_config);
+
+        let node_key = "d1".repeat(32);
+        let mut rec = MachineRecord::new_at(
+            chrono::Utc::now(),
+            node_key.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "alice".into(),
+            "server".into(),
+            Ipv4Addr::new(100, 64, 0, 13),
+            false,
+        );
+        rec.forced_tags = vec!["tag:server".into()];
+        state.machines.upsert(node_key.clone(), rec);
+
+        let peer_key = "d2".repeat(32);
+        insert_peer(&state, &peer_key, "peer", 14);
+
+        let raw_policy = format!(
+            r#"
+            version = 1
+
+            [tag_owners]
+            "tag:server" = ["alice@"]
+
+            [[node_attrs]]
+            target = ["tag:server"]
+            attr = ["{CAPABILITY_FILE_SHARING}"]
+        "#
+        );
+        let doc = crate::policy::PolicyDoc::from_toml(&raw_policy).unwrap();
+        state.policy.set(doc, raw_policy);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        let node = mr.node.as_ref().expect("own node present");
+        assert!(node.cap_map.contains_key(CAPABILITY_ADMIN));
+        assert!(node.cap_map.contains_key(CAPABILITY_SSH));
+        assert!(!node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
     }
 
     #[tokio::test]

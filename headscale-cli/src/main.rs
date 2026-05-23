@@ -367,6 +367,10 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 policy: config
                     .as_ref()
                     .map_or_else(config::PolicyConfig::default, |c| c.policy.clone()),
+                taildrop_enabled: config.as_ref().map_or_else(
+                    || config::TaildropConfig::default().enabled,
+                    |c| c.taildrop.enabled,
+                ),
                 ephemeral_node_inactivity_timeout: Duration::from_secs(
                     server_config.map_or(defaults.ephemeral_node_inactivity_timeout_secs, |s| {
                         s.ephemeral_node_inactivity_timeout_secs

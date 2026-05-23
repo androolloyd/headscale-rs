@@ -92,6 +92,9 @@ pub(crate) struct CliConfig {
     /// Upstream-compatible ACL policy serving mode.
     #[serde(default, skip_serializing_if = "policy_config_is_default")]
     pub(crate) policy: PolicyConfig,
+    /// Upstream-compatible Taildrop/file-sharing switch.
+    #[serde(default, skip_serializing_if = "taildrop_config_is_default")]
+    pub(crate) taildrop: TaildropConfig,
     /// OpenID Connect configuration
     #[serde(default, skip_serializing_if = "oidc_config_is_default")]
     pub oidc: OidcConfig,
@@ -275,6 +278,18 @@ pub(crate) struct UpstreamSqliteConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub(crate) struct TaildropConfig {
+    pub enabled: bool,
+}
+
+impl Default for TaildropConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub(crate) struct PolicyConfig {
     pub mode: String,
     pub path: PathBuf,
@@ -326,6 +341,7 @@ impl CliConfig {
         }
         config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
+        config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -356,6 +372,7 @@ impl CliConfig {
         let mut config = Self::default();
         config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
+        config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -389,6 +406,21 @@ impl CliConfig {
         self.oidc
             .apply_headscale_env_overrides_from(vars)
             .context("failed to apply OIDC environment overrides")
+    }
+
+    fn apply_taildrop_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            if key.as_ref() == "HEADSCALE_TAILDROP_ENABLED" {
+                self.taildrop.enabled = parse_env_bool(value.as_ref())
+                    .with_context(|| format!("invalid {key}", key = key.as_ref()))?;
+            }
+        }
+        Ok(())
     }
 
     fn resolve_oidc_client_secret(&mut self) -> Result<()> {
@@ -1089,8 +1121,20 @@ fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("duration {trimmed:?} overflows u64 seconds"))
 }
 
+fn parse_env_bool(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "t" | "true" | "y" | "yes" | "on" => Ok(true),
+        "0" | "f" | "false" | "n" | "no" | "off" => Ok(false),
+        value => bail!("invalid boolean value {value:?}"),
+    }
+}
+
 fn oidc_config_is_default(config: &OidcConfig) -> bool {
     config == &OidcConfig::default()
+}
+
+fn taildrop_config_is_default(config: &TaildropConfig) -> bool {
+    config == &TaildropConfig::default()
 }
 
 fn policy_config_is_default(config: &PolicyConfig) -> bool {
@@ -1210,12 +1254,42 @@ mod tests {
     fn cli_config_includes_upstream_oidc_defaults() {
         let config = CliConfig::default();
 
+        assert!(config.taildrop.enabled);
         assert!(config.oidc.only_start_if_oidc_is_available);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
         assert!(config.oidc.email_verified_required);
         assert!(!config.oidc.use_expiry_from_token);
         assert!(!config.oidc.pkce.enabled);
         assert_eq!(config.oidc.pkce.method, "S256");
+    }
+
+    #[test]
+    fn loads_upstream_taildrop_config() {
+        let source = r"
+taildrop:
+  enabled: false
+";
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        assert!(!config.taildrop.enabled);
+    }
+
+    #[test]
+    fn applies_headscale_taildrop_env_override_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_taildrop_env_overrides_from([("HEADSCALE_TAILDROP_ENABLED", "false")])
+            .unwrap();
+
+        assert!(!config.taildrop.enabled);
+
+        let err = config
+            .apply_taildrop_env_overrides_from([("HEADSCALE_TAILDROP_ENABLED", "maybe")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_TAILDROP_ENABLED"));
     }
 
     #[test]

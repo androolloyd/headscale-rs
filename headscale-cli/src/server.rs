@@ -70,6 +70,7 @@ pub(crate) struct RunServerConfig {
     pub derp: Option<DerpConfig>,
     pub dns: Option<DnsConfigSpec>,
     pub policy: PolicyConfig,
+    pub taildrop_enabled: bool,
     pub ephemeral_node_inactivity_timeout: Duration,
 }
 
@@ -612,6 +613,7 @@ fn runtime_config_snapshot(
         .unwrap_or_default();
     snapshot.tailcfg_dns_config =
         serde_json::to_value(dns.build(&[])).unwrap_or(serde_json::Value::Null);
+    snapshot.taildrop.enabled = cfg.taildrop_enabled;
 
     snapshot.oidc.only_start_if_oidc_is_available = cfg.oidc.only_start_if_oidc_is_available;
     snapshot.oidc.issuer.clone_from(&cfg.oidc.issuer);
@@ -1557,6 +1559,7 @@ mod tests {
             derp: None,
             dns: None,
             policy: PolicyConfig::default(),
+            taildrop_enabled: true,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
     }
@@ -2272,6 +2275,7 @@ regions:
             derp: None,
             dns: None,
             policy: PolicyConfig::default(),
+            taildrop_enabled: true,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2323,6 +2327,7 @@ regions:
             derp: None,
             dns: None,
             policy: PolicyConfig::default(),
+            taildrop_enabled: true,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2468,6 +2473,7 @@ regions:
             derp: None,
             dns: None,
             policy: PolicyConfig::database(),
+            taildrop_enabled: false,
             ephemeral_node_inactivity_timeout: Duration::from_secs(180),
         };
 
@@ -2500,6 +2506,7 @@ regions:
         assert_eq!(snapshot.acme_email, "ops@example.com");
         assert!(snapshot.dns_config.magic_dns);
         assert_eq!(snapshot.dns_config.base_domain, "tail.example");
+        assert!(!snapshot.taildrop.enabled);
         assert_eq!(snapshot.unix_socket_permission, 0o760);
     }
 
@@ -2527,6 +2534,7 @@ regions:
             derp: None,
             dns: None,
             policy: PolicyConfig::default(),
+            taildrop_enabled: true,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })
         .await

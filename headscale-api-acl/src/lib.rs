@@ -1536,8 +1536,6 @@ impl AclDoc {
             } else if identity_matches(member, principal) {
                 matched = true;
                 break;
-            } else {
-                continue;
             }
         }
 

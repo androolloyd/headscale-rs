@@ -123,26 +123,23 @@ pub async fn serve(
         "wire surface listening (HTTP)"
     );
 
-    let metrics_listener = match cfg.metrics_addr {
-        Some(metrics_addr) => {
-            let listener = tokio::net::TcpListener::bind(metrics_addr)
-                .await
-                .map_err(|e| WireError::Internal(format!("bind {metrics_addr}: {e}")))?;
-            let bound_addr = listener.local_addr().map_err(WireError::Io)?;
-            tracing::info!(
-                target = "tailscale_wire::serve",
-                addr = %bound_addr,
-                "metrics/debug surface listening (HTTP)"
-            );
-            Some((listener, bound_addr))
-        }
-        None => {
-            tracing::info!(
-                target = "tailscale_wire::serve",
-                "metrics/debug surface disabled"
-            );
-            None
-        }
+    let metrics_listener = if let Some(metrics_addr) = cfg.metrics_addr {
+        let listener = tokio::net::TcpListener::bind(metrics_addr)
+            .await
+            .map_err(|e| WireError::Internal(format!("bind {metrics_addr}: {e}")))?;
+        let bound_addr = listener.local_addr().map_err(WireError::Io)?;
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            addr = %bound_addr,
+            "metrics/debug surface listening (HTTP)"
+        );
+        Some((listener, bound_addr))
+    } else {
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            "metrics/debug surface disabled"
+        );
+        None
     };
 
     let http_app = app.clone();

@@ -26,13 +26,19 @@ use headscale_api::{
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, PingTracker,
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
-        derp_config, routes::normalize_routes, serve, wire::DnsRecord,
+        derp_config,
+        routes::normalize_routes,
+        serve,
+        wire::{DnsRecord, DnsResolver},
     },
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+type DnsResolverAddrsBySuffix = HashMap<String, Vec<String>>;
+type DnsResolversBySuffix = HashMap<String, Vec<DnsResolver>>;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +74,14 @@ struct Args {
     base_domain: Option<String>,
     #[arg(long, env = "HSRS_HARNESS_DNS_EXTRA_RECORDS_JSON")]
     dns_extra_records_json: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_NAMESERVERS_JSON")]
+    dns_nameservers_json: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_SPLIT_NAMESERVERS_JSON")]
+    dns_split_nameservers_json: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_FALLBACK_NAMESERVERS_JSON")]
+    dns_fallback_nameservers_json: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_OVERRIDE_LOCAL")]
+    dns_override_local: Option<bool>,
     #[arg(
         long,
         value_enum,
@@ -291,10 +305,23 @@ async fn main() -> Result<()> {
 
     let machines = Arc::new(MachineRegistry::new());
     let dns_extra_records = parse_dns_extra_records(args.dns_extra_records_json.as_deref())?;
+    let (nameservers, nameserver_resolvers) =
+        parse_dns_resolvers_json(args.dns_nameservers_json.as_deref())?;
+    let (restricted_nameservers, restricted_resolvers) =
+        parse_dns_split_resolvers_json(args.dns_split_nameservers_json.as_deref())?;
+    let (fallback_nameservers, fallback_resolvers) =
+        parse_dns_resolvers_json(args.dns_fallback_nameservers_json.as_deref())?;
     let dns = Arc::new(DnsStore::from_spec(DnsConfigSpec {
         magic_dns: args.base_domain.is_some(),
         base_domain: args.base_domain.unwrap_or_default(),
+        override_local_dns: args.dns_override_local.unwrap_or(false),
+        nameservers,
+        nameserver_resolvers,
+        restricted_nameservers,
+        restricted_resolvers,
         extra_records: dns_extra_records,
+        fallback_nameservers,
+        fallback_resolvers,
         ..DnsConfigSpec::default()
     }));
     let derp_map = headscale_api::tailscale_wire::DerpMapStore::shared(load_derp_map(
@@ -414,6 +441,93 @@ fn parse_dns_extra_records(raw: Option<&str>) -> Result<Vec<DnsRecord>> {
         return Ok(Vec::new());
     };
     parse_extra_records(raw.as_bytes()).context("parse HSRS_HARNESS_DNS_EXTRA_RECORDS_JSON")
+}
+
+fn parse_dns_resolvers_json(raw: Option<&str>) -> Result<(Vec<String>, Vec<DnsResolver>)> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let values: Vec<serde_json::Value> =
+        serde_json::from_str(raw).context("parse DNS resolver JSON array")?;
+    let resolvers = values
+        .into_iter()
+        .map(value_to_dns_resolver)
+        .collect::<Result<Vec<_>>>()?;
+    let addrs = resolvers
+        .iter()
+        .map(|resolver| resolver.addr.clone())
+        .collect();
+    Ok((addrs, resolvers))
+}
+
+fn parse_dns_split_resolvers_json(
+    raw: Option<&str>,
+) -> Result<(DnsResolverAddrsBySuffix, DnsResolversBySuffix)> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok((HashMap::new(), HashMap::new()));
+    };
+    let values: HashMap<String, Vec<serde_json::Value>> =
+        serde_json::from_str(raw).context("parse DNS split resolver JSON object")?;
+    let mut addrs_by_suffix = HashMap::new();
+    let mut resolvers_by_suffix = HashMap::new();
+    for (suffix, raw_resolvers) in values {
+        let resolvers = raw_resolvers
+            .into_iter()
+            .map(value_to_dns_resolver)
+            .collect::<Result<Vec<_>>>()?;
+        let addrs = resolvers
+            .iter()
+            .map(|resolver| resolver.addr.clone())
+            .collect();
+        addrs_by_suffix.insert(suffix.clone(), addrs);
+        resolvers_by_suffix.insert(suffix, resolvers);
+    }
+    Ok((addrs_by_suffix, resolvers_by_suffix))
+}
+
+fn value_to_dns_resolver(value: serde_json::Value) -> Result<DnsResolver> {
+    match value {
+        serde_json::Value::String(addr) => Ok(DnsResolver {
+            addr,
+            ..DnsResolver::default()
+        }),
+        serde_json::Value::Object(map) => {
+            let addr = map
+                .get("addr")
+                .or_else(|| map.get("Addr"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|addr| !addr.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("DNS resolver object requires addr/Addr"))?
+                .to_string();
+            let bootstrap_resolution = map
+                .get("bootstrap_resolution")
+                .or_else(|| map.get("BootstrapResolution"))
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                                anyhow::anyhow!("BootstrapResolution entries must be strings")
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let use_with_exit_node = map
+                .get("use_with_exit_node")
+                .or_else(|| map.get("UseWithExitNode"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Ok(DnsResolver {
+                addr,
+                bootstrap_resolution,
+                use_with_exit_node,
+            })
+        }
+        other => bail!("DNS resolver entries must be strings or objects, got {other:?}"),
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {

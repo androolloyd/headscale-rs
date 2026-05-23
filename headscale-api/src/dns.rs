@@ -63,6 +63,17 @@ use tokio::sync::Notify;
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
 
+type ResolverAddrs = Vec<String>;
+type ResolverObjects = Vec<DnsResolver>;
+type SplitResolverAddrs = HashMap<String, ResolverAddrs>;
+type SplitResolverObjects = HashMap<String, ResolverObjects>;
+type NameserverParts = (
+    ResolverAddrs,
+    ResolverObjects,
+    SplitResolverAddrs,
+    SplitResolverObjects,
+);
+
 /// How often the background poller checks the extra-records file's
 /// `mtime`. Operators expect "edit a JSON file; new records appear
 /// within a few seconds" — 5s is the same cadence the upstream Go
@@ -99,12 +110,20 @@ pub struct DnsConfigSpec {
     /// both the older flat list and upstream headscale's
     /// `nameservers.global` shape.
     pub nameservers: Vec<String>,
+    /// Structured form of [`Self::nameservers`]. This is populated by
+    /// the permissive deserializer when config uses resolver objects
+    /// instead of bare strings, preserving tailcfg metadata such as
+    /// `BootstrapResolution` and `UseWithExitNode`.
+    pub nameserver_resolvers: Vec<DnsResolver>,
     /// Per-suffix restricted resolvers (split DNS). Key is a DNS
     /// suffix (e.g. `"corp.internal"`), value is the resolver list to
     /// use for that suffix. Empty ⇒ no `Routes` field on the wire.
     /// The deserializer accepts both this historical field and
     /// upstream headscale's `nameservers.split` table.
     pub restricted_nameservers: HashMap<String, Vec<String>>,
+    /// Structured form of [`Self::restricted_nameservers`], retaining
+    /// resolver metadata for split-DNS routes.
+    pub restricted_resolvers: HashMap<String, Vec<DnsResolver>>,
     /// Inline operator records that land in
     /// `DNSConfig.ExtraRecords`. Upstream headscale names this field
     /// `extra_records` and uses a top-level array of
@@ -124,6 +143,9 @@ pub struct DnsConfigSpec {
     pub search_domains: Vec<String>,
     /// Last-resort resolvers (`FallbackResolvers`).
     pub fallback_nameservers: Vec<String>,
+    /// Structured form of [`Self::fallback_nameservers`], retaining
+    /// resolver metadata.
+    pub fallback_resolvers: Vec<DnsResolver>,
     /// `ExitNodeFilteredSet` — suffixes the client should not flow
     /// through an exit node.
     pub exit_node_filtered_set: Vec<String>,
@@ -153,11 +175,14 @@ impl Default for DnsConfigSpec {
             base_domain: default_base_domain(),
             override_local_dns: default_true(),
             nameservers: Vec::new(),
+            nameserver_resolvers: Vec::new(),
             restricted_nameservers: HashMap::new(),
+            restricted_resolvers: HashMap::new(),
             extra_records: Vec::new(),
             extra_records_path: None,
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
+            fallback_resolvers: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: None,
         }
@@ -175,8 +200,19 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
                 "dns.extra_records and dns.extra_records_path are mutually exclusive",
             ));
         }
-        let (nameservers, mut restricted_nameservers) = raw.nameservers.into_parts();
-        restricted_nameservers.extend(raw.restricted_nameservers);
+        let (
+            nameservers,
+            nameserver_resolvers,
+            mut restricted_nameservers,
+            mut restricted_resolvers,
+        ) = raw.nameservers.into_parts();
+        for (suffix, resolvers) in raw.restricted_nameservers {
+            let (addrs, structured) = raw_resolvers_into_parts(resolvers);
+            restricted_nameservers.insert(suffix.clone(), addrs);
+            restricted_resolvers.insert(suffix, structured);
+        }
+        let (fallback_nameservers, fallback_resolvers) =
+            raw_resolvers_into_parts(raw.fallback_nameservers);
 
         let (extra_records, extra_records_path_from_legacy_key) = match raw.extra_records {
             Some(RawExtraRecords::Records(records)) => {
@@ -191,13 +227,16 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
             base_domain: raw.base_domain,
             override_local_dns: raw.override_local_dns,
             nameservers,
+            nameserver_resolvers,
             restricted_nameservers,
+            restricted_resolvers,
             extra_records,
             extra_records_path: raw
                 .extra_records_path
                 .or(extra_records_path_from_legacy_key),
             search_domains: raw.search_domains,
-            fallback_nameservers: raw.fallback_nameservers,
+            fallback_nameservers,
+            fallback_resolvers,
             exit_node_filtered_set: raw.exit_node_filtered_set,
             authoritative_suffixes: raw.authoritative_suffixes,
         })
@@ -211,11 +250,11 @@ struct RawDnsConfigSpec {
     base_domain: String,
     override_local_dns: bool,
     nameservers: RawNameservers,
-    restricted_nameservers: HashMap<String, Vec<String>>,
+    restricted_nameservers: HashMap<String, Vec<RawResolver>>,
     extra_records: Option<RawExtraRecords>,
     extra_records_path: Option<PathBuf>,
     search_domains: Vec<String>,
-    fallback_nameservers: Vec<String>,
+    fallback_nameservers: Vec<RawResolver>,
     exit_node_filtered_set: Vec<String>,
     authoritative_suffixes: Option<Vec<String>>,
 }
@@ -241,20 +280,38 @@ impl Default for RawDnsConfigSpec {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawNameservers {
-    Flat(Vec<String>),
+    Flat(Vec<RawResolver>),
     Upstream {
         #[serde(default)]
-        global: Vec<String>,
+        global: Vec<RawResolver>,
         #[serde(default)]
-        split: HashMap<String, Vec<String>>,
+        split: HashMap<String, Vec<RawResolver>>,
     },
 }
 
 impl RawNameservers {
-    fn into_parts(self) -> (Vec<String>, HashMap<String, Vec<String>>) {
+    fn into_parts(self) -> NameserverParts {
         match self {
-            Self::Flat(global) => (global, HashMap::new()),
-            Self::Upstream { global, split } => (global, split),
+            Self::Flat(global) => {
+                let (global_addrs, global_resolvers) = raw_resolvers_into_parts(global);
+                (
+                    global_addrs,
+                    global_resolvers,
+                    HashMap::new(),
+                    HashMap::new(),
+                )
+            }
+            Self::Upstream { global, split } => {
+                let (global_addrs, global_resolvers) = raw_resolvers_into_parts(global);
+                let mut split_addrs = HashMap::new();
+                let mut split_resolvers = HashMap::new();
+                for (suffix, resolvers) in split {
+                    let (addrs, structured) = raw_resolvers_into_parts(resolvers);
+                    split_addrs.insert(suffix.clone(), addrs);
+                    split_resolvers.insert(suffix, structured);
+                }
+                (global_addrs, global_resolvers, split_addrs, split_resolvers)
+            }
         }
     }
 }
@@ -266,6 +323,45 @@ impl Default for RawNameservers {
             split: HashMap::new(),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawResolver {
+    Addr(String),
+    Resolver(RawResolverObject),
+}
+
+#[derive(Deserialize)]
+struct RawResolverObject {
+    #[serde(alias = "Addr")]
+    addr: String,
+    #[serde(default, alias = "BootstrapResolution")]
+    bootstrap_resolution: Vec<String>,
+    #[serde(default, alias = "UseWithExitNode")]
+    use_with_exit_node: bool,
+}
+
+impl From<RawResolver> for DnsResolver {
+    fn from(raw: RawResolver) -> Self {
+        match raw {
+            RawResolver::Addr(addr) => resolver_from_addr(&addr),
+            RawResolver::Resolver(raw) => Self {
+                addr: raw.addr,
+                bootstrap_resolution: raw.bootstrap_resolution,
+                use_with_exit_node: raw.use_with_exit_node,
+            },
+        }
+    }
+}
+
+fn raw_resolvers_into_parts(raw: Vec<RawResolver>) -> (Vec<String>, Vec<DnsResolver>) {
+    let resolvers: Vec<DnsResolver> = raw.into_iter().map(Into::into).collect();
+    let addrs = resolvers
+        .iter()
+        .map(|resolver| resolver.addr.clone())
+        .collect();
+    (addrs, resolvers)
 }
 
 #[derive(Deserialize)]
@@ -321,7 +417,10 @@ impl DnsConfigSpec {
         if self.magic_dns && self.base_domain.trim().is_empty() {
             return Err(DnsConfigError::MissingBaseDomainForMagicDns);
         }
-        if self.override_local_dns && self.nameservers.is_empty() {
+        if self.override_local_dns
+            && self.nameservers.is_empty()
+            && self.nameserver_resolvers.is_empty()
+        {
             return Err(DnsConfigError::MissingGlobalNameserversForOverride);
         }
 
@@ -382,11 +481,14 @@ impl DnsStore {
             base_domain: String::new(),
             override_local_dns: true,
             nameservers: Vec::new(),
+            nameserver_resolvers: Vec::new(),
             restricted_nameservers: HashMap::new(),
+            restricted_resolvers: HashMap::new(),
             extra_records: Vec::new(),
             extra_records_path: None,
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
+            fallback_resolvers: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: Some(Vec::new()),
         })
@@ -513,32 +615,16 @@ pub fn build_dns_config(
     machines: &[MachineDnsRecord],
     extra: &[DnsRecord],
 ) -> DnsConfig {
-    let base_domain_set = !spec.base_domain.trim().is_empty();
+    let base_domain = normalise_domain(&spec.base_domain);
+    let base_domain_set = !base_domain.is_empty();
     let magic_dns_enabled = spec.magic_dns && base_domain_set;
-    let global_resolvers: Vec<DnsResolver> = spec
-        .nameservers
-        .iter()
-        .map(|s| string_to_resolver(s))
-        .collect();
-    let routes: HashMap<String, Vec<DnsResolver>> = spec
-        .restricted_nameservers
-        .iter()
-        .map(|(suffix, addrs)| {
-            (
-                suffix.clone(),
-                addrs.iter().map(|s| string_to_resolver(s)).collect(),
-            )
-        })
-        .collect();
+    let global_resolvers = effective_global_resolvers(spec);
+    let routes = effective_split_resolvers(spec);
     let mut fallback_resolvers = Vec::new();
     if !spec.override_local_dns {
         fallback_resolvers.extend(global_resolvers.iter().cloned());
     }
-    fallback_resolvers.extend(
-        spec.fallback_nameservers
-            .iter()
-            .map(|s| string_to_resolver(s)),
-    );
+    fallback_resolvers.extend(effective_fallback_resolvers(spec));
     let resolvers = if spec.override_local_dns {
         global_resolvers
     } else {
@@ -552,16 +638,17 @@ pub fn build_dns_config(
     // wire output is `{}` byte-for-byte.
     let mut domains = Vec::with_capacity(1 + spec.search_domains.len());
     if base_domain_set {
-        domains.push(spec.base_domain.clone());
+        domains.push(base_domain.clone());
     }
     for d in &spec.search_domains {
-        if d != &spec.base_domain {
-            domains.push(d.clone());
+        let domain = normalise_domain(d);
+        if !domain.is_empty() && domain != base_domain && !domains.contains(&domain) {
+            domains.push(domain);
         }
     }
 
     let magic_records = if magic_dns_enabled {
-        magic_dns_records(&spec.base_domain, machines)
+        magic_dns_records(&base_domain, machines)
     } else {
         Vec::new()
     };
@@ -569,10 +656,10 @@ pub fn build_dns_config(
     combined.extend_from_slice(extra);
     combined.extend(magic_records);
 
-    let authoritative = spec
-        .authoritative_suffixes
-        .clone()
-        .unwrap_or_else(|| derive_authoritative_suffixes(spec));
+    let authoritative = spec.authoritative_suffixes.as_ref().map_or_else(
+        || derive_authoritative_suffixes(spec),
+        |suffixes| normalise_domain_list(suffixes),
+    );
 
     DnsConfig {
         resolvers,
@@ -598,7 +685,7 @@ pub fn try_build_dns_config(
     Ok(build_dns_config(spec, machines, extra))
 }
 
-fn string_to_resolver(s: &str) -> DnsResolver {
+fn resolver_from_addr(s: &str) -> DnsResolver {
     DnsResolver {
         addr: s.to_string(),
         bootstrap_resolution: Vec::new(),
@@ -606,21 +693,93 @@ fn string_to_resolver(s: &str) -> DnsResolver {
     }
 }
 
+fn effective_global_resolvers(spec: &DnsConfigSpec) -> Vec<DnsResolver> {
+    if spec.nameserver_resolvers.is_empty() {
+        spec.nameservers
+            .iter()
+            .map(|addr| resolver_from_addr(addr))
+            .collect()
+    } else {
+        spec.nameserver_resolvers.clone()
+    }
+}
+
+fn effective_fallback_resolvers(spec: &DnsConfigSpec) -> Vec<DnsResolver> {
+    if spec.fallback_resolvers.is_empty() {
+        spec.fallback_nameservers
+            .iter()
+            .map(|addr| resolver_from_addr(addr))
+            .collect()
+    } else {
+        spec.fallback_resolvers.clone()
+    }
+}
+
+fn effective_split_resolvers(spec: &DnsConfigSpec) -> HashMap<String, Vec<DnsResolver>> {
+    let mut keys = std::collections::BTreeSet::new();
+    keys.extend(spec.restricted_nameservers.keys());
+    keys.extend(spec.restricted_resolvers.keys());
+
+    let mut routes = HashMap::new();
+    for suffix in keys {
+        let normalised_suffix = normalise_domain(suffix);
+        if normalised_suffix.is_empty() {
+            continue;
+        }
+        let resolvers = spec
+            .restricted_resolvers
+            .get(suffix)
+            .cloned()
+            .unwrap_or_else(|| {
+                spec.restricted_nameservers
+                    .get(suffix)
+                    .into_iter()
+                    .flatten()
+                    .map(|addr| resolver_from_addr(addr))
+                    .collect()
+            });
+        routes.insert(normalised_suffix, resolvers);
+    }
+    routes
+}
+
+pub fn normalise_domain(input: &str) -> String {
+    input.trim().trim_matches('.').to_ascii_lowercase()
+}
+
+fn normalise_domain_list(input: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(input.len());
+    for suffix in input {
+        let suffix = normalise_domain(suffix);
+        if !suffix.is_empty() && seen.insert(suffix.clone()) {
+            out.push(suffix);
+        }
+    }
+    out
+}
+
 /// Default authoritative-suffix list — the base domain plus every
 /// split-DNS suffix the operator has restricted. Operators can
 /// override this via `[dns].authoritative_suffixes` in node.toml.
 fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
-    let mut out = Vec::with_capacity(1 + spec.restricted_nameservers.len());
-    if !spec.base_domain.trim().is_empty() {
-        out.push(spec.base_domain.clone());
+    let mut keys = std::collections::BTreeSet::new();
+    keys.extend(spec.restricted_nameservers.keys());
+    keys.extend(spec.restricted_resolvers.keys());
+
+    let mut out = Vec::with_capacity(1 + keys.len());
+    let mut seen = HashSet::new();
+    let base_domain = normalise_domain(&spec.base_domain);
+    if !base_domain.is_empty() {
+        seen.insert(base_domain.clone());
+        out.push(base_domain);
     }
     // Sorted for determinism — HashMap iteration order is otherwise
-    // non-deterministic and our tests would flake. BTreeSet is the
-    // zero-value-friendly form of the BTreeMap<K, ()> pattern.
-    let sorted: std::collections::BTreeSet<&String> = spec.restricted_nameservers.keys().collect();
-    for k in &sorted {
-        if k.as_str() != spec.base_domain {
-            out.push((*k).clone());
+    // non-deterministic and our tests would flake.
+    for suffix in keys {
+        let suffix = normalise_domain(suffix);
+        if !suffix.is_empty() && seen.insert(suffix.clone()) {
+            out.push(suffix);
         }
     }
     out
@@ -637,7 +796,8 @@ fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
 /// the rest get a `-n{id}` suffix. Sorting by `node_id` gives a
 /// stable, reproducible ordering across rebuilds.
 pub fn magic_dns_records(base_domain: &str, machines: &[MachineDnsRecord]) -> Vec<DnsRecord> {
-    if base_domain.trim().is_empty() {
+    let base_domain = normalise_domain(base_domain);
+    if base_domain.is_empty() {
         return Vec::new();
     }
 
@@ -655,7 +815,7 @@ pub fn magic_dns_records(base_domain: &str, machines: &[MachineDnsRecord]) -> Ve
             seen.insert(format!("n{}", m.node_id));
             format!("n{}", m.node_id)
         } else if seen.contains(&normalised) {
-            format!("{normalised}-n{}", m.node_id)
+            collision_label(&normalised, m.node_id)
         } else {
             normalised.clone()
         };
@@ -677,6 +837,20 @@ pub fn magic_dns_records(base_domain: &str, machines: &[MachineDnsRecord]) -> Ve
         }
     }
     out
+}
+
+fn collision_label(base: &str, node_id: u64) -> String {
+    let suffix = format!("-n{node_id}");
+    let max_base_len = 63usize.saturating_sub(suffix.len());
+    let mut base = base.chars().take(max_base_len).collect::<String>();
+    while base.ends_with('-') {
+        base.pop();
+    }
+    if base.is_empty() {
+        format!("n{node_id}")
+    } else {
+        format!("{base}{suffix}")
+    }
 }
 
 /// Reduce an arbitrary hostname to a single DNS label. Lowercases,
@@ -710,6 +884,12 @@ pub fn normalise_hostname(input: &str) -> String {
     }
     while s.ends_with('-') {
         s.pop();
+    }
+    if s.len() > 63 {
+        s.truncate(63);
+        while s.ends_with('-') {
+            s.pop();
+        }
     }
     s
 }
@@ -830,6 +1010,14 @@ mod tests {
         }
     }
 
+    fn record(name: &str, record_type: &str, value: &str) -> DnsRecord {
+        DnsRecord {
+            name: name.into(),
+            record_type: record_type.into(),
+            value: value.into(),
+        }
+    }
+
     #[test]
     fn default_spec_matches_headscale_go_dns_defaults() {
         let s = DnsConfigSpec::default();
@@ -928,6 +1116,61 @@ mod tests {
     }
 
     #[test]
+    fn magic_dns_records_follow_prefix_family_presence() {
+        let machines = [
+            MachineDnsRecord {
+                hostname: "v4-only".into(),
+                ipv4: Some(Ipv4Addr::new(100, 64, 0, 4)),
+                ipv6: None,
+                node_id: 4,
+            },
+            MachineDnsRecord {
+                hostname: "v6-only".into(),
+                ipv4: None,
+                ipv6: Some("fd7a:115c:a1e0::6".parse().unwrap()),
+                node_id: 6,
+            },
+            MachineDnsRecord {
+                hostname: "dual".into(),
+                ipv4: Some(Ipv4Addr::new(100, 64, 0, 46)),
+                ipv6: Some("fd7a:115c:a1e0::46".parse().unwrap()),
+                node_id: 46,
+            },
+        ];
+
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
+
+        assert!(
+            cfg.extra_records
+                .contains(&record("v4-only.headscale.test", "A", "100.64.0.4",))
+        );
+        assert!(cfg.extra_records.contains(&record(
+            "v6-only.headscale.test",
+            "AAAA",
+            "fd7a:115c:a1e0::6",
+        )));
+        assert!(
+            cfg.extra_records
+                .contains(&record("dual.headscale.test", "A", "100.64.0.46"))
+        );
+        assert!(cfg.extra_records.contains(&record(
+            "dual.headscale.test",
+            "AAAA",
+            "fd7a:115c:a1e0::46",
+        )));
+        assert!(
+            !cfg.extra_records
+                .iter()
+                .any(|r| r.name == "v4-only.headscale.test" && r.record_type == "AAAA")
+        );
+        assert!(
+            !cfg.extra_records
+                .iter()
+                .any(|r| r.name == "v6-only.headscale.test" && r.record_type == "A")
+        );
+    }
+
+    #[test]
     fn hostname_collision_lowest_node_id_keeps_canonical_name() {
         let machines = [
             machine("dup", 11, 42), // higher id ⇒ collision-suffixed
@@ -960,6 +1203,40 @@ mod tests {
         assert_eq!(normalise_hostname("---a---"), "a");
         assert_eq!(normalise_hostname(""), "");
         assert_eq!(normalise_hostname("!!!"), "");
+    }
+
+    #[test]
+    fn hostname_normalisation_caps_dns_label_length_before_collision_suffix() {
+        let long = "node".repeat(20);
+        assert_eq!(normalise_hostname(&long).len(), 63);
+
+        let machines = [
+            MachineDnsRecord {
+                hostname: long.clone(),
+                ipv4: Some(Ipv4Addr::new(100, 64, 0, 1)),
+                ipv6: None,
+                node_id: 1,
+            },
+            MachineDnsRecord {
+                hostname: long,
+                ipv4: Some(Ipv4Addr::new(100, 64, 0, 2)),
+                ipv6: None,
+                node_id: 2,
+            },
+        ];
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
+        let collision = cfg
+            .extra_records
+            .iter()
+            .find(|record| record.value == "100.64.0.2")
+            .expect("collision record")
+            .name
+            .split('.')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(collision.ends_with("-n2"));
+        assert!(collision.len() <= 63);
     }
 
     #[test]
@@ -1044,6 +1321,24 @@ mod tests {
         assert_eq!(recs[0].name, "foo.example.org");
         assert_eq!(recs[0].record_type, "CNAME");
         assert_eq!(recs[0].value, "bar.example.org");
+    }
+
+    #[test]
+    fn parse_extra_records_preserves_aaaa_and_cname_records() {
+        let body = br#"[
+          {"Name":"v6.example.org","Type":"AAAA","Value":"fd7a:115c:a1e0::53"},
+          {"Name":"alias.example.org","Type":"CNAME","Value":"v6.example.org"}
+        ]"#;
+
+        let recs = parse_extra_records(body).expect("parses");
+
+        assert_eq!(
+            recs,
+            vec![
+                record("v6.example.org", "AAAA", "fd7a:115c:a1e0::53"),
+                record("alias.example.org", "CNAME", "v6.example.org"),
+            ]
+        );
     }
 
     #[test]
@@ -1193,6 +1488,49 @@ mod tests {
     }
 
     #[test]
+    fn domains_and_route_suffixes_are_normalised_and_deduplicated() {
+        let spec = DnsConfigSpec {
+            base_domain: "HeadScale.Test.".into(),
+            search_domains: vec![
+                "headscale.test".into(),
+                "Corp.Example.".into(),
+                "corp.example".into(),
+            ],
+            restricted_nameservers: HashMap::from([(
+                "Corp.Internal.".to_string(),
+                vec!["10.0.0.53".to_string()],
+            )]),
+            ..magic_spec()
+        };
+        let cfg = DnsStore::from_spec(spec).build(&[]);
+
+        assert_eq!(cfg.domains, vec!["headscale.test", "corp.example"]);
+        assert!(cfg.routes.contains_key("corp.internal"));
+        assert_eq!(
+            cfg.authoritative_suffixes,
+            vec!["headscale.test", "corp.internal"]
+        );
+        assert!(cfg.proxied);
+    }
+
+    #[test]
+    fn authoritative_suffix_override_is_normalised_and_deduplicated() {
+        let spec = DnsConfigSpec {
+            authoritative_suffixes: Some(vec![
+                "Tail.Example.".to_string(),
+                "tail.example".to_string(),
+                "Corp.Example".to_string(),
+            ]),
+            ..magic_spec()
+        };
+        let cfg = DnsStore::from_spec(spec).build(&[]);
+        assert_eq!(
+            cfg.authoritative_suffixes,
+            vec!["tail.example", "corp.example"]
+        );
+    }
+
+    #[test]
     fn dns_config_serialises_to_pascalcase_json() {
         let spec = DnsConfigSpec {
             override_local_dns: true,
@@ -1303,6 +1641,48 @@ global = ["1.1.1.1", "8.8.8.8"]
         assert_eq!(spec.extra_records.len(), 2);
         assert_eq!(spec.extra_records[0].name, "ops.test.example.org");
         assert_eq!(spec.extra_records[1].record_type, "CNAME");
+    }
+
+    #[test]
+    fn config_spec_preserves_structured_resolver_metadata() {
+        let toml_src = r#"
+magic_dns = true
+base_domain = "Tail.Example."
+override_local_dns = true
+fallback_nameservers = [
+  { addr = "9.9.9.9", use_with_exit_node = true },
+]
+
+[nameservers]
+global = [
+  { addr = "https://dns.example/dns-query", bootstrap_resolution = ["203.0.113.53"], use_with_exit_node = true },
+]
+
+[nameservers.split]
+"Corp.Internal." = [
+  { Addr = "tls://dns.corp.example", BootstrapResolution = ["2001:db8::53"], UseWithExitNode = true },
+]
+"#;
+        let spec: DnsConfigSpec = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(spec.nameservers, vec!["https://dns.example/dns-query"]);
+        assert_eq!(
+            spec.restricted_nameservers.get("Corp.Internal.").unwrap(),
+            &vec!["tls://dns.corp.example".to_string()]
+        );
+
+        let cfg = build_dns_config(&spec, &[], &[]);
+        assert_eq!(cfg.domains, vec!["tail.example"]);
+        assert_eq!(cfg.resolvers.len(), 1);
+        assert_eq!(cfg.resolvers[0].addr, "https://dns.example/dns-query");
+        assert_eq!(cfg.resolvers[0].bootstrap_resolution, vec!["203.0.113.53"]);
+        assert!(cfg.resolvers[0].use_with_exit_node);
+
+        let route = cfg.routes.get("corp.internal").expect("split route");
+        assert_eq!(route[0].addr, "tls://dns.corp.example");
+        assert_eq!(route[0].bootstrap_resolution, vec!["2001:db8::53"]);
+        assert!(route[0].use_with_exit_node);
+        assert_eq!(cfg.fallback_resolvers[0].addr, "9.9.9.9");
+        assert!(cfg.fallback_resolvers[0].use_with_exit_node);
     }
 
     #[test]

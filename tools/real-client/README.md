@@ -87,6 +87,8 @@ with the same stock `tailscaled` image.
 | DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix and peer DNS names |
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
 | DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap |
+| DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records |
+| DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
 | Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill after prefix migration |

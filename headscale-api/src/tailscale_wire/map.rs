@@ -1614,7 +1614,7 @@ mod tests {
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
         router as public_router,
         test_support::{MockIpAllocator, MockRedeemer},
-        wire::{DerpMap, DerpRegion, DerpRegionNode},
+        wire::{DerpMap, DerpRegion, DerpRegionNode, DnsRecord},
     };
     use axum::body::to_bytes;
     use std::net::Ipv4Addr;
@@ -2699,6 +2699,43 @@ mod tests {
                 .host_name,
             "refresh.example.com"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_true_dns_refresh_emits_full_map_response() {
+        let (state, _dir) = fixture();
+        let a = "d2".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert_eq!(first.dns_config.unwrap().extra_records.len(), 0);
+
+        let state_for_spawn = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state_for_spawn.dns.set_spec(crate::dns::DnsConfigSpec {
+                base_domain: "headscale.test".into(),
+                override_local_dns: false,
+                extra_records: vec![DnsRecord {
+                    name: "reload.headscale.test".into(),
+                    record_type: "AAAA".into(),
+                    value: "fd7a:115c:a1e0::53".into(),
+                }],
+                ..crate::dns::DnsConfigSpec::default()
+            });
+        });
+
+        let updated = next_zstd_map_response(&mut body).await;
+        let dns = updated.dns_config.expect("dns config");
+        assert_eq!(dns.domains, vec!["headscale.test"]);
+        assert!(dns.extra_records.iter().any(|record| {
+            record.name == "reload.headscale.test"
+                && record.record_type == "AAAA"
+                && record.value == "fd7a:115c:a1e0::53"
+        }));
+        assert!(!updated.keep_alive);
     }
 
     #[tokio::test]

@@ -751,15 +751,30 @@ impl PersistentMachineAdmin {
         } else {
             row.given_name.clone()
         };
+        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+        let live = self.wire_registry.as_ref().and_then(|registry| {
+            let record = registry.get(&node_key_hex)?;
+            let online = registry
+                .online_states()
+                .get(&crate::tailscale_wire::wire::stable_id_from_key(
+                    &node_key_hex,
+                ))
+                .copied()
+                .unwrap_or(false);
+            Some((online, record.last_seen.timestamp().max(0) as u64))
+        });
         MachineAdminRecord {
             node_id: u64::try_from(row.id).unwrap_or_default(),
-            id: key_without_prefix("nodekey:", &row.node_key),
+            id: node_key_hex,
             name,
             user: self.user_name_for_row(&row).await,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
-            online: !expired,
-            last_seen: row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+            online: live.map_or(!expired, |(online, _)| online && !expired),
+            last_seen: live.map_or_else(
+                || row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+                |(_, last_seen)| last_seen,
+            ),
             created_at: row.created_at.max(0) as u64,
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
@@ -2453,6 +2468,50 @@ mod tests {
         assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.register_method, 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_reports_live_online_and_last_seen() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let registry = Arc::new(MachineRegistry::new());
+        let admin = PersistentMachineAdmin::new(db.pool().clone())
+            .with_user_admin(users)
+            .with_wire_registry(registry.clone());
+        let created = admin.create(persistent_record()).await.unwrap();
+
+        let offline = admin.get(&created.id).await.unwrap();
+        assert!(!offline.online);
+        assert_eq!(offline.last_seen, created.last_seen);
+
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            registry.clone(),
+            crate::tailscale_wire::wire::stable_id_from_key(&created.id),
+            std::time::Duration::ZERO,
+        );
+        let online = admin.get(&created.id).await.unwrap();
+        assert!(online.online);
+
+        let live = registry.get(&created.id).unwrap();
+        registry.touch_last_seen(&created.id);
+        assert!(registry.get(&created.id).unwrap().last_seen >= live.last_seen);
+        let touched = admin.get(&created.id).await.unwrap();
+        assert_eq!(
+            touched.last_seen,
+            registry
+                .get(&created.id)
+                .unwrap()
+                .last_seen
+                .timestamp()
+                .max(0) as u64
+        );
+
+        drop(guard);
+        tokio::task::yield_now().await;
+        let disconnected = admin.get(&created.id).await.unwrap();
+        assert!(!disconnected.online);
     }
 
     #[tokio::test]

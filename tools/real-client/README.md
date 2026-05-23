@@ -78,6 +78,7 @@ with the same stock `tailscaled` image.
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| Lifecycle | `online-lastseen` | `online-lastseen-smoke.sh` | `online-lastseen-headscale-go-smoke.sh` | Production online transition and LastSeen after client disconnect |
 | Tags | `tagged-preauth` | `tagged-preauth-smoke.sh` | `tagged-preauth-headscale-go-smoke.sh` | Tagged preauth key with `tagOwners` policy |
 | Tags | `tag-update` | `tag-update-smoke.sh` | `tag-update-headscale-go-smoke.sh` | Post-login forced tag replacement |
 | Tags | `tag-update-invalid` | `tag-update-invalid-smoke.sh` | `tag-update-invalid-headscale-go-smoke.sh` | Invalid tag update rejection |
@@ -141,7 +142,7 @@ protocol failure is separated from a stock-client behavior mismatch:
 
 ```sh
 FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh
-REAL_CLIENT_SMOKES=authkey,web-register,oidc,magicdns,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,magicdns,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
 REAL_CLIENT_TARGETS='rust headscale-go' \
 tools/real-client/smoke-matrix.sh
 ```
@@ -265,6 +266,23 @@ Useful knobs:
 - `REAL_CLIENT_OIDC_EMAIL`, `REAL_CLIENT_OIDC_USERNAME`,
   `REAL_CLIENT_OIDC_SUBJECT`, and `REAL_CLIENT_OIDC_GROUPS` control the mock
   identity.
+
+## Online / LastSeen Smoke
+
+The lifecycle scenario starts the production `headscale server` path, logs in a
+stock client with a reusable auth key, checks that `nodes list -o json` reports
+the node online with a parseable `LastSeen`, then stops `tailscaled` and waits
+for the production admin view to report the node offline with an advanced
+`LastSeen`:
+
+```sh
+tools/real-client/online-lastseen-smoke.sh
+tools/real-client/online-lastseen-headscale-go-smoke.sh
+```
+
+The helper accepts headscale-go protobuf JSON that omits the default `online:
+false` field after disconnect, while still requiring an explicit connected
+online state.
 
 ## Tagged Preauth Smoke
 

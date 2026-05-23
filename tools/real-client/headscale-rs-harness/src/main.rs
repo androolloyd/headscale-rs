@@ -27,7 +27,7 @@ use headscale_api::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, PingTracker,
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
         derp_config,
-        routes::normalize_routes,
+        routes::{DebugRoutes, normalize_routes},
         serve, spawn_route_health_probe,
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
     },
@@ -520,6 +520,7 @@ async fn main() -> Result<()> {
                 "PUT /harness/policy",
                 "POST /harness/register/{registration_id}",
                 "GET /harness/machines",
+                "GET /harness/routes",
                 "PUT /harness/machines/{node_key}/routes",
                 "PUT /harness/machines/{node_key}/tags",
                 "POST /harness/derp/verify",
@@ -566,6 +567,7 @@ fn harness_router(state: AppState) -> Router {
         .route("/harness/policy", put(set_policy))
         .route("/harness/register/:registration_id", post(register_pending))
         .route("/harness/machines", get(list_machines))
+        .route("/harness/routes", get(route_state))
         .route(
             "/harness/machines/:node_key/routes",
             put(set_machine_routes),
@@ -730,6 +732,11 @@ async fn list_machines(State(state): State<AppState>) -> Json<Vec<MachineSummary
         .collect::<Vec<_>>();
     machines.sort_by(|a, b| a.node_key.cmp(&b.node_key));
     Json(machines)
+}
+
+async fn route_state(State(state): State<AppState>) -> Json<DebugRoutes> {
+    let snapshot = state.machines.snapshot();
+    Json(state.machines.debug_routes_for_snapshot(&snapshot))
 }
 
 async fn set_machine_routes(

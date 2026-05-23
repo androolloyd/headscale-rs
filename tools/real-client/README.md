@@ -21,6 +21,7 @@ It starts the headscale-rs Tailscale wire surface and adds harness-only routes:
 - `PUT /harness/policy`
 - `POST /harness/register/{registration_id}`
 - `GET /harness/machines`
+- `GET /harness/routes`
 - `PUT /harness/machines/{node_key}/routes`
 
 Mint an auth key for a stock client:
@@ -109,6 +110,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
+| Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
@@ -584,6 +586,16 @@ tools/real-client/route-health-smoke.sh
 tools/real-client/route-health-headscale-go-smoke.sh
 ```
 
+The all-unhealthy route-health variant pauses the current primary, waits for
+failover, then pauses every remaining route candidate and asserts the route
+keeps a degraded primary instead of disappearing. Current headscale-go retains
+the last known primary in this stock-client unavailable-candidate case:
+
+```sh
+tools/real-client/route-health-all-unhealthy-smoke.sh
+tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
+```
+
 The headscale-go wrapper also defaults to the audited current-head commit
 because pinned v0.28 does not expose `node.routes.ha`.
 
@@ -596,6 +608,8 @@ Additional knobs:
 - `REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS` entries are
   `source_index:peer_index:route` and assert route ownership in
   `tailscale debug netmap`.
+- `REAL_CLIENT_EXPECT_ROUTE_HEALTH_ALL_UNHEALTHY_ROUTE` enables the degraded
+  primary fallback assertion after all route candidates have timed out.
 - `REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS` and
   `REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS` default to `2` and `1` in the
   route-health wrappers.

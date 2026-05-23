@@ -24,6 +24,7 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
 expected_peer_route_owners="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS:-}"
 expected_route_health_failover_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE:-}"
+expected_route_health_all_unhealthy_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_ALL_UNHEALTHY_ROUTE:-}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
@@ -362,9 +363,9 @@ if [[ -n "${route_health_probe_timeout_secs}" ]] &&
   echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be a positive integer, got ${route_health_probe_timeout_secs}" >&2
   exit 2
 fi
-if [[ -n "${expected_route_health_failover_route}" ]] &&
+if { [[ -n "${expected_route_health_failover_route}" ]] || [[ -n "${expected_route_health_all_unhealthy_route}" ]]; } &&
   [[ -z "${route_health_probe_interval_secs}" || -z "${route_health_probe_timeout_secs}" ]]; then
-  echo "REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE requires REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
+  echo "route-health assertions require REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
   exit 2
 fi
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
@@ -1278,7 +1279,7 @@ echo "::group::assert harness machine state"
 curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines.json"
 if [[ -n "${expected_primary_route}" ]]; then
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes.json"
 else
   printf '{}\n' >"${work_dir}/debug-routes.json"
@@ -1790,7 +1791,7 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
   echo "::group::assert primary route failover"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-failover.json"
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes-before-failover.json"
   failover_node_key="$(
     ruby -rjson -e '
@@ -1823,7 +1824,7 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
     >"${work_dir}/failover-clear-primary.json"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-failover.json"
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes-after-failover.json"
   ruby -rjson -e '
     route = ARGV.fetch(4)
@@ -1885,7 +1886,7 @@ if [[ -n "${expected_primary_failover_route}" ]]; then
       >"${work_dir}/sticky-reapprove-old-primary.json"
     curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-sticky.json"
     curl -fsS -H 'accept: application/json' \
-      "http://127.0.0.1:${http_port}/debug/routes" \
+      "http://127.0.0.1:${http_port}/harness/routes" \
       >"${work_dir}/debug-routes-after-sticky.json"
     ruby -rjson -e '
       route = ARGV.fetch(3)
@@ -1937,7 +1938,7 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
   echo "::group::assert primary route withdrawal"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-withdraw.json"
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes-before-withdraw.json"
   withdraw_client_name="$(
     ruby -rjson -e '
@@ -1980,7 +1981,7 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
   until
     curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-withdraw.json" &&
       curl -fsS -H 'accept: application/json' \
-        "http://127.0.0.1:${http_port}/debug/routes" \
+        "http://127.0.0.1:${http_port}/harness/routes" \
         >"${work_dir}/debug-routes-after-withdraw.json" &&
       ruby -rjson -e '
         route = ARGV.fetch(4)
@@ -2050,7 +2051,7 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
   echo "::group::assert route-health primary failover"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-route-health.json"
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes-before-route-health.json"
   route_health_client_name="$(
     ruby -rjson -e '
@@ -2083,7 +2084,7 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
   until
     curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-route-health.json" &&
       curl -fsS -H 'accept: application/json' \
-        "http://127.0.0.1:${http_port}/debug/routes" \
+        "http://127.0.0.1:${http_port}/harness/routes" \
         >"${work_dir}/debug-routes-after-route-health.json" &&
       ruby -rjson -e '
         route = ARGV.fetch(4)
@@ -2141,7 +2142,7 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
   fi
   sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
   curl -fsS -H 'accept: application/json' \
-    "http://127.0.0.1:${http_port}/debug/routes" \
+    "http://127.0.0.1:${http_port}/harness/routes" \
     >"${work_dir}/debug-routes-after-route-health-recovery.json"
   ruby -rjson -e '
     route = ARGV.fetch(2)
@@ -2150,6 +2151,178 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
     abort("route-health recovery stole #{route}: #{recovered_owner.inspect}, expected sticky #{failed_over_owner.inspect}") unless recovered_owner == failed_over_owner
     puts JSON.pretty_generate({route: route, sticky_owner: recovered_owner})
   ' "${work_dir}/debug-routes-after-route-health.json" "${work_dir}/debug-routes-after-route-health-recovery.json" "${expected_route_health_failover_route}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_route_health_all_unhealthy_route}" ]]; then
+  echo "::group::assert route-health all-unhealthy fallback"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-route-health-all-unhealthy.json"
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/harness/routes" \
+    >"${work_dir}/debug-routes-before-route-health-all-unhealthy.json"
+  route_health_all_selection="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(2)
+
+      def stable_id_from_key(hex)
+        h = 0xcbf29ce484222325
+        hex.each_byte do |byte|
+          h ^= byte
+          h = (h * 0x100000001b3) & 0xffffffffffffffff
+        end
+        h & 0x7fffffffffffffff
+      end
+
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      debug_routes = JSON.parse(File.read(ARGV.fetch(1)))
+      primary_owner = debug_routes.fetch("primary_routes").fetch(route) {
+        abort("missing primary route #{route.inspect} before all-unhealthy route-health check")
+      }
+      candidates = machines
+        .select { |machine| Array(machine["available_routes"]).include?(route) && Array(machine["approved_routes"]).include?(route) }
+        .map { |machine| [stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")), machine.fetch("hostname")] }
+        .sort_by(&:first)
+      abort("expected at least two route-health candidates for #{route}, got #{candidates.inspect}") if candidates.length < 2
+      primary = candidates.find { |id, _hostname| id == primary_owner }
+      abort("primary owner #{primary_owner.inspect} did not match active candidates #{candidates.inspect}") unless primary
+      puts primary.fetch(1)
+      candidates.each { |_id, hostname| puts hostname }
+    ' "${work_dir}/machines-before-route-health-all-unhealthy.json" "${work_dir}/debug-routes-before-route-health-all-unhealthy.json" "${expected_route_health_all_unhealthy_route}"
+  )"
+  mapfile -t route_health_all_lines <<<"${route_health_all_selection}"
+  route_health_all_primary_name="${route_health_all_lines[0]}"
+  route_health_all_candidates=("${route_health_all_lines[@]:1}")
+  route_health_all_paused=()
+
+  docker pause "${route_health_all_primary_name}" >/dev/null
+  route_health_all_paused+=("${route_health_all_primary_name}")
+  deadline=$((SECONDS + timeout_secs))
+  until
+    curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-route-health-first-unhealthy.json" &&
+      curl -fsS -H 'accept: application/json' \
+        "http://127.0.0.1:${http_port}/harness/routes" \
+        >"${work_dir}/debug-routes-after-route-health-first-unhealthy.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(4)
+        paused_client = ARGV.fetch(5)
+        expected_count = Integer(ARGV.fetch(6))
+
+        def stable_id_from_key(hex)
+          h = 0xcbf29ce484222325
+          hex.each_byte do |byte|
+            h ^= byte
+            h = (h * 0x100000001b3) & 0xffffffffffffffff
+          end
+          h & 0x7fffffffffffffff
+        end
+
+        before_machines = JSON.parse(File.read(ARGV.fetch(0)))
+        before_debug = JSON.parse(File.read(ARGV.fetch(1)))
+        after_machines = JSON.parse(File.read(ARGV.fetch(2)))
+        after_debug = JSON.parse(File.read(ARGV.fetch(3)))
+        abort("expected #{expected_count} machines before first route-health timeout, got #{before_machines.length}") unless before_machines.length == expected_count
+        abort("expected #{expected_count} machines after first route-health timeout, got #{after_machines.length}") unless after_machines.length == expected_count
+
+        before_owner = before_debug.fetch("primary_routes").fetch(route)
+        after_owner = after_debug.fetch("primary_routes").fetch(route) {
+          abort("missing primary route #{route.inspect} after first route-health timeout")
+        }
+        abort("expected first route-health timeout to fail over, still #{after_owner.inspect}") if after_owner == before_owner
+
+        remaining_ids = after_machines
+          .reject { |machine| machine.fetch("hostname") == paused_client }
+          .select { |machine| Array(machine["available_routes"]).include?(route) && Array(machine["approved_routes"]).include?(route) }
+          .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+        abort("first failover owner #{after_owner.inspect} not among remaining active routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          paused_client: paused_client,
+          before_owner: before_owner,
+          after_owner: after_owner,
+          debug_routes: after_debug,
+        })
+      ' "${work_dir}/machines-before-route-health-all-unhealthy.json" "${work_dir}/debug-routes-before-route-health-all-unhealthy.json" "${work_dir}/machines-after-route-health-first-unhealthy.json" "${work_dir}/debug-routes-after-route-health-first-unhealthy.json" "${expected_route_health_all_unhealthy_route}" "${route_health_all_primary_name}" "${expected_machine_count}"
+  do
+    if ((SECONDS >= deadline)); then
+      for paused in "${route_health_all_paused[@]}"; do
+        docker unpause "${paused}" >/dev/null 2>&1 || true
+      done
+      echo "timed out waiting for first route-health timeout" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for candidate in "${route_health_all_candidates[@]}"; do
+    if [[ "${candidate}" != "${route_health_all_primary_name}" ]]; then
+      docker pause "${candidate}" >/dev/null
+      route_health_all_paused+=("${candidate}")
+    fi
+  done
+
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  if ! (
+    curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-route-health-all-unhealthy.json" &&
+      curl -fsS -H 'accept: application/json' \
+        "http://127.0.0.1:${http_port}/harness/routes" \
+        >"${work_dir}/debug-routes-after-route-health-all-unhealthy.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(4)
+        expected_count = Integer(ARGV.fetch(5))
+
+        def stable_id_from_key(hex)
+          h = 0xcbf29ce484222325
+          hex.each_byte do |byte|
+            h ^= byte
+            h = (h * 0x100000001b3) & 0xffffffffffffffff
+          end
+          h & 0x7fffffffffffffff
+        end
+
+        before_machines = JSON.parse(File.read(ARGV.fetch(0)))
+        first_debug = JSON.parse(File.read(ARGV.fetch(1)))
+        after_machines = JSON.parse(File.read(ARGV.fetch(2)))
+        after_debug = JSON.parse(File.read(ARGV.fetch(3)))
+        abort("expected #{expected_count} machines before all-unhealthy route-health, got #{before_machines.length}") unless before_machines.length == expected_count
+        abort("expected #{expected_count} machines after all-unhealthy route-health, got #{after_machines.length}") unless after_machines.length == expected_count
+
+        first_owner = first_debug.fetch("primary_routes").fetch(route)
+        after_owner = after_debug.fetch("primary_routes").fetch(route) {
+          abort("missing primary route #{route.inspect} after all route-health candidates are unhealthy")
+        }
+
+        candidate_ids = before_machines
+          .select { |machine| Array(machine["available_routes"]).include?(route) && Array(machine["approved_routes"]).include?(route) }
+          .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+          .sort
+        abort("all-unhealthy fallback owner #{after_owner.inspect} not among candidates #{candidate_ids.inspect}") unless candidate_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          route: route,
+          first_unhealthy_owner: first_owner,
+          all_unhealthy_owner: after_owner,
+          retained_last_known_primary: after_owner == first_owner,
+          candidate_ids: candidate_ids,
+          debug_routes: after_debug,
+        })
+      ' "${work_dir}/machines-before-route-health-all-unhealthy.json" "${work_dir}/debug-routes-after-route-health-first-unhealthy.json" "${work_dir}/machines-after-route-health-all-unhealthy.json" "${work_dir}/debug-routes-after-route-health-all-unhealthy.json" "${expected_route_health_all_unhealthy_route}" "${expected_machine_count}"
+  ); then
+    for paused in "${route_health_all_paused[@]}"; do
+      docker unpause "${paused}" >/dev/null 2>&1 || true
+    done
+    echo "route-health all-unhealthy fallback assertion failed" >&2
+    exit 1
+  fi
+
+  for paused in "${route_health_all_paused[@]}"; do
+    docker unpause "${paused}" >/dev/null
+  done
+  for paused in "${route_health_all_paused[@]}"; do
+    if ! wait_for "tailscale logged-in netmap after all-unhealthy route-health ${paused}" "tailscale_logged_in '${paused}'"; then
+      dump_client_debug "${paused}"
+      exit 1
+    fi
+  done
   echo "::endgroup::"
 fi
 

@@ -25,6 +25,7 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
 expected_peer_route_owners="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS:-}"
 expected_route_health_failover_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE:-}"
+expected_route_health_all_unhealthy_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_ALL_UNHEALTHY_ROUTE:-}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
@@ -448,9 +449,9 @@ if [[ -n "${route_health_probe_timeout_secs}" ]] &&
   echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be a positive integer, got ${route_health_probe_timeout_secs}" >&2
   exit 2
 fi
-if [[ -n "${expected_route_health_failover_route}" ]] &&
+if { [[ -n "${expected_route_health_failover_route}" ]] || [[ -n "${expected_route_health_all_unhealthy_route}" ]]; } &&
   [[ -z "${route_health_probe_interval_secs}" || -z "${route_health_probe_timeout_secs}" ]]; then
-  echo "REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE requires REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
+  echo "route-health assertions require REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
   exit 2
 fi
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
@@ -2356,6 +2357,167 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
     abort("route-health recovery stole #{route}: #{recovered_owner.inspect}, expected sticky #{failed_over_owner.inspect}") unless recovered_owner == failed_over_owner
     puts JSON.pretty_generate({route: route, sticky_owner: recovered_owner})
   ' "${work_dir}/nodes-after-route-health.json" "${work_dir}/nodes-after-route-health-recovery.json" "${expected_route_health_failover_route}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_route_health_all_unhealthy_route}" ]]; then
+  echo "::group::assert route-health all-unhealthy fallback"
+  cp "${work_dir}/nodes.json" "${work_dir}/nodes-before-route-health-all-unhealthy.json"
+  route_health_all_selection="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(1)
+
+      def node_name(node)
+        node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+      end
+
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      primary_nodes = nodes.select do |node|
+        Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route)
+      end
+      abort("expected exactly one primary node before all-unhealthy route-health, got #{primary_nodes.length}") unless primary_nodes.length == 1
+      candidates = nodes
+        .select do |node|
+          Array(node["availableRoutes"] || node["available_routes"]).include?(route) &&
+            Array(node["approvedRoutes"] || node["approved_routes"]).include?(route)
+        end
+        .map { |node| [Integer(node.fetch("id")), node_name(node)] }
+        .sort_by(&:first)
+      abort("expected at least two route-health candidates for #{route}, got #{candidates.inspect}") if candidates.length < 2
+      primary_id = Integer(primary_nodes.fetch(0).fetch("id"))
+      primary = candidates.find { |id, _hostname| id == primary_id }
+      abort("primary owner #{primary_id.inspect} did not match active candidates #{candidates.inspect}") unless primary
+      puts primary.fetch(1)
+      candidates.each { |_id, hostname| puts hostname }
+    ' "${work_dir}/nodes-before-route-health-all-unhealthy.json" "${expected_route_health_all_unhealthy_route}"
+  )"
+  mapfile -t route_health_all_lines <<<"${route_health_all_selection}"
+  route_health_all_primary_name="${route_health_all_lines[0]}"
+  route_health_all_candidates=("${route_health_all_lines[@]:1}")
+  route_health_all_paused=()
+
+  docker pause "${route_health_all_primary_name}" >/dev/null
+  route_health_all_paused+=("${route_health_all_primary_name}")
+  deadline=$((SECONDS + timeout_secs))
+  until
+    "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-after-route-health-first-unhealthy.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(2)
+        paused_client = ARGV.fetch(3)
+        expected_count = Integer(ARGV.fetch(4))
+
+        def node_name(node)
+          node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+        end
+
+        before_payload = JSON.parse(File.read(ARGV.fetch(0)))
+        before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
+        after_payload = JSON.parse(File.read(ARGV.fetch(1)))
+        after_nodes = after_payload.is_a?(Array) ? after_payload : after_payload.fetch("nodes")
+        abort("expected #{expected_count} nodes before first route-health timeout, got #{before_nodes.length}") unless before_nodes.length == expected_count
+        abort("expected #{expected_count} nodes after first route-health timeout, got #{after_nodes.length}") unless after_nodes.length == expected_count
+
+        before_primary = before_nodes.select { |node| Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route) }
+        after_primary = after_nodes.select { |node| Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route) }
+        abort("expected exactly one primary node before first route-health timeout, got #{before_primary.length}") unless before_primary.length == 1
+        abort("expected exactly one primary node after first route-health timeout, got #{after_primary.length}") unless after_primary.length == 1
+        before_owner = Integer(before_primary.fetch(0).fetch("id"))
+        after_owner = Integer(after_primary.fetch(0).fetch("id"))
+        abort("expected first route-health timeout to fail over, still #{after_owner}") if after_owner == before_owner
+
+        remaining_ids = after_nodes
+          .reject { |node| node_name(node) == paused_client }
+          .select do |node|
+            Array(node["availableRoutes"] || node["available_routes"]).include?(route) &&
+              Array(node["approvedRoutes"] || node["approved_routes"]).include?(route)
+          end
+          .map { |node| Integer(node.fetch("id")) }
+        abort("first failover owner #{after_owner} not among remaining active routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          paused_client: paused_client,
+          before_owner: before_owner,
+          after_owner: after_owner,
+          nodes: after_nodes,
+        })
+      ' "${work_dir}/nodes-before-route-health-all-unhealthy.json" "${work_dir}/nodes-after-route-health-first-unhealthy.json" "${expected_route_health_all_unhealthy_route}" "${route_health_all_primary_name}" "${expected_machine_count}"
+  do
+    if ((SECONDS >= deadline)); then
+      for paused in "${route_health_all_paused[@]}"; do
+        docker unpause "${paused}" >/dev/null 2>&1 || true
+      done
+      echo "timed out waiting for first route-health timeout" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  for candidate in "${route_health_all_candidates[@]}"; do
+    if [[ "${candidate}" != "${route_health_all_primary_name}" ]]; then
+      docker pause "${candidate}" >/dev/null
+      route_health_all_paused+=("${candidate}")
+    fi
+  done
+
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  if ! (
+    "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-after-route-health-all-unhealthy.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(3)
+        expected_count = Integer(ARGV.fetch(4))
+
+        before_payload = JSON.parse(File.read(ARGV.fetch(0)))
+        before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
+        first_payload = JSON.parse(File.read(ARGV.fetch(1)))
+        first_nodes = first_payload.is_a?(Array) ? first_payload : first_payload.fetch("nodes")
+        after_payload = JSON.parse(File.read(ARGV.fetch(2)))
+        after_nodes = after_payload.is_a?(Array) ? after_payload : after_payload.fetch("nodes")
+        abort("expected #{expected_count} nodes before all-unhealthy route-health, got #{before_nodes.length}") unless before_nodes.length == expected_count
+        abort("expected #{expected_count} nodes after all-unhealthy route-health, got #{after_nodes.length}") unless after_nodes.length == expected_count
+
+        first_primary = first_nodes.select { |node| Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route) }
+        after_primary = after_nodes.select { |node| Array(node["subnetRoutes"] || node["subnet_routes"]).include?(route) }
+        abort("expected exactly one primary node after first route-health timeout, got #{first_primary.length}") unless first_primary.length == 1
+        abort("expected exactly one primary node after all route-health candidates are unhealthy, got #{after_primary.length}") unless after_primary.length == 1
+        first_owner = Integer(first_primary.fetch(0).fetch("id"))
+        after_owner = Integer(after_primary.fetch(0).fetch("id"))
+
+        candidate_ids = before_nodes
+          .select do |node|
+            Array(node["availableRoutes"] || node["available_routes"]).include?(route) &&
+              Array(node["approvedRoutes"] || node["approved_routes"]).include?(route)
+          end
+          .map { |node| Integer(node.fetch("id")) }
+          .sort
+        abort("all-unhealthy fallback owner #{after_owner} not among candidates #{candidate_ids.inspect}") unless candidate_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          route: route,
+          first_unhealthy_owner: first_owner,
+          all_unhealthy_owner: after_owner,
+          retained_last_known_primary: after_owner == first_owner,
+          candidate_ids: candidate_ids,
+          nodes: after_nodes,
+        })
+      ' "${work_dir}/nodes-before-route-health-all-unhealthy.json" "${work_dir}/nodes-after-route-health-first-unhealthy.json" "${work_dir}/nodes-after-route-health-all-unhealthy.json" "${expected_route_health_all_unhealthy_route}" "${expected_machine_count}"
+  ); then
+    for paused in "${route_health_all_paused[@]}"; do
+      docker unpause "${paused}" >/dev/null 2>&1 || true
+    done
+    echo "route-health all-unhealthy fallback assertion failed" >&2
+    exit 1
+  fi
+
+  for paused in "${route_health_all_paused[@]}"; do
+    docker unpause "${paused}" >/dev/null
+  done
+  for paused in "${route_health_all_paused[@]}"; do
+    if ! wait_for "tailscale logged-in netmap after all-unhealthy route-health ${paused}" "tailscale_logged_in '${paused}'"; then
+      dump_client_debug "${paused}"
+      exit 1
+    fi
+  done
   echo "::endgroup::"
 fi
 

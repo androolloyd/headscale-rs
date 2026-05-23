@@ -103,6 +103,7 @@ smoke_ids=(
   route-via
   route-via-multiprefix
   route-health
+  route-health-all-unhealthy
   derp-private
   ssh
 )
@@ -134,6 +135,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -185,6 +187,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-smoke.sh
   tools/real-client/route-via-multiprefix-smoke.sh
   tools/real-client/route-health-smoke.sh
+  tools/real-client/route-health-all-unhealthy-smoke.sh
   tools/real-client/derp-private-smoke.sh
   tools/real-client/ssh-smoke.sh
 )
@@ -226,6 +229,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/route-health-headscale-go-smoke.sh
+  tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/derp-private-headscale-go-smoke.sh
   tools/real-client/ssh-headscale-go-smoke.sh
 )
@@ -267,6 +271,7 @@ smoke_assertions=(
   "current-head route steering with grants via"
   "current-head multi-prefix route steering with grants via"
   "current-head route-health failover and sticky recovery"
+  "current-head route-health all-unavailable degraded primary retention"
   "private DERP relay, STUN, verify-client admission, and DERP map metadata"
   "Tailscale SSH allow, deny, and ACL timeout"
 )

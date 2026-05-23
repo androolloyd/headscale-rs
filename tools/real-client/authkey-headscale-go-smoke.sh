@@ -36,6 +36,9 @@ prefix_v6="${REAL_CLIENT_PREFIX_V6-fd7a:115c:a1e0::/48}"
 prefix_allocation="${REAL_CLIENT_PREFIX_ALLOCATION:-sequential}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
+accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
+dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
+expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
@@ -233,6 +236,18 @@ if ((expect_no_magic_dns)) && [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS conflicts with REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX" >&2
   exit 2
 fi
+case "${accept_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    accept_dns_arg=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    accept_dns_arg=false
+    ;;
+  *)
+    echo "REAL_CLIENT_ACCEPT_DNS must be true or false, got ${accept_dns}" >&2
+    exit 2
+    ;;
+esac
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-}"
 if [[ -z "${up_timeout}" ]]; then
   if [[ "${login_mode}" == "web" ]]; then
@@ -490,6 +505,28 @@ write_registration_id() {
   ' "${output_path}" <<<"${status_json}"
 }
 
+assert_dns_extra_record() {
+  local client_name="$1"
+  local host="$2"
+  local expected="$3"
+  local output_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      host = ARGV.fetch(1).sub(/\.\z/, "")
+      expected = ARGV.fetch(2)
+      records = Array(netmap.dig("DNS", "ExtraRecords"))
+      match = records.any? do |record|
+        name = (record["Name"] || record["name"]).to_s.sub(/\.\z/, "")
+        value = (record["Value"] || record["value"]).to_s
+        name == host && value == expected
+      end
+      abort("expected DNS extra record #{host}=#{expected}, got #{records.inspect}") unless match
+      puts JSON.pretty_generate(records)
+    ' "${netmap_path}" "${host}" "${expected}" >"${output_path}"
+}
+
 dump_client_debug() {
   local client_name="$1"
   docker exec "${client_name}" tailscale status 2>&1 || true
@@ -570,6 +607,24 @@ dns:
     global: []
     split: {}
   search_domains: []
+EOF
+if [[ -n "${dns_extra_records_json}" ]]; then
+  printf '  extra_records:\n' >>"${config_path}"
+  ruby -rjson -e '
+    JSON.parse(ARGV.fetch(0)).each do |record|
+      name = record["Name"] || record["name"]
+      type = record["Type"] || record["type"] || ""
+      value = record["Value"] || record["value"]
+      abort("extra DNS records need Name/name and Value/value: #{record.inspect}") if name.to_s.empty? || value.to_s.empty?
+      puts "    - name: #{name.to_s.to_json}"
+      puts "      type: #{type.to_s.to_json}" unless type.to_s.empty?
+      puts "      value: #{value.to_s.to_json}"
+    end
+  ' "${dns_extra_records_json}" >>"${config_path}"
+else
+  printf '  extra_records: []\n' >>"${config_path}"
+fi
+cat >>"${config_path}" <<EOF
 
 logtail:
   enabled: false
@@ -756,7 +811,7 @@ for idx in "${!client_names[@]}"; do
     "--hostname=${client_name}"
     "--timeout=${up_timeout}"
     --accept-routes=false
-    --accept-dns=false
+    "--accept-dns=${accept_dns_arg}"
   )
   if [[ "${login_mode}" == "authkey" ]]; then
     up_args+=("--authkey=${authkeys[$idx]}")
@@ -841,7 +896,7 @@ if ((do_reauth_after_login)); then
       "--hostname=${client_name}"
       "--timeout=${up_timeout}"
       --accept-routes=false
-      --accept-dns=false
+      "--accept-dns=${accept_dns_arg}"
       --force-reauth
       --reset
     )
@@ -1112,6 +1167,28 @@ if ((expect_no_magic_dns)); then
     end
     puts JSON.pretty_generate({magic_dns: false, clients: status_paths.length})
   ' "${no_magicdns_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_dns_extra_records}" ]]; then
+  echo "::group::assert DNS extra records"
+  resolver_client="${client_names[0]}"
+  IFS=',' read -r -a dns_expectations <<<"${expected_dns_extra_records}"
+  for expectation in "${dns_expectations[@]}"; do
+    host="${expectation%%=*}"
+    expected="${expectation#*=}"
+    if [[ -z "${host}" || -z "${expected}" || "${host}" == "${expectation}" ]]; then
+      echo "REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS entries must be host=value, got ${expectation}" >&2
+      exit 2
+    fi
+    safe_host="${host//[^a-zA-Z0-9_.-]/-}"
+    wait_for "DNS extra record ${host}" \
+      "assert_dns_extra_record '${resolver_client}' '${host}' '${expected}' '${work_dir}/dns-${safe_host}.json'" || {
+        dump_client_debug "${resolver_client}"
+        exit 1
+      }
+    cat "${work_dir}/dns-${safe_host}.json"
+  done
   echo "::endgroup::"
 fi
 

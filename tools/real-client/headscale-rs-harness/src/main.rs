@@ -21,12 +21,12 @@ use axum::{
 };
 use clap::{Parser, ValueEnum};
 use headscale_api::{
-    dns::{DnsConfigSpec, DnsStore},
+    dns::{DnsConfigSpec, DnsStore, parse_extra_records},
     policy::{NodeView, PolicyStore, parse_hujson_policy},
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, PingTracker,
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
-        derp_config, routes::normalize_routes, serve,
+        derp_config, routes::normalize_routes, serve, wire::DnsRecord,
     },
 };
 use parking_lot::RwLock;
@@ -66,6 +66,8 @@ struct Args {
     policy: Option<PathBuf>,
     #[arg(long, env = "HSRS_HARNESS_BASE_DOMAIN")]
     base_domain: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_EXTRA_RECORDS_JSON")]
+    dns_extra_records_json: Option<String>,
     #[arg(
         long,
         value_enum,
@@ -288,9 +290,11 @@ async fn main() -> Result<()> {
     }
 
     let machines = Arc::new(MachineRegistry::new());
+    let dns_extra_records = parse_dns_extra_records(args.dns_extra_records_json.as_deref())?;
     let dns = Arc::new(DnsStore::from_spec(DnsConfigSpec {
         magic_dns: args.base_domain.is_some(),
         base_domain: args.base_domain.unwrap_or_default(),
+        extra_records: dns_extra_records,
         ..DnsConfigSpec::default()
     }));
     let derp_map = Arc::new(load_derp_map(args.derp_map.as_ref())?);
@@ -383,6 +387,13 @@ fn harness_router(state: AppState) -> Router {
         )
         .route("/harness/machines/:node_key/tags", put(set_machine_tags))
         .with_state(state)
+}
+
+fn parse_dns_extra_records(raw: Option<&str>) -> Result<Vec<DnsRecord>> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    parse_extra_records(raw.as_bytes()).context("parse HSRS_HARNESS_DNS_EXTRA_RECORDS_JSON")
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {

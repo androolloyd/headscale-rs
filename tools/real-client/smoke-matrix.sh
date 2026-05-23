@@ -79,6 +79,7 @@ smoke_ids=(
   tag-reauth-clear
   magicdns
   magicdns-custom-domain
+  extra-records
   dns-disabled
   prefix-family-dual-stack
   prefix-family-v4-to-dual-backfill
@@ -110,6 +111,7 @@ smoke_areas=(
   tags
   tags
   tags
+  dns
   dns
   dns
   dns
@@ -145,6 +147,7 @@ smoke_rust_scripts=(
   tools/real-client/tag-reauth-clear-smoke.sh
   tools/real-client/magicdns-smoke.sh
   tools/real-client/magicdns-custom-domain-smoke.sh
+  tools/real-client/extra-records-smoke.sh
   tools/real-client/dns-disabled-smoke.sh
   tools/real-client/prefix-family-dual-stack-smoke.sh
   tools/real-client/prefix-family-v4-to-dual-backfill-smoke.sh
@@ -178,6 +181,7 @@ smoke_go_scripts=(
   tools/real-client/tag-reauth-clear-headscale-go-smoke.sh
   tools/real-client/magicdns-headscale-go-smoke.sh
   tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
+  tools/real-client/extra-records-headscale-go-smoke.sh
   tools/real-client/dns-disabled-headscale-go-smoke.sh
   tools/real-client/prefix-family-dual-stack-headscale-go-smoke.sh
   tools/real-client/prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
@@ -211,6 +215,7 @@ smoke_assertions=(
   "web reauth clears forced tags"
   "MagicDNS suffix and peer DNS names"
   "custom DNS base domain"
+  "extra DNS A record in client netmap"
   "MagicDNS disabled fallback names"
   "Dual-stack prefix-family allocation"
   "IPv4-to-dual-stack backfill after prefix migration"

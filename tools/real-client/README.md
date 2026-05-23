@@ -85,6 +85,7 @@ with the same stock `tailscaled` image.
 | Tags | `tag-reauth-clear` | `tag-reauth-clear-smoke.sh` | `tag-reauth-clear-headscale-go-smoke.sh` | Web reauth clears forced tags |
 | DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix and peer DNS names |
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
+| DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
 | Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill after prefix migration |
@@ -142,7 +143,7 @@ protocol failure is separated from a stock-client behavior mismatch:
 
 ```sh
 FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh
-REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,magicdns,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,magicdns,extra-records,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
 REAL_CLIENT_TARGETS='rust headscale-go' \
 tools/real-client/smoke-matrix.sh
 ```
@@ -361,6 +362,15 @@ non-default DNS base domain:
 ```sh
 tools/real-client/magicdns-custom-domain-smoke.sh
 tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
+```
+
+The extra-records variant configures an operator-supplied A record, runs the
+stock client with DNS acceptance enabled, and asserts the record is present in
+the client-observed netmap:
+
+```sh
+tools/real-client/extra-records-smoke.sh
+tools/real-client/extra-records-headscale-go-smoke.sh
 ```
 
 The disabled-DNS scenario starts two stock clients with MagicDNS off and

@@ -699,6 +699,7 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         validate_ssh_src_alias(src, errs);
         validate_group_ref(doc, src, errs);
         validate_tag_ref(doc, src, errs);
+        validate_ssh_source_group_recursion(doc, src, errs);
     }
     for dst in &rule.dst {
         validate_ssh_dst_alias(dst, errs);
@@ -909,6 +910,70 @@ fn group_defined(doc: &AclDoc, group: &str) -> bool {
         || group
             .strip_prefix("group:")
             .is_some_and(|short| doc.groups.contains_key(short))
+}
+
+fn group_members<'a>(doc: &'a AclDoc, group: &str) -> Option<&'a Vec<String>> {
+    if let Some(short) = group.strip_prefix("group:") {
+        return doc.groups.get(short).or_else(|| doc.groups.get(group));
+    }
+    doc.groups.get(group)
+}
+
+fn canonical_group_ref(group: &str) -> String {
+    if group.starts_with("group:") {
+        group.to_string()
+    } else {
+        format!("group:{group}")
+    }
+}
+
+fn validate_ssh_source_group_recursion(doc: &AclDoc, src: &str, errs: &mut Vec<String>) {
+    if !src.starts_with("group:") {
+        return;
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut chain = Vec::new();
+    validate_ssh_source_group_chain(doc, src, &mut visiting, &mut chain, errs);
+}
+
+fn validate_ssh_source_group_chain(
+    doc: &AclDoc,
+    group: &str,
+    visiting: &mut BTreeSet<String>,
+    chain: &mut Vec<String>,
+    errs: &mut Vec<String>,
+) {
+    let group_ref = canonical_group_ref(group);
+    if visiting.contains(&group_ref) {
+        let cycle_start = chain
+            .iter()
+            .position(|entry| entry == &group_ref)
+            .unwrap_or(0);
+        let mut cycle = chain[cycle_start..].to_vec();
+        cycle.sort();
+        errs.push(format!(
+            "circular group reference detected in SSH source: {}",
+            cycle.join(" -> ")
+        ));
+        return;
+    }
+
+    let Some(members) = group_members(doc, group) else {
+        return;
+    };
+
+    visiting.insert(group_ref.clone());
+    chain.push(group_ref.clone());
+
+    for member in members {
+        if member.starts_with("group:") {
+            validate_ssh_source_group_chain(doc, member, visiting, chain, errs);
+        }
+    }
+
+    chain.pop();
+    visiting.remove(&group_ref);
 }
 
 fn tag_defined(doc: &AclDoc, tag: &str) -> bool {
@@ -1337,11 +1402,9 @@ impl AclDoc {
         if token == "*" {
             return wildcard_filter_cidrs();
         }
-        if let Some(g) = token.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(g).or_else(|| self.groups.get(token)) {
-                return members.clone();
-            }
-            return Vec::new();
+        if token.starts_with("group:") {
+            let mut visiting = BTreeSet::new();
+            return self.expand_group_members(token, &mut visiting);
         }
         if let Some(h) = token.strip_prefix("host:") {
             if let Some(cidr) = self.hosts.get(h) {
@@ -1367,6 +1430,32 @@ impl AclDoc {
         vec![token.to_string()]
     }
 
+    fn expand_group_members(&self, group: &str, visiting: &mut BTreeSet<String>) -> Vec<String> {
+        let group_ref = canonical_group_ref(group);
+        if !visiting.insert(group_ref.clone()) {
+            return Vec::new();
+        }
+
+        let Some(members) = group_members(self, group) else {
+            visiting.remove(&group_ref);
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for member in members {
+            if member.starts_with("group:") {
+                for expanded in self.expand_group_members(member, visiting) {
+                    out.push(expanded);
+                }
+            } else {
+                out.push(member.clone());
+            }
+        }
+
+        visiting.remove(&group_ref);
+        out
+    }
+
     fn principal_matches(
         &self,
         set: &[String],
@@ -1390,11 +1479,9 @@ impl AclDoc {
         if entry == "*" {
             return true;
         }
-        if let Some(group) = entry.strip_prefix("group:") {
-            if let Some(members) = self.groups.get(group).or_else(|| self.groups.get(entry)) {
-                return members.iter().any(|m| identity_matches(m, principal));
-            }
-            return false;
+        if entry.starts_with("group:") {
+            let mut visiting = BTreeSet::new();
+            return self.group_principal_matches(entry, principal, &mut visiting);
         }
         if let Some(tag) = entry.strip_prefix("tag:") {
             return principal.tags.iter().any(|t| tag_matches(t, tag));
@@ -1421,6 +1508,41 @@ impl AclDoc {
             return addr_in_cidr(principal.addr, entry);
         }
         identity_matches(entry, principal)
+    }
+
+    fn group_principal_matches(
+        &self,
+        group: &str,
+        principal: &NodeView<'_>,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        let group_ref = canonical_group_ref(group);
+        if !visiting.insert(group_ref.clone()) {
+            return false;
+        }
+
+        let Some(members) = group_members(self, group) else {
+            visiting.remove(&group_ref);
+            return false;
+        };
+
+        let mut matched = false;
+        for member in members {
+            if member.starts_with("group:") {
+                if self.group_principal_matches(member, principal, visiting) {
+                    matched = true;
+                    break;
+                }
+            } else if identity_matches(member, principal) {
+                matched = true;
+                break;
+            } else {
+                continue;
+            }
+        }
+
+        visiting.remove(&group_ref);
+        matched
     }
 }
 
@@ -2793,6 +2915,55 @@ mod tests {
     }
 
     #[test]
+    fn ssh_source_rejects_circular_group_references() {
+        let err = parse_hujson_policy(
+            r#"{
+              "groups": {
+                "admins": ["group:ops"],
+                "ops": ["group:admins"]
+              },
+              "ssh": [{
+                "action": "accept",
+                "src": ["group:admins"],
+                "dst": ["autogroup:tagged"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(
+            "circular group reference detected in SSH source: group:admins -> group:ops"
+        ));
+    }
+
+    #[test]
+    fn ssh_source_nested_groups_parse_and_expand() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "groups": {
+                "admins": ["group:ops", "carol@"],
+                "ops": ["alice@", "group:eng"],
+                "eng": ["bob@"]
+              },
+              "ssh": [{
+                "action": "accept",
+                "src": ["group:admins"],
+                "dst": ["autogroup:tagged"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.expand_principal("group:admins"),
+            vec!["alice@", "bob@", "carol@"]
+        );
+    }
+
+    #[test]
     fn rejects_invalid_ssh_action_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{
@@ -3178,6 +3349,21 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
         );
         assert_eq!(d.expand_principal("group:admins"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ssh_source_expansion_skips_circular_group_edges() {
+        let mut d = AclDoc::empty();
+        d.groups.insert(
+            "admins".to_string(),
+            vec!["group:ops".to_string(), "alice@".to_string()],
+        );
+        d.groups.insert(
+            "ops".to_string(),
+            vec!["group:admins".to_string(), "bob@".to_string()],
+        );
+
+        assert_eq!(d.expand_principal("group:admins"), vec!["bob@", "alice@"]);
     }
 
     #[test]

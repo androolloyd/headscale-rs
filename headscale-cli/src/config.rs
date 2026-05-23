@@ -89,6 +89,9 @@ pub(crate) struct CliConfig {
     /// Top-level headscale-compatible DNS configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsConfigSpec>,
+    /// Upstream-compatible ACL policy serving mode.
+    #[serde(default, skip_serializing_if = "policy_config_is_default")]
+    pub(crate) policy: PolicyConfig,
     /// OpenID Connect configuration
     #[serde(default, skip_serializing_if = "oidc_config_is_default")]
     pub oidc: OidcConfig,
@@ -268,6 +271,49 @@ pub(crate) struct UpstreamDatabaseConfig {
 pub(crate) struct UpstreamSqliteConfig {
     #[serde(default)]
     path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PolicyConfig {
+    pub mode: String,
+    pub path: PathBuf,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: "file".to_string(),
+            path: PathBuf::new(),
+        }
+    }
+}
+
+impl PolicyConfig {
+    #[cfg(test)]
+    pub(crate) fn database() -> Self {
+        Self {
+            mode: "database".to_string(),
+            path: PathBuf::new(),
+        }
+    }
+
+    pub(crate) fn mode(&self) -> &str {
+        self.mode.trim()
+    }
+
+    pub(crate) fn is_file_mode(&self) -> bool {
+        self.mode() == "file"
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_database_mode(&self) -> bool {
+        self.mode() == "database"
+    }
+
+    pub(crate) fn path_if_non_empty(&self) -> Option<&Path> {
+        (!self.path.as_os_str().is_empty()).then_some(self.path.as_path())
+    }
 }
 
 impl CliConfig {
@@ -478,6 +524,9 @@ impl CliConfig {
         resolve_optional_path(config_dir, &mut self.tls_cert_path);
         resolve_optional_path(config_dir, &mut self.tls_key_path);
         resolve_optional_path(config_dir, &mut self.tls_letsencrypt_cache_dir);
+        if self.policy.is_file_mode() && !self.policy.path.as_os_str().is_empty() {
+            resolve_path(config_dir, &mut self.policy.path);
+        }
     }
 
     /// Save configuration to a file.
@@ -494,6 +543,7 @@ impl CliConfig {
         self.oidc.validate().context("invalid OIDC configuration")?;
         self.validate_upstream_database_config()?;
         self.validate_upstream_tls_config()?;
+        self.validate_policy_config()?;
 
         let server = self.server.as_ref().context(
             "server.server_url is required so clients receive absolute registration URLs",
@@ -551,6 +601,23 @@ impl CliConfig {
         }
 
         Ok(())
+    }
+
+    fn validate_policy_config(&self) -> Result<()> {
+        match self.policy.mode() {
+            "file" => {
+                let Some(path) = self.policy.path_if_non_empty() else {
+                    return Ok(());
+                };
+                let raw = std::fs::read_to_string(path)
+                    .with_context(|| format!("read policy.path {}", path.display()))?;
+                headscale_api::policy::parse_hujson_policy(&raw)
+                    .with_context(|| format!("parse policy.path {}", path.display()))?;
+                Ok(())
+            }
+            "database" => Ok(()),
+            mode => bail!("policy.mode must be either file or database, got {mode:?}"),
+        }
     }
 
     fn validate_upstream_database_config(&self) -> Result<()> {
@@ -643,10 +710,14 @@ fn resolve_optional_path(config_dir: &Path, path: &mut Option<PathBuf>) {
     let Some(value) = path else {
         return;
     };
-    if value.as_os_str().is_empty() || value.is_absolute() {
+    resolve_path(config_dir, value);
+}
+
+fn resolve_path(config_dir: &Path, path: &mut PathBuf) {
+    if path.as_os_str().is_empty() || path.is_absolute() {
         return;
     }
-    *value = config_dir.join(&*value);
+    *path = config_dir.join(&*path);
 }
 
 fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
@@ -946,6 +1017,10 @@ fn oidc_config_is_default(config: &OidcConfig) -> bool {
     config == &OidcConfig::default()
 }
 
+fn policy_config_is_default(config: &PolicyConfig) -> bool {
+    config == &PolicyConfig::default()
+}
+
 fn embedded_derp_config_is_default(config: &EmbeddedDerpConfig) -> bool {
     config == &EmbeddedDerpConfig::default()
 }
@@ -1222,6 +1297,83 @@ database:
         assert_eq!(server.mesh_cidr_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
         assert_eq!(server.ip_allocation, "random");
         assert_eq!(server.db_path, PathBuf::from("/srv/headscale/db.sqlite"));
+    }
+
+    #[test]
+    fn loads_upstream_policy_yaml_and_resolves_relative_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("policy.hujson"),
+            r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#,
+        )
+        .unwrap();
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+policy:
+  mode: file
+  path: policy.hujson
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load(&config_path).unwrap();
+
+        assert_eq!(config.policy.mode(), "file");
+        assert_eq!(config.policy.path, dir.path().join("policy.hujson"));
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn loads_upstream_database_policy_mode() {
+        let source = r#"
+server_url: "https://headscale.example"
+policy:
+  mode: database
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        assert!(config.policy.is_database_mode());
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_policy_mode() {
+        let source = r#"
+server_url: "https://headscale.example"
+policy:
+  mode: consul
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("policy.mode"));
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_policy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("policy.hujson"), "{").unwrap();
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+policy:
+  mode: file
+  path: policy.hujson
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load(&config_path).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("parse policy.path"));
     }
 
     #[test]

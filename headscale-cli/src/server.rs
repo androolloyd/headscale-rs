@@ -40,6 +40,7 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
+use crate::config::PolicyConfig;
 use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
@@ -66,6 +67,7 @@ pub(crate) struct RunServerConfig {
     pub embedded_derp: EmbeddedDerpConfig,
     pub derp: Option<DerpConfig>,
     pub dns: Option<DnsConfigSpec>,
+    pub policy: PolicyConfig,
     pub ephemeral_node_inactivity_timeout: Duration,
 }
 
@@ -189,7 +191,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let (dns_store, dns_extra_records_path) =
         dns_store_from_config(cfg.dns.clone()).context("load DNS runtime config")?;
     let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
-    let runtime = build_persistent_wire_runtime_with_dns(
+    let runtime = build_persistent_wire_runtime_with_dns_and_policy(
         db.pool(),
         &cfg.state_dir,
         server_url,
@@ -199,6 +201,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         oidc,
         derp_map,
         dns_store.clone(),
+        &cfg.policy,
         runtime_config,
     )
     .await?;
@@ -323,6 +326,7 @@ async fn build_persistent_wire_runtime(
     .await
 }
 
+#[cfg(test)]
 async fn build_persistent_wire_runtime_with_dns(
     pool: &sqlx::SqlitePool,
     state_dir: &Path,
@@ -333,6 +337,35 @@ async fn build_persistent_wire_runtime_with_dns(
     oidc: Option<OidcAuthRuntime>,
     derp_map: DerpMap,
     dns: Arc<DnsStore>,
+    runtime_config: Arc<RuntimeConfigSnapshot>,
+) -> Result<PersistentWireRuntime> {
+    build_persistent_wire_runtime_with_dns_and_policy(
+        pool,
+        state_dir,
+        server_url,
+        mesh_cidr,
+        mesh_cidr_v6,
+        ip_allocation,
+        oidc,
+        derp_map,
+        dns,
+        &PolicyConfig::database(),
+        runtime_config,
+    )
+    .await
+}
+
+async fn build_persistent_wire_runtime_with_dns_and_policy(
+    pool: &sqlx::SqlitePool,
+    state_dir: &Path,
+    server_url: &str,
+    mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
+    oidc: Option<OidcAuthRuntime>,
+    derp_map: DerpMap,
+    dns: Arc<DnsStore>,
+    policy_config: &PolicyConfig,
     runtime_config: Arc<RuntimeConfigSnapshot>,
 ) -> Result<PersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
@@ -350,10 +383,11 @@ async fn build_persistent_wire_runtime_with_dns(
     let ip_allocator: Arc<dyn IpAllocator> =
         Arc::new(CidrIpAllocator::from_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?);
     let policy = Arc::new(PolicyStore::new());
-    let policy_loaded = load_persisted_policy(pool, &policy).await?;
+    let policy_loaded = load_startup_policy(pool, &policy, policy_config).await?;
     tracing::info!(
         loaded = policy_loaded,
-        "loaded persisted policy into wire runtime"
+        mode = policy_config.mode(),
+        "loaded startup policy into wire runtime"
     );
     let hydrated = machines
         .hydrate_wire_registry(&wire_registry)
@@ -371,10 +405,14 @@ async fn build_persistent_wire_runtime_with_dns(
         machines.clone(),
     )
     .with_database_pool(pool.clone())
-    .with_policy_pool(pool.clone())
     .with_registration_cache(registration_cache.clone())
     .with_wire_registry(wire_registry.clone())
     .with_ip_allocator(ip_allocator.clone());
+    let admin_service = match policy_config.mode() {
+        "database" => admin_service.with_policy_pool(pool.clone()),
+        "file" => admin_service.with_policy_file(policy_config.path.clone()),
+        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+    };
     let oidc = oidc.map(|runtime| {
         let handler = PersistentOidcRegistrationHandler::new(
             registration_cache.clone(),
@@ -587,6 +625,8 @@ fn runtime_config_snapshot(
     snapshot.oidc.use_expiry_from_token = cfg.oidc.use_expiry_from_token;
     snapshot.oidc.pkce.enabled = cfg.oidc.pkce.enabled;
     snapshot.oidc.pkce.method.clone_from(&cfg.oidc.pkce.method);
+    snapshot.policy.mode = cfg.policy.mode().to_string();
+    snapshot.policy.path = cfg.policy.path.display().to_string();
 
     snapshot
 }
@@ -961,6 +1001,34 @@ async fn load_persisted_policy(pool: &sqlx::SqlitePool, policy: &PolicyStore) ->
     };
     let doc = parse_hujson_policy(&row.data).context("parse persisted ACL policy")?;
     policy.set_at(doc, row.data, row.updated_at);
+    Ok(true)
+}
+
+async fn load_startup_policy(
+    pool: &sqlx::SqlitePool,
+    policy: &PolicyStore,
+    config: &PolicyConfig,
+) -> Result<bool> {
+    match config.mode() {
+        "database" => load_persisted_policy(pool, policy).await,
+        "file" => load_file_policy(config, policy).await,
+        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+    }
+}
+
+async fn load_file_policy(config: &PolicyConfig, policy: &PolicyStore) -> Result<bool> {
+    let Some(path) = config.path_if_non_empty() else {
+        return Ok(false);
+    };
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read policy.path {}", path.display()))?;
+    if raw.is_empty() {
+        return Ok(false);
+    }
+    let doc = parse_hujson_policy(&raw)
+        .with_context(|| format!("parse policy.path {}", path.display()))?;
+    policy.set(doc, raw);
     Ok(true)
 }
 
@@ -1471,6 +1539,7 @@ mod tests {
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
+            policy: PolicyConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
     }
@@ -2124,6 +2193,7 @@ regions:
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
+            policy: PolicyConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2174,6 +2244,7 @@ regions:
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
+            policy: PolicyConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2318,6 +2389,7 @@ regions:
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
+            policy: PolicyConfig::database(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(180),
         };
 
@@ -2376,6 +2448,7 @@ regions:
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
+            policy: PolicyConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })
         .await
@@ -2583,6 +2656,45 @@ regions:
         assert!(runtime.state.policy.tag_exists("tag:server"));
         assert!(!runtime.state.policy.tag_exists("tag:old"));
         assert!(runtime.state.policy.node_can_have_tag(&node, "tag:server"));
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_loads_configured_file_policy() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.hujson");
+        let raw_policy = r#"{"tagOwners":{"tag:file":["alice@"]}}"#;
+        tokio::fs::write(&policy_path, raw_policy).await.unwrap();
+
+        let runtime = build_persistent_wire_runtime_with_dns_and_policy(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            "sequential",
+            Some(oidc_runtime()),
+            DerpMap::default(),
+            Arc::new(DnsStore::new()),
+            &PolicyConfig {
+                mode: "file".to_string(),
+                path: policy_path,
+            },
+            Arc::new(RuntimeConfigSnapshot::default()),
+        )
+        .await
+        .unwrap();
+
+        let tags = Vec::new();
+        let node = headscale_api::policy::NodeView {
+            addr: Some("100.64.0.9"),
+            user: Some("alice"),
+            tags: &tags,
+        };
+        assert_eq!(runtime.state.policy.raw().as_deref(), Some(raw_policy));
+        assert!(runtime.state.policy.tag_exists("tag:file"));
+        assert!(runtime.state.policy.node_can_have_tag(&node, "tag:file"));
     }
 
     #[test]

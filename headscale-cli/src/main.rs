@@ -364,6 +364,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
                 derp: config.as_ref().and_then(|c| c.derp.clone()),
                 dns: config.as_ref().and_then(|c| c.dns.clone()),
+                policy: config
+                    .as_ref()
+                    .map_or_else(config::PolicyConfig::default, |c| c.policy.clone()),
                 ephemeral_node_inactivity_timeout: Duration::from_secs(
                     server_config.map_or(defaults.ephemeral_node_inactivity_timeout_secs, |s| {
                         s.ephemeral_node_inactivity_timeout_secs

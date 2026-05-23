@@ -73,6 +73,7 @@ smoke_ids=(
   web-register-unowned-tag
   oidc
   online-lastseen
+  restart-persistence
   tagged-preauth
   tag-update
   tag-update-invalid
@@ -106,6 +107,7 @@ smoke_areas=(
   registration
   registration
   registration
+  lifecycle
   lifecycle
   tags
   tags
@@ -141,6 +143,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-unowned-tag-smoke.sh
   tools/real-client/oidc-smoke.sh
   tools/real-client/online-lastseen-smoke.sh
+  tools/real-client/restart-persistence-smoke.sh
   tools/real-client/tagged-preauth-smoke.sh
   tools/real-client/tag-update-smoke.sh
   tools/real-client/tag-update-invalid-smoke.sh
@@ -175,6 +178,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/online-lastseen-headscale-go-smoke.sh
+  tools/real-client/restart-persistence-headscale-go-smoke.sh
   tools/real-client/tagged-preauth-headscale-go-smoke.sh
   tools/real-client/tag-update-headscale-go-smoke.sh
   tools/real-client/tag-update-invalid-headscale-go-smoke.sh
@@ -209,6 +213,7 @@ smoke_assertions=(
   "web registration rejects unowned requested tag"
   "OIDC callback, node row, and user profile"
   "production online transition and LastSeen after disconnect"
+  "production restart persistence and route/tag netmap churn"
   "preauth key with ACL tag owners"
   "post-login tag replacement"
   "invalid tag update rejection"

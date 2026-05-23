@@ -1914,6 +1914,24 @@ mod tests {
         assert_eq!(node.stun_port, -1);
     }
 
+    #[test]
+    fn embedded_derp_map_omits_default_tls_derp_port() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.example.com".into(),
+            derp_port: 443,
+            stun_only: true,
+            stun_addr: Some("0.0.0.0:3478".parse().unwrap()),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let map = derp_map_from_embedded_config(&cfg);
+        let node = &map.regions.get(&900).unwrap().nodes[0];
+
+        assert_eq!(node.derp_port, 0);
+        assert_eq!(node.stun_port, 3478);
+    }
+
     #[tokio::test]
     async fn runtime_derp_config_merges_static_paths_and_embedded_region() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -2911,7 +2929,7 @@ database:
         cfg.database = parsed.database.clone();
         cfg.logtail_enabled = parsed.logtail.enabled;
         cfg.auto_update_enabled = parsed.auto_update.enabled;
-        cfg.tuning = parsed.tuning.clone();
+        cfg.tuning = parsed.tuning;
 
         let dns = DnsStore::new();
         let snapshot = runtime_config_snapshot(&cfg, &DerpMap::default(), &dns);

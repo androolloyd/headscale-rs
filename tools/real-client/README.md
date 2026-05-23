@@ -106,6 +106,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-primary-sticky` | `route-primary-sticky-smoke.sh` | `route-primary-sticky-headscale-go-smoke.sh` | Sticky primary route ownership |
 | Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
+| DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
 ## Local and CI Execution

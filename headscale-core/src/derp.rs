@@ -607,7 +607,10 @@ impl DerperSidecar {
             command.arg("-verify-clients");
         }
         if let Some(url) = &cfg.verify_client_url {
-            command.arg("-verify-client-url").arg(url);
+            command
+                .arg("-verify-client-url")
+                .arg(url)
+                .arg("-verify-client-url-fail-open=false");
         }
 
         let child = command.spawn()?;
@@ -809,5 +812,67 @@ mod tests {
             cfg.derper_config_path,
             std::path::PathBuf::from("/var/lib/headscale/derper.key")
         );
+    }
+
+    #[tokio::test]
+    async fn sidecar_verify_url_is_fail_closed_for_admission_tests() {
+        use std::io::Write;
+
+        let unique = format!(
+            "headscale-rs-derper-args-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        let args_file = dir.join("args.txt");
+        let fake_derper = dir.join("derper-fake.sh");
+        let escaped_args_file = args_file.display().to_string().replace('\'', "'\\''");
+        let mut file = std::fs::File::create(&fake_derper).unwrap();
+        writeln!(
+            file,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nsleep 30\n",
+            escaped_args_file
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_derper).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_derper, perms).unwrap();
+        }
+
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.local".to_string(),
+            derper_binary: fake_derper,
+            derper_listen_addr: "127.0.0.1:0".parse().unwrap(),
+            derper_config_path: dir.join("derper.key"),
+            derper_cert_mode: "manual".to_string(),
+            verify_client_url: Some("http://127.0.0.1:51821/verify".to_string()),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let sidecar = DerperSidecar::spawn(&cfg).unwrap();
+        let mut args = String::new();
+        for _ in 0..20 {
+            if let Ok(raw) = std::fs::read_to_string(&args_file)
+                && raw.contains("-verify-client-url-fail-open=false")
+            {
+                args = raw;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        sidecar.terminate();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(args.contains("-verify-client-url\n"));
+        assert!(args.contains("http://127.0.0.1:51821/verify\n"));
+        assert!(args.contains("-verify-client-url-fail-open=false\n"));
     }
 }

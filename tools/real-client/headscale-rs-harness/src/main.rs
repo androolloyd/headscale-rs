@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc,
@@ -29,9 +29,10 @@ use headscale_api::{
         derp_config,
         routes::normalize_routes,
         serve,
-        wire::{DnsRecord, DnsResolver},
+        wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
     },
 };
+use headscale_core::{config::EmbeddedDerpConfig, derp::EmbeddedDerpRuntime};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::signal;
@@ -68,6 +69,64 @@ struct Args {
     state_dir: PathBuf,
     #[arg(long, env = "HSRS_HARNESS_DERP_MAP")]
     derp_map: Option<PathBuf>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP")]
+    embedded_derp: bool,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_HOSTNAME")]
+    embedded_derp_hostname: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 443,
+        env = "HSRS_HARNESS_EMBEDDED_DERP_DERP_PORT"
+    )]
+    embedded_derp_derp_port: u16,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_STUN_ADDR")]
+    embedded_derp_stun_addr: Option<SocketAddr>,
+    #[arg(
+        long,
+        default_value_t = 900,
+        env = "HSRS_HARNESS_EMBEDDED_DERP_REGION_ID"
+    )]
+    embedded_derp_region_id: u16,
+    #[arg(
+        long,
+        default_value = "embedded",
+        env = "HSRS_HARNESS_EMBEDDED_DERP_REGION_CODE"
+    )]
+    embedded_derp_region_code: String,
+    #[arg(
+        long,
+        default_value = "Embedded headscale-rs DERP sidecar",
+        env = "HSRS_HARNESS_EMBEDDED_DERP_REGION_NAME"
+    )]
+    embedded_derp_region_name: String,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_OMIT_DEFAULT_REGIONS")]
+    embedded_derp_omit_default_regions: bool,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_INSECURE_FOR_TESTS")]
+    embedded_derp_insecure_for_tests: bool,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_IPV4")]
+    embedded_derp_ipv4: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_IPV6")]
+    embedded_derp_ipv6: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_STUN_ONLY")]
+    embedded_derp_stun_only: bool,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_BINARY")]
+    embedded_derp_derper_binary: Option<PathBuf>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_LISTEN_ADDR")]
+    embedded_derp_derper_listen_addr: Option<SocketAddr>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_CONFIG_PATH")]
+    embedded_derp_derper_config_path: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "letsencrypt",
+        env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_CERT_MODE"
+    )]
+    embedded_derp_derper_cert_mode: String,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_CERT_DIR")]
+    embedded_derp_derper_cert_dir: Option<PathBuf>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_VERIFY_CLIENT_URL")]
+    embedded_derp_verify_client_url: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_VERIFY_CLIENTS")]
+    embedded_derp_verify_clients: bool,
     #[arg(long, env = "HSRS_HARNESS_POLICY")]
     policy: Option<PathBuf>,
     #[arg(long, env = "HSRS_HARNESS_BASE_DOMAIN")]
@@ -106,11 +165,19 @@ struct AppState {
     machines: Arc<MachineRegistry>,
     policy: Arc<PolicyStore>,
     registration_cache: Arc<RegistrationCache>,
+    derp_verify: Arc<DerpVerifyLog>,
 }
 
 #[derive(Default)]
 struct HarnessRedeemer {
     keys: RwLock<HashMap<String, HarnessKey>>,
+}
+
+#[derive(Default)]
+struct DerpVerifyLog {
+    requests: AtomicU64,
+    allowed: AtomicU64,
+    denied: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -258,13 +325,44 @@ struct RegisterPendingRequest {
     user: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DerpAdmitClientRequest {
+    #[serde(rename = "NodePublic", default)]
+    node_public: Option<String>,
+    #[serde(rename = "Source", default)]
+    source: Option<IpAddr>,
+}
+
+#[derive(Debug, Serialize)]
+struct DerpAdmitClientResponse {
+    #[serde(rename = "Allow")]
+    allow: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DerpVerifyLogResponse {
+    requests: u64,
+    allowed: u64,
+    denied: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct StartupInfo {
     http: String,
     https: Option<String>,
     public_url: String,
     tls_cert_path: Option<String>,
+    embedded_derp: Option<EmbeddedDerpStartup>,
     harness_routes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddedDerpStartup {
+    region_id: u16,
+    derp_port: u16,
+    stun_addr: Option<String>,
+    sidecar_status: Option<String>,
+    verify_client_url: Option<String>,
 }
 
 #[tokio::main]
@@ -313,7 +411,7 @@ async fn main() -> Result<()> {
         parse_dns_resolvers_json(args.dns_fallback_nameservers_json.as_deref())?;
     let dns = Arc::new(DnsStore::from_spec(DnsConfigSpec {
         magic_dns: args.base_domain.is_some(),
-        base_domain: args.base_domain.unwrap_or_default(),
+        base_domain: args.base_domain.clone().unwrap_or_default(),
         override_local_dns: args.dns_override_local.unwrap_or(false),
         nameservers,
         nameserver_resolvers,
@@ -324,14 +422,26 @@ async fn main() -> Result<()> {
         fallback_resolvers,
         ..DnsConfigSpec::default()
     }));
-    let derp_map = headscale_api::tailscale_wire::DerpMapStore::shared(load_derp_map(
-        args.derp_map.as_ref(),
-    )?);
     let public_url = args
         .public_url
+        .clone()
         .unwrap_or_else(|| format!("https://{}", args.hostname));
+    let embedded_derp_runtime = if args.embedded_derp {
+        let cfg = embedded_derp_config(&args)?;
+        Some(EmbeddedDerpRuntime::start_with_state_dir(cfg, &args.state_dir).await?)
+    } else {
+        None
+    };
+    let derp_map = headscale_api::tailscale_wire::DerpMapStore::shared(load_runtime_derp_map(
+        args.derp_map.as_ref(),
+        embedded_derp_runtime.as_ref(),
+    )?);
+    let embedded_derp_startup = embedded_derp_runtime
+        .as_ref()
+        .map(embedded_derp_startup_info);
 
     let registration_cache = Arc::new(RegistrationCache::new());
+    let derp_verify = Arc::new(DerpVerifyLog::default());
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(&args.state_dir)?),
         preauth: redeemer.clone(),
@@ -355,6 +465,7 @@ async fn main() -> Result<()> {
         machines,
         policy,
         registration_cache,
+        derp_verify,
     };
     let extra_routes = harness_router(app_state);
     let state_dir = args.state_dir;
@@ -384,6 +495,7 @@ async fn main() -> Result<()> {
             https: (!args.no_https).then_some(args.https.to_string()),
             public_url,
             tls_cert_path,
+            embedded_derp: embedded_derp_startup,
             harness_routes: vec![
                 "GET /harness/health",
                 "POST /harness/preauth",
@@ -392,6 +504,8 @@ async fn main() -> Result<()> {
                 "GET /harness/machines",
                 "PUT /harness/machines/{node_key}/routes",
                 "PUT /harness/machines/{node_key}/tags",
+                "POST /harness/derp/verify",
+                "GET /harness/derp/verify-log",
             ],
         })?
     );
@@ -433,6 +547,8 @@ fn harness_router(state: AppState) -> Router {
             put(set_machine_routes),
         )
         .route("/harness/machines/:node_key/tags", put(set_machine_tags))
+        .route("/harness/derp/verify", post(derp_verify))
+        .route("/harness/derp/verify-log", get(derp_verify_log))
         .with_state(state)
 }
 
@@ -655,17 +771,161 @@ async fn set_machine_tags(
     }
 }
 
+async fn derp_verify(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> (StatusCode, Json<DerpAdmitClientResponse>) {
+    let req = match serde_json::from_slice::<DerpAdmitClientRequest>(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            state.derp_verify.requests.fetch_add(1, Ordering::Relaxed);
+            state.derp_verify.denied.fetch_add(1, Ordering::Relaxed);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(DerpAdmitClientResponse { allow: false }),
+            );
+        }
+    };
+    let _source = req.source;
+    let allow = match req.node_public.as_deref() {
+        Some(node_public) => derp_admit_node_key_hex(node_public)
+            .ok()
+            .is_some_and(|node_key_hex| state.machines.get(node_key_hex).is_some()),
+        None => false,
+    };
+
+    state.derp_verify.requests.fetch_add(1, Ordering::Relaxed);
+    if allow {
+        state.derp_verify.allowed.fetch_add(1, Ordering::Relaxed);
+    } else {
+        state.derp_verify.denied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    (StatusCode::OK, Json(DerpAdmitClientResponse { allow }))
+}
+
+async fn derp_verify_log(State(state): State<AppState>) -> Json<DerpVerifyLogResponse> {
+    Json(DerpVerifyLogResponse {
+        requests: state.derp_verify.requests.load(Ordering::Relaxed),
+        allowed: state.derp_verify.allowed.load(Ordering::Relaxed),
+        denied: state.derp_verify.denied.load(Ordering::Relaxed),
+    })
+}
+
 fn load_policy(policy: &PolicyStore, raw: String) -> Result<()> {
     let doc = parse_hujson_policy(&raw)?;
     policy.set(doc, raw);
     Ok(())
 }
 
-fn load_derp_map(path: Option<&PathBuf>) -> Result<DerpMap> {
+fn load_runtime_derp_map(
+    path: Option<&PathBuf>,
+    embedded_derp_runtime: Option<&EmbeddedDerpRuntime>,
+) -> Result<DerpMap> {
     match path {
         Some(path) => derp_config::load_derp_map(path)
             .with_context(|| format!("load DERP map {}", path.display())),
-        None => Ok(derp_config::empty_derp_map()),
+        None => Ok(embedded_derp_runtime
+            .map(derp_map_from_embedded_runtime)
+            .unwrap_or_else(derp_config::empty_derp_map)),
+    }
+}
+
+fn embedded_derp_config(args: &Args) -> Result<EmbeddedDerpConfig> {
+    let host_name = args
+        .embedded_derp_hostname
+        .clone()
+        .unwrap_or_else(|| args.hostname.clone());
+    let derper_listen_addr = args.embedded_derp_derper_listen_addr.unwrap_or_else(|| {
+        SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            args.embedded_derp_derp_port,
+        )
+    });
+    let verify_client_url = args
+        .embedded_derp_verify_client_url
+        .clone()
+        .or_else(|| Some(format!("http://{}/harness/derp/verify", args.http)));
+
+    Ok(EmbeddedDerpConfig {
+        enabled: true,
+        host_name,
+        derp_port: args.embedded_derp_derp_port,
+        stun_addr: args.embedded_derp_stun_addr,
+        stun_only: args.embedded_derp_stun_only,
+        region_id: args.embedded_derp_region_id,
+        region_code: args.embedded_derp_region_code.clone(),
+        region_name: args.embedded_derp_region_name.clone(),
+        omit_default_regions: args.embedded_derp_omit_default_regions,
+        insecure_for_tests: args.embedded_derp_insecure_for_tests,
+        ipv4: args.embedded_derp_ipv4.clone().unwrap_or_default(),
+        ipv6: args.embedded_derp_ipv6.clone().unwrap_or_default(),
+        derper_binary: args.embedded_derp_derper_binary.clone().unwrap_or_default(),
+        derper_listen_addr,
+        derper_config_path: args
+            .embedded_derp_derper_config_path
+            .clone()
+            .unwrap_or_default(),
+        derper_cert_mode: args.embedded_derp_derper_cert_mode.clone(),
+        derper_cert_dir: args.embedded_derp_derper_cert_dir.clone(),
+        verify_client_url,
+        verify_clients: args.embedded_derp_verify_clients,
+    })
+}
+
+fn derp_map_from_embedded_runtime(runtime: &EmbeddedDerpRuntime) -> DerpMap {
+    let cfg = runtime.config();
+    if !cfg.enabled {
+        return DerpMap::default();
+    }
+
+    let stun_port = runtime
+        .stun_local_addr()
+        .map_or(-1, |addr| i32::from(addr.port()));
+    let node = DerpRegionNode {
+        name: cfg.region_id.to_string(),
+        region_id: cfg.region_id,
+        host_name: cfg.host_name.clone(),
+        cert_name: String::new(),
+        ipv4: cfg.ipv4.clone(),
+        ipv6: cfg.ipv6.clone(),
+        derp_port: if cfg.derp_port == 443 {
+            0
+        } else {
+            cfg.derp_port
+        },
+        stun_port,
+        stun_only: cfg.stun_only,
+        insecure_for_tests: cfg.insecure_for_tests,
+        stun_test_ip: String::new(),
+        can_port80: false,
+    };
+    let region = DerpRegion {
+        region_id: cfg.region_id,
+        region_code: cfg.region_code.clone(),
+        region_name: cfg.region_name.clone(),
+        latitude: 0.0,
+        longitude: 0.0,
+        avoid: false,
+        no_measure_no_home: false,
+        nodes: vec![node],
+    };
+
+    DerpMap {
+        home_params: None,
+        regions: HashMap::from([(cfg.region_id, region)]),
+        omit_default_regions: cfg.omit_default_regions,
+    }
+}
+
+fn embedded_derp_startup_info(runtime: &EmbeddedDerpRuntime) -> EmbeddedDerpStartup {
+    let cfg = runtime.config();
+    EmbeddedDerpStartup {
+        region_id: cfg.region_id,
+        derp_port: cfg.derp_port,
+        stun_addr: runtime.stun_local_addr().map(|addr| addr.to_string()),
+        sidecar_status: runtime.sidecar_status().map(|status| format!("{status:?}")),
+        verify_client_url: cfg.verify_client_url.clone(),
     }
 }
 
@@ -729,6 +989,17 @@ fn apply_requested_tags(policy: &PolicyStore, record: &mut MachineRecord) -> Res
 
 fn valid_tag(tag: &str) -> bool {
     tag.starts_with("tag:") && tag.to_lowercase() == tag && tag.split_whitespace().count() <= 1
+}
+
+fn derp_admit_node_key_hex(node_public: &str) -> Result<&str, ()> {
+    let Some(node_key_hex) = node_public.strip_prefix("nodekey:") else {
+        return Err(());
+    };
+    if node_key_hex.len() == 64 && node_key_hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        Ok(node_key_hex)
+    } else {
+        Err(())
+    }
 }
 
 fn default_user() -> String {

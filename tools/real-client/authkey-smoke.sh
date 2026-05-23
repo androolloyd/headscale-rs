@@ -55,6 +55,20 @@ ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
 ssh_deny_status="${REAL_CLIENT_EXPECT_SSH_DENY_STATUS:-}"
 ssh_deny_stderr_regex="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_REGEX:-Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node}"
 ssh_deny_stderr_first_line="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE:-}"
+force_derp="${REAL_CLIENT_FORCE_DERP:-false}"
+expected_derp_region_id="${REAL_CLIENT_EXPECT_DERP_REGION_ID:-}"
+expected_derp_region_code="${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-}"
+expected_derp_region_name="${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-}"
+expected_derp_host="${REAL_CLIENT_EXPECT_DERP_HOST:-}"
+expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-}"
+expected_derp_stun_port="${REAL_CLIENT_EXPECT_DERP_STUN_PORT:-}"
+expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-}"
+expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-}"
+expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
+expected_derp_verify_requests_min="${REAL_CLIENT_EXPECT_DERP_VERIFY_REQUESTS_MIN:-}"
+assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
+harness_derp_map="${HSRS_HARNESS_DERP_MAP:-${REAL_CLIENT_DERP_MAP:-}}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
   enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-true}"
   install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-true}"
@@ -91,6 +105,50 @@ case "${install_openssh}" in
     exit 2
     ;;
 esac
+case "${force_derp}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    force_derp_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    force_derp_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_FORCE_DERP must be true or false, got ${force_derp}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_derp_ping}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_derp_ping_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_derp_ping_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DERP_PING must be true or false, got ${expected_derp_ping}" >&2
+    exit 2
+    ;;
+esac
+case "${assert_derp_stun}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    assert_derp_stun_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    assert_derp_stun_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_derp_ping_flag)) && [[ "${client_count}" =~ ^[0-9]+$ ]] && ((client_count < 2)); then
+  echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
+  exit 2
+fi
+if [[ -n "${expected_derp_verify_requests_min}" ]] && ! [[ "${expected_derp_verify_requests_min}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_DERP_VERIFY_REQUESTS_MIN must be a non-negative integer, got ${expected_derp_verify_requests_min}" >&2
+  exit 2
+fi
 if [[ -n "${expected_ssh_matrix}" && -z "${ssh_user}" ]]; then
   echo "REAL_CLIENT_EXPECT_SSH_MATRIX requires REAL_CLIENT_SSH_USER" >&2
   exit 2
@@ -249,6 +307,10 @@ mkdir -p "${work_dir}"
 
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+if ((expect_derp_ping_flag)) && ((client_count < 2)); then
+  echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
   exit 2
 fi
 
@@ -556,6 +618,118 @@ assert_dns_route() {
     ' "${netmap_path}" "${suffix}" "${expected_csv}" >"${output_path}"
 }
 
+assert_stun_round_trip() {
+  local host="$1"
+  local port="$2"
+  local output_path="$3"
+  ruby -rjson -rsocket -rzlib -e '
+    host = ARGV.fetch(0)
+    port = Integer(ARGV.fetch(1))
+    txid = "derpstun1234".bytes.take(12).pack("C*")
+    software = "tailnode"
+    body = [0x8022, software.bytesize].pack("nn") + software
+    req = [0x0001, body.bytesize + 8, 0x2112a442].pack("nnN") + txid + body
+    fingerprint = (Zlib.crc32(req) ^ 0x5354554e) & 0xffffffff
+    req += [0x8028, 4, fingerprint].pack("nnN")
+    ipv6 = host.include?(":")
+    sock = UDPSocket.new(ipv6 ? Socket::AF_INET6 : Socket::AF_INET)
+    sock.bind(ipv6 ? "::1" : "127.0.0.1", 0)
+    local = sock.addr
+    sock.send(req, 0, host, port)
+    ready = IO.select([sock], nil, nil, 3)
+    abort("timed out waiting for STUN response from #{host}:#{port}") unless ready
+    data, = sock.recvfrom(1500)
+    abort("short STUN response: #{data.bytesize}") if data.bytesize < 32
+    type, len, cookie = data.byteslice(0, 8).unpack("nnN")
+    abort("unexpected STUN type 0x#{type.to_s(16)}") unless type == 0x0101
+    abort("unexpected STUN cookie 0x#{cookie.to_s(16)}") unless cookie == 0x2112a442
+    abort("transaction id mismatch") unless data.byteslice(8, 12) == txid
+    attr_type, attr_len = data.byteslice(20, 4).unpack("nn")
+    abort("expected XOR-MAPPED-ADDRESS, got 0x#{attr_type.to_s(16)}") unless attr_type == 0x0020
+    abort("truncated XOR-MAPPED-ADDRESS") if data.bytesize < 24 + attr_len
+    family = data.getbyte(25)
+    abort("unexpected XOR-MAPPED-ADDRESS length #{attr_len}") unless (family == 0x01 && attr_len == 8) || (family == 0x02 && attr_len == 20)
+    xport = data.byteslice(26, 2).unpack1("n")
+    decoded_port = xport ^ (0x2112a442 >> 16)
+    expected_port = local[1]
+    abort("expected reflected port #{expected_port}, got #{decoded_port}") unless decoded_port == expected_port
+    File.write(ARGV.fetch(2), JSON.pretty_generate({stun: "#{host}:#{port}", family: family == 0x02 ? "ipv6" : "ipv4", reflected_port: decoded_port}))
+  ' "${host}" "${port}" "${output_path}"
+}
+
+assert_derp_map() {
+  local client_name="$1"
+  local output_path="$2"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      path = ARGV.fetch(0)
+      expected_region = ARGV.fetch(1)
+      expected_code = ARGV.fetch(2)
+      expected_name = ARGV.fetch(3)
+      expected_host = ARGV.fetch(4)
+      expected_port = ARGV.fetch(5)
+      expected_stun = ARGV.fetch(6)
+      expected_insecure = ARGV.fetch(7)
+      expected_omit_default = ARGV.fetch(8)
+      netmap = JSON.parse(File.read(path))
+      derp_map = netmap.fetch("DERPMap")
+      regions = derp_map.fetch("Regions")
+      region = regions.fetch(expected_region) {
+        abort("missing DERP region #{expected_region}; got #{regions.keys.inspect}")
+      }
+      abort("expected RegionCode #{expected_code.inspect}, got #{region["RegionCode"].inspect}") unless expected_code.empty? || region["RegionCode"] == expected_code
+      abort("expected RegionName #{expected_name.inspect}, got #{region["RegionName"].inspect}") unless expected_name.empty? || region["RegionName"] == expected_name
+      node = Array(region["Nodes"]).first || abort("region #{expected_region} has no nodes")
+      abort("expected HostName #{expected_host.inspect}, got #{node["HostName"].inspect}") unless expected_host.empty? || node["HostName"] == expected_host
+      unless expected_port.empty?
+        port = node.fetch("DERPPort", 0).to_i
+        abort("expected DERPPort #{expected_port}, got #{port}") unless port == Integer(expected_port)
+      end
+      unless expected_stun.empty?
+        stun = node.fetch("STUNPort", 0).to_i
+        abort("expected STUNPort #{expected_stun}, got #{stun}") unless stun == Integer(expected_stun)
+      end
+      unless expected_insecure.empty?
+        insecure = !!node["InsecureForTests"]
+        want = %w[1 true TRUE True yes YES Yes on ON On].include?(expected_insecure)
+        abort("expected InsecureForTests #{want}, got #{insecure}") unless insecure == want
+      end
+      unless expected_omit_default.empty?
+        omit = !!derp_map["omitDefaultRegions"]
+        want = %w[1 true TRUE True yes YES Yes on ON On].include?(expected_omit_default)
+        abort("expected omitDefaultRegions #{want}, got #{omit}") unless omit == want
+      end
+      puts JSON.pretty_generate({region: region, node: node, omitDefaultRegions: !!derp_map["omitDefaultRegions"]})
+    ' "${netmap_path}" "${expected_derp_region_id}" "${expected_derp_region_code}" "${expected_derp_region_name}" "${expected_derp_host}" "${expected_derp_port}" "${expected_derp_stun_port}" "${expected_derp_insecure_for_tests}" "${expected_derp_omit_default_regions}" >"${output_path}"
+}
+
+tailscale_derp_ping_succeeded() {
+  local source_name="$1"
+  local target_name="$2"
+  local output_path="$3"
+  local target_ip
+  target_ip="$(
+    docker exec "${source_name}" tailscale status --json 2>/dev/null | ruby -rjson -e '
+      status = JSON.parse(STDIN.read)
+      target = ARGV.fetch(0)
+      peer = (status["Peer"] || {}).each_value.find { |p| p["HostName"] == target }
+      exit 1 unless peer
+      ips = Array(peer["TailscaleIPs"])
+      ips << peer["TailscaleIP"] if ips.empty? && peer["TailscaleIP"]
+      puts ips.first
+    ' "${target_name}"
+  )" || return 1
+  docker exec "${source_name}" tailscale ping --timeout=5s --c=1 --until-direct=false "${target_ip}" \
+    >"${output_path}" \
+    2>"${output_path}.err" || return 1
+  if [[ -n "${expected_derp_region_code}" ]]; then
+    grep -Eq "via DERP\\(${expected_derp_region_code}\\)" "${output_path}"
+  else
+    grep -Eq "via DERP\\(" "${output_path}"
+  fi
+}
+
 dump_client_debug() {
   local client_name="$1"
   docker exec "${client_name}" tailscale status 2>&1 || true
@@ -584,6 +758,9 @@ harness_args=(
   --state-dir "${work_dir}/state"
   --ip-families "${harness_ip_families}"
 )
+if [[ -n "${harness_derp_map}" ]]; then
+  harness_args+=(--derp-map "${harness_derp_map}")
+fi
 if [[ -n "${base_domain}" ]]; then
   harness_args+=(--base-domain "${base_domain}")
 fi
@@ -613,6 +790,18 @@ test -s "${work_dir}/state/tls.crt"
 echo "harness http=http://127.0.0.1:${http_port}"
 echo "harness login=https://host.docker.internal:${https_port}"
 echo "::endgroup::"
+
+if ((assert_derp_stun_flag)); then
+  echo "::group::assert embedded DERP STUN"
+  if [[ -z "${expected_derp_stun_port}" ]]; then
+    echo "REAL_CLIENT_ASSERT_DERP_STUN requires REAL_CLIENT_EXPECT_DERP_STUN_PORT" >&2
+    exit 2
+  fi
+  wait_for "embedded DERP STUN" \
+    "assert_stun_round_trip '${derp_stun_probe_host}' '${expected_derp_stun_port}' '${work_dir}/embedded-derp-stun.json'"
+  cat "${work_dir}/embedded-derp-stun.json"
+  echo "::endgroup::"
+fi
 
 if [[ -n "${policy_json}" ]]; then
   echo "::group::load policy"
@@ -667,7 +856,11 @@ fi
 
 echo "::group::start stock tailscale client"
 for client_name in "${client_names[@]}"; do
-  client_entry='update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
+  tailscaled_prefix=""
+  if ((force_derp_flag)); then
+    tailscaled_prefix="TS_DEBUG_ALWAYS_USE_DERP=1 "
+  fi
+  client_entry="update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; ${tailscaled_prefix}tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity"
   if ((install_openssh_client)); then
     client_entry="apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; ${client_entry}"
   fi
@@ -1214,6 +1407,47 @@ if [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]]; then
       puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
     end
   ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_derp_region_id}" ]]; then
+  echo "::group::assert DERP map metadata"
+  for client_name in "${client_names[@]}"; do
+    assert_derp_map "${client_name}" "${work_dir}/${client_name}.derp-map.json" || {
+      dump_client_debug "${client_name}"
+      exit 1
+    }
+    cat "${work_dir}/${client_name}.derp-map.json"
+  done
+  echo "::endgroup::"
+fi
+
+if ((expect_derp_ping_flag)); then
+  echo "::group::assert DERP relay path"
+  source_name="${client_names[0]}"
+  target_name="${client_names[1]}"
+  if ! wait_for "tailscale ping ${source_name} to ${target_name} via DERP" \
+    "tailscale_derp_ping_succeeded '${source_name}' '${target_name}' '${work_dir}/derp-ping-${source_name}-to-${target_name}.txt'"; then
+    cat "${work_dir}/derp-ping-${source_name}-to-${target_name}.err" >&2 || true
+    dump_client_debug "${source_name}"
+    dump_client_debug "${target_name}"
+    exit 1
+  fi
+  cat "${work_dir}/derp-ping-${source_name}-to-${target_name}.txt"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_derp_verify_requests_min}" ]]; then
+  echo "::group::assert DERP verify-client admission"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/derp/verify-log" >"${work_dir}/derp-verify-log.json"
+  ruby -rjson -e '
+    log = JSON.parse(File.read(ARGV.fetch(0)))
+    expected = Integer(ARGV.fetch(1))
+    abort("expected at least #{expected} DERP verify requests, got #{log.inspect}") unless log.fetch("requests") >= expected
+    abort("expected at least #{expected} allowed DERP verify requests, got #{log.inspect}") unless log.fetch("allowed") >= expected
+    abort("expected zero denied DERP verify requests, got #{log.inspect}") unless log.fetch("denied") == 0
+    puts JSON.pretty_generate(log)
+  ' "${work_dir}/derp-verify-log.json" "${expected_derp_verify_requests_min}"
   echo "::endgroup::"
 fi
 

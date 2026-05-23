@@ -2786,6 +2786,38 @@ enabled = true
     }
 
     #[test]
+    fn upstream_derp_derives_tls_server_url_default_port() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[derp.server]
+enabled = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert_eq!(embedded.host_name, "headscale.example");
+        assert_eq!(embedded.derp_port, 443);
+    }
+
+    #[test]
+    fn upstream_derp_derives_plain_server_url_default_port() {
+        let source = r#"
+server_url = "http://headscale.example"
+
+[derp.server]
+enabled = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert_eq!(embedded.host_name, "headscale.example");
+        assert_eq!(embedded.derp_port, 80);
+    }
+
+    #[test]
     fn configtest_rejects_disabled_embedded_derp_injection_without_path_map() {
         let source = r#"
 server_url = "https://headscale.example"

@@ -195,6 +195,11 @@ prefixes:
 dns:
   magic_dns: false
   base_domain: "${base_domain}"
+  override_local_dns: false
+  nameservers:
+    global: []
+    split: {}
+  search_domains: []
 
 policy:
   mode: file

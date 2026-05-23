@@ -1671,22 +1671,11 @@ impl MachineRegistry {
                 pending.os_version = existing.os_version;
             }
 
-            let available = pending
-                .available_routes
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
             let mut approved_routes = existing
                 .approved_routes
                 .into_iter()
-                .filter(|route| available.contains(route))
                 .collect::<std::collections::BTreeSet<_>>();
-            approved_routes.extend(
-                pending
-                    .approved_routes
-                    .into_iter()
-                    .filter(|route| available.contains(route)),
-            );
+            approved_routes.extend(pending.approved_routes);
             pending.approved_routes = approved_routes.into_iter().collect();
 
             self.replace_node_key(&old_node_key, pending.node_key_hex.clone(), pending.clone());
@@ -2977,14 +2966,53 @@ mod registry_tests {
     }
 
     #[test]
+    fn set_approved_routes_empty_clears_active_primary_but_keeps_advertisement() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_key = "route-clear-approval";
+        let route = "10.0.0.0/24";
+        reg.upsert(node_key.to_string(), route_record(node_key, 8, route));
+        let _guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(node_key),
+            Duration::ZERO,
+        );
+
+        let before = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            before.get(node_key).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        assert!(reg.set_approved_routes(node_key, Vec::new()));
+        let updated = reg.get(node_key).unwrap();
+        assert_eq!(updated.available_routes, vec![route]);
+        assert!(updated.approved_routes.is_empty());
+
+        let after = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert!(!after.contains_key(node_key));
+        assert!(
+            reg.debug_routes_for_snapshot(&reg.snapshot())
+                .primary_routes
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn debug_routes_excludes_expired_nodes() {
-        let reg = MachineRegistry::new();
+        let reg = Arc::new(MachineRegistry::new());
         let mut rec = mk_record(8);
         rec.available_routes = vec!["10.0.0.0/24".into()];
         rec.approved_routes = vec!["10.0.0.0/24".into()];
         rec.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
         reg.upsert("nk-a".to_string(), rec);
+        let _guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key("nk-a"),
+            Duration::ZERO,
+        );
 
+        let primary = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert!(primary.is_empty());
         let routes = reg.debug_routes_for_snapshot(&reg.snapshot());
         assert!(routes.available_routes.is_empty());
         assert!(routes.primary_routes.is_empty());
@@ -3026,6 +3054,112 @@ mod registry_tests {
     }
 
     #[test]
+    fn simultaneous_online_route_candidates_choose_lowest_stable_id() {
+        let reg = Arc::new(MachineRegistry::new());
+        let keys = stable_sorted_keys(&["route-simultaneous-b", "route-simultaneous-a"]);
+        let route = "10.0.0.0/24";
+        reg.upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        reg.upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+
+        let primary = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            primary.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!primary.contains_key(&keys[1]));
+    }
+
+    #[test]
+    fn offline_router_is_removed_from_primary_routes_until_it_returns() {
+        let reg = Arc::new(MachineRegistry::new());
+        let keys = stable_sorted_keys(&["route-offline-b", "route-offline-a"]);
+        let route = "10.0.0.0/24";
+        reg.upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        reg.upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+
+        let first = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            first.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        drop(guard_a);
+        let failed_over = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            failed_over.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!failed_over.contains_key(&keys[0]));
+
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let returned = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            returned.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!returned.contains_key(&keys[0]));
+    }
+
+    #[test]
+    fn ephemeral_router_gc_removes_primary_candidate_state() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_key = "route-ephemeral-router";
+        let route = "10.0.0.0/24";
+        let mut rec = route_record(node_key, 12, route);
+        rec.ephemeral = true;
+        reg.upsert(node_key.to_string(), rec);
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(node_key),
+            Duration::ZERO,
+        );
+
+        let before = reg.primary_routes_for_snapshot(&reg.snapshot());
+        assert_eq!(
+            before.get(node_key).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        drop(guard);
+        reg.update_with(|map| {
+            map.get_mut(node_key).unwrap().last_seen = Utc::now() - chrono::Duration::seconds(120);
+        });
+        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        assert_eq!(removed, vec![node_key.to_string()]);
+        assert!(reg.get(node_key).is_none());
+        assert!(reg.primary_routes_for_snapshot(&reg.snapshot()).is_empty());
+        assert!(
+            reg.debug_routes_for_snapshot(&reg.snapshot())
+                .available_routes
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn complete_web_registration_rekeys_same_machine_and_clears_tags() {
         let reg = MachineRegistry::new();
         let mut existing = mk_record(8);
@@ -3056,7 +3190,7 @@ mod registry_tests {
         assert_eq!(registered.created_at, old_created_at);
         assert_eq!(
             registered.approved_routes,
-            vec!["10.0.0.0/24", "10.1.0.0/24"]
+            vec!["10.0.0.0/24", "10.1.0.0/24", "10.99.0.0/24"]
         );
         assert_eq!(registered.register_method, 2);
 

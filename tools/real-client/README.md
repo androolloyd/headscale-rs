@@ -79,6 +79,7 @@ with the same stock `tailscaled` image.
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
 | Lifecycle | `online-lastseen` | `online-lastseen-smoke.sh` | `online-lastseen-headscale-go-smoke.sh` | Production online transition and LastSeen after client disconnect |
+| Lifecycle | `restart-persistence` | `restart-persistence-smoke.sh` | `restart-persistence-headscale-go-smoke.sh` | Production restart persistence and route/tag netmap churn |
 | Tags | `tagged-preauth` | `tagged-preauth-smoke.sh` | `tagged-preauth-headscale-go-smoke.sh` | Tagged preauth key with `tagOwners` policy |
 | Tags | `tag-update` | `tag-update-smoke.sh` | `tag-update-headscale-go-smoke.sh` | Post-login forced tag replacement |
 | Tags | `tag-update-invalid` | `tag-update-invalid-smoke.sh` | `tag-update-invalid-headscale-go-smoke.sh` | Invalid tag update rejection |
@@ -101,7 +102,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-primary` | `route-primary-smoke.sh` | `route-primary-headscale-go-smoke.sh` | Single primary route owner |
 | Routes | `route-primary-failover` | `route-primary-failover-smoke.sh` | `route-primary-failover-headscale-go-smoke.sh` | Primary route failover |
 | Routes | `route-primary-sticky` | `route-primary-sticky-smoke.sh` | `route-primary-sticky-headscale-go-smoke.sh` | Sticky primary route ownership |
-| Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover |
+| Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
@@ -143,7 +144,7 @@ protocol failure is separated from a stock-client behavior mismatch:
 
 ```sh
 FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh
-REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,magicdns,extra-records,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
 REAL_CLIENT_TARGETS='rust headscale-go' \
 tools/real-client/smoke-matrix.sh
 ```
@@ -506,7 +507,8 @@ tools/real-client/route-primary-sticky-headscale-go-smoke.sh
 
 The primary-route withdrawal scenario instead asks the current primary client
 to stop advertising the route with `tailscale set --advertise-routes=` and
-asserts that another advertising router takes over:
+asserts that another advertising router takes over while the withdrawn router's
+operator approval remains recorded:
 
 ```sh
 tools/real-client/route-primary-withdraw-smoke.sh
@@ -523,6 +525,8 @@ Additional knobs:
   in the sticky wrapper and must match the failover route.
 - `REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE` defaults to `REAL_CLIENT_ROUTE`
   in the withdrawal wrappers.
+- `REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED` defaults to `true` in the
+  withdrawal wrappers.
 
 The exit-node scenario advertises the default-route pair with
 `tailscale up --advertise-exit-node`, approves both routes, and checks that

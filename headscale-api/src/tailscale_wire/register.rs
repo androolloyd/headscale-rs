@@ -618,15 +618,10 @@ fn invalid_requested_tags_response(tags: &[String]) -> axum::response::Response 
 
 fn merge_existing_approved_routes(
     existing_approved_routes: &[String],
-    available_routes: &[String],
+    _available_routes: &[String],
     auto_approved_routes: Vec<String>,
 ) -> Vec<String> {
-    let available: BTreeSet<&str> = available_routes.iter().map(String::as_str).collect();
-    let mut merged: BTreeSet<String> = existing_approved_routes
-        .iter()
-        .filter(|route| available.contains(route.as_str()))
-        .cloned()
-        .collect();
+    let mut merged: BTreeSet<String> = existing_approved_routes.iter().cloned().collect();
     merged.extend(auto_approved_routes);
     merged.into_iter().collect()
 }
@@ -1965,7 +1960,10 @@ mod tests {
             rotated.available_routes,
             vec!["10.40.0.0/24", "10.42.0.0/24"]
         );
-        assert_eq!(rotated.approved_routes, vec!["10.40.0.0/24"]);
+        assert_eq!(
+            rotated.approved_routes,
+            vec!["10.40.0.0/24", "10.41.0.0/24"]
+        );
     }
 
     #[tokio::test]

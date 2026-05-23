@@ -21,6 +21,7 @@ expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
+expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
@@ -127,6 +128,18 @@ if [[ -n "${expected_primary_sticky_route}" ]]; then
     exit 2
   fi
 fi
+case "${expected_withdraw_approval_preserved}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_withdraw_approval_preserved=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_withdraw_approval_preserved=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED must be true or false, got ${expected_withdraw_approval_preserved}" >&2
+    exit 2
+    ;;
+esac
 case "${expected_set_tags_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     expect_set_tags_failure=1
@@ -1506,6 +1519,7 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
         route = ARGV.fetch(2)
         withdrawn_client = ARGV.fetch(3)
         expected_count = Integer(ARGV.fetch(4))
+        preserve_approval = ARGV.fetch(5) == "true"
 
         before_payload = JSON.parse(File.read(ARGV.fetch(0)))
         before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
@@ -1532,6 +1546,10 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
         end
         abort("missing withdrawn client #{withdrawn_client}") unless withdrawn
         abort("withdrawn client still advertises #{route}") if Array(withdrawn["availableRoutes"] || withdrawn["available_routes"]).include?(route)
+        if preserve_approval
+          approved_routes = Array(withdrawn["approvedRoutes"] || withdrawn["approved_routes"])
+          abort("withdrawn client lost approved route #{route}") unless approved_routes.include?(route)
+        end
 
         remaining_ids = after_nodes
           .reject do |node|
@@ -1544,11 +1562,12 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
 
         puts JSON.pretty_generate({
           withdrawn_client: withdrawn_client,
+          withdrawn_approved_routes: Array(withdrawn["approvedRoutes"] || withdrawn["approved_routes"]).sort,
           before_owner: before_owner,
           after_owner: after_owner,
           nodes: after_nodes,
         })
-      ' "${work_dir}/nodes-before-withdraw.json" "${work_dir}/nodes-after-withdraw.json" "${expected_primary_withdraw_route}" "${withdraw_client_name}" "${expected_machine_count}"
+      ' "${work_dir}/nodes-before-withdraw.json" "${work_dir}/nodes-after-withdraw.json" "${expected_primary_withdraw_route}" "${withdraw_client_name}" "${expected_machine_count}" "$([[ "${expect_withdraw_approval_preserved}" -eq 1 ]] && printf true || printf false)"
   do
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for primary route withdrawal" >&2

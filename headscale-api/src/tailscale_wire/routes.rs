@@ -426,6 +426,22 @@ mod tests {
     }
 
     #[test]
+    fn auto_approvals_preserve_current_unadvertised_approvals() {
+        let policy = PolicyStore::new();
+        let approved = auto_approved_routes_for_node(
+            &policy,
+            "100.64.0.8",
+            Some("alice"),
+            &[],
+            &p(&["10.99.0.0/24"]),
+            &p(&["10.40.0.0/24"]),
+        )
+        .unwrap();
+
+        assert_eq!(approved, p(&["10.99.0.0/24"]));
+    }
+
+    #[test]
     fn active_exit_routes_are_separate_from_primary_routes() {
         let available = p(&["0.0.0.0/0", "::/0", "10.0.0.0/24"]);
         let approved = p(&["0.0.0.0/0", "10.0.0.0/24"]);

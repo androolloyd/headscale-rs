@@ -528,6 +528,37 @@ async fn api_machine_approve_routes_alias_matches_upstream_spelling() {
 }
 
 #[tokio::test]
+async fn api_machine_routes_empty_list_explicitly_unapproves_routes() {
+    let id = "aa".repeat(32);
+    let app = app();
+
+    let resp = app
+        .clone()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":["10.20.0.0/24"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(v["approved_routes"], serde_json::json!(["10.20.0.0/24"]));
+
+    let resp = app
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":[]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    assert_eq!(v["approved_routes"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn api_machine_tags_accepts_loaded_policy_tags() {
     let app = router(fixture_state_with_tag_policy(&["tag:prod", "tag:web"]));
     let id = "aa".repeat(32);
@@ -606,6 +637,7 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
         false,
     );
     rec.available_routes = vec!["10.77.1.0/24".into(), "10.99.1.0/24".into()];
+    rec.approved_routes = vec!["10.99.1.0/24".into()];
     reg.upsert(node_key.clone(), rec);
     let state = AdminState::builder()
         .bearer_token(BEARER)
@@ -631,7 +663,7 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
 
     let rec = reg.get(&node_key).expect("node still registered");
     assert_eq!(rec.available_routes, vec!["10.77.1.0/24", "10.99.1.0/24"]);
-    assert_eq!(rec.approved_routes, vec!["10.77.1.0/24"]);
+    assert_eq!(rec.approved_routes, vec!["10.77.1.0/24", "10.99.1.0/24"]);
 }
 
 #[tokio::test]

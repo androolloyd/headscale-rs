@@ -3806,6 +3806,59 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_route_withdraw_emits_full_peer_delta_without_route_allowed_ip() {
+        let (state, _dir) = fixture();
+        let alice = "c1".repeat(32);
+        let router_key = "c2".repeat(32);
+        let route = "10.30.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            routed_record(&router_key, "router", 11, vec![route.into()]),
+        );
+
+        let app = router(state.clone());
+        let _router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let mut alice_body = open_zstd_stream(app, &alice).await;
+        let first = next_zstd_map_response(&mut alice_body).await;
+        let router_peer = first
+            .peers
+            .iter()
+            .find(|peer| peer.id == stable_id_from_key(&router_key))
+            .expect("router visible before withdrawal");
+        assert!(router_peer.allowed_ips.iter().any(|ip| ip == route));
+        assert!(
+            router_peer
+                .hostinfo
+                .routable_ips
+                .iter()
+                .any(|routable| routable == route)
+        );
+
+        assert!(state.machines.set_available_routes(&router_key, Vec::new()));
+
+        let mr = next_zstd_map_response(&mut alice_body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        let peer = &mr.peers_changed[0];
+        assert_eq!(peer.id, stable_id_from_key(&router_key));
+        assert!(!peer.allowed_ips.iter().any(|ip| ip == route));
+        assert!(peer.hostinfo.routable_ips.is_empty());
+
+        let stored = state
+            .machines
+            .get(&router_key)
+            .expect("router still registered");
+        assert!(stored.available_routes.is_empty());
+        assert_eq!(stored.approved_routes, vec![route]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_peer_connect_emits_online_peer_change_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

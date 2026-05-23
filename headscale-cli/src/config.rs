@@ -1203,7 +1203,7 @@ fn default_log_level() -> String {
 }
 
 fn default_log_format() -> String {
-    "pretty".to_string()
+    "text".to_string()
 }
 
 fn default_true() -> bool {
@@ -1254,6 +1254,7 @@ mod tests {
     fn cli_config_includes_upstream_oidc_defaults() {
         let config = CliConfig::default();
 
+        assert_eq!(LoggingConfig::default().format, "text");
         assert!(config.taildrop.enabled);
         assert!(config.oidc.only_start_if_oidc_is_available);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);

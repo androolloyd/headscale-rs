@@ -799,7 +799,7 @@ seed = false
 # Logging configuration
 [logging]
 level = "info"
-format = "pretty"  # pretty, json, compact
+format = "text"  # text, json
 
 # OpenID Connect registration. When oidc.issuer is set, `headscale server`
 # starts the Tailscale wire-compatible public control surface and completes

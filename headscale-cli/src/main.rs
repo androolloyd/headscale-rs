@@ -359,6 +359,10 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 grpc_listen_addr: server_config
                     .map_or(defaults.grpc_listen_addr, |s| s.grpc_listen_addr.clone()),
                 grpc_allow_insecure: server_config.is_some_and(|s| s.grpc_allow_insecure),
+                trusted_proxies: config
+                    .as_ref()
+                    .map_or_else(Vec::new, |c| c.trusted_proxies.clone()),
+                disable_check_updates: config.as_ref().is_some_and(|c| c.disable_check_updates),
                 tls: server::TlsRuntimeConfig {
                     acme_url: config.as_ref().and_then(|c| c.acme_url.clone()),
                     acme_email: config.as_ref().and_then(|c| c.acme_email.clone()),
@@ -384,6 +388,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 embedded_derp: server_config
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
                 derp: config.as_ref().and_then(|c| c.derp.clone()),
+                database: config.as_ref().and_then(|c| c.database.clone()),
                 dns: config.as_ref().and_then(|c| c.dns.clone()),
                 policy: config
                     .as_ref()
@@ -392,6 +397,11 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     || config::TaildropConfig::default().enabled,
                     |c| c.taildrop.enabled,
                 ),
+                logtail_enabled: config.as_ref().is_some_and(|c| c.logtail.enabled),
+                auto_update_enabled: config.as_ref().is_some_and(|c| c.auto_update.enabled),
+                tuning: config
+                    .as_ref()
+                    .map_or_else(config::TuningConfig::default, |c| c.tuning.clone()),
                 ephemeral_node_inactivity_timeout: Duration::from_secs(
                     server_config.map_or(defaults.ephemeral_node_inactivity_timeout_secs, |s| {
                         s.ephemeral_node_inactivity_timeout_secs

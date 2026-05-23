@@ -589,6 +589,8 @@ pub struct DebugConfigInfo {
     pub grpc_addr: String,
     #[serde(rename = "GRPCAllowInsecure")]
     pub grpc_allow_insecure: bool,
+    #[serde(rename = "TrustedProxies")]
+    pub trusted_proxies: Vec<String>,
     #[serde(rename = "EphemeralNodeInactivityTimeout")]
     pub ephemeral_node_inactivity_timeout: i64,
     #[serde(rename = "Node")]
@@ -633,6 +635,8 @@ pub struct DebugConfigInfo {
     pub randomize_client_port: bool,
     #[serde(rename = "Taildrop")]
     pub taildrop: DebugEnabledConfig,
+    #[serde(rename = "AutoUpdate")]
+    pub auto_update: DebugEnabledConfig,
     #[serde(rename = "CLI")]
     pub cli: DebugCliConfig,
     #[serde(rename = "Policy")]
@@ -655,6 +659,7 @@ impl Default for DebugConfigInfo {
             metrics_addr: String::new(),
             grpc_addr: ":50443".to_string(),
             grpc_allow_insecure: false,
+            trusted_proxies: Vec::new(),
             ephemeral_node_inactivity_timeout: duration_nanos(std::time::Duration::from_secs(120)),
             node: DebugNodeConfig {
                 expiry: 0,
@@ -781,6 +786,7 @@ impl Default for DebugConfigInfo {
             log_tail: DebugEnabledConfig { enabled: false },
             randomize_client_port: false,
             taildrop: DebugEnabledConfig { enabled: true },
+            auto_update: DebugEnabledConfig { enabled: false },
             cli: DebugCliConfig {
                 address: String::new(),
                 api_key: String::new(),
@@ -798,6 +804,7 @@ impl Default for DebugConfigInfo {
                 batcher_workers: default_batcher_workers(),
                 register_cache_cleanup: 0,
                 register_cache_expiration: 0,
+                register_cache_max_entries: 0,
                 node_store_batch_size: 100,
                 node_store_batch_timeout: duration_nanos(std::time::Duration::from_millis(500)),
             },
@@ -913,6 +920,7 @@ pub struct DebugPostgresConfig {
     #[serde(rename = "User")]
     pub user: String,
     #[serde(rename = "Pass")]
+    #[serde(skip_serializing)]
     pub pass: String,
     #[serde(rename = "Ssl")]
     pub ssl: String,
@@ -1084,6 +1092,8 @@ pub struct DebugTuningConfig {
     pub register_cache_cleanup: i64,
     #[serde(rename = "RegisterCacheExpiration")]
     pub register_cache_expiration: i64,
+    #[serde(rename = "RegisterCacheMaxEntries")]
+    pub register_cache_max_entries: i32,
     #[serde(rename = "NodeStoreBatchSize")]
     pub node_store_batch_size: i32,
     #[serde(rename = "NodeStoreBatchTimeout")]
@@ -3984,6 +3994,7 @@ mod tests {
             "MetricsAddr",
             "GRPCAddr",
             "GRPCAllowInsecure",
+            "TrustedProxies",
             "EphemeralNodeInactivityTimeout",
             "Node",
             "PrefixV4",
@@ -3992,6 +4003,7 @@ mod tests {
             "NoisePrivateKeyPath",
             "BaseDomain",
             "Log",
+            "DisableUpdateCheck",
             "Database",
             "DERP",
             "TLS",
@@ -4002,6 +4014,7 @@ mod tests {
             "OIDC",
             "LogTail",
             "Taildrop",
+            "AutoUpdate",
             "CLI",
             "Policy",
             "Tuning",
@@ -4010,6 +4023,7 @@ mod tests {
         }
         assert_eq!(parsed["GRPCAddr"], ":50443");
         assert_eq!(parsed["GRPCAllowInsecure"], false);
+        assert_eq!(parsed["TrustedProxies"], serde_json::json!([]));
         assert_eq!(parsed["EphemeralNodeInactivityTimeout"], 120_000_000_000i64);
         assert_eq!(parsed["Node"]["Expiry"], 0);
         assert_eq!(
@@ -4031,6 +4045,7 @@ mod tests {
         assert_eq!(parsed["DNSConfig"]["OverrideLocalDNS"], true);
         assert_eq!(parsed["Policy"]["Mode"], "file");
         assert_eq!(parsed["Tuning"]["NodeStoreBatchSize"], 100);
+        assert_eq!(parsed["Tuning"]["RegisterCacheMaxEntries"], 0);
         assert_eq!(parsed["UnixSocketPermission"], 0o770);
     }
 
@@ -4096,8 +4111,10 @@ mod tests {
             metrics_addr: "127.0.0.1:9090".to_string(),
             grpc_addr: "127.0.0.1:50443".to_string(),
             grpc_allow_insecure: true,
+            trusted_proxies: vec!["127.0.0.1/32".to_string()],
             prefix_v4: Some("100.100.0.0/16".to_string()),
             ip_allocation: "random".to_string(),
+            disable_update_check: true,
             acme_url: "https://acme.example/directory".to_string(),
             acme_email: "ops@example.com".to_string(),
             unix_socket: "/run/headscale/headscale.sock".to_string(),
@@ -4131,6 +4148,11 @@ mod tests {
         assert_eq!(parsed["MetricsAddr"], "127.0.0.1:9090");
         assert_eq!(parsed["GRPCAddr"], "127.0.0.1:50443");
         assert_eq!(parsed["GRPCAllowInsecure"], true);
+        assert_eq!(
+            parsed["TrustedProxies"],
+            serde_json::json!(["127.0.0.1/32"])
+        );
+        assert_eq!(parsed["DisableUpdateCheck"], true);
         assert_eq!(parsed["PrefixV4"], "100.100.0.0/16");
         assert_eq!(parsed["IPAllocation"], "random");
         assert_eq!(parsed["Node"]["Expiry"], 0);

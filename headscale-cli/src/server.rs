@@ -42,7 +42,7 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
-use crate::config::PolicyConfig;
+use crate::config::{PolicyConfig, TuningConfig, UpstreamDatabaseConfig};
 use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
@@ -64,6 +64,8 @@ pub(crate) struct RunServerConfig {
     pub unix_socket_permission: u32,
     pub grpc_listen_addr: String,
     pub grpc_allow_insecure: bool,
+    pub trusted_proxies: Vec<String>,
+    pub disable_check_updates: bool,
     pub tls: TlsRuntimeConfig,
     pub oidc: OidcConfig,
     pub node_expiry: Duration,
@@ -71,9 +73,13 @@ pub(crate) struct RunServerConfig {
     pub node_routes_ha_probe_timeout: Duration,
     pub embedded_derp: EmbeddedDerpConfig,
     pub derp: Option<DerpConfig>,
+    pub database: Option<UpstreamDatabaseConfig>,
     pub dns: Option<DnsConfigSpec>,
     pub policy: PolicyConfig,
     pub taildrop_enabled: bool,
+    pub logtail_enabled: bool,
+    pub auto_update_enabled: bool,
+    pub tuning: TuningConfig,
     pub ephemeral_node_inactivity_timeout: Duration,
 }
 
@@ -481,6 +487,7 @@ fn runtime_config_snapshot(
         metrics_addr: cfg.metrics_listen_addr.clone().unwrap_or_default(),
         grpc_addr: cfg.grpc_listen_addr.clone(),
         grpc_allow_insecure: cfg.grpc_allow_insecure,
+        trusted_proxies: cfg.trusted_proxies.clone(),
         ephemeral_node_inactivity_timeout: duration_nanos(cfg.ephemeral_node_inactivity_timeout),
         node: headscale_api::tailscale_wire::basic_handlers::DebugNodeConfig {
             expiry: duration_nanos(cfg.node_expiry),
@@ -512,6 +519,36 @@ fn runtime_config_snapshot(
 
     snapshot.database.database_type = "sqlite3".to_string();
     snapshot.database.sqlite.path = cfg.db_path.display().to_string();
+    if let Some(database) = &cfg.database {
+        snapshot.database.database_type = database.debug_type();
+        snapshot.database.debug = database.debug_enabled();
+        let gorm = database.debug_gorm();
+        snapshot.database.gorm.debug = gorm.debug(database.debug_enabled());
+        snapshot.database.gorm.slow_threshold = u64_nanos_to_i64(gorm.slow_threshold_nanos());
+        snapshot.database.gorm.skip_err_record_not_found = gorm.skip_err_record_not_found();
+        snapshot.database.gorm.parameterized_queries = gorm.parameterized_queries();
+        snapshot.database.gorm.prepare_stmt = gorm.prepare_stmt();
+
+        let sqlite = database.debug_sqlite();
+        snapshot.database.sqlite.path = sqlite
+            .path()
+            .map(|path| path.display().to_string())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| cfg.db_path.display().to_string());
+        snapshot.database.sqlite.write_ahead_log = sqlite.write_ahead_log();
+        snapshot.database.sqlite.wal_auto_check_point = sqlite.wal_autocheckpoint();
+
+        let postgres = database.debug_postgres();
+        snapshot.database.postgres.host = postgres.host().to_string();
+        snapshot.database.postgres.port = postgres.port();
+        snapshot.database.postgres.name = postgres.name().to_string();
+        snapshot.database.postgres.user = postgres.user().to_string();
+        snapshot.database.postgres.ssl = postgres.ssl().to_string();
+        snapshot.database.postgres.max_open_connections = postgres.max_open_conns();
+        snapshot.database.postgres.max_idle_connections = postgres.max_idle_conns();
+        snapshot.database.postgres.conn_max_idle_time_secs = postgres.conn_max_idle_time_secs();
+    }
+    snapshot.disable_update_check = cfg.disable_check_updates;
 
     if let Some(derp) = &cfg.derp {
         snapshot.derp.server_enabled = derp.server.enabled;
@@ -629,7 +666,9 @@ fn runtime_config_snapshot(
         .unwrap_or_default();
     snapshot.tailcfg_dns_config =
         serde_json::to_value(dns.build(&[])).unwrap_or(serde_json::Value::Null);
+    snapshot.log_tail.enabled = cfg.logtail_enabled;
     snapshot.taildrop.enabled = cfg.taildrop_enabled;
+    snapshot.auto_update.enabled = cfg.auto_update_enabled;
 
     let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
     snapshot.oidc.only_start_if_oidc_is_available = oidc_config.only_start_if_oidc_is_available;
@@ -667,6 +706,17 @@ fn runtime_config_snapshot(
         .clone_from(&oidc_config.pkce.method);
     snapshot.policy.mode = cfg.policy.mode().to_string();
     snapshot.policy.path = cfg.policy.path.display().to_string();
+    snapshot.tuning.notifier_send_timeout = u64_nanos_to_i64(cfg.tuning.notifier_send_timeout);
+    snapshot.tuning.batch_change_delay = u64_nanos_to_i64(cfg.tuning.batch_change_delay);
+    snapshot.tuning.node_map_session_buffered_chan_size =
+        cfg.tuning.node_mapsession_buffered_chan_size;
+    snapshot.tuning.batcher_workers = cfg.tuning.batcher_workers;
+    snapshot.tuning.register_cache_expiration =
+        u64_nanos_to_i64(cfg.tuning.register_cache_expiration);
+    snapshot.tuning.register_cache_max_entries = cfg.tuning.register_cache_max_entries;
+    snapshot.tuning.node_store_batch_size = cfg.tuning.node_store_batch_size;
+    snapshot.tuning.node_store_batch_timeout =
+        u64_nanos_to_i64(cfg.tuning.node_store_batch_timeout);
 
     snapshot
 }
@@ -675,6 +725,10 @@ fn upstream_oidc_runtime_config(oidc: &OidcConfig) -> OidcConfig {
     let mut oidc = oidc.clone();
     oidc.expiry = Duration::ZERO;
     oidc
+}
+
+fn u64_nanos_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMaterialSource> {
@@ -1536,7 +1590,10 @@ mod tests {
         headscale_service_client::HeadscaleServiceClient,
         headscale_service_server::HeadscaleService,
     };
-    use headscale_api::oidc::{OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig};
+    use headscale_api::oidc::{
+        OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig, OidcRegistrationHandler, OidcStoredUser,
+        REGISTER_METHOD_OIDC,
+    };
     use headscale_api::tailscale_wire::{
         map as wire_map_handlers,
         noise::NoisePeerMachineKey,
@@ -1760,6 +1817,8 @@ mod tests {
             unix_socket_permission: 0o700,
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
+            trusted_proxies: Vec::new(),
+            disable_check_updates: false,
             tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig {
                 expiry: Duration::ZERO,
@@ -1770,9 +1829,13 @@ mod tests {
             node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
+            database: None,
             dns: None,
             policy: PolicyConfig::default(),
             taildrop_enabled: true,
+            logtail_enabled: false,
+            auto_update_enabled: false,
+            tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
     }
@@ -2500,6 +2563,8 @@ regions:
             unix_socket_permission: 0o700,
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
+            trusted_proxies: Vec::new(),
+            disable_check_updates: false,
             tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
             node_expiry: Duration::default(),
@@ -2507,9 +2572,13 @@ regions:
             node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
+            database: None,
             dns: None,
             policy: PolicyConfig::default(),
             taildrop_enabled: true,
+            logtail_enabled: false,
+            auto_update_enabled: false,
+            tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2551,6 +2620,8 @@ regions:
             unix_socket_permission: 0o700,
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
+            trusted_proxies: Vec::new(),
+            disable_check_updates: false,
             tls: TlsRuntimeConfig {
                 cert_path: Some(material.cert_path.clone()),
                 key_path: Some(material.key_path.clone()),
@@ -2562,9 +2633,13 @@ regions:
             node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
+            database: None,
             dns: None,
             policy: PolicyConfig::default(),
             taildrop_enabled: true,
+            logtail_enabled: false,
+            auto_update_enabled: false,
+            tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
@@ -2695,6 +2770,8 @@ regions:
             unix_socket_permission: 0o760,
             grpc_listen_addr: "127.0.0.1:50443".into(),
             grpc_allow_insecure: true,
+            trusted_proxies: Vec::new(),
+            disable_check_updates: false,
             tls: TlsRuntimeConfig {
                 acme_url: Some("https://acme.example/directory".into()),
                 acme_email: Some("ops@example.com".into()),
@@ -2711,9 +2788,13 @@ regions:
             node_routes_ha_probe_timeout: Duration::from_secs(4),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
+            database: None,
             dns: None,
             policy: PolicyConfig::database(),
             taildrop_enabled: false,
+            logtail_enabled: false,
+            auto_update_enabled: false,
+            tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(180),
         };
 
@@ -2767,6 +2848,98 @@ regions:
         assert_eq!(snapshot.unix_socket_permission, 0o760);
     }
 
+    #[test]
+    fn runtime_config_snapshot_projects_current_upstream_schema_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "127.0.0.1/32"
+disable_check_updates: true
+
+logtail:
+  enabled: true
+
+auto_update:
+  enabled: true
+
+tuning:
+  notifier_send_timeout: 900ms
+  batch_change_delay: 700ms
+  node_mapsession_buffered_chan_size: 42
+  batcher_workers: 2
+  register_cache_expiration: 5m
+  register_cache_max_entries: 2048
+  node_store_batch_size: 128
+  node_store_batch_timeout: 250ms
+
+database:
+  type: sqlite
+  debug: true
+  gorm:
+    prepare_stmt: true
+    parameterized_queries: true
+    skip_err_record_not_found: true
+    slow_threshold: 1000
+  sqlite:
+    path: "data/db.sqlite"
+    write_ahead_log: false
+    wal_autocheckpoint: 250
+  postgres:
+    host: localhost
+    port: 5432
+    name: headscale
+    user: headscale
+    pass: secret
+    ssl: false
+    max_open_conns: 11
+    max_idle_conns: 7
+    conn_max_idle_time_secs: 120
+"#,
+        )
+        .unwrap();
+        let parsed = crate::config::CliConfig::load(&config_path).unwrap();
+        parsed.validate_for_configtest().unwrap();
+
+        let mut cfg = test_run_server_config(&dir);
+        cfg.db_path = parsed.server.as_ref().unwrap().db_path.clone();
+        cfg.trusted_proxies = parsed.trusted_proxies.clone();
+        cfg.disable_check_updates = parsed.disable_check_updates;
+        cfg.database = parsed.database.clone();
+        cfg.logtail_enabled = parsed.logtail.enabled;
+        cfg.auto_update_enabled = parsed.auto_update.enabled;
+        cfg.tuning = parsed.tuning.clone();
+
+        let dns = DnsStore::new();
+        let snapshot = runtime_config_snapshot(&cfg, &DerpMap::default(), &dns);
+
+        assert_eq!(snapshot.trusted_proxies, ["127.0.0.1/32"]);
+        assert!(snapshot.disable_update_check);
+        assert!(snapshot.log_tail.enabled);
+        assert!(snapshot.auto_update.enabled);
+        assert_eq!(snapshot.database.database_type, "sqlite3");
+        assert!(snapshot.database.debug);
+        assert!(snapshot.database.gorm.debug);
+        assert_eq!(snapshot.database.gorm.slow_threshold, 1_000_000_000);
+        assert!(snapshot.database.gorm.prepare_stmt);
+        assert_eq!(
+            snapshot.database.sqlite.path,
+            dir.path().join("data/db.sqlite").display().to_string()
+        );
+        assert!(!snapshot.database.sqlite.write_ahead_log);
+        assert_eq!(snapshot.database.sqlite.wal_auto_check_point, 250);
+        assert_eq!(snapshot.database.postgres.host, "localhost");
+        assert_eq!(snapshot.database.postgres.ssl, "false");
+        assert_eq!(snapshot.database.postgres.max_open_connections, 11);
+        assert_eq!(snapshot.tuning.notifier_send_timeout, 900_000_000);
+        assert_eq!(snapshot.tuning.node_map_session_buffered_chan_size, 42);
+        assert_eq!(snapshot.tuning.register_cache_max_entries, 2048);
+        assert_eq!(snapshot.tuning.node_store_batch_timeout, 250_000_000);
+    }
+
     #[tokio::test]
     async fn non_oidc_server_requires_public_server_url_before_binding() {
         let dir = tempfile::tempdir().unwrap();
@@ -2785,6 +2958,8 @@ regions:
             unix_socket_permission: 0o700,
             grpc_listen_addr: "127.0.0.1:0".into(),
             grpc_allow_insecure: false,
+            trusted_proxies: Vec::new(),
+            disable_check_updates: false,
             tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
             node_expiry: Duration::default(),
@@ -2792,9 +2967,13 @@ regions:
             node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
+            database: None,
             dns: None,
             policy: PolicyConfig::default(),
             taildrop_enabled: true,
+            logtail_enabled: false,
+            auto_update_enabled: false,
+            tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })
         .await
@@ -2883,11 +3062,12 @@ regions:
             &state_dir,
             "https://headscale.example",
             "100.64.0.0/10",
-            None,
+            Some(oidc_runtime()),
             DerpMap::default(),
         )
         .await
         .unwrap();
+        assert!(runtime.oidc.is_some());
         let user = runtime
             .admin_service
             .create_user(TonicRequest::new(CreateUserRequest {
@@ -2966,6 +3146,48 @@ regions:
             format!("nodekey:{interactive_node_key}")
         );
         assert_eq!(interactive_node.available_routes, vec!["10.71.0.0/24"]);
+
+        let oidc_node_key = "e1".repeat(32);
+        let oidc_machine_key = "f1".repeat(32);
+        let oidc_register = wire_register_interactive(
+            &runtime.state,
+            &oidc_node_key,
+            &oidc_machine_key,
+            "oidc-router",
+            &["10.72.0.0/24"],
+        )
+        .await;
+        assert!(!oidc_register.machine_authorized);
+        let oidc_registration_id = registration_id_from_auth_url(&oidc_register.auth_url);
+        let oidc_users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let oidc_machines = Arc::new(
+            PersistentMachineAdmin::new(db.pool().clone())
+                .with_user_admin(oidc_users)
+                .with_wire_registry(runtime.state.machines.clone()),
+        );
+        let oidc_handler = PersistentOidcRegistrationHandler::new(
+            runtime.state.registration_cache.clone(),
+            oidc_machines,
+            runtime.state.policy.clone(),
+        )
+        .with_wire_registry(runtime.state.machines.clone());
+        let oidc_result = oidc_handler
+            .complete_oidc_registration(
+                &oidc_registration_id,
+                &OidcStoredUser {
+                    id: user.id,
+                    name: "alice".into(),
+                    display_name: "Alice Smith".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/sub".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: String::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(oidc_result.new_node);
 
         assert_eq!(
             wire_map_status(
@@ -3066,6 +3288,16 @@ regions:
         assert_eq!(hydrated_interactive.user, "alice");
         assert_eq!(hydrated_interactive.available_routes, vec!["10.71.0.0/24"]);
         assert_eq!(hydrated_interactive.register_method, 2);
+
+        let hydrated_oidc = restarted
+            .state
+            .machines
+            .get(&oidc_node_key)
+            .expect("OIDC node hydrated");
+        assert_eq!(hydrated_oidc.user, "alice");
+        assert_eq!(hydrated_oidc.hostname, "oidc-router");
+        assert_eq!(hydrated_oidc.available_routes, vec!["10.72.0.0/24"]);
+        assert_eq!(hydrated_oidc.register_method, 3);
 
         let full = wire_full_map(&restarted.state, &auth_node_key, &auth_machine_key).await;
         let self_node = full.node.expect("self node after restart");

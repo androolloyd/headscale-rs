@@ -1,5 +1,6 @@
 //! Configuration file handling for the CLI.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -33,6 +34,15 @@ pub(crate) struct CliConfig {
     /// Upstream top-level `grpc_allow_insecure`.
     #[serde(default, skip_serializing)]
     pub(crate) grpc_allow_insecure: Option<bool>,
+    /// Upstream top-level `trusted_proxies` CIDR list. Parsed and
+    /// validated for config parity; reverse-proxy header trust is not
+    /// wired into the Rust HTTP runtime yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) trusted_proxies: Vec<String>,
+    /// Upstream top-level update-check switch. Parsed and projected in
+    /// debug config; headscale-rs does not implement release checks.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) disable_check_updates: bool,
     /// Upstream top-level `ephemeral_node_inactivity_timeout`.
     #[serde(
         default,
@@ -97,9 +107,22 @@ pub(crate) struct CliConfig {
     /// Upstream-compatible Taildrop/file-sharing switch.
     #[serde(default, skip_serializing_if = "taildrop_config_is_default")]
     pub(crate) taildrop: TaildropConfig,
+    /// Upstream-compatible Logtail switch. Parsed and projected only.
+    #[serde(default, skip_serializing_if = "enabled_config_is_default")]
+    pub(crate) logtail: EnabledConfig,
+    /// Upstream-compatible default client auto-update switch. Parsed
+    /// and projected only; Rust map responses do not emit the
+    /// auto-update cap yet.
+    #[serde(default, skip_serializing_if = "enabled_config_is_default")]
+    pub(crate) auto_update: EnabledConfig,
     /// OpenID Connect configuration
     #[serde(default, skip_serializing_if = "oidc_config_is_default")]
     pub oidc: OidcConfig,
+    /// Upstream-compatible advanced tuning block. Parsed and projected
+    /// for `/debug/config`; only fields already explicitly wired by the
+    /// Rust runtime affect behaviour.
+    #[serde(default, skip_serializing_if = "tuning_config_is_default")]
+    pub(crate) tuning: TuningConfig,
 }
 
 /// Operator CLI configuration used by upstream `headscale` admin commands.
@@ -312,13 +335,114 @@ pub(crate) struct UpstreamDatabaseConfig {
     #[serde(default, rename = "type")]
     database_type: Option<String>,
     #[serde(default)]
+    debug: bool,
+    #[serde(default)]
+    gorm: UpstreamGormConfig,
+    #[serde(default)]
     sqlite: Option<UpstreamSqliteConfig>,
+    #[serde(default)]
+    postgres: UpstreamPostgresConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub(crate) struct UpstreamGormConfig {
+    #[serde(skip_serializing_if = "is_false")]
+    debug: bool,
+    #[serde(deserialize_with = "deserialize_duration_nanos_from_millis_or_string")]
+    slow_threshold: u64,
+    skip_err_record_not_found: bool,
+    parameterized_queries: bool,
+    prepare_stmt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub(crate) struct UpstreamSqliteConfig {
     #[serde(default)]
     path: Option<PathBuf>,
+    write_ahead_log: bool,
+    wal_autocheckpoint: i32,
+}
+
+impl Default for UpstreamSqliteConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            write_ahead_log: true,
+            wal_autocheckpoint: 1000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct UpstreamPostgresConfig {
+    host: String,
+    port: i32,
+    name: String,
+    user: String,
+    #[serde(skip_serializing, default)]
+    pass: String,
+    #[serde(deserialize_with = "deserialize_string_from_string_or_bool")]
+    ssl: String,
+    max_open_conns: i32,
+    max_idle_conns: i32,
+    conn_max_idle_time_secs: i32,
+}
+
+impl Default for UpstreamPostgresConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 0,
+            name: String::new(),
+            user: String::new(),
+            pass: String::new(),
+            ssl: "false".to_string(),
+            max_open_conns: 10,
+            max_idle_conns: 10,
+            conn_max_idle_time_secs: 3600,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub(crate) struct EnabledConfig {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct TuningConfig {
+    #[serde(deserialize_with = "deserialize_duration_nanos_from_duration_string")]
+    pub notifier_send_timeout: u64,
+    #[serde(deserialize_with = "deserialize_duration_nanos_from_duration_string")]
+    pub batch_change_delay: u64,
+    pub node_mapsession_buffered_chan_size: i32,
+    pub batcher_workers: usize,
+    #[serde(deserialize_with = "deserialize_duration_nanos_from_duration_string")]
+    pub register_cache_expiration: u64,
+    pub register_cache_max_entries: i32,
+    pub node_store_batch_size: i32,
+    #[serde(deserialize_with = "deserialize_duration_nanos_from_duration_string")]
+    pub node_store_batch_timeout: u64,
+}
+
+impl Default for TuningConfig {
+    fn default() -> Self {
+        Self {
+            notifier_send_timeout: 800_000_000,
+            batch_change_delay: 800_000_000,
+            node_mapsession_buffered_chan_size: 30,
+            batcher_workers: default_batcher_workers(),
+            register_cache_expiration: 0,
+            register_cache_max_entries: 0,
+            node_store_batch_size: 100,
+            node_store_batch_timeout: 500_000_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -664,6 +788,7 @@ impl CliConfig {
     /// binding listeners or opening long-running services.
     pub(crate) fn validate_for_configtest(&self) -> Result<()> {
         self.oidc.validate().context("invalid OIDC configuration")?;
+        self.validate_trusted_proxies()?;
         self.validate_upstream_database_config()?;
         self.validate_upstream_tls_config()?;
         self.validate_upstream_node_config()?;
@@ -727,6 +852,24 @@ impl CliConfig {
         Ok(())
     }
 
+    fn validate_trusted_proxies(&self) -> Result<()> {
+        for (i, raw) in self.trusted_proxies.iter().enumerate() {
+            let (addr, bits) =
+                parse_ip_prefix(raw).with_context(|| format!("trusted_proxies[{i}] {raw:?}"))?;
+            if bits == 0 {
+                bail!("trusted_proxies[{i}] {raw:?}: 0.0.0.0/0 and ::/0 are not allowed");
+            }
+            let max_bits = match addr {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            if bits > max_bits {
+                bail!("trusted_proxies[{i}] {raw:?}: prefix length {bits} exceeds {max_bits}");
+            }
+        }
+        Ok(())
+    }
+
     fn validate_policy_config(&self) -> Result<()> {
         match self.policy.mode() {
             "file" => {
@@ -751,10 +894,34 @@ impl CliConfig {
         let Some(database_type) = database.database_type.as_deref() else {
             return Ok(());
         };
-        if matches!(database_type, "sqlite" | "sqlite3") {
-            return Ok(());
+        match database_type {
+            "sqlite" | "sqlite3" => {
+                if database.sqlite.as_ref().is_some_and(|sqlite| {
+                    sqlite.wal_autocheckpoint < 0
+                        || sqlite
+                            .path
+                            .as_ref()
+                            .is_some_and(|p| p.as_os_str().is_empty())
+                }) {
+                    bail!(
+                        "database.sqlite.path must be non-empty and database.sqlite.wal_autocheckpoint must be >= 0"
+                    );
+                }
+                Ok(())
+            }
+            "postgres" => {
+                if database.postgres.max_open_conns < 0
+                    || database.postgres.max_idle_conns < 0
+                    || database.postgres.conn_max_idle_time_secs < 0
+                {
+                    bail!("database.postgres connection pool fields must be >= 0");
+                }
+                bail!("database.type \"postgres\" is not supported yet; only sqlite is wired");
+            }
+            other => bail!(
+                "database.type {other:?} is invalid; supported values are sqlite, sqlite3, postgres"
+            ),
         }
-        bail!("database.type {database_type:?} is not supported yet; only sqlite is wired");
     }
 
     fn validate_upstream_tls_config(&self) -> Result<()> {
@@ -822,6 +989,100 @@ impl UpstreamDatabaseConfig {
             .and_then(|sqlite| sqlite.path.as_ref())
             .filter(|path| !path.as_os_str().is_empty())
             .cloned()
+    }
+
+    pub(crate) fn debug_type(&self) -> String {
+        match self.database_type.as_deref() {
+            Some("sqlite") => "sqlite3".to_string(),
+            Some(value) => value.to_string(),
+            None => String::new(),
+        }
+    }
+
+    pub(crate) fn debug_enabled(&self) -> bool {
+        self.debug
+    }
+
+    pub(crate) fn debug_gorm(&self) -> &UpstreamGormConfig {
+        &self.gorm
+    }
+
+    pub(crate) fn debug_sqlite(&self) -> UpstreamSqliteConfig {
+        self.sqlite.clone().unwrap_or_default()
+    }
+
+    pub(crate) fn debug_postgres(&self) -> &UpstreamPostgresConfig {
+        &self.postgres
+    }
+}
+
+impl UpstreamGormConfig {
+    pub(crate) fn debug(&self, database_debug: bool) -> bool {
+        database_debug || self.debug
+    }
+
+    pub(crate) fn slow_threshold_nanos(&self) -> u64 {
+        self.slow_threshold
+    }
+
+    pub(crate) fn skip_err_record_not_found(&self) -> bool {
+        self.skip_err_record_not_found
+    }
+
+    pub(crate) fn parameterized_queries(&self) -> bool {
+        self.parameterized_queries
+    }
+
+    pub(crate) fn prepare_stmt(&self) -> bool {
+        self.prepare_stmt
+    }
+}
+
+impl UpstreamSqliteConfig {
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub(crate) fn write_ahead_log(&self) -> bool {
+        self.write_ahead_log
+    }
+
+    pub(crate) fn wal_autocheckpoint(&self) -> i32 {
+        self.wal_autocheckpoint
+    }
+}
+
+impl UpstreamPostgresConfig {
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn port(&self) -> i32 {
+        self.port
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub(crate) fn ssl(&self) -> &str {
+        &self.ssl
+    }
+
+    pub(crate) fn max_open_conns(&self) -> i32 {
+        self.max_open_conns
+    }
+
+    pub(crate) fn max_idle_conns(&self) -> i32 {
+        self.max_idle_conns
+    }
+
+    pub(crate) fn conn_max_idle_time_secs(&self) -> i32 {
+        self.conn_max_idle_time_secs
     }
 }
 
@@ -1148,6 +1409,41 @@ where
         .map_err(de::Error::custom)
 }
 
+fn deserialize_duration_nanos_from_millis_or_string<'de, D>(
+    deserializer: D,
+) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = DurationRepr::deserialize(deserializer)?;
+    parse_duration_nanos_repr(value, NumericDurationUnit::Millis).map_err(de::Error::custom)
+}
+
+fn deserialize_duration_nanos_from_duration_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = DurationRepr::deserialize(deserializer)?;
+    parse_duration_nanos_repr(value, NumericDurationUnit::Nanos).map_err(de::Error::custom)
+}
+
+fn deserialize_string_from_string_or_bool<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrBool {
+        String(String),
+        Bool(bool),
+    }
+
+    match StringOrBool::deserialize(deserializer)? {
+        StringOrBool::String(value) => Ok(value),
+        StringOrBool::Bool(value) => Ok(value.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum U32Repr {
@@ -1189,6 +1485,54 @@ fn parse_duration_secs_repr(value: DurationRepr) -> Result<u64, String> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum NumericDurationUnit {
+    Nanos,
+    Millis,
+}
+
+fn parse_duration_nanos_repr(
+    value: DurationRepr,
+    numeric_unit: NumericDurationUnit,
+) -> Result<u64, String> {
+    match value {
+        DurationRepr::Int(value) => match numeric_unit {
+            NumericDurationUnit::Nanos => Ok(value),
+            NumericDurationUnit::Millis => value
+                .checked_mul(1_000_000)
+                .ok_or_else(|| format!("duration {value}ms overflows u64 nanoseconds")),
+        },
+        DurationRepr::String(value) => parse_duration_nanos_str(&value),
+    }
+}
+
+fn parse_duration_nanos_str(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".into());
+    }
+    let (number, multiplier) = if let Some(number) = trimmed.strip_suffix("ms") {
+        (number, 1_000_000)
+    } else if let Some(number) = trimmed.strip_suffix('s') {
+        (number, 1_000_000_000)
+    } else if let Some(number) = trimmed.strip_suffix('m') {
+        (number, 60_000_000_000)
+    } else if let Some(number) = trimmed.strip_suffix('h') {
+        (number, 3_600_000_000_000)
+    } else if let Some(number) = trimmed.strip_suffix('d') {
+        (number, 86_400_000_000_000)
+    } else {
+        return trimmed
+            .parse::<u64>()
+            .map_err(|err| format!("invalid duration {trimmed:?}: {err}"));
+    };
+    let n = number
+        .parse::<u64>()
+        .map_err(|err| format!("invalid duration magnitude {number:?}: {err}"))?;
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("duration {trimmed:?} overflows u64 nanoseconds"))
+}
+
 fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1222,6 +1566,19 @@ fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("duration {trimmed:?} overflows u64 seconds"))
 }
 
+fn parse_ip_prefix(raw: &str) -> Result<(IpAddr, u8)> {
+    let (addr, bits) = raw
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("missing prefix length"))?;
+    let addr: IpAddr = addr
+        .parse()
+        .with_context(|| format!("invalid IP address {addr:?}"))?;
+    let bits: u8 = bits
+        .parse()
+        .with_context(|| format!("invalid prefix length {bits:?}"))?;
+    Ok((addr, bits))
+}
+
 fn parse_env_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "t" | "true" | "y" | "yes" | "on" => Ok(true),
@@ -1230,12 +1587,24 @@ fn parse_env_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn oidc_config_is_default(config: &OidcConfig) -> bool {
     config == &OidcConfig::default()
 }
 
 fn taildrop_config_is_default(config: &TaildropConfig) -> bool {
     config == &TaildropConfig::default()
+}
+
+fn enabled_config_is_default(config: &EnabledConfig) -> bool {
+    config == &EnabledConfig::default()
+}
+
+fn tuning_config_is_default(config: &TuningConfig) -> bool {
+    config == &TuningConfig::default()
 }
 
 fn policy_config_is_default(config: &PolicyConfig) -> bool {
@@ -1309,6 +1678,10 @@ fn default_log_format() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_batcher_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() * 3 / 4).max(1))
 }
 
 impl Default for ServerConfig {
@@ -1474,6 +1847,110 @@ node:
         let err = config.validate_for_configtest().unwrap_err();
 
         assert!(format!("{err:#}").contains("node.routes.ha.probe_timeout"));
+    }
+
+    #[test]
+    fn loads_remaining_current_upstream_schema_fields() {
+        let source = r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "127.0.0.1/32"
+  - "fd7a:115c:a1e0::/48"
+disable_check_updates: true
+
+logtail:
+  enabled: true
+
+auto_update:
+  enabled: true
+
+tuning:
+  notifier_send_timeout: 900ms
+  batch_change_delay: 700ms
+  node_mapsession_buffered_chan_size: 42
+  batcher_workers: 2
+  register_cache_expiration: 5m
+  register_cache_max_entries: 2048
+  node_store_batch_size: 128
+  node_store_batch_timeout: 250ms
+
+database:
+  type: sqlite
+  debug: true
+  gorm:
+    prepare_stmt: true
+    parameterized_queries: true
+    skip_err_record_not_found: true
+    slow_threshold: 1000
+  sqlite:
+    path: "/srv/headscale/db.sqlite"
+    write_ahead_log: false
+    wal_autocheckpoint: 250
+  postgres:
+    host: localhost
+    port: 5432
+    name: headscale
+    user: headscale
+    pass: secret
+    ssl: verify-full
+    max_open_conns: 11
+    max_idle_conns: 7
+    conn_max_idle_time_secs: 120
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        config.validate_for_configtest().unwrap();
+
+        assert_eq!(
+            config.trusted_proxies,
+            ["127.0.0.1/32", "fd7a:115c:a1e0::/48"]
+        );
+        assert!(config.disable_check_updates);
+        assert!(config.logtail.enabled);
+        assert!(config.auto_update.enabled);
+        assert_eq!(config.tuning.notifier_send_timeout, 900_000_000);
+        assert_eq!(config.tuning.node_mapsession_buffered_chan_size, 42);
+        assert_eq!(config.tuning.register_cache_max_entries, 2048);
+        assert_eq!(config.tuning.node_store_batch_timeout, 250_000_000);
+
+        let database = config.database.as_ref().unwrap();
+        assert_eq!(database.debug_type(), "sqlite3");
+        assert!(database.debug_enabled());
+        assert_eq!(database.debug_gorm().slow_threshold_nanos(), 1_000_000_000);
+        assert!(database.debug_gorm().prepare_stmt());
+        assert!(!database.debug_sqlite().write_ahead_log());
+        assert_eq!(database.debug_sqlite().wal_autocheckpoint(), 250);
+        assert_eq!(database.debug_postgres().ssl(), "verify-full");
+        assert_eq!(database.debug_postgres().max_open_conns(), 11);
+    }
+
+    #[test]
+    fn configtest_rejects_unsafe_or_malformed_trusted_proxies() {
+        let config = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "0.0.0.0/0"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+
+        let err = config.validate_for_configtest().unwrap_err();
+        assert!(format!("{err:#}").contains("trusted_proxies[0]"));
+
+        let config = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "127.0.0.1"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+
+        let err = config.validate_for_configtest().unwrap_err();
+        assert!(format!("{err:#}").contains("missing prefix length"));
     }
 
     #[test]

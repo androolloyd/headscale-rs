@@ -1804,9 +1804,9 @@ impl MachineRegistry {
     /// applies `f`, swaps the new Arc in atomically, and wakes every
     /// long-poll waiter.
     ///
-    /// All lifecycle mutators (`set_expiry`, `rename`, `logout`,
-    /// `delete`, `touch_last_seen`, `set_forced_tags`,
-    /// `gc_ephemeral`) route through this helper so the COW pattern is
+    /// Most lifecycle mutators (`set_expiry`, `rename`, `logout`,
+    /// `delete`, `touch_last_seen`, `set_forced_tags`) route through
+    /// this helper so the COW pattern is
     /// expressed exactly once. Returns whatever `f` returns — typically
     /// a Result so callers can distinguish "node not found" from
     /// "applied".
@@ -1985,8 +1985,10 @@ impl MachineRegistry {
         let deadline = now - cutoff_chrono;
         let active_connections = self.active_connections.read().clone();
         let online_states = self.online_states.read().clone();
-        let removed = self.update_with(|map| {
-            let to_drop: Vec<String> = map
+        let start = Instant::now();
+        let removed = {
+            let mut g = self.inner.write();
+            let to_drop: Vec<String> = g
                 .iter()
                 .filter(|(node_key, rec)| {
                     let node_id = stable_id_from_key(node_key);
@@ -1997,21 +1999,35 @@ impl MachineRegistry {
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
-            for k in &to_drop {
-                map.remove(k);
+
+            if to_drop.is_empty() {
+                Vec::new()
+            } else {
+                let mut next = (**g).clone();
+                for k in &to_drop {
+                    next.remove(k);
+                }
+                *g = Arc::new(next);
+                to_drop
             }
-            to_drop
-        });
-        if !removed.is_empty() {
-            let mut active = self.active_connections.write();
-            let mut online = self.online_states.write();
-            let mut generations = self.connection_generations.write();
-            for node_key_hex in &removed {
-                let node_id = stable_id_from_key(node_key_hex);
-                active.remove(&node_id);
-                online.remove(&node_id);
-                generations.remove(&node_id);
-            }
+        };
+        if removed.is_empty() {
+            return removed;
+        }
+
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation("update", elapsed);
+        self.record_nodestore_batch(1, elapsed);
+        self.wake_waiters();
+
+        let mut active = self.active_connections.write();
+        let mut online = self.online_states.write();
+        let mut generations = self.connection_generations.write();
+        for node_key_hex in &removed {
+            let node_id = stable_id_from_key(node_key_hex);
+            active.remove(&node_id);
+            online.remove(&node_id);
+            generations.remove(&node_id);
         }
         removed
     }

@@ -1600,6 +1600,7 @@ mod tests {
         wire::{DerpMap, DerpRegion, DerpRegionNode, DnsRecord},
     };
     use axum::body::to_bytes;
+    use futures_util::FutureExt;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -3678,6 +3679,76 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_noop_ephemeral_gc_does_not_emit_empty_delta() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        state.machines.upsert(
+            b.clone(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                b.clone(),
+                TEST_MACHINE_KEY_HEX.to_string(),
+                "u".into(),
+                "peer-b".into(),
+                Ipv4Addr::new(100, 64, 0, 11),
+                true,
+            ),
+        );
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+
+        assert!(
+            state
+                .machines
+                .gc_ephemeral(Duration::from_secs(60))
+                .is_empty()
+        );
+        tokio::task::yield_now().await;
+
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "fresh/no-match ephemeral GC must not wake streams with an empty peers delta"
+        );
+
+        tokio::time::advance(MAP_KEEPALIVE_INTERVAL + Duration::from_millis(1)).await;
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
     }
 
     #[tokio::test(start_paused = true)]

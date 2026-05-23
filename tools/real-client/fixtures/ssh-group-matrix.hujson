@@ -1,0 +1,22 @@
+{
+  "groups": {
+    "group:primary": ["user1@"],
+    "group:secondary": ["user2@"],
+    "group:auditors": ["user3@"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["group:primary", "group:secondary", "group:auditors"],
+      "dst": ["autogroup:self"],
+      "users": ["ssh-it-user"]
+    }
+  ]
+}

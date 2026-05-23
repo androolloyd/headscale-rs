@@ -57,6 +57,9 @@ ssh_user="${REAL_CLIENT_SSH_USER:-}"
 expected_ssh_matrix="${REAL_CLIENT_EXPECT_SSH_MATRIX:-}"
 ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
 ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
+ssh_deny_status="${REAL_CLIENT_EXPECT_SSH_DENY_STATUS:-}"
+ssh_deny_stderr_regex="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_REGEX:-Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node}"
+ssh_deny_stderr_first_line="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE:-}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
   enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-true}"
   install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-true}"
@@ -107,6 +110,10 @@ if ! [[ "${ssh_attempt_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_attempt_timeout_se
 fi
 if ! [[ "${ssh_host_key_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_host_key_timeout_secs < 1)); then
   echo "REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS must be a positive integer, got ${ssh_host_key_timeout_secs}" >&2
+  exit 2
+fi
+if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" && ! "${ssh_deny_status}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_SSH_DENY_STATUS must be empty, any, or a non-negative integer, got ${ssh_deny_status}" >&2
   exit 2
 fi
 case "${expected_register_failure}" in
@@ -1449,6 +1456,7 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
     target_name="${client_names[$((target_idx - 1))]}"
     stdout_path="${work_dir}/ssh-${source_name}-to-${target_name}-${expected_ssh}.stdout"
     stderr_path="${work_dir}/ssh-${source_name}-to-${target_name}-${expected_ssh}.stderr"
+    status_path="${work_dir}/ssh-${source_name}-to-${target_name}-${expected_ssh}.status"
 
     # TODO(real-client SSH): when this fails, the control plane is not
     # re-emitting peer sshHostKeys in MapNode.HostInfo;
@@ -1471,13 +1479,21 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
         fi
         cp "${work_dir}/ssh-${source_name}-to-${target_name}.stdout" "${stdout_path}"
         cp "${work_dir}/ssh-${source_name}-to-${target_name}.stderr" "${stderr_path}"
+        printf '0\n' >"${status_path}"
         ;;
       deny)
         ssh_status=0
         tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" ||
           ssh_status="$?"
+        printf '%s\n' "${ssh_status}" >"${status_path}"
         if ((ssh_status == 0)); then
           echo "expected tailscale ssh ${source_name} to ${target_name} to be denied" >&2
+          exit 1
+        fi
+        if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" ]] &&
+          ((ssh_status != ssh_deny_status)); then
+          echo "expected denied tailscale ssh status ${ssh_deny_status}, got ${ssh_status}" >&2
+          cat "${stderr_path}" >&2 || true
           exit 1
         fi
         if [[ -s "${stdout_path}" ]]; then
@@ -1485,7 +1501,15 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
           cat "${stdout_path}" >&2
           exit 1
         fi
-        if ! grep -Eq 'Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node' "${stderr_path}"; then
+        if [[ -n "${ssh_deny_stderr_first_line}" ]]; then
+          first_line="$(sed -n '1{s/\r$//;p;q;}' "${stderr_path}")"
+          if [[ "${first_line}" != "${ssh_deny_stderr_first_line}" ]]; then
+            echo "expected denied tailscale ssh first stderr line '${ssh_deny_stderr_first_line}', got '${first_line}':" >&2
+            cat "${stderr_path}" >&2 || true
+            exit 1
+          fi
+        fi
+        if [[ -n "${ssh_deny_stderr_regex}" ]] && ! grep -Eq "${ssh_deny_stderr_regex}" "${stderr_path}"; then
           echo "expected tailscale ssh denial stderr, got:" >&2
           cat "${stderr_path}" >&2 || true
           exit 1
@@ -1495,6 +1519,7 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
         ssh_status=0
         tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" ||
           ssh_status="$?"
+        printf '%s\n' "${ssh_status}" >"${status_path}"
         if ((ssh_status == 0)); then
           echo "expected tailscale ssh ${source_name} to ${target_name} to time out" >&2
           exit 1

@@ -350,6 +350,63 @@ mod tests {
     }
 
     #[test]
+    fn compiles_group_sources_for_self_without_cross_user_leak() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "groups": {
+                "group:primary": ["user1@"],
+                "group:secondary": ["user2@"],
+                "group:auditors": ["user3@"]
+              },
+              "ssh": [{
+                "action": "accept",
+                "src": ["group:primary", "group:secondary", "group:auditors"],
+                "dst": ["autogroup:self"],
+                "users": ["ssh-it-user"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("user1".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("user1".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 3,
+                user: Some("user2".into()),
+                addrs: vec!["100.64.0.3".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 4,
+                user: Some("user3".into()),
+                addrs: vec!["100.64.0.4".into()],
+                tags: Vec::new(),
+            },
+        ];
+
+        let user1_target = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+        let user2_target = compile_ssh_policy(&doc, &nodes, 3).unwrap();
+        let user3_target = compile_ssh_policy(&doc, &nodes, 4).unwrap();
+
+        assert_eq!(
+            principal_ips(&user1_target),
+            vec!["100.64.0.1", "100.64.0.2"]
+        );
+        assert_eq!(principal_ips(&user2_target), vec!["100.64.0.3"]);
+        assert_eq!(principal_ips(&user3_target), vec!["100.64.0.4"]);
+    }
+
+    #[test]
     fn check_period_serialises_as_duration_nanos() {
         let doc = parse_hujson_policy(
             r#"{
@@ -384,5 +441,13 @@ mod tests {
             pol.rules[0].action.session_duration,
             24 * 60 * 60 * 1_000_000_000
         );
+    }
+
+    fn principal_ips(policy: &SshPolicy) -> Vec<&str> {
+        policy.rules[0]
+            .principals
+            .iter()
+            .map(|principal| principal.node_ip.as_str())
+            .collect()
     }
 }

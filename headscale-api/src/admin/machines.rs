@@ -893,7 +893,12 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
         let mut record = machine_admin_record_from_wire(&pending);
         record.user = oidc_user_name(user);
-        record.expiry = node_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
+        let effective_expiry = if pending.forced_tags.is_empty() {
+            node_expiry.or(pending.expiry)
+        } else {
+            None
+        };
+        record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
         record.register_method = REGISTER_METHOD_OIDC;
 
         let result = self
@@ -1878,6 +1883,18 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
+    }
+
+    fn oidc_test_user() -> crate::oidc::OidcStoredUser {
+        crate::oidc::OidcStoredUser {
+            id: 1,
+            name: "alice".into(),
+            display_name: "Alice Smith".into(),
+            email: "alice@example.com".into(),
+            provider_identifier: "https://issuer.example/subject".into(),
+            provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+            profile_pic_url: String::new(),
+        }
     }
 
     fn fixture() -> (WireMachineAdmin, Arc<MachineRegistry>) {
@@ -2975,6 +2992,88 @@ mod tests {
             }
             other => panic!("unexpected registration outcome: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_preserves_pending_expiry_without_provider_expiry()
+    {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "da".repeat(32),
+            "db".repeat(32),
+            String::new(),
+            "alice-oidc-default".into(),
+            Ipv4Addr::new(100, 64, 0, 56),
+            false,
+        );
+        let pending_expiry = Utc.timestamp_opt(4_102_358_400, 0).unwrap();
+        pending.expiry = Some(pending_expiry);
+        let registration_id = "u".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin.clone(),
+            Arc::new(PolicyStore::new()),
+        )
+        .with_wire_registry(registry.clone());
+        let user = oidc_test_user();
+        let result = handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        assert!(cache.get(&registration_id).is_none());
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(stored.expiry, Some(4_102_358_400));
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.expiry, Some(pending_expiry));
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_handler_provider_expiry_overrides_pending_expiry() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "dc".repeat(32),
+            "dd".repeat(32),
+            String::new(),
+            "alice-oidc-token".into(),
+            Ipv4Addr::new(100, 64, 0, 57),
+            false,
+        );
+        pending.expiry = Some(Utc.timestamp_opt(4_102_358_400, 0).unwrap());
+        let token_expiry = Utc.timestamp_opt(4_102_444_800, 0).unwrap();
+        let registration_id = "v".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin.clone(),
+            Arc::new(PolicyStore::new()),
+        )
+        .with_wire_registry(registry.clone());
+        let user = oidc_test_user();
+        let result = handler
+            .complete_oidc_registration(&registration_id, &user, Some(token_expiry))
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.expiry, Some(4_102_444_800));
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.expiry, Some(token_expiry));
     }
 
     #[tokio::test]

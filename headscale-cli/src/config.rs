@@ -83,8 +83,10 @@ pub(crate) struct CliConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unix_socket: Option<PathBuf>,
     /// Node mode configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeConfig>,
     /// Logging configuration
+    #[serde(default, alias = "log", skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
     /// Top-level headscale-compatible DNS configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,11 +197,13 @@ pub(crate) struct DerpServerConfig {
 }
 
 /// Node mode configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct NodeConfig {
     /// Control plane URL
+    #[serde(default)]
     pub server: String,
     /// Node name
+    #[serde(default)]
     pub name: Option<String>,
     /// WireGuard interface name
     #[serde(default = "default_wg_interface")]
@@ -213,6 +217,18 @@ pub(crate) struct NodeConfig {
     /// Node capabilities
     #[serde(default)]
     pub capabilities: NodeCapabilities,
+    /// Upstream `node.expiry` default key lifetime for non-tagged nodes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string"
+    )]
+    pub expiry: Option<u64>,
+    /// Upstream ephemeral-node lifecycle settings.
+    #[serde(default)]
+    pub ephemeral: NodeEphemeralConfig,
+    /// Upstream route lifecycle settings.
+    #[serde(default)]
+    pub routes: NodeRoutesConfig,
 }
 
 /// What resources this node can provide.
@@ -233,6 +249,35 @@ pub(crate) struct NodeCapabilities {
     /// Is a seed node
     #[serde(default)]
     pub seed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct NodeEphemeralConfig {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string"
+    )]
+    pub inactivity_timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct NodeRoutesConfig {
+    #[serde(default)]
+    pub ha: NodeRoutesHaConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct NodeRoutesHaConfig {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string"
+    )]
+    pub probe_interval: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string"
+    )]
+    pub probe_timeout: Option<u64>,
 }
 
 /// Logging configuration.
@@ -341,6 +386,7 @@ impl CliConfig {
         }
         config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
+        config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
@@ -372,6 +418,7 @@ impl CliConfig {
         let mut config = Self::default();
         config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
+        config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
@@ -423,6 +470,22 @@ impl CliConfig {
         Ok(())
     }
 
+    fn apply_node_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            if key.as_ref() == "HEADSCALE_NODE_EXPIRY" {
+                let expiry = parse_duration_secs_str(value.as_ref())
+                    .map_err(|err| anyhow::anyhow!("invalid {}: {err}", key.as_ref()))?;
+                self.node.get_or_insert_with(NodeConfig::default).expiry = Some(expiry);
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_oidc_client_secret(&mut self) -> Result<()> {
         self.oidc
             .resolve_client_secret()
@@ -437,6 +500,11 @@ impl CliConfig {
             || self.grpc_listen_addr.is_some()
             || self.grpc_allow_insecure.is_some()
             || self.ephemeral_node_inactivity_timeout.is_some()
+            || self
+                .node
+                .as_ref()
+                .and_then(|node| node.ephemeral.inactivity_timeout)
+                .is_some()
             || self.unix_socket.is_some()
             || self.unix_socket_permission.is_some()
             || self
@@ -473,6 +541,13 @@ impl CliConfig {
             server.grpc_allow_insecure = grpc_allow_insecure;
         }
         if let Some(timeout) = self.ephemeral_node_inactivity_timeout {
+            server.ephemeral_node_inactivity_timeout_secs = timeout;
+        }
+        if let Some(timeout) = self
+            .node
+            .as_ref()
+            .and_then(|node| node.ephemeral.inactivity_timeout)
+        {
             server.ephemeral_node_inactivity_timeout_secs = timeout;
         }
         if !had_server_block && let Some(unix_socket) = self.unix_socket.clone() {
@@ -591,6 +666,7 @@ impl CliConfig {
         self.oidc.validate().context("invalid OIDC configuration")?;
         self.validate_upstream_database_config()?;
         self.validate_upstream_tls_config()?;
+        self.validate_upstream_node_config()?;
         self.validate_policy_config()?;
 
         let server = self.server.as_ref().context(
@@ -710,6 +786,31 @@ impl CliConfig {
             );
         }
 
+        Ok(())
+    }
+
+    fn validate_upstream_node_config(&self) -> Result<()> {
+        let Some(node) = &self.node else {
+            return Ok(());
+        };
+        let Some(interval) = node.routes.ha.probe_interval else {
+            return Ok(());
+        };
+        if interval == 0 {
+            return Ok(());
+        }
+        if interval < 2 {
+            bail!("node.routes.ha.probe_interval ({interval}s) must be >= 2s");
+        }
+        let timeout = node.routes.ha.probe_timeout.unwrap_or(5);
+        if timeout < 1 {
+            bail!("node.routes.ha.probe_timeout ({timeout}s) must be >= 1s");
+        }
+        if timeout >= interval {
+            bail!(
+                "node.routes.ha.probe_timeout ({timeout}s) must be less than node.routes.ha.probe_interval ({interval}s)"
+            );
+        }
         Ok(())
     }
 }
@@ -1291,6 +1392,88 @@ taildrop:
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_TAILDROP_ENABLED"));
+    }
+
+    #[test]
+    fn loads_upstream_node_lifecycle_config_without_node_mode_server() {
+        let source = r#"
+server_url: "https://headscale.example"
+
+node:
+  expiry: 180d
+  ephemeral:
+    inactivity_timeout: 30m
+  routes:
+    ha:
+      probe_interval: 15s
+      probe_timeout: 4s
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let node = config.node.as_ref().expect("node block parsed");
+        assert_eq!(node.server, "");
+        assert_eq!(node.expiry, Some(180 * 24 * 60 * 60));
+        assert_eq!(node.ephemeral.inactivity_timeout, Some(30 * 60));
+        assert_eq!(node.routes.ha.probe_interval, Some(15));
+        assert_eq!(node.routes.ha.probe_timeout, Some(4));
+        assert_eq!(
+            config
+                .server
+                .as_ref()
+                .unwrap()
+                .ephemeral_node_inactivity_timeout_secs,
+            30 * 60
+        );
+    }
+
+    #[test]
+    fn node_expiry_zero_disables_default_expiry() {
+        let source = r"
+[node]
+expiry = 0
+";
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+
+        assert_eq!(config.node.as_ref().unwrap().expiry, Some(0));
+    }
+
+    #[test]
+    fn applies_headscale_node_expiry_env_override_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_node_env_overrides_from([("HEADSCALE_NODE_EXPIRY", "14d")])
+            .unwrap();
+
+        assert_eq!(
+            config.node.as_ref().unwrap().expiry,
+            Some(14 * 24 * 60 * 60)
+        );
+
+        let err = config
+            .apply_node_env_overrides_from([("HEADSCALE_NODE_EXPIRY", "1ms")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_NODE_EXPIRY"));
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_node_route_ha_timing() {
+        let source = r#"
+server_url: "https://headscale.example"
+
+node:
+  routes:
+    ha:
+      probe_interval: 5s
+      probe_timeout: 5s
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("node.routes.ha.probe_timeout"));
     }
 
     #[test]

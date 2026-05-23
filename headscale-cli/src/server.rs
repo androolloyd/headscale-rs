@@ -66,6 +66,9 @@ pub(crate) struct RunServerConfig {
     pub grpc_allow_insecure: bool,
     pub tls: TlsRuntimeConfig,
     pub oidc: OidcConfig,
+    pub node_expiry: Duration,
+    pub node_routes_ha_probe_interval: Duration,
+    pub node_routes_ha_probe_timeout: Duration,
     pub embedded_derp: EmbeddedDerpConfig,
     pub derp: Option<DerpConfig>,
     pub dns: Option<DnsConfigSpec>,
@@ -175,7 +178,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     })?;
 
     let db = open_sqlite_database(&cfg.db_path).await?;
-    let oidc = runtime_from_core_oidc(&cfg.oidc, server_url)
+    let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
+    let oidc = runtime_from_core_oidc(&oidc_config, server_url)
         .await
         .context("build OIDC runtime")?;
     let embedded_derp_runtime =
@@ -478,6 +482,18 @@ fn runtime_config_snapshot(
         grpc_addr: cfg.grpc_listen_addr.clone(),
         grpc_allow_insecure: cfg.grpc_allow_insecure,
         ephemeral_node_inactivity_timeout: duration_nanos(cfg.ephemeral_node_inactivity_timeout),
+        node: headscale_api::tailscale_wire::basic_handlers::DebugNodeConfig {
+            expiry: duration_nanos(cfg.node_expiry),
+            ephemeral: headscale_api::tailscale_wire::basic_handlers::DebugNodeEphemeralConfig {
+                inactivity_timeout: duration_nanos(cfg.ephemeral_node_inactivity_timeout),
+            },
+            routes: headscale_api::tailscale_wire::basic_handlers::DebugNodeRoutesConfig {
+                ha: headscale_api::tailscale_wire::basic_handlers::DebugNodeRoutesHaConfig {
+                    probe_interval: duration_nanos(cfg.node_routes_ha_probe_interval),
+                    probe_timeout: duration_nanos(cfg.node_routes_ha_probe_timeout),
+                },
+            },
+        },
         prefix_v4: non_empty_string(&cfg.mesh_cidr),
         prefix_v6: cfg
             .mesh_cidr_v6
@@ -615,39 +631,50 @@ fn runtime_config_snapshot(
         serde_json::to_value(dns.build(&[])).unwrap_or(serde_json::Value::Null);
     snapshot.taildrop.enabled = cfg.taildrop_enabled;
 
-    snapshot.oidc.only_start_if_oidc_is_available = cfg.oidc.only_start_if_oidc_is_available;
-    snapshot.oidc.issuer.clone_from(&cfg.oidc.issuer);
-    snapshot.oidc.client_id.clone_from(&cfg.oidc.client_id);
+    let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
+    snapshot.oidc.only_start_if_oidc_is_available = oidc_config.only_start_if_oidc_is_available;
+    snapshot.oidc.issuer.clone_from(&oidc_config.issuer);
+    snapshot.oidc.client_id.clone_from(&oidc_config.client_id);
     snapshot
         .oidc
         .client_secret
-        .clone_from(&cfg.oidc.client_secret);
-    snapshot.oidc.scope.clone_from(&cfg.oidc.scope);
+        .clone_from(&oidc_config.client_secret);
+    snapshot.oidc.scope.clone_from(&oidc_config.scope);
     snapshot
         .oidc
         .extra_params
-        .clone_from(&cfg.oidc.extra_params);
+        .clone_from(&oidc_config.extra_params);
     snapshot
         .oidc
         .allowed_domains
-        .clone_from(&cfg.oidc.allowed_domains);
+        .clone_from(&oidc_config.allowed_domains);
     snapshot
         .oidc
         .allowed_users
-        .clone_from(&cfg.oidc.allowed_users);
+        .clone_from(&oidc_config.allowed_users);
     snapshot
         .oidc
         .allowed_groups
-        .clone_from(&cfg.oidc.allowed_groups);
-    snapshot.oidc.email_verified_required = cfg.oidc.email_verified_required;
-    snapshot.oidc.expiry = duration_nanos(cfg.oidc.expiry);
-    snapshot.oidc.use_expiry_from_token = cfg.oidc.use_expiry_from_token;
-    snapshot.oidc.pkce.enabled = cfg.oidc.pkce.enabled;
-    snapshot.oidc.pkce.method.clone_from(&cfg.oidc.pkce.method);
+        .clone_from(&oidc_config.allowed_groups);
+    snapshot.oidc.email_verified_required = oidc_config.email_verified_required;
+    snapshot.oidc.expiry = duration_nanos(oidc_config.expiry);
+    snapshot.oidc.use_expiry_from_token = oidc_config.use_expiry_from_token;
+    snapshot.oidc.pkce.enabled = oidc_config.pkce.enabled;
+    snapshot
+        .oidc
+        .pkce
+        .method
+        .clone_from(&oidc_config.pkce.method);
     snapshot.policy.mode = cfg.policy.mode().to_string();
     snapshot.policy.path = cfg.policy.path.display().to_string();
 
     snapshot
+}
+
+fn upstream_oidc_runtime_config(oidc: &OidcConfig) -> OidcConfig {
+    let mut oidc = oidc.clone();
+    oidc.expiry = Duration::ZERO;
+    oidc
 }
 
 fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMaterialSource> {
@@ -1554,7 +1581,13 @@ mod tests {
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
             tls: TlsRuntimeConfig::default(),
-            oidc: OidcConfig::default(),
+            oidc: OidcConfig {
+                expiry: Duration::ZERO,
+                ..OidcConfig::default()
+            },
+            node_expiry: Duration::default(),
+            node_routes_ha_probe_interval: Duration::from_secs(10),
+            node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
@@ -1562,6 +1595,24 @@ mod tests {
             taildrop_enabled: true,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
+    }
+
+    #[test]
+    fn server_boundary_disables_legacy_oidc_expiry_default() {
+        let oidc = OidcConfig {
+            issuer: "https://issuer.example".into(),
+            client_id: "headscale-rs".into(),
+            use_expiry_from_token: true,
+            ..OidcConfig::default()
+        };
+
+        let normalized = upstream_oidc_runtime_config(&oidc);
+
+        assert_eq!(oidc.expiry, Duration::from_secs(180 * 24 * 60 * 60));
+        assert_eq!(normalized.expiry, Duration::ZERO);
+        assert_eq!(normalized.issuer, oidc.issuer);
+        assert_eq!(normalized.client_id, oidc.client_id);
+        assert!(normalized.use_expiry_from_token);
     }
 
     #[test]
@@ -2271,6 +2322,9 @@ regions:
             grpc_allow_insecure: false,
             tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
+            node_expiry: Duration::default(),
+            node_routes_ha_probe_interval: Duration::from_secs(10),
+            node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
@@ -2323,6 +2377,9 @@ regions:
                 ..TlsRuntimeConfig::default()
             },
             oidc: OidcConfig::default(),
+            node_expiry: Duration::default(),
+            node_routes_ha_probe_interval: Duration::from_secs(10),
+            node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
@@ -2469,6 +2526,9 @@ regions:
                 key_path: Some(dir.path().join("tls.key")),
             },
             oidc: OidcConfig::default(),
+            node_expiry: Duration::from_secs(90 * 24 * 60 * 60),
+            node_routes_ha_probe_interval: Duration::from_secs(15),
+            node_routes_ha_probe_timeout: Duration::from_secs(4),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,
@@ -2506,6 +2566,23 @@ regions:
         assert_eq!(snapshot.acme_email, "ops@example.com");
         assert!(snapshot.dns_config.magic_dns);
         assert_eq!(snapshot.dns_config.base_domain, "tail.example");
+        assert_eq!(
+            snapshot.node.expiry,
+            i64::try_from(Duration::from_secs(90 * 24 * 60 * 60).as_nanos()).unwrap()
+        );
+        assert_eq!(
+            snapshot.node.ephemeral.inactivity_timeout,
+            i64::try_from(Duration::from_secs(180).as_nanos()).unwrap()
+        );
+        assert_eq!(
+            snapshot.node.routes.ha.probe_interval,
+            i64::try_from(Duration::from_secs(15).as_nanos()).unwrap()
+        );
+        assert_eq!(
+            snapshot.node.routes.ha.probe_timeout,
+            i64::try_from(Duration::from_secs(4).as_nanos()).unwrap()
+        );
+        assert_eq!(snapshot.oidc.expiry, 0);
         assert!(!snapshot.taildrop.enabled);
         assert_eq!(snapshot.unix_socket_permission, 0o760);
     }
@@ -2530,6 +2607,9 @@ regions:
             grpc_allow_insecure: false,
             tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
+            node_expiry: Duration::default(),
+            node_routes_ha_probe_interval: Duration::from_secs(10),
+            node_routes_ha_probe_timeout: Duration::from_secs(5),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
             dns: None,

@@ -168,6 +168,7 @@ async fn register_inner(
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     let requested_tags = requested_tags_for_body(&body);
     let now = chrono::Utc::now();
+    let default_expiry = configured_node_expiry(state.runtime_config.as_ref(), now);
 
     if let Some(expiry) = body.expiry
         && expiry <= now
@@ -394,11 +395,9 @@ async fn register_inner(
         requested_os_version
     };
     let expiry = if forced_tags.is_empty() {
-        effective_authkey_expiry(body.expiry, now)
+        effective_register_expiry(body.expiry, default_expiry, now)
     } else {
-        existing_machine
-            .as_ref()
-            .and_then(|(_, existing)| existing.expiry)
+        None
     };
     let rec = MachineRecord {
         node_key_hex: node_key_hex.clone(),
@@ -496,7 +495,13 @@ async fn register_interactive(
         Err(resp) => return resp,
     };
     let now = chrono::Utc::now();
+    let default_expiry = configured_node_expiry(state.runtime_config.as_ref(), now);
     let registration_id = new_registration_id();
+    let expiry = if requested_tags.is_empty() {
+        effective_register_expiry(body.expiry, default_expiry, now)
+    } else {
+        None
+    };
     let record = MachineRecord {
         node_key_hex,
         machine_key_hex,
@@ -510,7 +515,7 @@ async fn register_interactive(
         disco_key: None,
         endpoints: Vec::new(),
         home_derp: 0,
-        expiry: effective_authkey_expiry(body.expiry, now),
+        expiry,
         last_seen: now,
         ephemeral: body.ephemeral,
         created_at: now,
@@ -626,11 +631,27 @@ fn merge_existing_approved_routes(
     merged.into_iter().collect()
 }
 
-fn effective_authkey_expiry(
-    expiry: Option<chrono::DateTime<chrono::Utc>>,
+fn configured_node_expiry(
+    runtime_config: &crate::tailscale_wire::RuntimeConfigSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    expiry.filter(|expiry| *expiry > now)
+    let nanos = runtime_config.node.expiry;
+    if nanos <= 0 {
+        return None;
+    }
+    let duration = chrono::Duration::nanoseconds(nanos);
+    Some(
+        now.checked_add_signed(duration)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+    )
+}
+
+fn effective_register_expiry(
+    expiry: Option<chrono::DateTime<chrono::Utc>>,
+    default_expiry: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    expiry.filter(|expiry| *expiry > now).or(default_expiry)
 }
 
 fn preauth_error_response(err: RedeemError) -> axum::response::Response {
@@ -977,6 +998,14 @@ mod tests {
                 next.run(req).await
             },
         ))
+    }
+
+    fn runtime_config_with_node_expiry(
+        expiry: Duration,
+    ) -> crate::tailscale_wire::RuntimeConfigSnapshot {
+        let mut config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        config.node.expiry = i64::try_from(expiry.as_nanos()).unwrap_or(i64::MAX);
+        config
     }
 
     fn fixture() -> (WireState, MockRedeemer, tempfile::TempDir) {
@@ -1588,7 +1617,8 @@ mod tests {
 
     #[tokio::test]
     async fn authkey_tagged_preauth_disables_requested_expiry() {
-        let (state, redeemer, _dir) = fixture();
+        let (mut state, redeemer, _dir) = fixture();
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
         let authkey = "hskey-auth-tagged-expiry";
         redeemer.insert_full(
             authkey,
@@ -1692,8 +1722,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authkey_untagged_applies_node_expiry_when_client_expiry_absent() {
+        let (mut state, redeemer, _dir) = fixture();
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
+        let authkey = "hskey-auth-node-expiry-default";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "16".repeat(32);
+        let before = chrono::Utc::now();
+        let body = req_body(&node_key_hex, authkey);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        let expiry = rec.expiry.expect("node.expiry default applied");
+        assert!(expiry >= before + chrono::Duration::seconds(3600));
+        assert!(expiry <= chrono::Utc::now() + chrono::Duration::seconds(3600));
+    }
+
+    #[tokio::test]
     async fn authkey_untagged_preauth_ignores_go_zero_expiry() {
-        let (state, redeemer, _dir) = fixture();
+        let (mut state, redeemer, _dir) = fixture();
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(7200)));
         let authkey = "hskey-auth-zero-expiry";
         redeemer.insert(authkey, "alice");
         let app = router(state.clone());
@@ -1719,10 +1780,33 @@ mod tests {
 
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert!(rec.forced_tags.is_empty());
-        assert!(
-            rec.expiry.is_none(),
-            "Go's zero time should not create an already-expired node"
-        );
+        let expiry = rec.expiry.expect("Go zero time falls back to node.expiry");
+        assert!(expiry > chrono::Utc::now() + chrono::Duration::seconds(7100));
+    }
+
+    #[tokio::test]
+    async fn authkey_node_expiry_zero_yields_no_default_expiry() {
+        let (mut state, redeemer, _dir) = fixture();
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::ZERO));
+        let authkey = "hskey-auth-node-expiry-zero";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "1e".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.get(&node_key_hex).unwrap().expiry.is_none());
     }
 
     #[tokio::test]
@@ -1940,7 +2024,8 @@ mod tests {
 
     #[tokio::test]
     async fn authkey_existing_node_can_reregister_with_used_key() {
-        let (state, redeemer, _dir) = fixture();
+        let (mut state, redeemer, _dir) = fixture();
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
         let authkey = "hskey-auth-used-reregister";
         redeemer.insert(authkey, "alice");
         let app = router(state.clone());
@@ -1959,6 +2044,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!redeemer.contains(authkey));
         assert_eq!(state.machines.len(), 1);
+        let first_expiry = state
+            .machines
+            .get(&node_key_hex)
+            .unwrap()
+            .expiry
+            .expect("first registration applied default expiry");
+
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(7200)));
+        let app = router(state.clone());
 
         let mut body = req_body(&node_key_hex, authkey);
         body["Hostinfo"]["Hostname"] = serde_json::json!("peer-restarted");
@@ -1980,6 +2074,13 @@ mod tests {
             state.machines.get(&node_key_hex).unwrap().hostname,
             "peer-restarted"
         );
+        let second_expiry = state
+            .machines
+            .get(&node_key_hex)
+            .unwrap()
+            .expiry
+            .expect("reauth refreshed default expiry");
+        assert!(second_expiry > first_expiry + chrono::Duration::minutes(50));
 
         let attacker_node_key = "3d".repeat(32);
         let body = req_body(&attacker_node_key, authkey);
@@ -2422,6 +2523,45 @@ mod tests {
         assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
         assert!(pending.expiry.is_none());
         assert!(pending.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn missing_authkey_interactive_registration_applies_node_expiry_default() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
+        let app = router(state.clone());
+        let node_key_hex = "d4".repeat(32);
+        let before = chrono::Utc::now();
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending-default-expiry" },
+        });
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let registration_id = rr
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .expect("configured web registration AuthURL");
+        let pending = state.registration_cache.get(registration_id).unwrap();
+        let expiry = pending.expiry.expect("node.expiry default applied");
+
+        assert!(expiry >= before + chrono::Duration::seconds(3600));
+        assert!(expiry <= chrono::Utc::now() + chrono::Duration::seconds(3600));
     }
 
     #[tokio::test]

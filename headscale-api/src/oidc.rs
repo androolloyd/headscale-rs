@@ -2416,6 +2416,54 @@ mod tests {
 
     #[cfg(feature = "full")]
     #[tokio::test]
+    async fn oidc_callback_without_token_expiry_passes_no_provider_expiry() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        config.policy.expiry = Duration::zero();
+        config.policy.use_expiry_from_token = false;
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
+        let start = runtime.begin_registration("r".repeat(24)).unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = registrations.calls.read();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, None);
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
     async fn oidc_callback_maps_expired_registration_to_upstream_gone_response() {
         let token = Arc::new(RwLock::new(String::new()));
         let captured_form = Arc::new(RwLock::new(BTreeMap::new()));

@@ -591,6 +591,8 @@ pub struct DebugConfigInfo {
     pub grpc_allow_insecure: bool,
     #[serde(rename = "EphemeralNodeInactivityTimeout")]
     pub ephemeral_node_inactivity_timeout: i64,
+    #[serde(rename = "Node")]
+    pub node: DebugNodeConfig,
     #[serde(rename = "PrefixV4")]
     pub prefix_v4: Option<String>,
     #[serde(rename = "PrefixV6")]
@@ -654,6 +656,13 @@ impl Default for DebugConfigInfo {
             grpc_addr: ":50443".to_string(),
             grpc_allow_insecure: false,
             ephemeral_node_inactivity_timeout: duration_nanos(std::time::Duration::from_secs(120)),
+            node: DebugNodeConfig {
+                expiry: 0,
+                ephemeral: DebugNodeEphemeralConfig {
+                    inactivity_timeout: duration_nanos(std::time::Duration::from_secs(120)),
+                },
+                routes: DebugNodeRoutesConfig::default(),
+            },
             prefix_v4: None,
             prefix_v6: None,
             ip_allocation: "sequential".to_string(),
@@ -802,6 +811,57 @@ pub struct DebugLogConfig {
     pub format: String,
     #[serde(rename = "Level")]
     pub level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNodeConfig {
+    #[serde(rename = "Expiry")]
+    pub expiry: i64,
+    #[serde(rename = "Ephemeral")]
+    pub ephemeral: DebugNodeEphemeralConfig,
+    #[serde(rename = "Routes")]
+    pub routes: DebugNodeRoutesConfig,
+}
+
+impl Default for DebugNodeConfig {
+    fn default() -> Self {
+        Self {
+            expiry: 0,
+            ephemeral: DebugNodeEphemeralConfig {
+                inactivity_timeout: duration_nanos(std::time::Duration::from_secs(120)),
+            },
+            routes: DebugNodeRoutesConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNodeEphemeralConfig {
+    #[serde(rename = "InactivityTimeout")]
+    pub inactivity_timeout: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DebugNodeRoutesConfig {
+    #[serde(rename = "HA")]
+    pub ha: DebugNodeRoutesHaConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNodeRoutesHaConfig {
+    #[serde(rename = "ProbeInterval")]
+    pub probe_interval: i64,
+    #[serde(rename = "ProbeTimeout")]
+    pub probe_timeout: i64,
+}
+
+impl Default for DebugNodeRoutesHaConfig {
+    fn default() -> Self {
+        Self {
+            probe_interval: duration_nanos(std::time::Duration::from_secs(10)),
+            probe_timeout: duration_nanos(std::time::Duration::from_secs(5)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3925,6 +3985,7 @@ mod tests {
             "GRPCAddr",
             "GRPCAllowInsecure",
             "EphemeralNodeInactivityTimeout",
+            "Node",
             "PrefixV4",
             "PrefixV6",
             "IPAllocation",
@@ -3950,6 +4011,19 @@ mod tests {
         assert_eq!(parsed["GRPCAddr"], ":50443");
         assert_eq!(parsed["GRPCAllowInsecure"], false);
         assert_eq!(parsed["EphemeralNodeInactivityTimeout"], 120_000_000_000i64);
+        assert_eq!(parsed["Node"]["Expiry"], 0);
+        assert_eq!(
+            parsed["Node"]["Ephemeral"]["InactivityTimeout"],
+            120_000_000_000i64
+        );
+        assert_eq!(
+            parsed["Node"]["Routes"]["HA"]["ProbeInterval"],
+            10_000_000_000i64
+        );
+        assert_eq!(
+            parsed["Node"]["Routes"]["HA"]["ProbeTimeout"],
+            5_000_000_000i64
+        );
         assert!(parsed["PrefixV4"].is_null());
         assert!(parsed["PrefixV6"].is_null());
         assert_eq!(parsed["IPAllocation"], "sequential");
@@ -4059,6 +4133,7 @@ mod tests {
         assert_eq!(parsed["GRPCAllowInsecure"], true);
         assert_eq!(parsed["PrefixV4"], "100.100.0.0/16");
         assert_eq!(parsed["IPAllocation"], "random");
+        assert_eq!(parsed["Node"]["Expiry"], 0);
         assert_eq!(parsed["TLS"]["CertPath"], "/etc/headscale/tls.crt");
         assert_eq!(parsed["TLS"]["KeyPath"], "/etc/headscale/tls.key");
         assert_eq!(

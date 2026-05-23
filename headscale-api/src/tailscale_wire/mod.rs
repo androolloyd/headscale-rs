@@ -2228,6 +2228,18 @@ mod registry_tests {
         }
     }
 
+    fn oidc_test_user() -> crate::oidc::OidcStoredUser {
+        crate::oidc::OidcStoredUser {
+            id: 7,
+            name: "alice@example.com".into(),
+            display_name: "Alice Smith".into(),
+            email: "alice@example.com".into(),
+            provider_identifier: "https://issuer.example/subject".into(),
+            provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+            profile_pic_url: String::new(),
+        }
+    }
+
     #[tokio::test]
     async fn public_ping_response_head_route_is_successful() {
         let state = test_state();
@@ -2460,20 +2472,9 @@ mod registry_tests {
         let handler = WireOidcRegistrationHandler {
             state: state.clone(),
         };
+        let user = oidc_test_user();
         let result = handler
-            .complete_oidc_registration(
-                &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 7,
-                    name: "alice@example.com".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
-                Some(expiry),
-            )
+            .complete_oidc_registration(&registration_id, &user, Some(expiry))
             .await
             .unwrap();
 
@@ -2499,24 +2500,71 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn wire_oidc_registration_handler_preserves_pending_expiry_without_provider_expiry() {
+        let state = test_state();
+        let registration_id = "e".repeat(24);
+        let mut pending = mk_record(11);
+        pending.user.clear();
+        let pending_expiry = Utc::now() + chrono::Duration::hours(3);
+        pending.expiry = Some(pending_expiry);
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let user = oidc_test_user();
+        let result = handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert_eq!(registered.user, "alice@example.com");
+        assert_eq!(registered.register_method, REGISTER_METHOD_OIDC);
+        assert_eq!(registered.expiry, Some(pending_expiry));
+        assert!(state.registration_cache.get(&registration_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_clears_tagged_expiry() {
+        let state = test_state();
+        let registration_id = "t".repeat(24);
+        let mut pending = mk_record(12);
+        pending.user.clear();
+        pending.forced_tags = vec!["tag:server".into()];
+        pending.expiry = Some(Utc::now() + chrono::Duration::hours(3));
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+
+        let token_expiry = Utc::now() + chrono::Duration::hours(1);
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let user = oidc_test_user();
+        let result = handler
+            .complete_oidc_registration(&registration_id, &user, Some(token_expiry))
+            .await
+            .unwrap();
+
+        assert!(result.new_node);
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert_eq!(registered.forced_tags, vec!["tag:server"]);
+        assert_eq!(registered.expiry, None);
+    }
+
+    #[tokio::test]
     async fn wire_oidc_registration_handler_reports_expired_sessions() {
         let handler = WireOidcRegistrationHandler {
             state: test_state(),
         };
+        let user = oidc_test_user();
+        let registration_id = "missing".repeat(4);
         let err = handler
-            .complete_oidc_registration(
-                &"missing".repeat(4),
-                &crate::oidc::OidcStoredUser {
-                    id: 7,
-                    name: "alice@example.com".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
-                Some(Utc::now()),
-            )
+            .complete_oidc_registration(&registration_id, &user, Some(Utc::now()))
             .await
             .unwrap_err();
 
@@ -3138,7 +3186,11 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             .registration_cache
             .get(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
-        pending.expiry = node_expiry;
+        pending.expiry = if pending.forced_tags.is_empty() {
+            node_expiry.or(pending.expiry)
+        } else {
+            None
+        };
 
         pending.approved_routes = auto_approved_routes_for_node(
             &self.state.policy,

@@ -313,6 +313,28 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
         } => {
             let server_config = config.as_ref().and_then(|c| c.server.as_ref());
             let defaults = ServerConfig::default();
+            let node_expiry = config
+                .as_ref()
+                .and_then(|c| c.node.as_ref())
+                .and_then(|node| node.expiry)
+                .map(Duration::from_secs)
+                .unwrap_or_default();
+            let node_routes_ha_probe_interval = config
+                .as_ref()
+                .and_then(|c| c.node.as_ref())
+                .and_then(|node| node.routes.ha.probe_interval)
+                .map_or_else(|| Duration::from_secs(10), Duration::from_secs);
+            let node_routes_ha_probe_timeout = config
+                .as_ref()
+                .and_then(|c| c.node.as_ref())
+                .and_then(|node| node.routes.ha.probe_timeout)
+                .map_or_else(|| Duration::from_secs(5), Duration::from_secs);
+            let mut oidc = config
+                .as_ref()
+                .map_or_else(headscale_core::config::OidcConfig::default, |c| {
+                    c.oidc.clone()
+                });
+            oidc.expiry = Duration::ZERO;
             let run_config = server::RunServerConfig {
                 listen: server_config.map_or(listen, |s| s.listen.clone()),
                 db_path: server_config.map_or(db_path, |s| s.db_path.clone()),
@@ -355,11 +377,10 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     cert_path: config.as_ref().and_then(|c| c.tls_cert_path.clone()),
                     key_path: config.as_ref().and_then(|c| c.tls_key_path.clone()),
                 },
-                oidc: config
-                    .as_ref()
-                    .map_or_else(headscale_core::config::OidcConfig::default, |c| {
-                        c.oidc.clone()
-                    }),
+                oidc,
+                node_expiry,
+                node_routes_ha_probe_interval,
+                node_routes_ha_probe_timeout,
                 embedded_derp: server_config
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
                 derp: config.as_ref().and_then(|c| c.derp.clone()),
@@ -391,7 +412,15 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
             let server_url = config
                 .as_ref()
                 .and_then(|c| c.node.as_ref())
-                .map_or(server_url, |n| n.server.clone());
+                .and_then(|n| {
+                    let server = n.server.trim();
+                    if server.is_empty() {
+                        None
+                    } else {
+                        Some(n.server.clone())
+                    }
+                })
+                .unwrap_or(server_url);
             let name = name.or_else(|| {
                 config
                     .as_ref()
@@ -450,10 +479,14 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
-                config
-                    .as_ref()
-                    .and_then(|c| c.node.as_ref())
-                    .map(|n| n.server.clone())
+                config.as_ref().and_then(|c| c.node.as_ref()).and_then(|n| {
+                    let server = n.server.trim();
+                    if server.is_empty() {
+                        None
+                    } else {
+                        Some(n.server.clone())
+                    }
+                })
             });
             check_status(server_url.as_deref())
                 .await

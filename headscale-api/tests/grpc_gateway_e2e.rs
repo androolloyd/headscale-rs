@@ -33,6 +33,36 @@ async fn fixture() -> (Router, String) {
     (app, token)
 }
 
+async fn fixture_with_wire_registry()
+-> (Router, String, Arc<MachineRegistry>, headscale_db::Database) {
+    let db = headscale_db::Database::in_memory()
+        .await
+        .expect("open in-memory db");
+    db.migrate().await.expect("migrate");
+
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
+    let created = api_keys
+        .mint(ApiKeyMintRequest { expiration: None })
+        .await
+        .expect("mint api key");
+    let preauth = Arc::new(
+        PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
+    );
+    let registry = Arc::new(MachineRegistry::new());
+    let machines = Arc::new(WireMachineAdmin::new(registry.clone()));
+    let service = HeadscaleAdminService::with_user_admin(
+        users,
+        api_keys,
+        preauth,
+        PolicyStore::new(),
+        machines,
+    )
+    .with_database_pool(db.pool().clone())
+    .with_policy_pool(db.pool().clone());
+    (grpc_gateway::router(service), created.api_key, registry, db)
+}
+
 async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
     let db = headscale_db::Database::in_memory()
         .await
@@ -651,7 +681,7 @@ async fn grpc_gateway_path_uint64_accepts_go_base0_literals() {
 
 #[tokio::test]
 async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
-    let (app, token) = fixture().await;
+    let (app, token, registry, _db) = fixture_with_wire_registry().await;
     let registration_key = "abcdefghijklmnopqrstuvwx";
 
     let created_user = app
@@ -681,6 +711,8 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let node_id = body["node"]["id"].as_str().unwrap().to_string();
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
     assert!(!node_id.is_empty());
     assert!(
         body["node"]["machineKey"]
@@ -1001,7 +1033,7 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
 
 #[tokio::test]
 async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
-    let (app, token) = fixture().await;
+    let (app, token, registry, _db) = fixture_with_wire_registry().await;
     let registration_key = "exitrouteabcdefghijklmno";
 
     let created_user = app
@@ -1031,6 +1063,8 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let node_id = body["node"]["id"].as_str().unwrap().to_string();
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
     assert_eq!(
         body["node"]["availableRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])

@@ -262,7 +262,7 @@ async fn api_v1_machines_list_shapes_correctly() {
     // The fixture machine should be present, with the standard fields.
     assert!(body.contains(r#""user":"alice""#));
     assert!(body.contains(r#""ipv4":"100.64.0.5""#));
-    assert!(body.contains(r#""online":true"#));
+    assert!(body.contains(r#""online":false"#));
 }
 
 #[tokio::test]

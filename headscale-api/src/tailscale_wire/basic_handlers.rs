@@ -1373,16 +1373,21 @@ fn default_batcher_workers() -> usize {
 
 fn metrics_text(state: &WireState) -> String {
     let snapshot = state.machines.snapshot();
+    let online_states = state.machines.online_states();
     let now = chrono::Utc::now();
     let mut nodes_online = 0usize;
     let mut nodes_expired = 0usize;
     let mut nodes_ephemeral = 0usize;
     let mut users = BTreeSet::new();
 
-    for rec in snapshot.values() {
+    for (node_key, rec) in snapshot.iter() {
         if rec.is_expired_at(now) {
             nodes_expired += 1;
-        } else {
+        } else if online_states
+            .get(&stable_id_from_key(node_key))
+            .copied()
+            .unwrap_or(false)
+        {
             nodes_online += 1;
         }
         if rec.ephemeral {
@@ -1412,7 +1417,7 @@ fn metrics_text(state: &WireState) -> String {
     append_gauge(
         &mut out,
         "headscale_nodes_online",
-        "Current number of non-expired nodes in the wire registry.",
+        "Current number of streaming-online nodes in the wire registry.",
         nodes_online,
     );
     append_gauge(
@@ -1831,6 +1836,7 @@ fn prometheus_float(value: f64) -> String {
 
 fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNode> {
     let snapshot = state.machines.snapshot();
+    let online_states = state.machines.online_states();
     let now = chrono::Utc::now();
     snapshot
         .iter()
@@ -1845,7 +1851,8 @@ fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNod
                     user: rec.user.clone(),
                     hostname: rec.hostname.clone(),
                     ipv4: rec.ipv4.to_string(),
-                    online: !rec.is_expired_at(now),
+                    online: !rec.is_expired_at(now)
+                        && online_states.get(&id).copied().unwrap_or(false),
                     expired: rec.is_expired_at(now),
                     ephemeral: rec.ephemeral,
                     created_at: rec.created_at.to_rfc3339(),
@@ -2106,6 +2113,7 @@ fn sorted_snapshot_nodes(
 
 fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
     let snapshot = state.machines.snapshot();
+    let online_states = state.machines.online_states();
     let now = chrono::Utc::now();
     let mut nodes = DebugOverviewNodes {
         total: snapshot.len(),
@@ -2113,15 +2121,15 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
     };
     let mut users = BTreeMap::new();
 
-    for rec in snapshot.values() {
+    for (node_key, rec) in snapshot.iter() {
         let expired = rec.is_expired_at(now);
         if expired {
             nodes.expired += 1;
-        } else {
-            // The in-memory wire registry does not yet track
-            // headscale-go's separate online/offline bit. A record
-            // that is present and not expired is the closest current
-            // equivalent.
+        } else if online_states
+            .get(&stable_id_from_key(node_key))
+            .copied()
+            .unwrap_or(false)
+        {
             nodes.online += 1;
         }
         if rec.ephemeral {
@@ -3798,6 +3806,11 @@ mod tests {
         bob.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
         state.machines.upsert(bob.node_key_hex.clone(), bob);
 
+        let _guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key("overview-alice"),
+        );
+
         let resp = router(state)
             .oneshot(
                 axum::http::Request::builder()
@@ -3999,6 +4012,8 @@ mod tests {
 
         let id_a = stable_id_from_key(node_a);
         let id_b = stable_id_from_key(node_b);
+        let _guard_a = MachineRegistry::track_stream_connection(state.machines.clone(), id_a);
+        let _guard_b = MachineRegistry::track_stream_connection(state.machines.clone(), id_b);
         let primary = id_a.min(id_b);
         let resp = router(state)
             .oneshot(
@@ -4190,6 +4205,10 @@ mod tests {
         rec.hostname = "charlie-node".to_string();
         rec.forced_tags = vec!["tag:debug".to_string()];
         state.machines.upsert(node_key.to_string(), rec);
+        let _guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(node_key),
+        );
 
         let resp = router(state)
             .oneshot(

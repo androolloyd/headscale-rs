@@ -253,17 +253,30 @@ fn peer_ids_from_snapshot(
         .collect()
 }
 
+fn apply_transient_lifecycle(
+    node: &mut MapNode,
+    rec: &MachineRecord,
+    online_states: &BTreeMap<u64, bool>,
+) {
+    let online = !rec.is_expired_at(chrono::Utc::now())
+        && online_states.get(&node.id).copied().unwrap_or(false);
+    node.online = Some(online);
+    node.last_seen = if online { None } else { Some(rec.last_seen) };
+}
+
 fn self_map_node_from_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
     self_node_key: &str,
     tailnet_domain: &str,
     primary_routes: &HashMap<String, Vec<String>>,
     exit_routes: &HashMap<String, Vec<String>>,
+    online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
     let mut own_node = record_to_map_node(own, tailnet_domain);
+    apply_transient_lifecycle(&mut own_node, own, online_states);
     own_node.cap = cap_version;
     apply_routes_to_map_node(
         &mut own_node,
@@ -291,12 +304,14 @@ fn self_map_node_for_registry(
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let online_states = machines.online_states();
     self_map_node_from_snapshot(
         &snapshot,
         self_node_key,
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     )
@@ -313,6 +328,7 @@ fn visible_peer_state_for_registry(
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let online_states = machines.online_states();
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
@@ -323,6 +339,7 @@ fn visible_peer_state_for_registry(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     );
@@ -354,18 +371,34 @@ fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
     serde_json::to_value(node).ok()
 }
 
-fn peer_patch_if_only_endpoint_or_derp_changed(
+fn map_node_has_subnet_route(node: &MapNode) -> bool {
+    node.allowed_ips
+        .iter()
+        .any(|route| !node.addresses.contains(route) && route != "0.0.0.0/0" && route != "::/0")
+}
+
+fn peer_patch_if_only_patchable_fields_changed(
     previous: &MapNode,
     current: &MapNode,
 ) -> Option<PeerChange> {
     let endpoints_changed = previous.endpoints != current.endpoints;
     let derp_changed = previous.home_derp != current.home_derp;
-    if !endpoints_changed && !derp_changed {
+    let online_changed = previous.online != current.online;
+    let last_seen_changed = previous.last_seen != current.last_seen;
+    let last_seen_patch =
+        last_seen_changed && !online_changed && !endpoints_changed && !derp_changed;
+    if !endpoints_changed && !derp_changed && !online_changed && !last_seen_patch {
         return None;
     }
     // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
     // back to a full node update for clears instead of an empty patch.
     if derp_changed && current.home_derp == 0 {
+        return None;
+    }
+    // headscale-go sends full updates for subnet-router online/offline
+    // transitions so primary-route recalculation is carried with the node.
+    if online_changed && (map_node_has_subnet_route(previous) || map_node_has_subnet_route(current))
+    {
         return None;
     }
 
@@ -381,6 +414,7 @@ fn peer_patch_if_only_endpoint_or_derp_changed(
         .net_info
         .clone_from(&previous.hostinfo.net_info);
     current_normalized.last_seen = previous.last_seen;
+    current_normalized.online = previous.online;
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
         return None;
@@ -394,6 +428,12 @@ fn peer_patch_if_only_endpoint_or_derp_changed(
             Vec::new()
         },
         derp_region: if derp_changed { current.home_derp } else { 0 },
+        online: if online_changed { current.online } else { None },
+        last_seen: if last_seen_patch {
+            current.last_seen
+        } else {
+            None
+        },
         ..PeerChange::default()
     })
 }
@@ -405,6 +445,7 @@ fn visible_peer_map_nodes(
     tailnet_domain: &str,
     primary_routes: &HashMap<String, Vec<String>>,
     exit_routes: &HashMap<String, Vec<String>>,
+    online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
 ) -> Vec<MapNode> {
@@ -414,6 +455,7 @@ fn visible_peer_map_nodes(
         .filter(|(node_key, _)| peer_allowed(allowed_ids, node_key))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, tailnet_domain);
+            apply_transient_lifecycle(&mut node, rec, online_states);
             node.cap = cap_version;
             apply_routes_to_map_node(
                 &mut node,
@@ -834,15 +876,20 @@ async fn map_inner(
         }
     }
 
+    let self_node_id = stable_id_from_key(&node_key_hex);
+    let stream_connection_guard = req.stream.then(|| {
+        super::MachineRegistry::track_stream_connection(state.machines.clone(), self_node_id)
+    });
+
     // Build the response.
     let snapshot = state.machines.snapshot();
     let tailnet_domain = tailnet_domain(&state.dns);
     let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let online_states = state.machines.online_states();
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
-    let self_node_id = stable_id_from_key(&node_key_hex);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
     let Some(own_node) = self_map_node_from_snapshot(
         &snapshot,
@@ -850,6 +897,7 @@ async fn map_inner(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         &state.policy,
         req.version,
     ) else {
@@ -866,6 +914,7 @@ async fn map_inner(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         &state.policy,
         req.version,
     );
@@ -962,10 +1011,7 @@ async fn map_inner(
         let dns_for_stream = state.dns.clone();
         let pings = state.pings.clone();
         let ping_rx = state.pings.subscribe();
-        let connection_guard = super::MachineRegistry::track_stream_connection(
-            machines.clone(),
-            stable_id_from_key(&node_key_hex),
-        );
+        let connection_guard = stream_connection_guard.expect("stream guard created above");
         let stream = futures_util::stream::unfold(
             (
                 Some(first),
@@ -1237,6 +1283,7 @@ fn rebuild_peer_delta_chunk(
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let online_states = machines.online_states();
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids = incremental_allowed_peer_ids_for_snapshot(
         policy,
@@ -1254,6 +1301,7 @@ fn rebuild_peer_delta_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     );
@@ -1271,6 +1319,7 @@ fn rebuild_peer_delta_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     );
@@ -1287,7 +1336,7 @@ fn rebuild_peer_delta_chunk(
         match last_peer_state.get(&peer.id) {
             None => full_peers_changed.push(peer),
             Some(previous) if map_node_json_value(previous) == map_node_json_value(&peer) => {}
-            Some(previous) => match peer_patch_if_only_endpoint_or_derp_changed(previous, &peer) {
+            Some(previous) => match peer_patch_if_only_patchable_fields_changed(previous, &peer) {
                 Some(patch) => peer_patches.push(patch),
                 None => full_peers_changed.push(peer),
             },
@@ -1354,6 +1403,7 @@ fn rebuild_map_chunk(
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
+    let online_states = machines.online_states();
     let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
@@ -1365,6 +1415,7 @@ fn rebuild_map_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     ) else {
@@ -1377,6 +1428,7 @@ fn rebuild_map_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &online_states,
         policy,
         cap_version,
     );
@@ -2021,6 +2073,10 @@ mod tests {
             router_key.clone(),
             routed_record(&router_key, "router", 11, vec!["10.10.1.0/24".into()]),
         );
+        let _router_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_key),
+        );
 
         let app = router(state);
         let resp = app
@@ -2069,6 +2125,10 @@ mod tests {
         state.machines.upsert(
             router_key.clone(),
             routed_record(&router_key, "router", 11, vec!["10.10.1.0/24".into()]),
+        );
+        let _router_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_key),
         );
 
         let app = router(state);
@@ -2183,6 +2243,10 @@ mod tests {
         state.machines.upsert(
             peer.clone(),
             policy_record(&peer, "peer", 11, "peer", Vec::new()),
+        );
+        let _alice_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&alice),
         );
         let resp = app
             .oneshot(
@@ -2481,6 +2545,14 @@ mod tests {
                 routed_record(node_key, host, last_octet, vec![route.clone()]),
             );
         }
+        let _guard_a = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&a),
+        );
+        let _guard_b = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&b),
+        );
 
         let app = router(state);
         let resp = app
@@ -2531,6 +2603,10 @@ mod tests {
             ),
         );
         insert_peer(&state, &b, "peer-b", 42);
+        let _guard_a = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&a),
+        );
 
         let app = router(state);
         let resp = app
@@ -2559,6 +2635,7 @@ mod tests {
     fn registry_primary_routes_preserve_owner_when_old_primary_returns() {
         let (state, _dir) = fixture();
         let route = "10.44.0.0/24".to_string();
+        let mut guards = Vec::new();
         for (node_key, host, last_octet) in [
             ("51".repeat(32), "router-a", 51),
             ("52".repeat(32), "router-b", 52),
@@ -2568,7 +2645,12 @@ mod tests {
                 node_key.clone(),
                 routed_record(&node_key, host, last_octet, vec![route.clone()]),
             );
+            guards.push(MachineRegistry::track_stream_connection(
+                state.machines.clone(),
+                stable_id_from_key(&node_key),
+            ));
         }
+        assert_eq!(guards.len(), 3);
 
         let first = state
             .machines
@@ -2753,6 +2835,40 @@ mod tests {
     /// `controlclient/direct.go::decodeMsg` does when Compress=zstd.
     fn decode_framed(bytes: &[u8]) -> Vec<u8> {
         zstd::bulk::decompress(framed_body(bytes), 16 * 1024 * 1024).expect("valid zstd frame")
+    }
+
+    async fn open_zstd_stream(app: axum::Router, node_key_hex: &str) -> axum::body::Body {
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.into_body()
+    }
+
+    async fn next_zstd_map_response(body: &mut axum::body::Body) -> MapResponse {
+        let frame = http_body_util::BodyExt::frame(body).await.unwrap().unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        serde_json::from_slice(&decoded).unwrap()
+    }
+
+    async fn assert_no_stream_frame(body: &mut axum::body::Body, within: Duration) {
+        let result = tokio::time::timeout(within, http_body_util::BodyExt::frame(body)).await;
+        assert!(
+            result.is_err(),
+            "stream emitted an unexpected frame within {within:?}"
+        );
     }
 
     /// Stream:true: notify_waiters on the registry produces a follow-up
@@ -3279,6 +3395,7 @@ mod tests {
 
         let app = router(state.clone());
         let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let _router_body = open_zstd_stream(app.clone(), &router_key).await;
         let resp = app
             .clone()
             .oneshot(
@@ -3360,6 +3477,137 @@ mod tests {
             peer.allowed_ips.iter().any(|route| route == "10.30.1.0/24"),
             "approved advertised routes must be sent as route-derived AllowedIPs"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_peer_connect_emits_online_peer_change_patch() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let mut b_body = open_zstd_stream(app.clone(), &b).await;
+        let first = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(first.peers.len(), 1);
+        assert_eq!(first.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(first.peers[0].online, Some(false));
+        assert!(first.peers[0].last_seen.is_some());
+
+        let mut a_body = open_zstd_stream(app, &a).await;
+        let delta = next_zstd_map_response(&mut b_body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_changed_patch.len(), 1);
+        let patch = &delta.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert_eq!(patch.online, Some(true));
+        assert!(patch.last_seen.is_none());
+        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.derp_region, 0);
+
+        let a_first = next_zstd_map_response(&mut a_body).await;
+        assert_eq!(
+            a_first.node.as_ref().and_then(|node| node.online),
+            Some(true)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_peer_disconnect_emits_offline_patch_after_grace() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let a_body = open_zstd_stream(app.clone(), &a).await;
+        let mut b_body = open_zstd_stream(app, &b).await;
+        let first = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(first.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(first.peers[0].online, Some(true));
+        assert!(first.peers[0].last_seen.is_none());
+
+        drop(a_body);
+        assert_no_stream_frame(&mut b_body, Duration::from_secs(9)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let delta = next_zstd_map_response(&mut b_body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_changed_patch.len(), 1);
+        let patch = &delta.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert_eq!(patch.online, Some(false));
+        assert!(patch.last_seen.is_none());
+
+        let rec = state.machines.get(&a).expect("peer-a retained");
+        assert!(rec.last_seen <= chrono::Utc::now());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_second_connection_does_not_emit_duplicate_online_patch() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let mut b_body = open_zstd_stream(app.clone(), &b).await;
+        let first = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(first.peers[0].online, Some(false));
+
+        let a_body_1 = open_zstd_stream(app.clone(), &a).await;
+        let online_delta = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(online_delta.peers_changed_patch.len(), 1);
+        assert_eq!(online_delta.peers_changed_patch[0].online, Some(true));
+
+        let _a_body_2 = open_zstd_stream(app, &a).await;
+        let second_connect_delta = next_zstd_map_response(&mut b_body).await;
+        assert!(
+            second_connect_delta
+                .peers_changed_patch
+                .iter()
+                .all(|patch| patch.online.is_none()),
+            "second active stream must not emit a duplicate Online=true patch"
+        );
+        assert!(second_connect_delta.peers_changed.is_empty());
+
+        drop(a_body_1);
+        assert_no_stream_frame(&mut b_body, Duration::from_secs(9)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_drop_one_of_two_connections_stays_online_until_last_drop() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let a_body_1 = open_zstd_stream(app.clone(), &a).await;
+        let a_body_2 = open_zstd_stream(app.clone(), &a).await;
+        let mut b_body = open_zstd_stream(app, &b).await;
+        let first = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(first.peers[0].online, Some(true));
+
+        drop(a_body_2);
+        assert_no_stream_frame(&mut b_body, Duration::from_secs(10)).await;
+
+        drop(a_body_1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        let delta = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(delta.peers_changed_patch.len(), 1);
+        assert_eq!(delta.peers_changed_patch[0].online, Some(false));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3447,6 +3695,8 @@ mod tests {
         assert_eq!(patch.node_id, stable_id_from_key(&a));
         assert_eq!(patch.endpoints, new_endpoints);
         assert!(patch.disco_key.is_none());
+        assert!(patch.online.is_none());
+        assert!(patch.last_seen.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -3649,6 +3899,8 @@ mod tests {
         assert!(patch.endpoints.is_empty());
         assert_eq!(patch.derp_region, 7);
         assert!(patch.disco_key.is_none());
+        assert!(patch.online.is_none());
+        assert!(patch.last_seen.is_none());
     }
 
     /// Stream:true: the response body emits the first framed

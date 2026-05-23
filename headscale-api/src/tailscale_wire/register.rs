@@ -896,7 +896,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         cap: 0,
         tags: rec.forced_tags.clone(),
         last_seen: Some(rec.last_seen),
-        online: Some(!expired),
+        online: Some(false),
         // Any non-expired record in [`MachineRegistry`] passed
         // [`PreauthRedeemer::redeem`]; expired self nodes must carry
         // the upstream unauthorized/expired combination so stock

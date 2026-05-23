@@ -64,6 +64,7 @@ const PING_ID_LENGTH: usize = 16;
 const PING_ID_URLSAFE: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const REGISTER_METHOD_OIDC: i32 = 3;
+const STREAM_OFFLINE_GRACE: Duration = Duration::from_secs(10);
 
 pub mod basic_handlers;
 pub mod be_transport;
@@ -876,6 +877,13 @@ pub struct MachineRegistry {
     /// zero-count entries are retained after disconnect to match
     /// headscale-go's `/debug/batcher` rapid-reconnect state.
     active_connections: RwLock<BTreeMap<u64, usize>>,
+    /// Volatile headscale-go `Node.IsOnline` equivalent. This is kept
+    /// separate from persisted machine records: startup/default state
+    /// is offline until a streaming map session marks the node online.
+    online_states: RwLock<BTreeMap<u64, bool>>,
+    /// Monotonic per-node stream generation used to suppress stale
+    /// delayed-offline tasks after a rapid reconnect.
+    connection_generations: RwLock<BTreeMap<u64, u64>>,
     /// Prometheus-compatible counters for the Tailscale wire surface.
     metrics: WireMetrics,
 }
@@ -953,6 +961,8 @@ impl Default for MachineRegistry {
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
             active_connections: RwLock::new(BTreeMap::new()),
+            online_states: RwLock::new(BTreeMap::new()),
+            connection_generations: RwLock::new(BTreeMap::new()),
             metrics: WireMetrics::default(),
         }
     }
@@ -1026,7 +1036,7 @@ impl MachineRegistry {
         snapshot: &HashMap<String, MachineRecord>,
     ) -> HashMap<String, Vec<String>> {
         let mut primary_routes = self.primary_routes.write();
-        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
 
         snapshot
             .keys()
@@ -1048,7 +1058,7 @@ impl MachineRegistry {
         snapshot: &HashMap<String, MachineRecord>,
     ) -> DebugRoutes {
         let mut primary_routes = self.primary_routes.write();
-        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
         primary_routes.debug_routes()
     }
 
@@ -1058,19 +1068,24 @@ impl MachineRegistry {
         snapshot: &HashMap<String, MachineRecord>,
     ) -> String {
         let mut primary_routes = self.primary_routes.write();
-        Self::sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
         primary_routes.debug_string()
     }
 
     fn sync_primary_routes_for_snapshot(
+        &self,
         primary_routes: &mut PrimaryRouteState,
         snapshot: &HashMap<String, MachineRecord>,
     ) {
         let now = Utc::now();
+        let online_states = self.online_states.read().clone();
         let _ = primary_routes.sync_routes(
             snapshot
                 .iter()
-                .filter(|&(_node_key, rec)| !rec.is_expired_at(now))
+                .filter(|&(node_key, rec)| {
+                    let node_id = stable_id_from_key(node_key);
+                    !rec.is_expired_at(now) && online_states.get(&node_id).copied().unwrap_or(false)
+                })
                 .map(|(node_key, rec)| {
                     (
                         stable_id_from_key(node_key),
@@ -1083,27 +1098,137 @@ impl MachineRegistry {
     /// Start tracking one active streaming map-response connection for
     /// `node_id`. The returned guard decrements the count when the
     /// response body is dropped.
-    pub(crate) fn track_stream_connection(
+    #[doc(hidden)]
+    pub fn track_stream_connection(machines: Arc<Self>, node_id: u64) -> StreamConnectionGuard {
+        Self::track_stream_connection_with_grace(machines, node_id, STREAM_OFFLINE_GRACE)
+    }
+
+    pub(crate) fn track_stream_connection_with_grace(
         machines: Arc<Self>,
         node_id: u64,
+        offline_grace: Duration,
     ) -> StreamConnectionGuard {
         {
             let mut active = machines.active_connections.write();
             *active.entry(node_id).or_insert(0) += 1;
         }
-        StreamConnectionGuard { machines, node_id }
+        {
+            let mut generations = machines.connection_generations.write();
+            let generation = generations
+                .get(&node_id)
+                .copied()
+                .unwrap_or(0)
+                .wrapping_add(1);
+            generations.insert(node_id, generation);
+        }
+        let online_changed = {
+            let mut online = machines.online_states.write();
+            let was_online = online.get(&node_id).copied().unwrap_or(false);
+            online.insert(node_id, true);
+            !was_online
+        };
+        if online_changed {
+            machines.wake_waiters();
+        }
+        StreamConnectionGuard {
+            machines,
+            node_id,
+            offline_grace,
+        }
     }
 
-    fn release_stream_connection(&self, node_id: u64) {
+    fn release_stream_connection(&self, node_id: u64) -> Option<u64> {
         let mut active = self.active_connections.write();
-        if let Some(count) = active.get_mut(&node_id) {
+        let became_idle = if let Some(count) = active.get_mut(&node_id) {
+            let was_active = *count > 0;
             *count = count.saturating_sub(1);
+            was_active && *count == 0
+        } else {
+            false
+        };
+        drop(active);
+        if !became_idle {
+            return None;
         }
+        let mut generations = self.connection_generations.write();
+        let generation = generations
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1);
+        generations.insert(node_id, generation);
+        Some(generation)
+    }
+
+    fn schedule_stream_offline_if_idle(
+        machines: Arc<Self>,
+        node_id: u64,
+        generation: u64,
+        offline_grace: Duration,
+    ) {
+        if offline_grace.is_zero() {
+            machines.mark_stream_offline_if_idle(node_id, generation);
+            return;
+        }
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(offline_grace).await;
+                machines.mark_stream_offline_if_idle(node_id, generation);
+            });
+        } else {
+            machines.mark_stream_offline_if_idle(node_id, generation);
+        }
+    }
+
+    fn mark_stream_offline_if_idle(&self, node_id: u64, generation: u64) {
+        let still_idle = self
+            .active_connections
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+            == 0
+            && self
+                .connection_generations
+                .read()
+                .get(&node_id)
+                .copied()
+                .unwrap_or(0)
+                == generation;
+        if !still_idle {
+            return;
+        }
+
+        let online_changed = {
+            let mut online = self.online_states.write();
+            let was_online = online.get(&node_id).copied().unwrap_or(false);
+            online.insert(node_id, false);
+            was_online
+        };
+        if !online_changed {
+            return;
+        }
+
+        let now = Utc::now();
+        self.update_with_operation("update", |map| {
+            if let Some((_node_key, rec)) = map
+                .iter_mut()
+                .find(|(node_key, _rec)| stable_id_from_key(node_key) == node_id)
+            {
+                rec.last_seen = now;
+            }
+        });
     }
 
     /// Snapshot batcher connection state by stable node ID.
     pub fn active_connections(&self) -> BTreeMap<u64, usize> {
         self.active_connections.read().clone()
+    }
+
+    /// Snapshot volatile `Node.IsOnline` state by stable node ID.
+    pub(crate) fn online_states(&self) -> BTreeMap<u64, bool> {
+        self.online_states.read().clone()
     }
 
     pub(crate) fn record_mapresponse_endpoint_update(&self, status: &str) {
@@ -1312,9 +1437,10 @@ impl MachineRegistry {
             map.insert(new_node_key_hex, rec);
         });
         if key_changed {
-            self.active_connections
-                .write()
-                .remove(&stable_id_from_key(old_node_key_hex));
+            let old_id = stable_id_from_key(old_node_key_hex);
+            self.active_connections.write().remove(&old_id);
+            self.online_states.write().remove(&old_id);
+            self.connection_generations.write().remove(&old_id);
         }
     }
 
@@ -1486,9 +1612,10 @@ impl MachineRegistry {
         let removed =
             self.update_with_operation("delete", |map| map.remove(node_key_hex).is_some());
         if removed {
-            self.active_connections
-                .write()
-                .remove(&stable_id_from_key(node_key_hex));
+            let node_id = stable_id_from_key(node_key_hex);
+            self.active_connections.write().remove(&node_id);
+            self.online_states.write().remove(&node_id);
+            self.connection_generations.write().remove(&node_id);
         }
         removed
     }
@@ -1584,22 +1711,36 @@ impl MachineRegistry {
         });
         if !removed.is_empty() {
             let mut active = self.active_connections.write();
+            let mut online = self.online_states.write();
+            let mut generations = self.connection_generations.write();
             for node_key_hex in &removed {
-                active.remove(&stable_id_from_key(node_key_hex));
+                let node_id = stable_id_from_key(node_key_hex);
+                active.remove(&node_id);
+                online.remove(&node_id);
+                generations.remove(&node_id);
             }
         }
         removed
     }
 }
 
-pub(crate) struct StreamConnectionGuard {
+#[doc(hidden)]
+pub struct StreamConnectionGuard {
     machines: Arc<MachineRegistry>,
     node_id: u64,
+    offline_grace: Duration,
 }
 
 impl Drop for StreamConnectionGuard {
     fn drop(&mut self) {
-        self.machines.release_stream_connection(self.node_id);
+        if let Some(generation) = self.machines.release_stream_connection(self.node_id) {
+            MachineRegistry::schedule_stream_offline_if_idle(
+                self.machines.clone(),
+                self.node_id,
+                generation,
+                self.offline_grace,
+            );
+        }
         self.machines.record_mapresponse_ended("done");
     }
 }
@@ -2137,12 +2278,53 @@ mod registry_tests {
 
         let guard = MachineRegistry::track_stream_connection(reg.clone(), node_id);
         assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
 
         drop(guard);
         assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
 
         assert!(reg.delete("nk-a"));
         assert!(!reg.active_connections().contains_key(&node_id));
+        assert!(!reg.online_states().contains_key(&node_id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_connection_offline_grace_suppresses_rapid_reconnect() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+        let before = reg.get("nk-a").unwrap().last_seen;
+
+        let first = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::from_secs(10),
+        );
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+        drop(first);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+
+        let second = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::from_secs(10),
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            reg.online_states().get(&node_id),
+            Some(&true),
+            "stale offline task must not win after reconnect"
+        );
+
+        drop(second);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert!(reg.get("nk-a").unwrap().last_seen > before);
     }
 
     /// `touch_last_seen` advances the timestamp.
@@ -2286,6 +2468,9 @@ mod registry_tests {
         let guard = MachineRegistry::track_stream_connection(reg.clone(), node_id);
         drop(guard);
         assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        reg.update_with(|map| {
+            map.get_mut("nk-a").unwrap().last_seen = Utc::now() - chrono::Duration::seconds(120);
+        });
 
         let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
         assert_eq!(removed, vec!["nk-a".to_string()]);

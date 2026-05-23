@@ -2966,6 +2966,7 @@ mod upstream_tests {
             fixture_machine_with_routes(&node_key, "alice", "alpha", vec!["10.0.0.0/24".into()]),
         );
         let node_id = stable_id_from_key(&node_key);
+        let _guard = MachineRegistry::track_stream_connection(machines.clone(), node_id);
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -3230,6 +3231,10 @@ mod upstream_tests {
         let mut machine_b = fixture_machine_with_routes(&node_b, "alice", "beta", vec![route]);
         machine_b.approved_routes = vec!["10.0.0.0/24".into()];
         machines.upsert(node_b.clone(), machine_b);
+        let _guard_a =
+            MachineRegistry::track_stream_connection(machines.clone(), stable_id_from_key(&node_a));
+        let _guard_b =
+            MachineRegistry::track_stream_connection(machines.clone(), stable_id_from_key(&node_b));
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -3257,13 +3262,19 @@ mod upstream_tests {
             ("63".repeat(32), "gamma", 63),
         ];
 
+        let mut guards = Vec::new();
         for (node_key, name, octet) in &nodes {
             let mut machine =
                 fixture_machine_with_routes(node_key, "alice", name, vec![route.clone()]);
             machine.ipv4 = Ipv4Addr::new(100, 64, 0, *octet);
             machine.approved_routes = vec![route.clone()];
             machines.upsert(node_key.clone(), machine);
+            guards.push(MachineRegistry::track_stream_connection(
+                machines.clone(),
+                stable_id_from_key(node_key),
+            ));
         }
+        assert_eq!(guards.len(), 3);
 
         let first = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -3332,6 +3343,7 @@ mod upstream_tests {
         machine.approved_routes = Vec::new();
         machines.upsert(node_key.clone(), machine);
         let node_id = stable_id_from_key(&node_key);
+        let _guard = MachineRegistry::track_stream_connection(machines.clone(), node_id);
 
         let updated = service
             .set_approved_routes(Request::new(SetApprovedRoutesRequest {

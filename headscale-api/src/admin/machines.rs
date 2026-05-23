@@ -283,6 +283,7 @@ impl WireMachineAdmin {
         id: &str,
         rec: &crate::tailscale_wire::MachineRecord,
         sidecar_expired: bool,
+        online: bool,
     ) -> MachineAdminRecord {
         // P1 lifecycle: the wire registry now carries `expiry` itself.
         // A machine is "expired" if the sidecar flag is set OR the
@@ -310,7 +311,7 @@ impl WireMachineAdmin {
             user: rec.user.clone(),
             ipv4: rec.ipv4.to_string(),
             ipv6: None,
-            online: !is_expired,
+            online: online && !is_expired,
             last_seen,
             created_at: rec.created_at.timestamp().max(0) as u64,
             expiry: rec.expiry.map(|t| t.timestamp().max(0) as u64),
@@ -1050,6 +1051,7 @@ impl MachineAdmin for WireMachineAdmin {
     async fn list(&self) -> Vec<MachineAdminRecord> {
         let deleted = self.deleted.read();
         let expired = self.expired.read();
+        let online_states = self.registry.online_states();
         // #238: walk the snapshot's borrowed entries; only allocate
         // for records that survive the `deleted` filter.
         let snapshot = self.registry.snapshot();
@@ -1058,7 +1060,11 @@ impl MachineAdmin for WireMachineAdmin {
             .filter(|(k, _)| !deleted.contains(k.as_str()))
             .map(|(k, rec)| {
                 let is_exp = expired.contains(k.as_str());
-                Self::render(k.as_str(), rec, is_exp)
+                let online = online_states
+                    .get(&crate::tailscale_wire::wire::stable_id_from_key(k))
+                    .copied()
+                    .unwrap_or(false);
+                Self::render(k.as_str(), rec, is_exp, online)
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -1071,7 +1077,13 @@ impl MachineAdmin for WireMachineAdmin {
         }
         let rec = self.registry.get(id)?;
         let is_exp = self.expired.read().contains(id);
-        Some(Self::render(id, &rec, is_exp))
+        let online = self
+            .registry
+            .online_states()
+            .get(&crate::tailscale_wire::wire::stable_id_from_key(id))
+            .copied()
+            .unwrap_or(false);
+        Some(Self::render(id, &rec, is_exp, online))
     }
 
     async fn create(
@@ -1644,7 +1656,7 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].user, "alice");
         assert_eq!(v[0].name, "node-1");
-        assert!(v[0].online);
+        assert!(!v[0].online);
     }
 
     #[test]

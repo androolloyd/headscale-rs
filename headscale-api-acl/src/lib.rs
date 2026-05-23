@@ -46,10 +46,11 @@
 //!
 //! The HuJSON parser is intentionally strict to match headscale-go:
 //! upstream top-level names only (`groups`, `hosts`, `tagOwners`,
-//! `acls`, `autoApprovers`, `ssh`), ACL `action` must be `accept`,
-//! and ports live in `dst` entries (`host:22`), not a rule-level
-//! `ports` field. TOML keeps the canonical/internal field names used
-//! by OctraVPN (`rules`, `tag_owners`, `node_attrs`, ...).
+//! `acls`, `grants`, `nodeAttrs`, `ipsets`, `autoApprovers`, `ssh`),
+//! ACL `action` must be `accept`, and ports live in `dst` entries
+//! (`host:22`), not a rule-level `ports` field. TOML keeps the
+//! canonical/internal field names used by OctraVPN (`rules`,
+//! `tag_owners`, `node_attrs`, ...).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -181,6 +182,32 @@ pub struct NodeAttrGrant {
     pub target: Vec<String>,
     #[serde(default)]
     pub attr: Vec<String>,
+    #[serde(default)]
+    pub app: CapabilityMap,
+    #[serde(default, rename = "ip_pool", alias = "ipPool")]
+    pub ip_pool: Vec<String>,
+}
+
+/// Application-layer capability map used by public `grants[].app`
+/// and `nodeAttrs[].app` policy entries.
+pub type CapabilityMap = BTreeMap<String, Vec<serde_json::Value>>;
+
+/// One public `grants` rule. Grants have an implied accept action and
+/// can carry network-layer `ip` allowances, application-layer `app`
+/// capabilities, and optional route-filtering `via` tags.
+#[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRule {
+    #[serde(default)]
+    pub src: Vec<String>,
+    #[serde(default)]
+    pub dst: Vec<String>,
+    #[serde(default, rename = "ip")]
+    pub ip: Vec<String>,
+    #[serde(default)]
+    pub app: CapabilityMap,
+    #[serde(default)]
+    pub via: Vec<String>,
 }
 
 /// `autoApprovers` block — route + exit-node auto-approval.
@@ -273,6 +300,11 @@ pub struct AclDoc {
     /// `node_attrs` / `nodeAttrs`.
     #[serde(default, alias = "nodeAttrs")]
     pub node_attrs: Vec<NodeAttrGrant>,
+    /// Public `grants` policy entries. During HuJSON parsing these
+    /// are also projected into accept rules for the existing evaluator
+    /// and packet-filter compiler.
+    #[serde(default)]
+    pub grants: Vec<GrantRule>,
     /// Upstream `randomizeClientPort`: tailnet-wide shorthand for
     /// stamping the `randomize-client-port` node attribute on every
     /// node.
@@ -419,9 +451,37 @@ impl AclDoc {
             .map(|n| {
                 let mut tgt = n.target.clone();
                 let mut atr = n.attr.clone();
+                let mut ip_pool = n.ip_pool.clone();
                 tgt.sort();
                 atr.sort();
-                serde_json::json!({ "target": tgt, "attr": atr })
+                ip_pool.sort();
+                serde_json::json!({
+                    "target": tgt,
+                    "attr": atr,
+                    "app": n.app,
+                    "ip_pool": ip_pool,
+                })
+            })
+            .collect();
+        let grants_sorted: Vec<serde_json::Value> = self
+            .grants
+            .iter()
+            .map(|g| {
+                let mut src = g.src.clone();
+                let mut dst = g.dst.clone();
+                let mut ip = g.ip.clone();
+                let mut via = g.via.clone();
+                src.sort();
+                dst.sort();
+                ip.sort();
+                via.sort();
+                serde_json::json!({
+                    "src": src,
+                    "dst": dst,
+                    "ip": ip,
+                    "app": g.app,
+                    "via": via,
+                })
             })
             .collect();
         let ssh_sorted: Vec<serde_json::Value> = self
@@ -457,6 +517,7 @@ impl AclDoc {
                 "exit_node": exit_node_sorted,
             },
             "node_attrs": node_attrs_sorted,
+            "grants": grants_sorted,
             "ssh": ssh_sorted,
             "tests": self.tests,
             "ssh_tests": self.ssh_tests,
@@ -516,8 +577,10 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
     let value = normalize_go_policy_top_level(value)?;
-    let doc = serde_json::from_value::<AclDoc>(value)
+    let mut doc = serde_json::from_value::<AclDoc>(value)
         .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+    let grant_rules = acl_rules_from_grants(&doc.grants).map_err(PolicyParseError::Schema)?;
+    doc.rules.extend(grant_rules);
     validate_policy(&doc).map_err(PolicyParseError::Schema)?;
     Ok(doc)
 }
@@ -553,6 +616,9 @@ fn go_policy_field_name(field: &str) -> Option<&'static str> {
         "hosts" => Some("hosts"),
         "tagowners" => Some("tagOwners"),
         "acls" => Some("acls"),
+        "grants" => Some("grants"),
+        "nodeattrs" => Some("nodeAttrs"),
+        "ipsets" => Some("ipsets"),
         "autoapprovers" => Some("autoApprovers"),
         "randomizeclientport" => Some("randomizeClientPort"),
         "ssh" => Some("ssh"),
@@ -591,11 +657,40 @@ fn go_acl_field_name(field: &str) -> Option<&'static str> {
     }
 }
 
+fn acl_rules_from_grants(grants: &[GrantRule]) -> Result<Vec<AclRule>, String> {
+    let mut out = Vec::new();
+    for grant in grants {
+        if grant.ip.is_empty() {
+            continue;
+        }
+        let mut ports = Vec::new();
+        for spec in &grant.ip {
+            ports.extend(normalize_grant_ip_spec(spec)?);
+        }
+        if ports.is_empty() {
+            continue;
+        }
+        out.push(AclRule {
+            action: AclAction::Accept,
+            src: grant.src.clone(),
+            dst: grant.dst.clone(),
+            ports,
+        });
+    }
+    Ok(out)
+}
+
 fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     let mut errs = Vec::new();
 
+    for grant in &doc.grants {
+        validate_grant_rule(doc, grant, &mut errs);
+    }
     for rule in &doc.rules {
         validate_acl_rule(doc, rule, &mut errs);
+    }
+    for grant in &doc.node_attrs {
+        validate_node_attr_grant(doc, grant, &mut errs);
     }
     for ssh in &doc.ssh {
         validate_ssh_rule(doc, ssh, &mut errs);
@@ -624,6 +719,87 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     }
 }
 
+fn validate_grant_rule(doc: &AclDoc, grant: &GrantRule, errs: &mut Vec<String>) {
+    if grant.ip.is_empty() && grant.app.is_empty() {
+        errs.push("ip and app can not both be empty".to_string());
+    }
+
+    for cap in grant.app.keys() {
+        if let Err(err) = validate_capability_name(cap) {
+            errs.push(err);
+        }
+    }
+
+    if !grant.app.is_empty() && grant.dst.iter().any(|dst| dst == "autogroup:internet") {
+        errs.push("cannot use app grants with autogroup:internet".to_string());
+    }
+
+    for src in &grant.src {
+        validate_grant_src_alias(src, errs);
+        validate_acl_ref(doc, src, errs);
+    }
+    for dst in &grant.dst {
+        validate_acl_dst_alias(dst, errs);
+        validate_acl_ref(doc, dst, errs);
+        if parse_cidr(dst).is_some_and(|net| is_default_route(&net)) {
+            errs.push(format!(
+                "dst {dst:?}: to allow all IP addresses, use \"*\" or \"autogroup:internet\""
+            ));
+        }
+    }
+
+    for via in &grant.via {
+        if !via.starts_with("tag:") {
+            errs.push("via can only be a tag".to_string());
+        } else if !tag_defined(doc, via) {
+            errs.push(format!("tag {via:?} not found"));
+        }
+    }
+
+    if grant.dst.iter().any(|dst| dst == "autogroup:self") {
+        for src in &grant.src {
+            let allowed =
+                src.contains('@') || src.starts_with("group:") || src == "autogroup:member";
+            if !allowed {
+                errs.push(
+                    "autogroup:self can only be used with users, groups, or supported autogroups"
+                        .to_string(),
+                );
+                break;
+            }
+        }
+    }
+}
+
+fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<String>) {
+    for cap in grant.app.keys() {
+        if let Err(err) = validate_capability_name(cap) {
+            errs.push(err);
+        }
+    }
+    for target in &grant.target {
+        if let Some(ag) = target.strip_prefix("autogroup:")
+            && !matches!(ag, "member" | "tagged")
+        {
+            errs.push(format!(
+                "nodeAttrs target does not support this autogroup: {target:?}"
+            ));
+        }
+        validate_acl_ref(doc, target, errs);
+    }
+    for pool in &grant.ip_pool {
+        let Some(net) = parse_cidr(pool) else {
+            errs.push(format!("nodeAttrs ipPool contains invalid prefix {pool:?}"));
+            continue;
+        };
+        if !cgnat_range().contains(&net.network()) || net.prefix_len() < 10 {
+            errs.push(format!(
+                "nodeAttrs ipPool must be within 100.64.0.0/10: {pool:?}"
+            ));
+        }
+    }
+}
+
 fn validate_acl_rule(doc: &AclDoc, rule: &AclRule, errs: &mut Vec<String>) {
     for src in &rule.src {
         validate_acl_src_alias(src, errs);
@@ -633,6 +809,13 @@ fn validate_acl_rule(doc: &AclDoc, rule: &AclRule, errs: &mut Vec<String>) {
         validate_acl_dst_alias(dst, errs);
         validate_acl_ref(doc, dst, errs);
     }
+}
+
+fn validate_grant_src_alias(alias: &str, errs: &mut Vec<String>) {
+    if alias == "autogroup:danger-all" {
+        return;
+    }
+    validate_acl_src_alias(alias, errs);
 }
 
 fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
@@ -810,6 +993,15 @@ fn validate_ssh_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> 
 fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
     validate_group_ref(doc, alias, errs);
     validate_tag_ref(doc, alias, errs);
+
+    if let Some(ipset) = alias.strip_prefix("ipset:") {
+        if !doc.ipsets.contains_key(ipset) {
+            errs.push(format!(
+                "IP set {ipset:?} is not defined in the Policy, please define or remove the reference to it"
+            ));
+        }
+        return;
+    }
 
     if let Some(host) = alias.strip_prefix("host:") {
         if !host_defined(doc, host) {
@@ -1624,6 +1816,10 @@ pub fn parse_cidr(s: &str) -> Option<IpNet> {
     None
 }
 
+fn cgnat_range() -> IpNet {
+    "100.64.0.0/10".parse().expect("static CGNAT range")
+}
+
 fn covers(outer: &IpNet, inner: &IpNet) -> bool {
     match (outer, inner) {
         (IpNet::V4(o), IpNet::V4(i)) => {
@@ -1689,6 +1885,25 @@ fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
     out
 }
 
+fn normalize_grant_ip_spec(spec: &str) -> Result<Vec<String>, String> {
+    let trimmed = spec.trim();
+    if trimmed == "*" {
+        return Ok(vec!["*/*".to_string()]);
+    }
+    let (proto, ports) = if let Some((proto, ports)) = trimmed.split_once(':') {
+        if ports.contains(':') {
+            return Err("expected only one colon in Internet protocol and port type".to_string());
+        }
+        let proto = proto.trim().to_ascii_lowercase();
+        validate_upstream_proto(&proto)?;
+        (proto, ports.trim())
+    } else {
+        ("*".to_string(), trimmed)
+    };
+    validate_proto_port_compat(&proto, ports)?;
+    Ok(normalize_port_spec(&proto, ports))
+}
+
 fn validate_upstream_proto(proto: &str) -> Result<(), String> {
     match proto {
         "" | "icmp" | "igmp" | "ipv4" | "ip-in-ip" | "tcp" | "egp" | "igp" | "udp" | "gre"
@@ -1712,6 +1927,27 @@ fn validate_upstream_proto(proto: &str) -> Result<(), String> {
             }
         }
     }
+}
+
+fn validate_capability_name(name: &str) -> Result<(), String> {
+    if name.contains("://") || !name.contains('/') {
+        return Err("capability name must have the form {domain}/{path}".to_string());
+    }
+    if name.starts_with("tailscale.com/") && !tailscale_cap_allowlisted(name) {
+        return Err("capability name must not be in the tailscale.com domain".to_string());
+    }
+    Ok(())
+}
+
+fn tailscale_cap_allowlisted(name: &str) -> bool {
+    matches!(
+        name,
+        "tailscale.com/cap/drive"
+            | "tailscale.com/cap/relay"
+            | "tailscale.com/cap/webui"
+            | "tailscale.com/cap/kubernetes"
+            | "tailscale.com/cap/tsidp"
+    )
 }
 
 fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
@@ -2529,10 +2765,12 @@ mod tests {
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["*".into()],
             attr: vec!["funnel".into()],
+            ..Default::default()
         });
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["tag:exit".into()],
             attr: vec!["exit-node".into()],
+            ..Default::default()
         });
         let exit_tags = vec!["exit".into()];
         let exit_node = NodeView::new("100.64.0.1").with_tags(&exit_tags);
@@ -2550,10 +2788,12 @@ mod tests {
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["*".into()],
             attr: vec!["ssh".into()],
+            ..Default::default()
         });
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["autogroup:member".into()],
             attr: vec!["ssh".into(), "funnel".into()],
+            ..Default::default()
         });
         let n = NodeView::new("100.64.0.1");
         let out = doc.attrs_for(&n);
@@ -2569,6 +2809,7 @@ mod tests {
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["tag:exit".into()],
             attr: vec!["exit-node".into()],
+            ..Default::default()
         });
         let n = NodeView::new("100.64.0.1");
         assert!(doc.attrs_for(&n).is_empty());
@@ -2583,6 +2824,7 @@ mod tests {
         doc.node_attrs.push(NodeAttrGrant {
             target: vec!["alice".into()],
             attr: vec!["funnel".into()],
+            ..Default::default()
         });
         let alice = NodeView::new("100.64.0.1").with_user("alice");
         let bob = NodeView::new("100.64.0.2").with_user("bob");
@@ -2619,6 +2861,7 @@ mod tests {
                 "randomize-client-port".into(),
                 "disable-captive-portal-detection".into(),
             ],
+            ..Default::default()
         });
 
         let tags = vec!["tag:server".into()];
@@ -2797,6 +3040,9 @@ mod tests {
         let doc = AclDoc::from_toml(
             r#"
             version = 1
+            [tag_owners]
+            "tag:exit" = ["alice@"]
+
             [[node_attrs]]
             target = ["*"]
             attr = ["funnel"]
@@ -3050,14 +3296,6 @@ mod tests {
         for (field, raw) in [
             ("version", r#"{"version":1,"acls":[]}"#),
             ("rules", r#"{"rules":[]}"#),
-            (
-                "ipsets",
-                r#"{"ipsets":{"office":["10.0.0.0/8"]},"acls":[]}"#,
-            ),
-            (
-                "nodeAttrs",
-                r#"{"nodeAttrs":[{"target":["*"],"attr":["funnel"]}],"acls":[]}"#,
-            ),
         ] {
             let err = parse_hujson_policy(raw).expect_err(field);
             let msg = err.to_string();
@@ -3121,6 +3359,126 @@ mod tests {
             doc.attrs_for(&NodeView::new("100.64.0.1")),
             vec!["randomize-client-port"]
         );
+    }
+
+    #[test]
+    fn hujson_acl_and_grant_network_rules_are_equivalent() {
+        let acl_doc = parse_hujson_policy(
+            r#"{
+              "groups": {"group:eng": ["alice@example.com"]},
+              "tagOwners": {"tag:web": ["group:eng"]},
+              "acls": [{
+                "action": "accept",
+                "proto": "tcp",
+                "src": ["group:eng"],
+                "dst": ["tag:web:443"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let grant_doc = parse_hujson_policy(
+            r#"{
+              "groups": {"group:eng": ["alice@example.com"]},
+              "tagOwners": {"tag:web": ["group:eng"]},
+              "grants": [{
+                "src": ["group:eng"],
+                "dst": ["tag:web"],
+                "ip": ["tcp:443"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(acl_doc.rules, grant_doc.rules);
+        assert_eq!(grant_doc.grants.len(), 1);
+    }
+
+    #[test]
+    fn hujson_accepts_public_ipsets_and_node_attrs_app_maps() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ipsets": {"office": ["10.0.0.0/8", "192.168.0.0/16"]},
+              "nodeAttrs": [{
+                "target": ["*"],
+                "attr": ["randomize-client-port"],
+                "app": {
+                  "example.com/cap/connector": [{"name": "prod"}]
+                },
+                "ipPool": ["100.81.0.0/16"]
+              }],
+              "grants": [{
+                "src": ["*"],
+                "dst": ["ipset:office"],
+                "ip": ["udp:53"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(doc.ipsets["office"].len(), 2);
+        assert_eq!(doc.node_attrs[0].attr, vec!["randomize-client-port"]);
+        assert_eq!(
+            doc.node_attrs[0].app["example.com/cap/connector"][0]["name"],
+            "prod"
+        );
+        assert_eq!(doc.node_attrs[0].ip_pool, vec!["100.81.0.0/16"]);
+        assert_eq!(doc.rules[0].dst, vec!["ipset:office"]);
+        assert_eq!(doc.rules[0].ports, vec!["udp/53"]);
+    }
+
+    #[test]
+    fn hujson_rejects_invalid_grant_app_cap_and_via() {
+        for (name, raw, want) in [
+            (
+                "missing-ip-and-app",
+                r#"{"grants":[{"src":["*"],"dst":["*"]}]}"#,
+                "ip and app can not both be empty",
+            ),
+            (
+                "app-to-internet",
+                r#"{"grants":[{"src":["*"],"dst":["autogroup:internet"],"app":{"example.com/cap/use":[]}}]}"#,
+                "cannot use app grants with autogroup:internet",
+            ),
+            (
+                "bad-cap-url",
+                r#"{"grants":[{"src":["*"],"dst":["*"],"app":{"https://example.com/cap/use":[]}}]}"#,
+                "capability name must have the form",
+            ),
+            (
+                "bad-tailscale-cap",
+                r#"{"grants":[{"src":["*"],"dst":["*"],"app":{"tailscale.com/cap/funnel":[]}}]}"#,
+                "capability name must not be in the tailscale.com domain",
+            ),
+            (
+                "via-not-tag",
+                r#"{"grants":[{"src":["*"],"dst":["*"],"ip":["*"],"via":["group:routers"]}]}"#,
+                "via can only be a tag",
+            ),
+            (
+                "via-undefined-tag",
+                r#"{"grants":[{"src":["*"],"dst":["*"],"ip":["*"],"via":["tag:router"]}]}"#,
+                "tag \"tag:router\" not found",
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).expect_err(name).to_string();
+            assert!(
+                err.contains(want),
+                "{name} should contain {want:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hujson_nil_acl_and_grants_default_deny() {
+        for raw in [r#"{}"#, r#"{"acls":[]}"#, r#"{"grants":[]}"#] {
+            let doc = parse_hujson_policy(raw).unwrap();
+            assert!(doc.rules.is_empty());
+            assert!(doc.grants.is_empty());
+            assert_eq!(
+                doc.decide("100.64.0.1", "100.64.0.2", PortRef::any()),
+                AclAction::Deny
+            );
+        }
     }
 
     #[test]

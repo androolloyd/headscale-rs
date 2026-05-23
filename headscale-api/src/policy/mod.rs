@@ -41,7 +41,8 @@ use tokio::sync::Notify;
 
 pub use check::{PolicyCheckNode, check_policy_semantics};
 pub use doc::{
-    AutoApprovers, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc, PolicyRule, PortRef, SshRule,
+    AutoApprovers, CapabilityMap, GrantRule, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc,
+    PolicyRule, PortRef, SshRule,
 };
 pub use filter::{PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node};
 pub use hujson::{PolicyParseError, parse_hujson_policy};

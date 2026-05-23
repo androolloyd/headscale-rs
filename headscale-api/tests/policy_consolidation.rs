@@ -148,6 +148,9 @@ fn node_attrs_for_collects_via_canonical_doc() {
     let store = PolicyStore::new();
     let raw = r#"
         version = 1
+        [tag_owners]
+        "tag:exit" = ["alice@"]
+
         [[node_attrs]]
         target = ["*"]
         attr = ["funnel"]

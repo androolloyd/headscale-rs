@@ -141,9 +141,13 @@ tools/real-client/smoke-matrix.sh
 ```
 
 The default repository CI already runs `./scripts/fuzz_ci.sh` for the 10k-input
-fuzz smoke and compiles the real-client Rust harness. A parity-focused CI job
-should run the fuzz gate first, then the real-client matrix, so a crash-only
-protocol failure is separated from a stock-client behavior mismatch:
+fuzz smoke and compiles the real-client Rust harness. The dedicated
+`Real-client parity` workflow runs selected paired rows on pull requests that
+touch the control-plane surface, runs `REAL_CLIENT_SMOKES=all` on a nightly
+schedule, and supports manual dispatch for arbitrary smoke/target selections.
+For local parity branches, run the fuzz gate first and then the real-client
+matrix so a crash-only protocol failure is separated from a stock-client
+behavior mismatch:
 
 ```sh
 FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh

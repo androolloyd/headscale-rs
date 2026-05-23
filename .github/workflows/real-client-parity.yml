@@ -1,0 +1,93 @@
+name: Real-client parity
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/real-client-parity.yml"
+      - "headscale-api/**"
+      - "headscale-api-acl/**"
+      - "headscale-cli/**"
+      - "headscale-db/**"
+      - "tools/real-client/**"
+      - "tools/parity/headscale-go/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      smokes:
+        description: "Space- or comma-separated smoke IDs, or all"
+        required: false
+        default: "all"
+      targets:
+        description: "Space- or comma-separated targets: rust, headscale-go"
+        required: false
+        default: "rust headscale-go"
+      timeout_secs:
+        description: "Per-smoke timeout in seconds"
+        required: false
+        default: "180"
+
+concurrency:
+  group: real-client-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  REAL_CLIENT_TARGETS: ${{ github.event.inputs.targets || 'rust headscale-go' }}
+  REAL_CLIENT_TIMEOUT_SECS: ${{ github.event.inputs.timeout_secs || '180' }}
+  TAILSCALE_IMAGE: tailscale/tailscale:v1.94.1
+
+jobs:
+  paired-smokes:
+    name: paired stock-client smokes
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      PR_SMOKES: authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/parity/headscale-go/go.mod
+          cache-dependency-path: tools/parity/headscale-go/go.sum
+      - uses: Swatinem/rust-cache@v2
+      - name: Install smoke dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openssl protobuf-compiler ruby sqlite3
+      - name: Check Docker availability
+        run: |
+          set -euo pipefail
+          docker version
+          docker info
+      - name: Pull stock Tailscale image
+        run: docker pull "${TAILSCALE_IMAGE}"
+      - name: Select smoke set
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            smokes="${PR_SMOKES}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            smokes="all"
+          else
+            smokes="${{ github.event.inputs.smokes || 'all' }}"
+          fi
+          echo "REAL_CLIENT_SMOKES=${smokes}" >> "${GITHUB_ENV}"
+      - name: List selected matrix
+        run: tools/real-client/smoke-matrix.sh --list
+      - name: Run paired real-client parity matrix
+        run: tools/real-client/smoke-matrix.sh
+      - name: Upload real-client logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-client-parity-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: target/real-client/

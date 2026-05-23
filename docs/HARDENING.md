@@ -3,12 +3,16 @@
 This repo has three quality gates:
 
 - Pull-request CI: formatting, clippy, tests, a 10k-input fuzz smoke run across
-  every checked-in fuzz target, and headscale-go policy differential scenarios.
+  every checked-in fuzz target, headscale-go policy differential scenarios, and
+  selected paired stock-client parity smokes for changes touching the control
+  plane.
 - Coverage CI: `cargo llvm-cov` over the active workspace plus the excluded
   support crates, with `target/coverage/lcov.info` and a text summary uploaded
   as artifacts.
 - Supply-chain CI: RustSec advisories, license/source policy, and the fuzz
   lockfile audited separately from the root dependency graph.
+- Real-client parity CI: selected paired Rust/headscale-go stock-client rows on
+  matching pull requests, plus a scheduled full paired matrix.
 
 ## Local commands
 
@@ -33,6 +37,9 @@ cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-007
 cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
 ./scripts/headscale_go_diff.sh
 ./scripts/headscale_rs_current_head_golden.sh
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve \
+  REAL_CLIENT_TARGETS='rust headscale-go' \
+  tools/real-client/smoke-matrix.sh
 ```
 
 `cargo audit` is lockfile-only and currently reports `RUSTSEC-2023-0071`
@@ -94,12 +101,12 @@ stock-client smokes, not comments. The current fixtures cover:
 - ACL default-deny, first-match-wins, group ordering canonicalisation, hosts,
   auto-approvers, and HuJSON compatibility; Rust-extension node attrs/ipsets
   are fuzzed but intentionally outside pinned v0.28 differential parity.
-- real Tailscale client auth-key, web registration, tag, ACL visibility,
-  MagicDNS enabled/custom/disabled, and route primary/failover/withdrawal
-  smokes against both headscale-rs and pinned headscale-go.
+- real Tailscale client auth-key, web registration, OIDC, lifecycle, tag, ACL
+  visibility, MagicDNS enabled/custom/disabled, address-family, route
+  primary/failover/withdrawal, DERP, and SSH smokes against both headscale-rs
+  and pinned headscale-go.
 
 The next parity layer should close the remaining paired stock-client and
-serving-topology gaps: production OIDC callback wiring, Tailscale SSH,
-DERP/STUN, private DERP, API auth, CLI over upstream gRPC, config-driven
-process wiring, and the remaining DNS/ACL/route edge matrices tracked in
-`docs/headscale-go-parity.md`.
+serving-topology gaps: ACME issuance, API auth exactness, CLI over upstream
+gRPC exact snapshots, config-driven process wiring, and the remaining
+DNS/ACL/route edge matrices tracked in `docs/headscale-go-parity.md`.

@@ -142,6 +142,14 @@ pub enum MachineAdminError {
 pub trait MachineAdmin: Send + Sync {
     async fn list(&self) -> Vec<MachineAdminRecord>;
     async fn get(&self, id: &str) -> Option<MachineAdminRecord>;
+    /// Return the node that an auth/web/CLI registration would update
+    /// instead of creating, if one exists.
+    async fn existing_auth_path_record(
+        &self,
+        _record: &MachineAdminRecord,
+    ) -> Option<MachineAdminRecord> {
+        None
+    }
     /// Insert a synthetic/admin-created machine record. Used by
     /// upstream debug/register gRPC paths and by future DB-backed node
     /// creation. Implementations must reject duplicate node IDs.
@@ -530,6 +538,8 @@ impl PersistentMachineAdmin {
             if let Some(ipv6) = existing.ipv6.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv6 = Some(ipv6.clone());
             }
+            self.reject_duplicate_addresses(Some(existing.id), &record)
+                .await?;
             let mut approved = existing.approved_route_list();
             approved.extend(record.approved_routes.clone());
             record.approved_routes = auto_approved_routes_for_node(
@@ -566,6 +576,7 @@ impl PersistentMachineAdmin {
                 &record.routes,
             )
             .map_err(MachineAdminError::BadRequest)?;
+            self.reject_duplicate_addresses(None, &record).await?;
             let row = headscale_db::headscale_nodes::create(
                 &self.pool,
                 create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
@@ -619,6 +630,46 @@ impl PersistentMachineAdmin {
         i64::try_from(user.id)
             .map(Some)
             .map_err(|_| MachineAdminError::BadRequest("user id out of range".to_string()))
+    }
+
+    async fn reject_duplicate_addresses(
+        &self,
+        current_row_id: Option<i64>,
+        record: &MachineAdminRecord,
+    ) -> Result<(), MachineAdminError> {
+        let ipv4 = (!record.ipv4.trim().is_empty()).then_some(record.ipv4.trim());
+        let ipv6 = record
+            .ipv6
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if ipv4.is_none() && ipv6.is_none() {
+            return Ok(());
+        }
+
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+        for row in rows {
+            if current_row_id == Some(row.id) {
+                continue;
+            }
+            if let Some(candidate) = ipv4
+                && row.ipv4.as_deref().map(str::trim) == Some(candidate)
+            {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv4 address {candidate} already in use"
+                )));
+            }
+            if let Some(candidate) = ipv6
+                && row.ipv6.as_deref().map(str::trim) == Some(candidate)
+            {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv6 address {candidate} already in use"
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn user_name_for_row(
@@ -897,6 +948,42 @@ impl MachineAdmin for PersistentMachineAdmin {
         }
     }
 
+    async fn existing_auth_path_record(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Option<MachineAdminRecord> {
+        let user_id = self.user_id_for_record(record).await.ok().flatten();
+        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
+        let existing_for_user = match user_id {
+            Some(user_id) => match headscale_db::headscale_nodes::get_by_machine_key_and_user(
+                &self.pool,
+                &machine_key,
+                user_id,
+            )
+            .await
+            {
+                Ok(row) => Some(row),
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(_) => return None,
+            },
+            None => None,
+        };
+        let existing_for_machine =
+            match headscale_db::headscale_nodes::get_by_machine_key(&self.pool, &machine_key).await
+            {
+                Ok(row) => Some(row),
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(_) => return None,
+            };
+        let existing = existing_for_user.or_else(|| {
+            existing_for_machine
+                .as_ref()
+                .filter(|row| !row.tag_list().is_empty())
+                .cloned()
+        })?;
+        Some(self.row_to_record(existing).await)
+    }
+
     async fn create(
         &self,
         record: MachineAdminRecord,
@@ -920,6 +1007,7 @@ impl MachineAdmin for PersistentMachineAdmin {
             ipv6.parse::<Ipv6Addr>()
                 .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))?;
         }
+        self.reject_duplicate_addresses(None, &record).await?;
         let user_id = self.user_id_for_record(&record).await?;
         let row = headscale_db::headscale_nodes::create(
             &self.pool,
@@ -1143,6 +1231,16 @@ impl MachineAdmin for WireMachineAdmin {
         Some(Self::render(id, &rec, is_exp, online))
     }
 
+    async fn existing_auth_path_record(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Option<MachineAdminRecord> {
+        let (_, existing) = self
+            .registry
+            .get_by_machine_key_for_user(&record.machine_key_hex, &record.user)?;
+        Some(machine_admin_record_from_wire(&existing))
+    }
+
     async fn create(
         &self,
         record: MachineAdminRecord,
@@ -1159,6 +1257,34 @@ impl MachineAdmin for WireMachineAdmin {
             .ipv4
             .parse()
             .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
+        let ipv6 = record
+            .ipv6
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse::<Ipv6Addr>()
+                    .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))
+            })
+            .transpose()?;
+        let snapshot = self.registry.snapshot();
+        for (node_key, existing) in snapshot.iter() {
+            if node_key == &record.id {
+                continue;
+            }
+            if existing.ipv4 == ipv4 {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv4 address {ipv4} already in use"
+                )));
+            }
+            if let Some(ipv6) = ipv6
+                && existing.ipv6 == Some(ipv6)
+            {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv6 address {ipv6} already in use"
+                )));
+            }
+        }
         let created_at =
             DateTime::from_timestamp(record.created_at as i64, 0).unwrap_or_else(Utc::now);
         let expiry = record
@@ -1173,6 +1299,7 @@ impl MachineAdmin for WireMachineAdmin {
             ipv4,
             false,
         );
+        rec.ipv6 = ipv6;
         rec.expiry = expiry;
         rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
         rec.os = record.os.clone();
@@ -1841,7 +1968,7 @@ mod tests {
             name: "debug-node".into(),
             user: "alice".into(),
             ipv4: "100.64.0.44".into(),
-            ipv6: None,
+            ipv6: Some("fd7a:115c:a1e0::44".into()),
             online: false,
             last_seen: 1_700_000_000,
             created_at: 1_700_000_000,
@@ -1863,11 +1990,37 @@ mod tests {
 
         let rec = reg.get(&record.id).expect("wire record inserted");
         assert_eq!(rec.hostname, "debug-node");
+        assert_eq!(
+            rec.ipv6.map(|ip| ip.to_string()).as_deref(),
+            Some("fd7a:115c:a1e0::44")
+        );
         assert_eq!(rec.available_routes, vec!["10.0.0.0/24"]);
         assert_eq!(rec.register_method, 2);
 
-        let err = rt().block_on(a.create(record)).unwrap_err();
+        let err = rt().block_on(a.create(record.clone())).unwrap_err();
         assert!(matches!(err, MachineAdminError::BadRequest(_)));
+
+        let mut duplicate_ipv4 = record.clone();
+        duplicate_ipv4.id = "ee".repeat(32);
+        duplicate_ipv4.name = "duplicate-v4".into();
+        duplicate_ipv4.ipv4 = "100.64.0.5".into();
+        duplicate_ipv4.ipv6 = None;
+        let err = rt().block_on(a.create(duplicate_ipv4)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("IPv4 address 100.64.0.5 already in use")
+        );
+
+        let mut duplicate_ipv6 = record;
+        duplicate_ipv6.id = "ff".repeat(32);
+        duplicate_ipv6.name = "duplicate-v6".into();
+        duplicate_ipv6.ipv4 = "100.64.0.45".into();
+        duplicate_ipv6.ipv6 = Some("fd7a:115c:a1e0::44".into());
+        let err = rt().block_on(a.create(duplicate_ipv6)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("IPv6 address fd7a:115c:a1e0::44 already in use")
+        );
     }
 
     /// `delete` removes the record from the wire registry too, not
@@ -2002,6 +2155,46 @@ mod tests {
 
         assert_eq!(created.ipv6.as_deref(), Some("fd7a:115c:a1e0::9"));
         assert_eq!(listed[0].ipv6.as_deref(), Some("fd7a:115c:a1e0::9"));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_rejects_duplicate_ipv4_on_create() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        admin.create(persistent_record()).await.unwrap();
+
+        let mut duplicate = persistent_record();
+        duplicate.id = "cc".repeat(32);
+        duplicate.machine_key_hex = "dd".repeat(32);
+        duplicate.name = "duplicate-v4".into();
+
+        let err = admin.create(duplicate).await.unwrap_err();
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        assert!(
+            err.to_string()
+                .contains("IPv4 address 100.64.0.9 already in use")
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_rejects_duplicate_ipv6_on_create() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        let mut first = persistent_record();
+        first.ipv6 = Some("fd7a:115c:a1e0::9".into());
+        admin.create(first).await.unwrap();
+
+        let mut duplicate = persistent_record();
+        duplicate.id = "cc".repeat(32);
+        duplicate.machine_key_hex = "dd".repeat(32);
+        duplicate.name = "duplicate-v6".into();
+        duplicate.ipv4 = "100.64.0.10".into();
+        duplicate.ipv6 = Some("fd7a:115c:a1e0::9".into());
+
+        let err = admin.create(duplicate).await.unwrap_err();
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        assert!(
+            err.to_string()
+                .contains("IPv6 address fd7a:115c:a1e0::9 already in use")
+        );
     }
 
     #[tokio::test]
@@ -2221,6 +2414,28 @@ mod tests {
         assert_eq!(
             raw.register_method,
             headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_auth_path_rejects_duplicate_new_node_ip() {
+        let (admin, _db, _users) = persistent_fixture().await;
+        admin.create(persistent_record()).await.unwrap();
+
+        let mut pending = persistent_record();
+        pending.id = "cc".repeat(32);
+        pending.machine_key_hex = "dd".repeat(32);
+        pending.name = "auth-path-duplicate".into();
+
+        let err = admin
+            .create_or_update_auth_path(pending, &PolicyStore::new())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        assert!(
+            err.to_string()
+                .contains("IPv4 address 100.64.0.9 already in use")
         );
     }
 

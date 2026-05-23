@@ -449,7 +449,7 @@ pub mod upstream {
             let now = chrono::Utc::now().timestamp().max(0) as u64;
             MachineAdminRecord {
                 node_id: 0,
-                ipv4: cgnat_ip_from_key(&node_key).to_string(),
+                ipv4: String::new(),
                 ipv6: None,
                 id: node_key,
                 name: name.to_string(),
@@ -467,6 +467,30 @@ pub mod upstream {
                 register_method: RegisterMethod::Unspecified as i32,
                 expired: false,
             }
+        }
+
+        async fn prepare_registration_addresses(
+            &self,
+            record: &mut MachineAdminRecord,
+        ) -> Result<(), Status> {
+            if let Some(existing) = self.machines.existing_auth_path_record(record).await {
+                record.ipv4 = existing.ipv4;
+                record.ipv6 = existing.ipv6;
+                return Ok(());
+            }
+            let Some(ip_allocator) = self.ip_allocator.as_deref() else {
+                return Ok(());
+            };
+
+            let ipv4 = ip_allocator.allocate(&record.id).map_err(|e| {
+                Status::internal(format!("allocating IPs: allocating IPv4 address: {e}"))
+            })?;
+            let ipv6 = ip_allocator.allocate_ipv6(&record.id).map_err(|e| {
+                Status::internal(format!("allocating IPs: allocating IPv6 address: {e}"))
+            })?;
+            record.ipv4 = ipv4.to_string();
+            record.ipv6 = ipv6.map(|ip| ip.to_string());
+            Ok(())
         }
 
         async fn unique_node_key(&self) -> String {
@@ -498,6 +522,7 @@ pub mod upstream {
             let mut record = wire_record_to_machine_admin(pending.clone());
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
+            self.prepare_registration_addresses(&mut record).await?;
             apply_requested_tags(&self.policy, &mut record)?;
 
             let result = self
@@ -1694,7 +1719,7 @@ pub mod upstream {
 #[cfg(all(test, feature = "admin"))]
 mod upstream_tests {
     use std::fs;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
 
     use axum::body::to_bytes;
@@ -1722,10 +1747,23 @@ mod upstream_tests {
     use crate::policy::{PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
-        MachineRegistry, RegistrationCache, RegistrationWaitOutcome, WireState,
+        AllocError, IpAllocator, MachineRegistry, RegistrationCache, RegistrationWaitOutcome,
+        WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         test_support::{MockIpAllocator, MockRedeemer},
     };
+
+    struct FixedDebugAllocator;
+
+    impl IpAllocator for FixedDebugAllocator {
+        fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+            Ok(Ipv4Addr::new(100, 64, 0, 42))
+        }
+
+        fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
+            Ok(Some("fd7a:115c:a1e0::42".parse().unwrap()))
+        }
+    }
 
     struct FailingDatabaseHealth;
 
@@ -2128,6 +2166,54 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_register_node_uses_configured_allocator() {
+        let (service, _machines) = admin_service_with_machines().await;
+        let service = service.with_ip_allocator(Arc::new(FixedDebugAllocator));
+        const REGISTRATION_ID: &str = "debugallocatorabcdefghij";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let debug_node = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "debug-router".into(),
+                routes: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("debug node");
+        assert!(debug_node.ip_addresses.is_empty());
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.node_key, debug_node.node_key);
+        assert_eq!(
+            registered.ip_addresses,
+            vec!["100.64.0.42".to_string(), "fd7a:115c:a1e0::42".to_string()]
+        );
     }
 
     #[tokio::test]

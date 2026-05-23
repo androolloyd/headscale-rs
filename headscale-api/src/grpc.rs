@@ -679,21 +679,23 @@ pub mod upstream {
                     .ok_or_else(|| Status::not_found("user not found"))?
                     .name
             };
-            let ttl_secs = body
+            let expiration = body
                 .expiration
                 .as_ref()
-                .map(timestamp_to_ttl_secs)
-                .transpose()?
-                .unwrap_or(0);
+                .map(timestamp_to_unix)
+                .transpose()?;
             let created = self
                 .preauth
-                .mint(PreauthMintRequest {
-                    user,
-                    ttl_secs,
-                    reusable: body.reusable,
-                    ephemeral: body.ephemeral,
-                    tags: body.acl_tags,
-                })
+                .mint_with_expiration(
+                    PreauthMintRequest {
+                        user,
+                        ttl_secs: 0,
+                        reusable: body.reusable,
+                        ephemeral: body.ephemeral,
+                        tags: body.acl_tags,
+                    },
+                    expiration,
+                )
                 .await
                 .map_err(preauth_error_to_status)?;
             Ok(Response::new(CreatePreAuthKeyResponse {
@@ -1239,15 +1241,6 @@ pub mod upstream {
 
     fn unix_to_timestamp(seconds: i64) -> prost_types::Timestamp {
         prost_types::Timestamp { seconds, nanos: 0 }
-    }
-
-    fn timestamp_to_ttl_secs(ts: &prost_types::Timestamp) -> Result<u64, Status> {
-        let expiration = timestamp_to_unix(ts)?;
-        let now = current_unix_i64();
-        if expiration <= now {
-            return Ok(60);
-        }
-        Ok((expiration - now) as u64)
     }
 
     fn timestamp_to_unix(ts: &prost_types::Timestamp) -> Result<i64, Status> {
@@ -3818,6 +3811,7 @@ mod upstream_tests {
         assert!(created.ephemeral);
         assert_eq!(created.acl_tags, vec!["tag:server".to_string()]);
         assert_eq!(created.user.as_ref().unwrap().id, user.id);
+        assert_eq!(created.expiration.as_ref().unwrap().seconds, 4_102_444_800);
 
         let listed = service
             .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
@@ -3826,6 +3820,10 @@ mod upstream_tests {
             .into_inner();
         assert_eq!(listed.pre_auth_keys.len(), 1);
         assert_eq!(listed.pre_auth_keys[0].id, created.id);
+        assert_eq!(
+            listed.pre_auth_keys[0].expiration.as_ref().unwrap().seconds,
+            4_102_444_800
+        );
 
         service
             .expire_pre_auth_key(Request::new(ExpirePreAuthKeyRequest { id: created.id }))

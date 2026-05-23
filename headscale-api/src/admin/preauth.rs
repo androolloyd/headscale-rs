@@ -69,8 +69,8 @@ pub struct PreauthAdminKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreauthMintRequest {
     pub user: String,
-    /// TTL in seconds. Capped at 365 days by the handler to avoid
-    /// "forever" keys.
+    /// TTL in seconds. Capped at 365 days by the handler for relative
+    /// admin/UI minting. `0` means no expiry.
     pub ttl_secs: u64,
     pub reusable: bool,
     pub ephemeral: bool,
@@ -98,6 +98,20 @@ pub trait PreauthAdmin: Send + Sync {
     /// Mint a fresh key.
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError>;
 
+    /// Mint a fresh key with an upstream absolute expiration timestamp.
+    ///
+    /// This is used by gRPC/REST-gateway `CreatePreAuthKey`, whose proto
+    /// carries `google.protobuf.Timestamp expiration`. Admin/UI callers should
+    /// keep using [`Self::mint`] with relative TTLs.
+    async fn mint_with_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        let _ = expiration;
+        self.mint(req).await
+    }
+
     /// Expire — set `expires_at` to now, OR remove — a key identified
     /// by its **prefix** (so admins can paste the truncated form
     /// shown in the table).
@@ -122,6 +136,7 @@ const TOKEN_PREFIX: &str = "hskey-auth-";
 const TOKEN_PREFIX_LEN: usize = 12;
 const TOKEN_SECRET_LEN: usize = 64;
 const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+pub const NEVER_EXPIRES_AT: u64 = i64::MAX as u64;
 
 fn generate_urlsafe(len: usize) -> String {
     let mut raw = vec![0u8; len];
@@ -137,29 +152,43 @@ fn generate_preauth_key() -> String {
     format!("{TOKEN_PREFIX}{prefix}-{secret}")
 }
 
+pub(crate) fn expiration_for_mint(ttl_secs: u64, explicit_expiration: Option<i64>) -> Option<i64> {
+    if let Some(expiration) = explicit_expiration {
+        return Some(expiration);
+    }
+    if ttl_secs == 0 {
+        return None;
+    }
+    const MIN_TTL_SECS: u64 = 60;
+    const MAX_TTL_SECS: u64 = 365 * 24 * 3600;
+    let ttl = ttl_secs.clamp(MIN_TTL_SECS, MAX_TTL_SECS);
+    let expires_at = now_unix().saturating_add(ttl);
+    Some(i64::try_from(expires_at).unwrap_or(i64::MAX))
+}
+
+pub(crate) fn display_expires_at(expiration: Option<i64>) -> u64 {
+    match expiration {
+        Some(expiration) => u64::try_from(expiration).unwrap_or_default(),
+        None => NEVER_EXPIRES_AT,
+    }
+}
+
 impl InMemoryPreauthAdmin {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-#[async_trait]
-impl PreauthAdmin for InMemoryPreauthAdmin {
-    async fn list(&self) -> Vec<PreauthAdminKey> {
-        let g = self.inner.lock();
-        let mut v: Vec<_> = g.values().cloned().collect();
-        v.sort_by_key(|key| std::cmp::Reverse(key.created_at));
-        v
-    }
-
-    async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
+    async fn mint_inner(
+        &self,
+        req: PreauthMintRequest,
+        explicit_expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
         if req.user.trim().is_empty() && req.tags.is_empty() {
             return Err(PreauthAdminError::Invalid(
                 "user must be non-empty unless acl_tags are provided".to_string(),
             ));
         }
-        const MAX_TTL_SECS: u64 = 365 * 24 * 3600;
-        let ttl = req.ttl_secs.clamp(60, MAX_TTL_SECS);
+        let expiration = expiration_for_mint(req.ttl_secs, explicit_expiration);
         let now = now_unix();
         let key = generate_preauth_key();
         let mut g = self.inner.lock();
@@ -174,7 +203,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
             key: key.clone(),
             user: req.user,
             created_at: now,
-            expires_at: now.saturating_add(ttl),
+            expires_at: display_expires_at(expiration),
             reusable: req.reusable,
             ephemeral: req.ephemeral,
             tags: req.tags,
@@ -182,6 +211,28 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         };
         g.insert(key, rec.clone());
         Ok(rec)
+    }
+}
+
+#[async_trait]
+impl PreauthAdmin for InMemoryPreauthAdmin {
+    async fn list(&self) -> Vec<PreauthAdminKey> {
+        let g = self.inner.lock();
+        let mut v: Vec<_> = g.values().cloned().collect();
+        v.sort_by_key(|key| std::cmp::Reverse(key.created_at));
+        v
+    }
+
+    async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, None).await
+    }
+
+    async fn mint_with_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, expiration).await
     }
 
     async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError> {
@@ -334,6 +385,37 @@ mod tests {
         assert!(block(a.expire_by_prefix(prefix)).is_ok());
         let live = block(a.list());
         assert!(live[0].expires_at <= now_unix() + 1);
+    }
+
+    #[test]
+    fn ttl_zero_means_no_expiry() {
+        let a = InMemoryPreauthAdmin::new();
+        let k = block(a.mint(PreauthMintRequest {
+            user: "alice".into(),
+            ttl_secs: 0,
+            reusable: false,
+            ephemeral: false,
+            tags: vec![],
+        }))
+        .unwrap();
+        assert_eq!(k.expires_at, NEVER_EXPIRES_AT);
+    }
+
+    #[test]
+    fn absolute_expiration_is_preserved() {
+        let a = InMemoryPreauthAdmin::new();
+        let k = block(a.mint_with_expiration(
+            PreauthMintRequest {
+                user: "alice".into(),
+                ttl_secs: 0,
+                reusable: false,
+                ephemeral: false,
+                tags: vec![],
+            },
+            Some(4_102_444_800),
+        ))
+        .unwrap();
+        assert_eq!(k.expires_at, 4_102_444_800);
     }
 
     #[test]

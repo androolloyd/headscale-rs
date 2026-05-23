@@ -358,9 +358,13 @@ pub enum PreauthKeysCmd {
         /// Comma-separated `tag:foo,tag:bar` tags.
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        /// Duration the key is valid (e.g. `24h`, `7d`, `30m`).
-        /// Defaults to `24h` — same as the admin GUI default.
-        #[arg(long, default_value = "24h")]
+        /// Duration the key is valid (e.g. `1h`, `24h`, `30m`).
+        #[arg(
+            short = 'e',
+            long = "expiration",
+            alias = "expires-in",
+            default_value = "1h"
+        )]
         expires_in: String,
     },
     /// List all known preauth keys.
@@ -1288,6 +1292,47 @@ mod tests {
                 .action,
             PreauthKeysCmd::Delete { id: 43 }
         ));
+    }
+
+    #[test]
+    fn preauthkeys_create_uses_upstream_expiration_flag_and_default() {
+        match PreauthKeysHarness::try_parse_from(["headscale", "create", "--user", "alice"])
+            .unwrap()
+            .action
+        {
+            PreauthKeysCmd::Create { expires_in, .. } => assert_eq!(expires_in, "1h"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        match PreauthKeysHarness::try_parse_from([
+            "headscale",
+            "create",
+            "--user",
+            "alice",
+            "--expiration",
+            "30m",
+        ])
+        .unwrap()
+        .action
+        {
+            PreauthKeysCmd::Create { expires_in, .. } => assert_eq!(expires_in, "30m"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        match PreauthKeysHarness::try_parse_from([
+            "headscale",
+            "create",
+            "--user",
+            "alice",
+            "--expires-in",
+            "24h",
+        ])
+        .unwrap()
+        .action
+        {
+            PreauthKeysCmd::Create { expires_in, .. } => assert_eq!(expires_in, "24h"),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

@@ -90,6 +90,51 @@ impl PersistentPreauthAdmin {
         &self.pool
     }
 
+    async fn mint_inner(
+        &self,
+        req: PreauthMintRequest,
+        explicit_expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        if req.user.trim().is_empty() && req.tags.is_empty() {
+            return Err(PreauthAdminError::Invalid(
+                "user must be non-empty unless acl_tags are provided".to_string(),
+            ));
+        }
+        let expiration = super::preauth::expiration_for_mint(req.ttl_secs, explicit_expiration);
+        let storage_user_id = self.storage_user_id(&req.user).await?;
+
+        let created = preauth_keys::create_with_cost(
+            &self.pool,
+            CreateParams {
+                user_id: storage_user_id,
+                reusable: req.reusable,
+                ephemeral: req.ephemeral,
+                tags: req.tags.clone(),
+                expiration,
+            },
+            self.cost,
+        )
+        .await
+        .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?;
+
+        self.plaintext_cache
+            .lock()
+            .insert(created.row.id, created.plaintext.clone());
+
+        let user = self.display_user_for_row(&created.row).await;
+        Ok(PreauthAdminKey {
+            id: created.row.id.max(0) as u64,
+            key: created.plaintext,
+            user,
+            created_at: created.row.created_at as u64,
+            expires_at: super::preauth::display_expires_at(created.row.expiration),
+            reusable: created.row.reusable,
+            ephemeral: created.row.ephemeral,
+            tags: req.tags,
+            redemptions: 0,
+        })
+    }
+
     /// Atomically try to redeem the given candidate plaintext. Mirror
     /// of [`preauth_keys::try_use`]; surfaced here so an embedding
     /// host can wire this into their wire-layer
@@ -158,7 +203,7 @@ impl PersistentPreauthAdmin {
             key,
             user,
             created_at: row.created_at as u64,
-            expires_at: row.expiration.unwrap_or(i64::MAX) as u64,
+            expires_at: super::preauth::display_expires_at(row.expiration),
             reusable: row.reusable,
             ephemeral: row.ephemeral,
             tags: row.tag_list(),
@@ -207,62 +252,15 @@ impl PreauthAdmin for PersistentPreauthAdmin {
     }
 
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
-        if req.user.trim().is_empty() && req.tags.is_empty() {
-            return Err(PreauthAdminError::Invalid(
-                "user must be non-empty unless acl_tags are provided".to_string(),
-            ));
-        }
-        // Mirror the in-memory minter's TTL clamp so the two stores
-        // agree on bounds (60s floor, 365d ceiling). `ttl_secs == 0`
-        // means "no expiry" — we encode this as a NULL `expiration`
-        // column.
-        const MIN_TTL_SECS: u64 = 60;
-        const MAX_TTL_SECS: u64 = 365 * 24 * 3600;
-        let expiration = if req.ttl_secs == 0 {
-            None
-        } else {
-            let ttl = req.ttl_secs.clamp(MIN_TTL_SECS, MAX_TTL_SECS);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            Some((now.saturating_add(ttl)) as i64)
-        };
-        let storage_user_id = self.storage_user_id(&req.user).await?;
+        self.mint_inner(req, None).await
+    }
 
-        let created = preauth_keys::create_with_cost(
-            &self.pool,
-            CreateParams {
-                user_id: storage_user_id,
-                reusable: req.reusable,
-                ephemeral: req.ephemeral,
-                tags: req.tags.clone(),
-                expiration,
-            },
-            self.cost,
-        )
-        .await
-        .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?;
-
-        // Cache the plaintext so subsequent `list` calls can splash
-        // it. The DB only holds the hash.
-        self.plaintext_cache
-            .lock()
-            .insert(created.row.id, created.plaintext.clone());
-
-        // Reconstruct the admin shape from the row directly (with the
-        // freshly-minted plaintext from the side-cache).
-        let user = self.display_user_for_row(&created.row).await;
-        Ok(PreauthAdminKey {
-            id: created.row.id.max(0) as u64,
-            key: created.plaintext,
-            user,
-            created_at: created.row.created_at as u64,
-            expires_at: created.row.expiration.unwrap_or(i64::MAX) as u64,
-            reusable: created.row.reusable,
-            ephemeral: created.row.ephemeral,
-            tags: req.tags,
-            redemptions: 0,
-        })
+    async fn mint_with_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, expiration).await
     }
 
     async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError> {
@@ -518,5 +516,18 @@ mod tests {
         let k = s.mint(r).await.unwrap();
         // `expires_at` is i64::MAX cast to u64 when expiration is NULL.
         assert!(k.expires_at > 10_000_000_000, "ttl=0 => effectively never");
+    }
+
+    #[tokio::test]
+    async fn absolute_expiration_is_not_ttl_clamped() {
+        let s = store().await;
+        let key = s
+            .mint_with_expiration(alice_req(), Some(4_102_444_800))
+            .await
+            .unwrap();
+        assert_eq!(key.expires_at, 4_102_444_800);
+
+        let listed = s.list().await;
+        assert_eq!(listed[0].expires_at, 4_102_444_800);
     }
 }

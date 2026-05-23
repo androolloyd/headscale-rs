@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 pub use check::{PolicyCheckNode, check_policy_semantics};
 pub use doc::{
     AutoApprovers, CapabilityMap, GrantRule, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc,
-    PolicyRule, PortRef, SshRule,
+    PolicyRule, PortRef, SshRule, ViaRouteGrantResult,
 };
 pub use filter::{PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node};
 pub use hujson::{PolicyParseError, parse_hujson_policy};
@@ -261,6 +261,21 @@ impl PolicyStore {
             .doc
             .as_ref()
             .map(|doc| build_peer_map_for_doc(doc, nodes))
+    }
+
+    /// Compute `grants[*].via` route effects for one map recipient
+    /// viewing one peer. `None` means no operator policy is loaded.
+    pub fn via_routes_for_peer(
+        &self,
+        nodes: &[PeerMapNode],
+        viewer_id: u64,
+        peer_id: u64,
+    ) -> Option<ViaRouteGrantResult> {
+        let state = self.inner.state.read();
+        let doc = state.doc.as_ref()?;
+        let viewer = nodes.iter().find(|node| node.id == viewer_id)?;
+        let peer = nodes.iter().find(|node| node.id == peer_id)?;
+        Some(doc.via_routes_for_peer(&viewer.view(), &peer.view(), &peer.routes))
     }
 
     /// Wake every parked `/map` long-poller without changing the

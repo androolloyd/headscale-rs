@@ -167,23 +167,32 @@ fn exit_routes_for_snapshot(
         .collect()
 }
 
-fn active_routes_for_snapshot(
-    primary_routes: &HashMap<String, Vec<String>>,
-    exit_routes: &HashMap<String, Vec<String>>,
+fn served_routes_for_snapshot(
+    snapshot: &HashMap<String, MachineRecord>,
 ) -> HashMap<String, Vec<String>> {
-    let mut out = primary_routes.clone();
-    for (node_key, routes) in exit_routes {
-        let entry = out.entry(node_key.clone()).or_default();
-        entry.extend(routes.iter().cloned());
-        entry.sort();
-        entry.dedup();
-    }
-    out
+    snapshot
+        .iter()
+        .filter_map(|(node_key, rec)| {
+            let mut routes =
+                super::routes::active_approved_routes(&rec.available_routes, &rec.approved_routes);
+            routes.extend(active_exit_routes(
+                &rec.available_routes,
+                &rec.approved_routes,
+            ));
+            routes.sort();
+            routes.dedup();
+            if routes.is_empty() {
+                None
+            } else {
+                Some((node_key.clone(), routes))
+            }
+        })
+        .collect()
 }
 
 fn peer_map_nodes_from_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
-    active_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
 ) -> Vec<PeerMapNode> {
     snapshot
         .iter()
@@ -192,14 +201,14 @@ fn peer_map_nodes_from_snapshot(
             addr: rec.primary_addr_string().unwrap_or_default(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
-            routes: active_routes.get(node_key).cloned().unwrap_or_default(),
+            routes: served_routes.get(node_key).cloned().unwrap_or_default(),
         })
         .collect()
 }
 
 fn packet_filter_nodes_from_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
-    active_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
 ) -> Vec<PacketFilterNode> {
     snapshot
         .iter()
@@ -208,7 +217,7 @@ fn packet_filter_nodes_from_snapshot(
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
-            routes: active_routes.get(node_key).cloned().unwrap_or_default(),
+            routes: served_routes.get(node_key).cloned().unwrap_or_default(),
         })
         .collect()
 }
@@ -217,9 +226,9 @@ fn allowed_peer_ids_for_snapshot(
     policy: &PolicyStore,
     snapshot: &HashMap<String, MachineRecord>,
     self_node_key: &str,
-    active_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
 ) -> Option<BTreeSet<u64>> {
-    let nodes = peer_map_nodes_from_snapshot(snapshot, active_routes);
+    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
     let peer_map = policy.build_peer_map(&nodes)?;
     let self_id = stable_id_from_key(self_node_key);
     Some(
@@ -237,6 +246,42 @@ fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str) -> bool {
         Some(ids) => ids.contains(&stable_id_from_key(node_key)),
         None => true,
     }
+}
+
+fn select_routes_for_viewer(
+    policy: &PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    peer_node_key: &str,
+    primary_routes: &HashMap<String, Vec<String>>,
+    exit_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
+) -> (Vec<String>, Vec<String>) {
+    let mut selected_primary = primary_routes
+        .get(peer_node_key)
+        .cloned()
+        .unwrap_or_default();
+    let mut allowed_routes = selected_primary.clone();
+    allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
+
+    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
+    let viewer_id = stable_id_from_key(self_node_key);
+    let peer_id = stable_id_from_key(peer_node_key);
+    if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
+        selected_primary.retain(|route| !via.exclude.contains(route));
+        allowed_routes.retain(|route| !via.exclude.contains(route));
+        for route in via.include {
+            if !allowed_routes.contains(&route) {
+                allowed_routes.push(route);
+            }
+        }
+    }
+
+    selected_primary.sort();
+    selected_primary.dedup();
+    allowed_routes.sort();
+    allowed_routes.dedup();
+    (selected_primary, allowed_routes)
 }
 
 fn peer_state_from_nodes(peers: &[MapNode]) -> BTreeMap<u64, MapNode> {
@@ -335,9 +380,9 @@ fn visible_peer_state_for_registry(
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
-    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let served_routes = served_routes_for_snapshot(&snapshot);
     let allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
     let peers = visible_peer_map_nodes(
         &snapshot,
         self_node_key,
@@ -345,6 +390,7 @@ fn visible_peer_state_for_registry(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &served_routes,
         &online_states,
         policy,
         cap_version,
@@ -357,7 +403,7 @@ fn incremental_allowed_peer_ids_for_snapshot(
     policy: &PolicyStore,
     snapshot: &HashMap<String, MachineRecord>,
     self_node_key: &str,
-    active_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
     initial_peer_ids: &BTreeSet<u64>,
     last_peer_state: &BTreeMap<u64, MapNode>,
 ) -> Option<BTreeSet<u64>> {
@@ -371,7 +417,7 @@ fn incremental_allowed_peer_ids_for_snapshot(
         surfaced_peer_ids.extend(current_peer_ids.difference(initial_peer_ids).copied());
         return Some(surfaced_peer_ids);
     }
-    allowed_peer_ids_for_snapshot(policy, snapshot, self_node_key, active_routes)
+    allowed_peer_ids_for_snapshot(policy, snapshot, self_node_key, served_routes)
 }
 
 fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
@@ -452,6 +498,7 @@ fn visible_peer_map_nodes(
     tailnet_domain: &str,
     primary_routes: &HashMap<String, Vec<String>>,
     exit_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
     online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
@@ -465,17 +512,16 @@ fn visible_peer_map_nodes(
             let mut node = record_to_map_node(rec, tailnet_domain);
             apply_transient_lifecycle(&mut node, rec, online_states);
             node.cap = cap_version;
-            apply_routes_to_map_node(
-                &mut node,
-                primary_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                exit_routes
-                    .get(node_key.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
+            let (selected_primary, selected_allowed) = select_routes_for_viewer(
+                policy,
+                snapshot,
+                self_node_key,
+                node_key,
+                primary_routes,
+                exit_routes,
+                served_routes,
             );
+            apply_selected_routes_to_map_node(&mut node, &selected_primary, &selected_allowed);
             apply_policy_attrs_to_map_node(&mut node, rec, policy);
             apply_taildrop_to_map_node(&mut node, taildrop_enabled);
             node
@@ -505,6 +551,18 @@ fn apply_routes_to_map_node(node: &mut MapNode, primary_routes: &[String], exit_
     node.allowed_ips = node.addresses.clone();
     node.allowed_ips.extend(primary_routes.iter().cloned());
     node.allowed_ips.extend(exit_routes.iter().cloned());
+    node.allowed_ips.sort();
+    node.allowed_ips.dedup();
+}
+
+fn apply_selected_routes_to_map_node(
+    node: &mut MapNode,
+    primary_routes: &[String],
+    allowed_routes: &[String],
+) {
+    node.primary_routes = primary_routes.to_vec();
+    node.allowed_ips = node.addresses.clone();
+    node.allowed_ips.extend(allowed_routes.iter().cloned());
     node.allowed_ips.sort();
     node.allowed_ips.dedup();
 }
@@ -903,10 +961,10 @@ async fn map_inner(
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = state.machines.online_states();
     let taildrop_enabled = state.runtime_config.taildrop.enabled;
-    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let served_routes = served_routes_for_snapshot(&snapshot);
     let allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &active_routes);
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
+        allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &served_routes);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
         &snapshot,
         &node_key_hex,
@@ -931,6 +989,7 @@ async fn map_inner(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &served_routes,
         &online_states,
         &state.policy,
         req.version,
@@ -1329,17 +1388,17 @@ fn rebuild_peer_delta_chunk(
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
-    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let served_routes = served_routes_for_snapshot(&snapshot);
     let allowed_peer_ids = incremental_allowed_peer_ids_for_snapshot(
         policy,
         &snapshot,
         self_node_key,
-        &active_routes,
+        &served_routes,
         initial_peer_ids,
         last_peer_state,
     );
     let self_node_id = stable_id_from_key(self_node_key);
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let current_self_node = self_map_node_from_snapshot(
         &snapshot,
         self_node_key,
@@ -1365,6 +1424,7 @@ fn rebuild_peer_delta_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &served_routes,
         &online_states,
         policy,
         cap_version,
@@ -1452,11 +1512,11 @@ fn rebuild_map_chunk(
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
-    let active_routes = active_routes_for_snapshot(&primary_routes, &exit_routes);
+    let served_routes = served_routes_for_snapshot(&snapshot);
     let allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &active_routes);
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
     let self_node_id = stable_id_from_key(self_node_key);
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &active_routes);
+    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
         &snapshot,
         self_node_key,
@@ -1477,6 +1537,7 @@ fn rebuild_map_chunk(
         &tailnet_domain,
         &primary_routes,
         &exit_routes,
+        &served_routes,
         &online_states,
         policy,
         cap_version,
@@ -2694,6 +2755,163 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn via_steering_policy(group_a_via: &str, group_b_via: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-a": ["router@"],
+                    "tag:router-b": ["router@"],
+                    "tag:group-a": ["client@"],
+                    "tag:group-b": ["client@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["tag:router-a", "tag:router-b", "tag:group-a", "tag:group-b"],
+                        "dst": ["tag:router-a", "tag:router-b", "tag:group-a", "tag:group-b"],
+                        "ip": ["*"]
+                    }},
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["10.0.0.0/24"],
+                        "ip": ["*"],
+                        "via": ["{group_a_via}"]
+                    }},
+                    {{
+                        "src": ["tag:group-b"],
+                        "dst": ["10.0.0.0/24"],
+                        "ip": ["*"],
+                        "via": ["{group_b_via}"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
+    fn insert_via_steering_nodes(state: &WireState) -> (String, String, String, String) {
+        let route = vec!["10.0.0.0/24".to_string()];
+        let router_a = "61".repeat(32);
+        let router_b = "62".repeat(32);
+        let client_a = "63".repeat(32);
+        let client_b = "64".repeat(32);
+
+        for (node_key, host, octet, user, tags, routes) in [
+            (
+                &router_a,
+                "router-a",
+                61,
+                "router",
+                vec!["tag:router-a".to_string()],
+                route.clone(),
+            ),
+            (
+                &router_b,
+                "router-b",
+                62,
+                "router",
+                vec!["tag:router-b".to_string()],
+                route,
+            ),
+            (
+                &client_a,
+                "client-a",
+                63,
+                "client",
+                vec!["tag:group-a".to_string()],
+                Vec::new(),
+            ),
+            (
+                &client_b,
+                "client-b",
+                64,
+                "client",
+                vec!["tag:group-b".to_string()],
+                Vec::new(),
+            ),
+        ] {
+            let mut rec = policy_record(node_key, host, octet, user, tags);
+            rec.available_routes = routes.clone();
+            rec.approved_routes = routes;
+            state.machines.upsert(node_key.clone(), rec);
+        }
+
+        (router_a, router_b, client_a, client_b)
+    }
+
+    fn peer_route<'a>(mr: &'a MapResponse, name: &str, route: &str) -> Option<&'a MapNode> {
+        mr.peers.iter().find(|peer| {
+            peer.name == name && peer.allowed_ips.iter().any(|allowed| allowed == route)
+        })
+    }
+
+    #[tokio::test]
+    async fn map_response_steers_same_prefix_to_different_via_routers_per_viewer() {
+        let (state, _dir) = fixture();
+        let policy = via_steering_policy("tag:router-a", "tag:router-b");
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+        let (_router_a, _router_b, client_a, client_b) = insert_via_steering_nodes(&state);
+
+        let app = router(state);
+        let route = "10.0.0.0/24";
+        for (client, expected, unexpected) in [
+            (&client_a, "router-a", "router-b"),
+            (&client_b, "router-b", "router-a"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/machine/nodekey:{client}/map"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+            let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+            assert!(peer_route(&mr, expected, route).is_some());
+            assert!(peer_route(&mr, unexpected, route).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_policy_change_moves_via_route_allowed_ips() {
+        let (state, _dir) = fixture();
+        let policy = via_steering_policy("tag:router-a", "tag:router-b");
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+        let (_router_a, _router_b, client_a, _client_b) = insert_via_steering_nodes(&state);
+
+        let app = router(state.clone());
+        let route = "10.0.0.0/24";
+        let mut body = open_zstd_stream(app, &client_a).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert!(peer_route(&first, "router-a", route).is_some());
+        assert!(peer_route(&first, "router-b", route).is_none());
+
+        let moved_policy = via_steering_policy("tag:router-b", "tag:router-b");
+        tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::parse_hujson_policy(&moved_policy).unwrap(),
+                    moved_policy,
+                );
+            }
+        });
+
+        let updated = next_zstd_map_response(&mut body).await;
+        assert!(peer_route(&updated, "router-a", route).is_none());
+        assert!(peer_route(&updated, "router-b", route).is_some());
     }
 
     #[tokio::test]

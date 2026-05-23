@@ -1437,7 +1437,96 @@ impl AclDoc {
                 return rule.action == AclAction::Accept;
             }
         }
-        false
+        self.grants
+            .iter()
+            .any(|grant| self.grant_matches_node_or_route(grant, src, dst, dst_routes, port))
+    }
+
+    /// Return the routes that `peer` should include or exclude for
+    /// `viewer` because of upstream `grants[*].via` route steering.
+    pub fn via_routes_for_peer(
+        &self,
+        viewer: &NodeView<'_>,
+        peer: &NodeView<'_>,
+        peer_routes: &[String],
+    ) -> ViaRouteGrantResult {
+        let mut result = ViaRouteGrantResult::default();
+        for grant in &self.grants {
+            if grant.via.is_empty()
+                || !self.grant_src_matches(grant, viewer)
+                || !grant_port_matches(grant, PortRef::any())
+            {
+                continue;
+            }
+
+            let matched = peer_routes
+                .iter()
+                .filter(|route| self.grant_dsts_overlap_route(grant, route))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matched.is_empty() {
+                continue;
+            }
+
+            let peer_has_via = grant.via.iter().any(|via| {
+                via.strip_prefix("tag:")
+                    .is_some_and(|tag| peer.tags.iter().any(|peer_tag| tag_matches(peer_tag, tag)))
+            });
+            let target = if peer_has_via {
+                &mut result.include
+            } else {
+                &mut result.exclude
+            };
+            for route in matched {
+                if !target.contains(&route) {
+                    target.push(route);
+                }
+            }
+        }
+
+        result.include.sort();
+        result.exclude.sort();
+        result
+    }
+
+    fn grant_matches_node_or_route(
+        &self,
+        grant: &GrantRule,
+        src: &NodeView<'_>,
+        dst: &NodeView<'_>,
+        dst_routes: &[String],
+        port: PortRef<'_>,
+    ) -> bool {
+        if !self.grant_src_matches(grant, src) || !grant_port_matches(grant, port) {
+            return false;
+        }
+        if grant.via.is_empty() {
+            return self.principal_matches(&grant.dst, dst, Some(src))
+                || self.principals_overlap_routes(&grant.dst, dst_routes);
+        }
+        let peer_has_via = grant.via.iter().any(|via| {
+            via.strip_prefix("tag:")
+                .is_some_and(|tag| dst.tags.iter().any(|dst_tag| tag_matches(dst_tag, tag)))
+        });
+        peer_has_via
+            && dst_routes
+                .iter()
+                .any(|route| self.grant_dsts_overlap_route(grant, route))
+    }
+
+    fn grant_src_matches(&self, grant: &GrantRule, src: &NodeView<'_>) -> bool {
+        self.principal_matches(&grant.src, src, None)
+    }
+
+    fn grant_dsts_overlap_route(&self, grant: &GrantRule, route: &str) -> bool {
+        let Some(route) = parse_cidr(route) else {
+            return false;
+        };
+        grant.dst.iter().any(|dst| {
+            self.expand_principal(dst).iter().any(|expanded| {
+                parse_cidr(expanded).is_some_and(|allowed| nets_overlap(&allowed, &route))
+            })
+        })
     }
 
     fn matches(
@@ -1736,6 +1825,13 @@ impl AclDoc {
     }
 }
 
+/// Route effects from `grants[*].via` for one viewer/peer pair.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ViaRouteGrantResult {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
 pub fn wildcard_filter_cidrs() -> Vec<String> {
     vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
 }
@@ -2010,6 +2106,17 @@ fn port_matches(pattern: &str, port: PortRef<'_>) -> bool {
     let proto_ok = proto_part == "*" || port.proto.is_none_or(|p| proto_matches(proto_part, p));
     let port_ok = port_part == "*" || port.port.is_none_or(|p| port_part_matches(port_part, p));
     proto_ok && port_ok
+}
+
+fn grant_port_matches(grant: &GrantRule, port: PortRef<'_>) -> bool {
+    grant.ip.is_empty()
+        || grant.ip.iter().any(|spec| {
+            normalize_grant_ip_spec(spec).is_ok_and(|patterns| {
+                patterns
+                    .iter()
+                    .any(|pattern| port_matches(pattern.as_str(), port))
+            })
+        })
 }
 
 fn proto_matches(pattern: &str, actual: &str) -> bool {

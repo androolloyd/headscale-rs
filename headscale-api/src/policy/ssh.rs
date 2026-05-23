@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::PolicyDoc;
 use crate::tailscale_wire::wire::{SshAction, SshPolicy, SshPrincipal, SshRule};
@@ -10,6 +10,12 @@ pub struct SshPolicyNode {
     pub user: Option<String>,
     pub addrs: Vec<String>,
     pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SshUserRule {
+    ssh_users: BTreeMap<String, String>,
+    source_node_ids: BTreeSet<u64>,
 }
 
 /// Compile a headscale policy `ssh` block into the `tailcfg.SSHPolicy`
@@ -30,13 +36,16 @@ pub fn compile_ssh_policy(
     let mut out = Vec::new();
 
     for rule in &doc.ssh {
-        let src_ips = resolve_ssh_sources(doc, &rule.src, nodes);
-        if src_ips.is_empty() {
+        let source_nodes = resolve_ssh_source_nodes(doc, &rule.src, nodes);
+        if source_nodes.is_empty() {
             continue;
         }
 
         let action = ssh_action(&rule.action, rule.check_period.as_deref());
-        let ssh_users = ssh_user_map(&rule.users);
+        let ssh_user_rules = ssh_user_rules(&rule.users, &source_nodes);
+        if ssh_user_rules.is_empty() {
+            continue;
+        }
         let mut self_dsts = Vec::new();
         let mut other_dsts = Vec::new();
         for dst in &rule.dst {
@@ -47,35 +56,9 @@ pub fn compile_ssh_policy(
             }
         }
 
-        if !self_dsts.is_empty() && target_node.tags.is_empty() {
-            let same_user = same_user_untagged_nodes(nodes, target_node);
-            let mut principals = Vec::new();
-            for node in same_user {
-                if node
-                    .addrs
-                    .iter()
-                    .any(|addr| src_ips.iter().any(|src| src == addr))
-                {
-                    for addr in &node.addrs {
-                        push_unique_string(&mut principals, addr.clone());
-                    }
-                }
-            }
-            principals.sort();
-            if !principals.is_empty() {
-                out.push(SshRule {
-                    principals: principals
-                        .into_iter()
-                        .map(|node_ip| SshPrincipal {
-                            node_ip,
-                            ..SshPrincipal::default()
-                        })
-                        .collect(),
-                    ssh_users: ssh_users.clone(),
-                    action: action.clone(),
-                    ..SshRule::default()
-                });
-            }
+        if !self_dsts.is_empty() && is_untagged_user_owned(target_node) {
+            let same_user = same_user_untagged_nodes(&source_nodes, target_node);
+            push_ssh_rules_for_nodes(&mut out, &same_user, &ssh_user_rules, &action);
         }
 
         if !other_dsts.is_empty()
@@ -83,91 +66,152 @@ pub fn compile_ssh_policy(
                 .iter()
                 .any(|dst| ssh_destination_matches(doc, dst, target_node))
         {
-            let mut principals = src_ips.clone();
-            principals.sort();
-            principals.dedup();
-            out.push(SshRule {
-                principals: principals
-                    .into_iter()
-                    .map(|node_ip| SshPrincipal {
-                        node_ip,
-                        ..SshPrincipal::default()
-                    })
-                    .collect(),
-                ssh_users: ssh_users.clone(),
-                action: action.clone(),
-                ..SshRule::default()
-            });
+            push_ssh_rules_for_nodes(&mut out, &source_nodes, &ssh_user_rules, &action);
         }
     }
 
     Some(SshPolicy { rules: out })
 }
 
-fn resolve_ssh_sources(doc: &PolicyDoc, tokens: &[String], nodes: &[SshPolicyNode]) -> Vec<String> {
+fn push_ssh_rules_for_nodes(
+    out: &mut Vec<SshRule>,
+    nodes: &[&SshPolicyNode],
+    ssh_user_rules: &[SshUserRule],
+    action: &SshAction,
+) {
+    for ssh_user_rule in ssh_user_rules {
+        let principals = source_node_addrs_for_rule(nodes, ssh_user_rule);
+        push_ssh_rule(out, &principals, &ssh_user_rule.ssh_users, action);
+    }
+}
+
+fn push_ssh_rule(
+    out: &mut Vec<SshRule>,
+    principals: &[String],
+    ssh_users: &BTreeMap<String, String>,
+    action: &SshAction,
+) {
+    if principals.is_empty() {
+        return;
+    }
+
+    out.push(SshRule {
+        principals: principals
+            .iter()
+            .cloned()
+            .map(|node_ip| SshPrincipal {
+                node_ip,
+                ..SshPrincipal::default()
+            })
+            .collect(),
+        ssh_users: ssh_users.clone(),
+        action: action.clone(),
+        ..SshRule::default()
+    });
+}
+
+fn source_node_addrs_for_rule(nodes: &[&SshPolicyNode], rule: &SshUserRule) -> Vec<String> {
     let mut out = Vec::new();
-    for token in tokens {
-        for value in resolve_ssh_source(doc, token, nodes) {
-            push_unique_string(&mut out, value);
+    for node in nodes {
+        if !rule.source_node_ids.contains(&node.id) {
+            continue;
+        }
+        for addr in &node.addrs {
+            push_unique_string(&mut out, addr.clone());
         }
     }
     out.sort();
     out
 }
 
-fn resolve_ssh_source(doc: &PolicyDoc, token: &str, nodes: &[SshPolicyNode]) -> Vec<String> {
+fn resolve_ssh_source_nodes<'a>(
+    doc: &PolicyDoc,
+    tokens: &[String],
+    nodes: &'a [SshPolicyNode],
+) -> Vec<&'a SshPolicyNode> {
+    let mut out = Vec::new();
+    let mut seen_nodes = BTreeSet::new();
+    for token in tokens {
+        let mut seen_groups = BTreeSet::new();
+        resolve_ssh_source_node(
+            doc,
+            token,
+            nodes,
+            &mut seen_groups,
+            &mut seen_nodes,
+            &mut out,
+        );
+    }
+    out.sort_by_key(|node| node.id);
+    out
+}
+
+fn resolve_ssh_source_node<'a>(
+    doc: &PolicyDoc,
+    token: &str,
+    nodes: &'a [SshPolicyNode],
+    seen_groups: &mut BTreeSet<String>,
+    seen_nodes: &mut BTreeSet<u64>,
+    out: &mut Vec<&'a SshPolicyNode>,
+) {
     if token.contains('@') {
-        return nodes
+        for node in nodes
             .iter()
-            .filter(|node| node.tags.is_empty())
+            .filter(|node| is_untagged_user_owned(node))
             .filter(|node| {
                 node.user
                     .as_deref()
                     .is_some_and(|user| user_matches(token, user))
             })
-            .flat_map(|node| node.addrs.clone())
-            .collect();
+        {
+            push_unique_node(out, seen_nodes, node);
+        }
+        return;
     }
     if let Some(group) = token.strip_prefix("group:") {
-        let Some(members) = doc.groups.get(token).or_else(|| doc.groups.get(group)) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for member in members {
-            for value in resolve_ssh_source(doc, member, nodes) {
-                push_unique_string(&mut out, value);
-            }
+        let group_ref = format!("group:{group}");
+        if !seen_groups.insert(group_ref.clone()) {
+            return;
         }
-        return out;
+        let Some(members) = doc.groups.get(token).or_else(|| doc.groups.get(group)) else {
+            seen_groups.remove(&group_ref);
+            return;
+        };
+        for member in members {
+            resolve_ssh_source_node(doc, member, nodes, seen_groups, seen_nodes, out);
+        }
+        seen_groups.remove(&group_ref);
+        return;
     }
     if let Some(tag) = token.strip_prefix("tag:") {
-        return nodes
+        for node in nodes
             .iter()
             .filter(|node| node.tags.iter().any(|node_tag| tag_matches(node_tag, tag)))
-            .flat_map(|node| node.addrs.clone())
-            .collect();
+        {
+            push_unique_node(out, seen_nodes, node);
+        }
+        return;
     }
     if let Some(kind) = token.strip_prefix("autogroup:") {
-        return match kind {
-            "member" => nodes
-                .iter()
-                .filter(|node| node.tags.is_empty())
-                .flat_map(|node| node.addrs.clone())
-                .collect(),
-            "tagged" => nodes
-                .iter()
-                .filter(|node| !node.tags.is_empty())
-                .flat_map(|node| node.addrs.clone())
-                .collect(),
-            _ => Vec::new(),
-        };
+        match kind {
+            "member" => {
+                for node in nodes.iter().filter(|node| is_untagged_user_owned(node)) {
+                    push_unique_node(out, seen_nodes, node);
+                }
+            }
+            "tagged" => {
+                for node in nodes.iter().filter(|node| !node.tags.is_empty()) {
+                    push_unique_node(out, seen_nodes, node);
+                }
+            }
+            _ => {}
+        }
     }
-    Vec::new()
 }
 
 fn ssh_destination_matches(doc: &PolicyDoc, token: &str, node: &SshPolicyNode) -> bool {
     if token.contains('@') {
-        return node.tags.is_empty()
+        return is_untagged_user_owned(node)
             && node
                 .user
                 .as_deref()
@@ -178,7 +222,7 @@ fn ssh_destination_matches(doc: &PolicyDoc, token: &str, node: &SshPolicyNode) -
     }
     if let Some(kind) = token.strip_prefix("autogroup:") {
         return match kind {
-            "member" => node.tags.is_empty(),
+            "member" => is_untagged_user_owned(node),
             "tagged" => !node.tags.is_empty(),
             _ => false,
         };
@@ -194,17 +238,23 @@ fn ssh_destination_matches(doc: &PolicyDoc, token: &str, node: &SshPolicyNode) -
 }
 
 fn same_user_untagged_nodes<'a>(
-    nodes: &'a [SshPolicyNode],
+    nodes: &'a [&'a SshPolicyNode],
     node: &SshPolicyNode,
 ) -> Vec<&'a SshPolicyNode> {
+    let Some(user) = node.user.as_deref().filter(|user| !user.is_empty()) else {
+        return Vec::new();
+    };
+
     nodes
         .iter()
-        .filter(|candidate| candidate.tags.is_empty())
-        .filter(|candidate| candidate.user == node.user)
+        .copied()
+        .filter(|candidate| is_untagged_user_owned(candidate))
+        .filter(|candidate| candidate.user.as_deref() == Some(user))
         .collect()
 }
 
-fn ssh_user_map(users: &[String]) -> BTreeMap<String, String> {
+fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshUserRule> {
+    let all_source_node_ids: BTreeSet<u64> = source_nodes.iter().map(|node| node.id).collect();
     let mut out = BTreeMap::new();
     if users.iter().any(|user| user == "autogroup:nonroot") {
         out.insert("*".to_string(), "=".to_string());
@@ -214,12 +264,56 @@ fn ssh_user_map(users: &[String]) -> BTreeMap<String, String> {
         out.insert("root".to_string(), "root".to_string());
     }
     for user in users {
-        if user == "root" || user == "autogroup:nonroot" {
+        if user == "root" || user == "autogroup:nonroot" || localpart_pattern_domain(user).is_some()
+        {
             continue;
         }
         out.insert(user.clone(), user.clone());
     }
-    out
+
+    let mut maps = Vec::new();
+    if !out.is_empty() || users.is_empty() {
+        maps.push(SshUserRule {
+            ssh_users: out,
+            source_node_ids: all_source_node_ids,
+        });
+    }
+
+    let localpart_domains: Vec<&str> = users
+        .iter()
+        .filter_map(|user| localpart_pattern_domain(user))
+        .collect();
+    if localpart_domains.is_empty() {
+        return maps;
+    }
+
+    let mut localpart_users: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for node in source_nodes
+        .iter()
+        .copied()
+        .filter(|node| is_untagged_user_owned(node))
+    {
+        let Some(login) = node.user.as_deref() else {
+            continue;
+        };
+        for domain in &localpart_domains {
+            if let Some(localpart) = localpart_for_login(login, domain) {
+                localpart_users
+                    .entry(localpart)
+                    .or_default()
+                    .insert(node.id);
+            }
+        }
+    }
+
+    for (localpart, source_node_ids) in localpart_users {
+        maps.push(SshUserRule {
+            ssh_users: BTreeMap::from([(localpart.clone(), localpart)]),
+            source_node_ids,
+        });
+    }
+
+    maps
 }
 
 fn ssh_action(action: &str, check_period: Option<&str>) -> SshAction {
@@ -286,6 +380,23 @@ fn user_matches(entry: &str, user: &str) -> bool {
     entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
 }
 
+fn localpart_pattern_domain(user: &str) -> Option<&str> {
+    user.strip_prefix("localpart:*@")
+        .filter(|domain| !domain.is_empty())
+}
+
+fn localpart_for_login(login: &str, domain: &str) -> Option<String> {
+    let (localpart, login_domain) = login.rsplit_once('@')?;
+    if localpart.is_empty() || !login_domain.eq_ignore_ascii_case(domain) {
+        return None;
+    }
+    Some(localpart.to_string())
+}
+
+fn is_untagged_user_owned(node: &SshPolicyNode) -> bool {
+    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
+}
+
 fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
     node_tag == policy_tag_without_prefix
         || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
@@ -304,6 +415,16 @@ fn prefix_contains_addr(prefix: &str, addr: &str) -> bool {
 fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !out.contains(&value) {
         out.push(value);
+    }
+}
+
+fn push_unique_node<'a>(
+    out: &mut Vec<&'a SshPolicyNode>,
+    seen: &mut BTreeSet<u64>,
+    node: &'a SshPolicyNode,
+) {
+    if seen.insert(node.id) {
+        out.push(node);
     }
 }
 
@@ -443,9 +564,173 @@ mod tests {
         );
     }
 
+    #[test]
+    fn localpart_users_compile_into_source_specific_rules() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:server": ["alice@example.com"]},
+              "ssh": [{
+                "action": "accept",
+                "src": ["autogroup:member"],
+                "dst": ["tag:server"],
+                "users": ["localpart:*@example.com"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("bob@example.com".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 3,
+                user: Some("eve@other.example".into()),
+                addrs: vec!["100.64.0.3".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 4,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.4".into()],
+                tags: vec!["tag:server".into()],
+            },
+        ];
+
+        let pol = compile_ssh_policy(&doc, &nodes, 4).unwrap();
+
+        assert_eq!(pol.rules.len(), 2);
+        assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.1"]);
+        assert_eq!(pol.rules[0].ssh_users["alice"], "alice");
+        assert_eq!(principal_ips_for_rule(&pol.rules[1]), vec!["100.64.0.2"]);
+        assert_eq!(pol.rules[1].ssh_users["bob"], "bob");
+    }
+
+    #[test]
+    fn localpart_users_remain_source_specific_for_autogroup_self() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["autogroup:member"],
+                "dst": ["autogroup:self"],
+                "users": ["localpart:*@example.com"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 3,
+                user: Some("bob@example.com".into()),
+                addrs: vec!["100.64.0.3".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 4,
+                user: Some("bob@example.com".into()),
+                addrs: vec!["100.64.0.4".into()],
+                tags: Vec::new(),
+            },
+        ];
+
+        let alice_target = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+        let bob_target = compile_ssh_policy(&doc, &nodes, 4).unwrap();
+
+        assert_eq!(alice_target.rules.len(), 1);
+        assert_eq!(
+            principal_ips_for_rule(&alice_target.rules[0]),
+            vec!["100.64.0.1", "100.64.0.2"]
+        );
+        assert_eq!(alice_target.rules[0].ssh_users["alice"], "alice");
+        assert!(!alice_target.rules[0].ssh_users.contains_key("bob"));
+
+        assert_eq!(bob_target.rules.len(), 1);
+        assert_eq!(
+            principal_ips_for_rule(&bob_target.rules[0]),
+            vec!["100.64.0.3", "100.64.0.4"]
+        );
+        assert_eq!(bob_target.rules[0].ssh_users["bob"], "bob");
+        assert!(!bob_target.rules[0].ssh_users.contains_key("alice"));
+    }
+
+    #[test]
+    fn userless_nodes_do_not_match_member_or_self() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [
+                {
+                  "action": "accept",
+                  "src": ["autogroup:member"],
+                  "dst": ["autogroup:member"],
+                  "users": ["deploy"]
+                },
+                {
+                  "action": "accept",
+                  "src": ["autogroup:member"],
+                  "dst": ["autogroup:self"],
+                  "users": ["root"]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: None,
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+        ];
+
+        let alice_target = compile_ssh_policy(&doc, &nodes, 1).unwrap();
+        let userless_target = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(alice_target.rules.len(), 2);
+        assert_eq!(
+            principal_ips_for_rule(&alice_target.rules[0]),
+            vec!["100.64.0.1"]
+        );
+        assert_eq!(
+            principal_ips_for_rule(&alice_target.rules[1]),
+            vec!["100.64.0.1"]
+        );
+        assert!(userless_target.rules.is_empty());
+    }
+
     fn principal_ips(policy: &SshPolicy) -> Vec<&str> {
-        policy.rules[0]
-            .principals
+        principal_ips_for_rule(&policy.rules[0])
+    }
+
+    fn principal_ips_for_rule(rule: &SshRule) -> Vec<&str> {
+        rule.principals
             .iter()
             .map(|principal| principal.node_ip.as_str())
             .collect()

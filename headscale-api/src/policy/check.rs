@@ -292,7 +292,7 @@ fn ssh_reachability(
         {
             continue;
         }
-        if !ssh_users_allow(&rule.users, user) {
+        if !ssh_users_allow(&rule.users, src, user) {
             continue;
         }
 
@@ -330,7 +330,7 @@ fn ssh_destination_matches(
         .any(|candidate| endpoint_matches_node(candidate, dst))
 }
 
-fn ssh_users_allow(users: &[String], user: &str) -> bool {
+fn ssh_users_allow(users: &[String], src: &Endpoint, user: &str) -> bool {
     if user.is_empty() {
         return false;
     }
@@ -344,6 +344,18 @@ fn ssh_users_allow(users: &[String], user: &str) -> bool {
         && users
             .iter()
             .any(|candidate| candidate == "autogroup:nonroot")
+    {
+        return true;
+    }
+    if users
+        .iter()
+        .filter_map(|candidate| localpart_pattern_domain(candidate))
+        .any(|domain| {
+            src.user
+                .as_deref()
+                .and_then(|login| localpart_for_login(login, domain))
+                .is_some_and(|localpart| localpart == user)
+        })
     {
         return true;
     }
@@ -402,7 +414,7 @@ fn resolve_alias_inner(
     }
     if token.contains('@') {
         for node in nodes.iter().filter(|node| {
-            node.tags.is_empty()
+            is_untagged_user_owned(node)
                 && node
                     .user
                     .as_deref()
@@ -436,7 +448,7 @@ fn resolve_alias_inner(
     if let Some(kind) = token.strip_prefix("autogroup:") {
         match kind {
             "member" => {
-                for node in nodes.iter().filter(|node| node.tags.is_empty()) {
+                for node in nodes.iter().filter(|node| is_untagged_user_owned(node)) {
                     push_node_addrs(node, out);
                 }
             }
@@ -450,6 +462,8 @@ fn resolve_alias_inner(
                     for node in nodes.iter().filter(|node| {
                         node.tags.is_empty()
                             && src.tags.is_empty()
+                            && node.user.as_deref().is_some_and(|user| !user.is_empty())
+                            && src.user.as_deref().is_some_and(|user| !user.is_empty())
                             && node.user.as_deref() == src.user.as_deref()
                     }) {
                         push_node_addrs(node, out);
@@ -581,8 +595,25 @@ fn parse_test_port(port: &str) -> Result<u16, String> {
     }
 }
 
+fn is_untagged_user_owned(node: &PolicyCheckNode) -> bool {
+    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
+}
+
 fn user_matches(entry: &str, user: &str) -> bool {
     entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
+}
+
+fn localpart_pattern_domain(user: &str) -> Option<&str> {
+    user.strip_prefix("localpart:*@")
+        .filter(|domain| !domain.is_empty())
+}
+
+fn localpart_for_login(login: &str, domain: &str) -> Option<String> {
+    let (localpart, login_domain) = login.rsplit_once('@')?;
+    if localpart.is_empty() || !login_domain.eq_ignore_ascii_case(domain) {
+        return None;
+    }
+    Some(localpart.to_string())
 }
 
 fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
@@ -666,6 +697,43 @@ mod tests {
             node(1, "alice", "alice", "100.64.0.1", &[]),
             node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
             node(3, "db", "bob", "100.64.0.3", &["tag:db"]),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_respect_localpart_user_patterns() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@example.com"]},
+                "ssh": [
+                    {
+                        "action": "accept",
+                        "src": ["autogroup:member"],
+                        "dst": ["tag:server"],
+                        "users": ["localpart:*@example.com"]
+                    }
+                ],
+                "sshTests": [
+                    {"src": "alice@example.com", "dst": ["tag:server"], "accept": ["alice"], "deny": ["bob"]},
+                    {"src": "bob@example.com", "dst": ["tag:server"], "accept": ["bob"], "deny": ["alice"]},
+                    {"src": "eve@other.example", "dst": ["tag:server"], "deny": ["eve"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice@example.com", "100.64.0.1", &[]),
+            node(2, "bob", "bob@example.com", "100.64.0.2", &[]),
+            node(3, "eve", "eve@other.example", "100.64.0.3", &[]),
+            node(
+                4,
+                "server",
+                "alice@example.com",
+                "100.64.0.4",
+                &["tag:server"],
+            ),
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();

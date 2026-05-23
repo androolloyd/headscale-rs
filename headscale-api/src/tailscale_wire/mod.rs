@@ -97,6 +97,53 @@ pub use wire::{
 pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
 pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
 
+/// Runtime DERP map store.
+///
+/// Headscale-go can refresh configured DERP map URLs while the server is
+/// running. The wire runtime therefore cannot treat the map as immutable after
+/// startup: `/map` handlers need a cheap current snapshot, and long-polling map
+/// streams need a wake signal when config refreshes replace the map.
+pub struct DerpMapStore {
+    current: RwLock<wire::DerpMap>,
+    notify: Notify,
+    gen_tx: watch::Sender<u64>,
+}
+
+impl DerpMapStore {
+    pub fn new(map: wire::DerpMap) -> Self {
+        let (gen_tx, _) = watch::channel(0);
+        Self {
+            current: RwLock::new(map),
+            notify: Notify::new(),
+            gen_tx,
+        }
+    }
+
+    pub fn shared(map: wire::DerpMap) -> Arc<Self> {
+        Arc::new(Self::new(map))
+    }
+
+    pub fn snapshot(&self) -> wire::DerpMap {
+        self.current.read().clone()
+    }
+
+    pub fn set(&self, map: wire::DerpMap) {
+        *self.current.write() = map;
+        let current_generation = *self.gen_tx.borrow();
+        let next_generation = current_generation.wrapping_add(1);
+        let _ = self.gen_tx.send(next_generation);
+        self.notify.notify_waiters();
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.gen_tx.subscribe()
+    }
+
+    pub async fn wait_for_change(&self) {
+        self.notify.notified().await;
+    }
+}
+
 /// Error type for the Tailscale-wire handlers.
 #[derive(Debug, Error)]
 pub enum WireError {
@@ -339,17 +386,10 @@ pub struct WireState {
     /// registration writes to this store first and treats
     /// [`Self::machines`] as a projection of the persisted row.
     pub registration_store: Option<Arc<dyn MachineRegistrationStore>>,
-    /// DERP map served on `/machine/map`. `Arc` because it's shared
-    /// across every map handler invocation and never mutated after
-    /// startup. Defaults to empty (`DerpMap::default()`) — non-interop
-    /// deployments rely on the public Tailscale DERP fleet, which our
-    /// stock-client interop test can't use because the daemon refuses
-    /// to dial out from a sealed docker network. The interop harness
-    /// sets `OCTRAVPN_DERP_MAP_PATH` and the loader populates this
-    /// field with a one-region fixture pointing at the `derp-1` sidecar.
-    /// See [`derp_config`] + `docs/tailscale-interop-blocker.md` 2026-
-    /// 05-19 §"Wall 6 closed".
-    pub derp_map: Arc<wire::DerpMap>,
+    /// DERP map served on `/machine/map`. The store gives each map
+    /// handler a cheap cloned snapshot and wakes long-poll streams when
+    /// runtime DERP refresh replaces it.
+    pub derp_map: Arc<DerpMapStore>,
     /// Live policy store. `/map` reads
     /// [`crate::policy::PolicyStore::filter_rules`] to populate
     /// `MapResponse.PacketFilter`; the admin PUT route mutates the
@@ -2177,7 +2217,7 @@ mod registry_tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
-            derp_map: Arc::new(wire::DerpMap::default()),
+            derp_map: DerpMapStore::shared(wire::DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),

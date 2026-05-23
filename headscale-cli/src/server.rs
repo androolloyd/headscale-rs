@@ -33,9 +33,9 @@ use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
-    AllocError, DerpMap, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey, WireState, serve,
-    spawn_node_expiry_waker,
+    AllocError, DerpMap, DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig,
+    MachineRegistry, PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
+    WireState, serve, spawn_node_expiry_waker,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -249,6 +249,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         )),
         None => None,
     };
+    let derp_auto_update = spawn_derp_auto_update_task(
+        cfg.derp.clone(),
+        cfg.embedded_derp.clone(),
+        runtime.state.derp_map.clone(),
+    );
 
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
@@ -270,6 +275,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     node_expiry_waker.abort();
     ephemeral_gc.abort();
     if let Some(handle) = dns_extra_records_watcher {
+        handle.abort();
+    }
+    if let Some(handle) = derp_auto_update {
         handle.abort();
     }
     drop(embedded_derp_runtime);
@@ -385,7 +393,7 @@ async fn build_persistent_wire_runtime_with_dns(
         ip_allocator,
         machines: wire_registry,
         registration_store: Some(machines),
-        derp_map: Arc::new(derp_map),
+        derp_map: DerpMapStore::shared(derp_map),
         policy,
         knock: KnockConfig::disabled(),
         dns,
@@ -715,6 +723,55 @@ async fn derp_map_from_runtime_config(
     }
 
     Ok(map)
+}
+
+fn spawn_derp_auto_update_task(
+    upstream: Option<DerpConfig>,
+    embedded: EmbeddedDerpConfig,
+    store: Arc<DerpMapStore>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let upstream = upstream?;
+    if !derp_auto_update_enabled(&upstream) {
+        return None;
+    }
+
+    let interval = Duration::from_secs(upstream.update_frequency);
+    Some(tokio::spawn(async move {
+        tracing::info!(
+            interval = ?interval,
+            urls = upstream.urls.len(),
+            paths = upstream.paths.len(),
+            "DERP auto-update task started"
+        );
+        loop {
+            tokio::time::sleep(interval).await;
+            match refresh_derp_map_once(&upstream, &embedded, &store).await {
+                Ok(()) => {
+                    tracing::info!("DERP map auto-update completed");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = ?err,
+                        "DERP map auto-update failed; keeping previous map"
+                    );
+                }
+            }
+        }
+    }))
+}
+
+fn derp_auto_update_enabled(upstream: &DerpConfig) -> bool {
+    upstream.auto_update_enabled && upstream.update_frequency != 0
+}
+
+async fn refresh_derp_map_once(
+    upstream: &DerpConfig,
+    embedded: &EmbeddedDerpConfig,
+    store: &DerpMapStore,
+) -> Result<()> {
+    let map = derp_map_from_runtime_config(Some(upstream), embedded).await?;
+    store.set(map);
+    Ok(())
 }
 
 fn merge_derp_maps(dest: &mut DerpMap, source: DerpMap) {
@@ -1555,6 +1612,90 @@ regions:
         assert!(
             format!("{err:#}").contains("requires at least one derp.paths entry"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn derp_auto_update_requires_enabled_flag_and_nonzero_frequency() {
+        assert!(!derp_auto_update_enabled(&DerpConfig {
+            auto_update_enabled: false,
+            update_frequency: 60,
+            ..DerpConfig::default()
+        }));
+        assert!(!derp_auto_update_enabled(&DerpConfig {
+            auto_update_enabled: true,
+            update_frequency: 0,
+            ..DerpConfig::default()
+        }));
+        assert!(derp_auto_update_enabled(&DerpConfig {
+            auto_update_enabled: true,
+            update_frequency: 60,
+            ..DerpConfig::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn refresh_derp_map_once_replaces_store_and_merges_embedded_region() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/derp.json");
+            then.status(200).json_body(serde_json::json!({
+                "Regions": {
+                    "901": {
+                        "RegionID": 901,
+                        "RegionCode": "url",
+                        "RegionName": "URL DERP",
+                        "Nodes": [{
+                            "Name": "901a",
+                            "RegionID": 901,
+                            "HostName": "url.example.com"
+                        }]
+                    }
+                }
+            }));
+        });
+        let derp = DerpConfig {
+            urls: vec![server.url("/derp.json")],
+            auto_update_enabled: true,
+            update_frequency: 60,
+            ..DerpConfig::default()
+        };
+        let embedded = EmbeddedDerpConfig {
+            enabled: true,
+            region_id: 902,
+            region_code: "embedded".into(),
+            region_name: "Embedded DERP".into(),
+            host_name: "embedded.example.com".into(),
+            stun_addr: None,
+            ..EmbeddedDerpConfig::default()
+        };
+        let store = DerpMapStore::shared(DerpMap::default());
+
+        refresh_derp_map_once(&derp, &embedded, &store)
+            .await
+            .unwrap();
+
+        mock.assert();
+        let map = store.snapshot();
+        assert_eq!(
+            map.regions
+                .get(&901)
+                .unwrap()
+                .nodes
+                .first()
+                .unwrap()
+                .host_name,
+            "url.example.com"
+        );
+        assert_eq!(
+            map.regions
+                .get(&902)
+                .unwrap()
+                .nodes
+                .first()
+                .unwrap()
+                .host_name,
+            "embedded.example.com"
         );
     }
 

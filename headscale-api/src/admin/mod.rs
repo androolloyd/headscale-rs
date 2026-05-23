@@ -38,7 +38,7 @@
 //!     # ip_allocator: todo!(),
 //!     # machines: Arc::new(tailscale_wire::MachineRegistry::new()),
 //!     # registration_store: None,
-//!     # derp_map: Arc::new(Default::default()),
+//!     # derp_map: crate::tailscale_wire::DerpMapStore::shared(Default::default()),
 //!     # policy: Arc::new(Default::default()),
 //!     # knock: tailscale_wire::KnockConfig::disabled(),
 //!     # dns: Arc::new(Default::default()),
@@ -52,7 +52,7 @@
 //!     .users(admin::UserRegistry::new())
 //!     .machines(Arc::new(admin::WireMachineAdmin::new(wire.machines.clone())))
 //!     .preauth(Arc::new(admin::InMemoryPreauthAdmin::new()))
-//!     .derp_regions(wire.derp_map.regions.len())
+//!     .derp_regions(wire.derp_map.snapshot().regions.len())
 //!     .build();
 //! let app = admin::router(admin_state);
 //! // axum::serve(listener_on_51822, app).await.unwrap();

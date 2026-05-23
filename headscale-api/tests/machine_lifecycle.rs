@@ -100,7 +100,9 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         ip_allocator: Arc::new(ZeroIp),
         machines: registry.clone(),
         registration_store: None,
-        derp_map: Arc::new(headscale_api::tailscale_wire::DerpMap::default()),
+        derp_map: headscale_api::tailscale_wire::DerpMapStore::shared(
+            headscale_api::tailscale_wire::DerpMap::default(),
+        ),
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
         dns: Arc::new(headscale_api::dns::DnsStore::new()),

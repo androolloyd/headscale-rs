@@ -9,7 +9,7 @@
 //! §"Wall 6 closed — interop passes" for the full citation.
 //!
 //! This module owns the small boundary between "JSON fixture on disk"
-//! and "`Arc<DerpMap>` injected into [`super::WireState`]". The
+//! and "`DerpMapStore` injected into [`super::WireState`]". The
 //! interop harness writes a fixture at
 //! `docker/devnet/tailscale-interop/derp-map.json` and points the
 //! mesh-control daemon at it via `OCTRAVPN_DERP_MAP_PATH`. Non-interop

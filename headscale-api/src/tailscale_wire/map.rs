@@ -933,7 +933,7 @@ async fn map_inner(
         // startup. Empty for non-interop deployments; the interop test
         // populates a one-region fixture pointing at the `derp-1`
         // sidecar (see `derp_config::load_derp_map`).
-        derp_map: Some((*state.derp_map).clone()),
+        derp_map: Some(state.derp_map.snapshot()),
         domain: tailnet_domain,
         collect_services: Some(false),
         // Headscale-go v0.28 sends the full per-node filter through
@@ -1009,6 +1009,7 @@ async fn map_inner(
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
         let derp_map_for_stream = state.derp_map.clone();
+        let derp_rx = state.derp_map.subscribe();
         let dns_for_stream = state.dns.clone();
         let pings = state.pings.clone();
         let ping_rx = state.pings.subscribe();
@@ -1021,6 +1022,7 @@ async fn map_inner(
                 policy,
                 self_node_key,
                 derp_map_for_stream,
+                derp_rx,
                 dns_for_stream,
                 pings,
                 ping_rx,
@@ -1038,6 +1040,7 @@ async fn map_inner(
                 policy,
                 self_node_key,
                 machines_derp_map,
+                mut derp_rx,
                 dns,
                 pings,
                 mut ping_rx,
@@ -1058,6 +1061,7 @@ async fn map_inner(
                             policy,
                             self_node_key,
                             machines_derp_map,
+                            derp_rx,
                             dns,
                             pings,
                             ping_rx,
@@ -1081,6 +1085,7 @@ async fn map_inner(
                             policy,
                             self_node_key,
                             machines_derp_map,
+                            derp_rx,
                             dns,
                             pings,
                             ping_rx,
@@ -1094,7 +1099,7 @@ async fn map_inner(
                     ));
                 }
                 // Wait for either a registry change, a policy change,
-                // a DNS extra-records edit, or a keepalive tick,
+                // a DERP map refresh, a DNS extra-records edit, or a keepalive tick,
                 // whichever fires first.
                 //
                 // `gen_rx.changed()` is missed-update tolerant: if the
@@ -1144,6 +1149,20 @@ async fn map_inner(
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                         )
                     }
+                    res = derp_rx.changed() => {
+                        // DERP URL/path refresh — wake every parked
+                        // poller so the next chunk carries the new
+                        // `DERPMap`.
+                        if res.is_err() {
+                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                        } else {
+                            (
+                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, compression, "config"),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                        )
+                        }
+                    }
                     res = ping_rx.changed() => {
                         if res.is_err() {
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
@@ -1176,6 +1195,7 @@ async fn map_inner(
                         policy,
                         self_node_key,
                         machines_derp_map,
+                        derp_rx,
                         dns,
                         pings,
                         ping_rx,
@@ -1390,7 +1410,7 @@ fn rebuild_map_chunk(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
     policy: &Arc<crate::policy::PolicyStore>,
     self_node_key: &str,
-    derp_map: &Arc<crate::tailscale_wire::wire::DerpMap>,
+    derp_map: &Arc<crate::tailscale_wire::DerpMapStore>,
     dns: &Arc<DnsStore>,
     cap_version: u32,
     compression: MapFrameCompression,
@@ -1441,7 +1461,7 @@ fn rebuild_map_chunk(
         peers,
         user_profiles,
         dns_config: Some(dns_config),
-        derp_map: Some((**derp_map).clone()),
+        derp_map: Some(derp_map.snapshot()),
         domain: tailnet_domain,
         collect_services: Some(false),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
@@ -1499,12 +1519,12 @@ async fn wait_for_change(notify: Arc<tokio::sync::Notify>) {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRecord, MachineRegistry, WireState,
+        DerpMapStore, MachineRecord, MachineRegistry, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
         router as public_router,
         test_support::{MockIpAllocator, MockRedeemer},
-        wire::DerpMap,
+        wire::{DerpMap, DerpRegion, DerpRegionNode},
     };
     use axum::body::to_bytes;
     use std::net::Ipv4Addr;
@@ -1536,7 +1556,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
-            derp_map: Arc::new(DerpMap::default()),
+            derp_map: DerpMapStore::shared(DerpMap::default()),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
@@ -2532,6 +2552,63 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers[0].name, "peer-b.headscale.test");
         assert_eq!(mr.domain, "headscale.test");
+    }
+
+    #[tokio::test]
+    async fn stream_true_derp_map_refresh_emits_full_map_response() {
+        let (state, _dir) = fixture();
+        let a = "d1".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert!(first.derp_map.unwrap().regions.is_empty());
+
+        state.derp_map.set(DerpMap {
+            home_params: None,
+            regions: std::collections::HashMap::from([(
+                777,
+                DerpRegion {
+                    region_id: 777,
+                    region_code: "refresh".into(),
+                    region_name: "Refresh DERP".into(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    avoid: false,
+                    no_measure_no_home: false,
+                    nodes: vec![DerpRegionNode {
+                        name: "777a".into(),
+                        region_id: 777,
+                        host_name: "refresh.example.com".into(),
+                        cert_name: String::new(),
+                        ipv4: String::new(),
+                        ipv6: String::new(),
+                        derp_port: 0,
+                        stun_port: -1,
+                        stun_only: false,
+                        insecure_for_tests: false,
+                        stun_test_ip: String::new(),
+                        can_port80: false,
+                    }],
+                },
+            )]),
+            omit_default_regions: false,
+        });
+
+        let updated = next_zstd_map_response(&mut body).await;
+        let derp_map = updated.derp_map.unwrap();
+        assert_eq!(
+            derp_map
+                .regions
+                .get(&777)
+                .unwrap()
+                .nodes
+                .first()
+                .unwrap()
+                .host_name,
+            "refresh.example.com"
+        );
     }
 
     #[tokio::test]

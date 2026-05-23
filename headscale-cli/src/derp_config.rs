@@ -2,7 +2,7 @@
 //!
 //! Startup loading can fetch JSON URL maps and merge local YAML path maps into
 //! the wire `DerpMap`. Config validation uses the same local path-map parser
-//! without fetching URLs; periodic auto-update remains runtime work.
+//! without fetching URLs; the CLI server owns the periodic auto-update worker.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -11,8 +11,6 @@ use anyhow::{Context, Result, bail};
 use headscale_api::tailscale_wire::wire::DerpHomeParams;
 use headscale_api::tailscale_wire::{DerpMap, DerpRegion, DerpRegionNode};
 use serde::{Deserialize, Serialize};
-
-const DEFAULT_DERP_URL: &str = "https://controlplane.tailscale.com/derpmap/default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,9 +21,10 @@ pub(crate) struct DerpConfig {
     pub urls: Vec<String>,
     /// Local DERP map files encoded as YAML.
     pub paths: Vec<PathBuf>,
-    /// Parsed for config parity only; no live update worker is wired here.
+    /// When true and `update_frequency` is non-zero, refresh DERP sources at
+    /// runtime.
     pub auto_update_enabled: bool,
-    /// Parsed for config parity only; no live update worker is wired here.
+    /// Runtime refresh period in seconds.
     #[serde(deserialize_with = "crate::config::deserialize_duration_secs_from_int_or_string")]
     pub update_frequency: u64,
 }
@@ -34,9 +33,9 @@ impl Default for DerpConfig {
     fn default() -> Self {
         Self {
             server: UpstreamDerpServerConfig::default(),
-            urls: vec![DEFAULT_DERP_URL.to_string()],
+            urls: Vec::new(),
             paths: Vec::new(),
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             update_frequency: 3 * 60 * 60,
         }
     }

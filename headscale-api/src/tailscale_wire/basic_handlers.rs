@@ -231,7 +231,8 @@ pub async fn handle_derp_probe(method: Method) -> Response {
 pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Response {
     let mut dns_entries: BTreeMap<String, Vec<IpAddr>> = BTreeMap::new();
 
-    for region in state.derp_map.regions.values() {
+    let derp_map = state.derp_map.snapshot();
+    for region in derp_map.regions.values() {
         for node in &region.nodes {
             let resolved = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -361,7 +362,7 @@ pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
         "headscale": {
             "nodes_registered": snapshot.len(),
             "dns_base_domain": dns_spec.base_domain,
-            "derp_regions": state.derp_map.regions.len(),
+            "derp_regions": state.derp_map.snapshot().regions.len(),
         }
     });
 
@@ -1092,8 +1093,9 @@ pub async fn handle_debug_routes(State(state): State<WireState>, headers: Header
 }
 
 pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMap) -> Response {
+    let derp_map = state.derp_map.snapshot();
     if wants_json(&headers) {
-        let info = debug_derp_info(&state.derp_map);
+        let info = debug_derp_info(&derp_map);
         match serde_json::to_string_pretty(&info) {
             Ok(body) => (
                 StatusCode::OK,
@@ -1107,7 +1109,7 @@ pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMa
         (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain")],
-            debug_derp_string(&state.derp_map),
+            debug_derp_string(&derp_map),
         )
             .into_response()
     }
@@ -1371,7 +1373,8 @@ fn debug_config_info(state: &WireState) -> DebugConfigInfo {
     let dns_spec = state.dns.spec();
     let tailcfg_dns_config =
         serde_json::to_value(state.dns.build(&[])).unwrap_or(serde_json::Value::Null);
-    let derp_map = serde_json::to_value(state.derp_map.as_ref()).unwrap_or(serde_json::Value::Null);
+    let derp_map =
+        serde_json::to_value(state.derp_map.snapshot()).unwrap_or(serde_json::Value::Null);
 
     if let Some(public_control_url) = &state.public_control_url {
         info.server_url.clone_from(public_control_url);
@@ -1443,7 +1446,8 @@ fn metrics_text(state: &WireState) -> String {
         }
     }
 
-    let derp = debug_derp_info(&state.derp_map);
+    let derp_map = state.derp_map.snapshot();
+    let derp = debug_derp_info(&derp_map);
     let routes = state.machines.debug_routes_for_snapshot(&snapshot);
     let active_connections = state.machines.active_connections();
     let map_stream_connections = active_connections.values().sum::<usize>();
@@ -2186,7 +2190,8 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
     }
 
     let routes = state.machines.debug_routes_for_snapshot(&snapshot);
-    let derp = debug_derp_info(&state.derp_map);
+    let derp_map = state.derp_map.snapshot();
+    let derp = debug_derp_info(&derp_map);
     DebugOverviewInfo {
         nodes,
         total_users: users.len(),
@@ -2714,7 +2719,9 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
-            derp_map: Arc::new(crate::tailscale_wire::wire::DerpMap::default()),
+            derp_map: crate::tailscale_wire::DerpMapStore::shared(
+                crate::tailscale_wire::wire::DerpMap::default(),
+            ),
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
@@ -3147,7 +3154,7 @@ mod tests {
             .get_mut(0)
             .unwrap()
             .host_name = "192.0.2.10".to_string();
-        state.derp_map = Arc::new(derp_map);
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_map);
 
         let resp = router(state)
             .oneshot(
@@ -3752,7 +3759,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_endpoint_reports_runtime_wire_state() {
         let (mut state, _dir) = fixture_state();
-        state.derp_map = Arc::new(derp_fixture());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
 
         let mut alice = record(
             "metrics-alice",
@@ -3838,7 +3845,7 @@ mod tests {
     #[tokio::test]
     async fn debug_overview_json_reports_runtime_state() {
         let (mut state, _dir) = fixture_state();
-        state.derp_map = Arc::new(derp_fixture());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
 
         let mut alice = record("overview-alice", 21, &["10.0.0.0/24"], &["10.0.0.0/24"]);
         alice.hostname = "alice-node".to_string();
@@ -3961,7 +3968,7 @@ mod tests {
     async fn debug_config_reflects_runtime_server_url_dns_and_derp() {
         let (mut state, _dir) = fixture_state();
         state.public_control_url = Some("https://headscale.example".to_string());
-        state.derp_map = Arc::new(derp_fixture());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
         state.dns.set_spec(crate::dns::DnsConfigSpec {
             magic_dns: true,
             base_domain: "tailnet.example".to_string(),
@@ -4188,7 +4195,7 @@ mod tests {
     #[tokio::test]
     async fn debug_derp_text_matches_headscale_go_configured_shape() {
         let (mut state, _dir) = fixture_state();
-        state.derp_map = Arc::new(derp_fixture());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
         let resp = router(state)
             .oneshot(
                 axum::http::Request::builder()
@@ -4217,7 +4224,7 @@ mod tests {
     #[tokio::test]
     async fn debug_derp_json_matches_headscale_go_shape() {
         let (mut state, _dir) = fixture_state();
-        state.derp_map = Arc::new(derp_fixture());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
         let resp = router(state)
             .oneshot(
                 axum::http::Request::builder()

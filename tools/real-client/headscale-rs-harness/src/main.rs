@@ -297,7 +297,9 @@ async fn main() -> Result<()> {
         extra_records: dns_extra_records,
         ..DnsConfigSpec::default()
     }));
-    let derp_map = Arc::new(load_derp_map(args.derp_map.as_ref())?);
+    let derp_map = headscale_api::tailscale_wire::DerpMapStore::shared(load_derp_map(
+        args.derp_map.as_ref(),
+    )?);
     let public_url = args
         .public_url
         .unwrap_or_else(|| format!("https://{}", args.hostname));

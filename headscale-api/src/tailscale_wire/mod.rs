@@ -3027,25 +3027,48 @@ mod registry_tests {
     }
 }
 
-/// Build the Tailscale-wire router.
+/// Build the combined Tailscale-wire router.
 ///
-/// Mount under the same axum app as the rest of the node's control
-/// plane. The four routes here are intentionally unauthenticated at
-/// the HTTP layer — authorization happens via the presented authkey
-/// (for `register`) or via possession of a registered node-key (for
-/// `map`).
+/// This remains useful for unit tests and small embedded harnesses.
+/// Production serving should use [`control_router`] and
+/// [`metrics_debug_router`] on separate listeners to match
+/// headscale-go's `listen_addr` / `metrics_listen_addr` split.
 pub fn router(state: WireState) -> Router {
-    router_with_optional_oidc(state, None)
+    combined_router_with_optional_oidc(state, None)
 }
 
-/// Build the wire router with the OIDC auth provider mounted.
+/// Build the combined wire router with the OIDC auth provider mounted.
 ///
 /// This mirrors headscale-go's routing switch: when OIDC is configured,
 /// `/register/{registration_id}` starts the OIDC auth-code flow instead
 /// of rendering the CLI registration instruction page, and
 /// `/oidc/callback` is present on the public control listener.
 pub fn router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRuntime) -> Router {
-    router_with_optional_oidc(state, Some(oidc))
+    combined_router_with_optional_oidc(state, Some(oidc))
+}
+
+/// Build only the public control listener routes.
+///
+/// Metrics and `/debug/*` intentionally live in
+/// [`metrics_debug_router`] so production can bind them to
+/// `metrics_listen_addr` instead of exposing them on `listen_addr`.
+pub fn control_router(state: WireState) -> Router {
+    control_router_with_optional_oidc(state, None)
+}
+
+/// Build only the public control listener routes with OIDC mounted.
+pub fn control_router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRuntime) -> Router {
+    control_router_with_optional_oidc(state, Some(oidc))
+}
+
+fn combined_router_with_optional_oidc(
+    state: WireState,
+    oidc: Option<crate::oidc::OidcAuthRuntime>,
+) -> Router {
+    let knock_cfg = state.knock.clone();
+    let inner = control_router_with_optional_oidc_inner(state.clone(), oidc, false)
+        .merge(metrics_debug_router(state));
+    knock::wrap_router(inner, knock_cfg)
 }
 
 #[derive(Clone)]
@@ -3111,9 +3134,17 @@ fn oidc_wire_user_name(user: &crate::oidc::OidcStoredUser) -> String {
     }
 }
 
-fn router_with_optional_oidc(
+fn control_router_with_optional_oidc(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
+) -> Router {
+    control_router_with_optional_oidc_inner(state, oidc, true)
+}
+
+fn control_router_with_optional_oidc_inner(
+    state: WireState,
+    oidc: Option<crate::oidc::OidcAuthRuntime>,
+    wrap_knock: bool,
 ) -> Router {
     let knock_cfg = state.knock.clone();
     let metrics_registry = Arc::clone(&state.machines);
@@ -3132,7 +3163,6 @@ fn router_with_optional_oidc(
             "/swagger/v1/openapiv2.json",
             get(basic_handlers::handle_swagger_api_v1),
         )
-        .route("/metrics", get(basic_handlers::handle_metrics))
         .route("/verify", post(basic_handlers::handle_verify))
         .route("/derp/probe", any(basic_handlers::handle_derp_probe))
         .route(
@@ -3143,6 +3173,73 @@ fn router_with_optional_oidc(
             "/bootstrap-dns",
             any(basic_handlers::handle_derp_bootstrap_dns),
         )
+        .route("/favicon.ico", get(basic_handlers::handle_favicon))
+        .route("/key", get(key_handler::handle_key))
+        .route(
+            "/machine/ping-response",
+            head(basic_handlers::handle_ping_response),
+        );
+
+    inner = if let Some(oidc) = oidc {
+        let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {
+            state: state.clone(),
+        }));
+        let register_oidc = oidc.clone();
+        let callback_oidc = oidc;
+        inner
+            .route(
+                "/register/:registration_id",
+                get(move |axum::extract::Path(registration_id): axum::extract::Path<String>| {
+                    let oidc = register_oidc.clone();
+                    async move { crate::oidc::handle_register(oidc, registration_id).await }
+                }),
+            )
+            .route(
+                "/oidc/callback",
+                get(
+                    move |headers: axum::http::HeaderMap,
+                          query: axum::extract::Query<crate::oidc::OidcCallbackQuery>| {
+                        let oidc = callback_oidc.clone();
+                        async move { crate::oidc::handle_callback(oidc, headers, query).await }
+                    },
+                ),
+            )
+    } else {
+        inner.route(
+            "/register/:registration_id",
+            get(basic_handlers::handle_web_register),
+        )
+    };
+
+    let inner = inner
+        .route("/ts2021", post(noise::handle_ts2021_post))
+        .fallback(basic_handlers::handle_fallback)
+        .with_state(state)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let metrics_registry = Arc::clone(&metrics_registry);
+            async move { record_http_metrics(metrics_registry, req, next).await }
+        }));
+
+    if wrap_knock {
+        // PSK-gated handshake — third layer of the active-probe shield.
+        // Default-off (KnockConfig::disabled()) → exact pass-through.
+        // When enabled, requests must carry a valid knock cookie or get a
+        // canonical nginx 404. See `tailscale_wire::knock` for the math.
+        knock::wrap_router(inner, knock_cfg)
+    } else {
+        inner
+    }
+}
+
+/// Build the metrics/debug listener router.
+///
+/// This mirrors headscale-go's dedicated metrics listener: `/metrics`
+/// and `/debug/*` are operator-facing diagnostics, not public control
+/// listener routes.
+pub fn metrics_debug_router(state: WireState) -> Router {
+    let metrics_registry = Arc::clone(&state.machines);
+    Router::new()
+        .route("/metrics", get(basic_handlers::handle_metrics))
         .route("/debug", get(basic_handlers::handle_debug_redirect))
         .route("/debug/", get(basic_handlers::handle_debug_index))
         .route("/debug/vars", get(basic_handlers::handle_debug_vars))
@@ -3215,58 +3312,11 @@ fn router_with_optional_oidc(
             "/debug/policy-manager",
             get(basic_handlers::handle_debug_policy_manager),
         )
-        .route("/favicon.ico", get(basic_handlers::handle_favicon))
-        .route("/key", get(key_handler::handle_key))
-        .route(
-            "/machine/ping-response",
-            head(basic_handlers::handle_ping_response),
-        );
-
-    inner = if let Some(oidc) = oidc {
-        let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {
-            state: state.clone(),
-        }));
-        let register_oidc = oidc.clone();
-        let callback_oidc = oidc;
-        inner
-            .route(
-                "/register/:registration_id",
-                get(move |axum::extract::Path(registration_id): axum::extract::Path<String>| {
-                    let oidc = register_oidc.clone();
-                    async move { crate::oidc::handle_register(oidc, registration_id).await }
-                }),
-            )
-            .route(
-                "/oidc/callback",
-                get(
-                    move |headers: axum::http::HeaderMap,
-                          query: axum::extract::Query<crate::oidc::OidcCallbackQuery>| {
-                        let oidc = callback_oidc.clone();
-                        async move { crate::oidc::handle_callback(oidc, headers, query).await }
-                    },
-                ),
-            )
-    } else {
-        inner.route(
-            "/register/:registration_id",
-            get(basic_handlers::handle_web_register),
-        )
-    };
-
-    let inner = inner
-        .route("/ts2021", post(noise::handle_ts2021_post))
-        .fallback(basic_handlers::handle_fallback)
         .with_state(state)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let metrics_registry = Arc::clone(&metrics_registry);
             async move { record_http_metrics(metrics_registry, req, next).await }
-        }));
-
-    // PSK-gated handshake — third layer of the active-probe shield.
-    // Default-off (KnockConfig::disabled()) → exact pass-through.
-    // When enabled, requests must carry a valid knock cookie or get a
-    // canonical nginx 404. See `tailscale_wire::knock` for the math.
-    knock::wrap_router(inner, knock_cfg)
+        }))
 }
 
 async fn record_http_metrics(

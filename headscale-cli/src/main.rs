@@ -324,6 +324,9 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 server_url: server_config.and_then(|s| s.server_url.clone()),
                 state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
                 https_listen: server_config.and_then(|s| s.https_listen.clone()),
+                metrics_listen_addr: server_config.map_or(defaults.metrics_listen_addr, |s| {
+                    s.metrics_listen_addr.clone()
+                }),
                 tls_hostname: server_config.and_then(|s| s.tls_hostname.clone()),
                 unix_socket: server_config.map_or(defaults.unix_socket, |s| s.unix_socket.clone()),
                 unix_socket_permission: server_config
@@ -720,6 +723,7 @@ mesh_cidr = "100.64.0.0/10"
 # server_url = "https://headscale.example"
 # state_dir = "/var/lib/headscale"
 # https_listen = "0.0.0.0:443"
+# metrics_listen_addr = "127.0.0.1:9090"
 # tls_hostname = "headscale.example"
 # unix_socket = "/var/run/headscale/headscale.sock"
 # unix_socket_permission = 504

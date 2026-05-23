@@ -1,6 +1,7 @@
-//! Dual-bind entry point for the Tailscale wire surface.
+//! Multi-listener entry point for the Tailscale wire surface.
 //!
-//! [`serve`] binds the router on **two** addresses simultaneously:
+//! [`serve`] can bind the control surface on two public addresses plus
+//! an optional operator diagnostics listener:
 //!
 //!   1. A plaintext HTTP listener (typically `127.0.0.1:51821`) for `GET /key`
 //!      and any other unauthenticated probe.
@@ -8,9 +9,12 @@
 //!      the `Upgrade: tailscale-control-protocol` path the client uses after
 //!      its forced-443 dial. The `/machine/...` control paths are served
 //!      inside the Noise h2 session, not on the outer HTTP router.
+//!   3. A metrics/debug HTTP listener for `/metrics` and `/debug/*`, matching
+//!      headscale-go's `metrics_listen_addr` split.
 //!
-//! Both listeners serve the **same** [`router`] — the wire layer's
-//! handlers are TLS-agnostic. The TLS material is built via
+//! The public HTTP and HTTPS listeners serve only the public control
+//! router; metrics/debug routes are mounted on the dedicated listener
+//! when configured. The TLS material is built via
 //! [`tls::load_or_generate`] which caches under `<state_dir>/tls.{crt,key}`.
 //!
 //! ## Decision log
@@ -24,9 +28,9 @@
 //!   `OnUpgrade` handler regains the socket). The raw listener
 //!   special-cases `/ts2021`, dispatches everything else into the
 //!   same `axum::Router` via `hyper::server::conn::http1`.
-//! - **Both listeners run as separate tasks.** A single bind failure
-//!   shouldn't bring down the other listener; the dual-listener entry
-//!   point logs and returns the first error it sees.
+//! - **Listeners run as separate tasks.** A single listener failure
+//!   shouldn't hide failures from the others; the entry point logs
+//!   and returns the first error it sees.
 //! - **Plain HTTP fallback stays bound.** The keyed paths + the
 //!   admin shim used by the harness still flow through `:51821`; we
 //!   don't migrate them under TLS to keep the existing tests + curl
@@ -41,7 +45,7 @@ use tokio::task::JoinHandle;
 
 use super::raw_tls;
 use super::tls::{self, SanConfig, TlsMaterial};
-use super::{WireError, WireState, router, router_with_oidc};
+use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
 
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
@@ -62,6 +66,9 @@ pub struct ServeConfig {
     /// Optional OIDC auth runtime. When present, the public `/register/{id}`
     /// route starts the OIDC auth-code flow and `/oidc/callback` is mounted.
     pub oidc: Option<crate::oidc::OidcAuthRuntime>,
+    /// Optional metrics/debug bind address. `None` disables the
+    /// dedicated operator diagnostics listener.
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 impl ServeConfig {
@@ -75,24 +82,27 @@ impl ServeConfig {
             state_dir: state_dir.as_ref().into(),
             sans: SanConfig::with_hostname(hostname),
             oidc: None,
+            metrics_addr: None,
         }
     }
 }
 
-/// Handles to the spawned listener tasks. Drop the joinset to abort
-/// both listeners.
+/// Handles to the spawned listener tasks. Drop or abort the handles to
+/// stop the listeners.
 pub struct ServeHandle {
     pub http: JoinHandle<Result<(), std::io::Error>>,
     pub https: Option<JoinHandle<Result<(), std::io::Error>>>,
+    pub metrics: Option<JoinHandle<Result<(), std::io::Error>>>,
+    pub metrics_addr: Option<SocketAddr>,
     /// The minted TLS material — exposed so callers (e.g. the docker
     /// harness install script) can copy the cert into peer trust
     /// stores. `None` when `https_addr` is unset.
     pub tls: Option<TlsMaterial>,
 }
 
-/// Bind both listeners and return without blocking. The caller is
-/// responsible for awaiting [`ServeHandle::http`] /
-/// [`ServeHandle::https`] (or aborting on shutdown).
+/// Bind configured listeners and return without blocking. The caller
+/// is responsible for awaiting the listener handles or aborting them
+/// on shutdown.
 ///
 /// `extra_routes` is merged into the wire router before binding — the
 /// harness uses this to attach its `/admin/preauth` shim.
@@ -113,12 +123,46 @@ pub async fn serve(
         "wire surface listening (HTTP)"
     );
 
+    let metrics_listener = match cfg.metrics_addr {
+        Some(metrics_addr) => {
+            let listener = tokio::net::TcpListener::bind(metrics_addr)
+                .await
+                .map_err(|e| WireError::Internal(format!("bind {metrics_addr}: {e}")))?;
+            let bound_addr = listener.local_addr().map_err(WireError::Io)?;
+            tracing::info!(
+                target = "tailscale_wire::serve",
+                addr = %bound_addr,
+                "metrics/debug surface listening (HTTP)"
+            );
+            Some((listener, bound_addr))
+        }
+        None => {
+            tracing::info!(
+                target = "tailscale_wire::serve",
+                "metrics/debug surface disabled"
+            );
+            None
+        }
+    };
+
     let http_app = app.clone();
     let http = tokio::spawn(async move {
         axum::serve(http_listener, http_app)
             .await
             .map_err(std::io::Error::other)
     });
+
+    let (metrics, metrics_addr) = if let Some((metrics_listener, metrics_addr)) = metrics_listener {
+        let metrics_app = metrics_debug_router(state.clone());
+        let metrics = tokio::spawn(async move {
+            axum::serve(metrics_listener, metrics_app)
+                .await
+                .map_err(std::io::Error::other)
+        });
+        (Some(metrics), Some(metrics_addr))
+    } else {
+        (None, None)
+    };
 
     // HTTPS branch — only mint TLS material when an https addr is
     // actually configured.
@@ -153,13 +197,19 @@ pub async fn serve(
         (None, None)
     };
 
-    Ok(ServeHandle { http, https, tls })
+    Ok(ServeHandle {
+        http,
+        https,
+        metrics,
+        metrics_addr,
+        tls,
+    })
 }
 
 fn public_router(state: WireState, oidc: Option<crate::oidc::OidcAuthRuntime>) -> Router {
     match oidc {
-        Some(oidc) => router_with_oidc(state, oidc),
-        None => router(state),
+        Some(oidc) => control_router_with_oidc(state, oidc),
+        None => control_router(state),
     }
 }
 
@@ -213,6 +263,7 @@ mod tests {
             state_dir: dir.path().into(),
             sans: SanConfig::with_hostname("test-host"),
             oidc: None,
+            metrics_addr: None,
         };
         // We need the actual bound port; tokio::net::TcpListener::bind
         // returns it via local_addr. Inline the relevant piece of
@@ -228,6 +279,85 @@ mod tests {
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_success());
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn production_public_router_excludes_metrics_debug_routes() {
+        let (state, _dir) = fixture_state();
+        let public_app = public_router(state.clone(), None);
+
+        let public_metrics = public_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let public_body = to_bytes(public_metrics.into_body(), 32 * 1024)
+            .await
+            .unwrap();
+        let public_body = String::from_utf8(public_body.to_vec()).unwrap();
+        assert!(
+            !public_body.contains("headscale_http_requests_total"),
+            "{public_body}"
+        );
+
+        let metrics_app = crate::tailscale_wire::metrics_debug_router(state);
+        let metrics = metrics_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), axum::http::StatusCode::OK);
+        let metrics_body = to_bytes(metrics.into_body(), 32 * 1024).await.unwrap();
+        let metrics_body = String::from_utf8(metrics_body.to_vec()).unwrap();
+        assert!(
+            metrics_body.contains("headscale_http_requests_total"),
+            "{metrics_body}"
+        );
+
+        let debug = metrics_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(debug.status(), axum::http::StatusCode::MOVED_PERMANENTLY);
+    }
+
+    #[tokio::test]
+    async fn serve_binds_optional_metrics_debug_listener() {
+        let (state, dir) = fixture_state();
+        let cfg = ServeConfig {
+            http_addr: "127.0.0.1:0".parse().unwrap(),
+            https_addr: None,
+            state_dir: dir.path().into(),
+            sans: SanConfig::with_hostname("test-host"),
+            oidc: None,
+            metrics_addr: Some("127.0.0.1:0".parse().unwrap()),
+        };
+
+        let handle = serve(state, cfg, Router::new()).await.unwrap();
+        let metrics_addr = handle.metrics_addr.unwrap();
+        let url = format!("http://{metrics_addr}/metrics");
+        let body = reqwest::get(&url).await.unwrap().text().await.unwrap();
+        assert!(body.contains("headscale_http_requests_total"), "{body}");
+
+        handle.http.abort();
+        if let Some(metrics) = handle.metrics {
+            metrics.abort();
+        }
     }
 
     fn oidc_runtime() -> crate::oidc::OidcAuthRuntime {

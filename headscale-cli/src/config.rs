@@ -21,6 +21,9 @@ pub(crate) struct CliConfig {
     /// Upstream top-level `listen_addr`.
     #[serde(default, skip_serializing)]
     pub(crate) listen_addr: Option<String>,
+    /// Upstream top-level `metrics_listen_addr`.
+    #[serde(default, skip_serializing)]
+    pub(crate) metrics_listen_addr: Option<Option<String>>,
     /// Upstream top-level `grpc_listen_addr`.
     #[serde(default, skip_serializing)]
     pub(crate) grpc_listen_addr: Option<String>,
@@ -118,6 +121,12 @@ pub(crate) struct ServerConfig {
     /// Optional HTTPS bind address for the Tailscale wire listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_listen: Option<String>,
+    /// Metrics/debug bind address. `None` disables the listener.
+    #[serde(
+        default = "default_metrics_listen_addr",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metrics_listen_addr: Option<String>,
     /// Optional TLS certificate DNS SAN. Defaults to the host in `server_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_hostname: Option<String>,
@@ -329,6 +338,7 @@ impl CliConfig {
         let had_server_block = self.server.is_some();
         let has_server_alias = self.server_url.is_some()
             || self.listen_addr.is_some()
+            || self.metrics_listen_addr.is_some()
             || self.grpc_listen_addr.is_some()
             || self.grpc_allow_insecure.is_some()
             || self.ephemeral_node_inactivity_timeout.is_some()
@@ -356,6 +366,9 @@ impl CliConfig {
         }
         if let Some(listen_addr) = non_empty_clone(self.listen_addr.as_ref()) {
             server.listen = listen_addr;
+        }
+        if let Some(metrics_listen_addr) = &self.metrics_listen_addr {
+            server.metrics_listen_addr = metrics_listen_addr.clone();
         }
         if let Some(grpc_listen_addr) = non_empty_clone(self.grpc_listen_addr.as_ref()) {
             server.grpc_listen_addr = grpc_listen_addr;
@@ -857,6 +870,10 @@ fn default_grpc_listen_addr() -> String {
     ":50443".to_string()
 }
 
+fn default_metrics_listen_addr() -> Option<String> {
+    None
+}
+
 fn default_ephemeral_node_inactivity_timeout_secs() -> u64 {
     120
 }
@@ -904,6 +921,7 @@ impl Default for ServerConfig {
             server_url: None,
             state_dir: default_state_dir(),
             https_listen: None,
+            metrics_listen_addr: default_metrics_listen_addr(),
             tls_hostname: None,
             unix_socket: default_unix_socket(),
             unix_socket_permission: default_unix_socket_permission(),
@@ -1008,6 +1026,7 @@ unix_socket = "/run/headscale/admin.sock"
 [server]
 listen = "127.0.0.1:51821"
 https_listen = "0.0.0.0:443"
+metrics_listen_addr = "127.0.0.1:9090"
 server_url = "https://headscale.example"
 state_dir = "/srv/headscale"
 tls_hostname = "headscale.example"
@@ -1027,6 +1046,10 @@ ephemeral_node_inactivity_timeout = "5m"
 
         assert_eq!(server.listen, "127.0.0.1:51821");
         assert_eq!(server.https_listen.as_deref(), Some("0.0.0.0:443"));
+        assert_eq!(
+            server.metrics_listen_addr.as_deref(),
+            Some("127.0.0.1:9090")
+        );
         assert_eq!(
             server.server_url.as_deref(),
             Some("https://headscale.example")
@@ -1048,6 +1071,7 @@ ephemeral_node_inactivity_timeout = "5m"
         let source = r#"
 server_url: "https://headscale.example"
 listen_addr: "127.0.0.1:8080"
+metrics_listen_addr: "127.0.0.1:9090"
 grpc_listen_addr: "127.0.0.1:50443"
 grpc_allow_insecure: true
 ephemeral_node_inactivity_timeout: 3m
@@ -1076,6 +1100,10 @@ database:
             Some("https://headscale.example")
         );
         assert_eq!(server.listen, "127.0.0.1:8080");
+        assert_eq!(
+            server.metrics_listen_addr.as_deref(),
+            Some("127.0.0.1:9090")
+        );
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
         assert_eq!(server.ephemeral_node_inactivity_timeout_secs, 180);
@@ -1089,6 +1117,44 @@ database:
         assert_eq!(server.mesh_cidr_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
         assert_eq!(server.ip_allocation, "random");
         assert_eq!(server.db_path, PathBuf::from("/srv/headscale/db.sqlite"));
+    }
+
+    #[test]
+    fn upstream_metrics_listen_addr_can_be_disabled() {
+        let omitted = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap()
+        .server
+        .unwrap();
+        assert!(omitted.metrics_listen_addr.is_none());
+
+        let empty = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+metrics_listen_addr: ""
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap()
+        .server
+        .unwrap();
+        assert_eq!(empty.metrics_listen_addr.as_deref(), Some(""));
+
+        let null = CliConfig::parse(
+            r#"
+server_url: "https://headscale.example"
+metrics_listen_addr: null
+"#,
+            ConfigFormat::Yaml,
+        )
+        .unwrap()
+        .server
+        .unwrap();
+        assert!(null.metrics_listen_addr.is_none());
     }
 
     #[test]

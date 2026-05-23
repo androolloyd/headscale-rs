@@ -52,6 +52,7 @@ pub(crate) struct RunServerConfig {
     pub server_url: Option<String>,
     pub state_dir: PathBuf,
     pub https_listen: Option<String>,
+    pub metrics_listen_addr: Option<String>,
     pub tls_hostname: Option<String>,
     pub unix_socket: PathBuf,
     pub unix_socket_permission: u32,
@@ -74,6 +75,14 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     tracing::info!(
         "  HTTPS: {}",
         cfg.https_listen.as_deref().unwrap_or("<disabled>")
+    );
+    tracing::info!(
+        "  Metrics/debug: {}",
+        cfg.metrics_listen_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|addr| !addr.is_empty())
+            .unwrap_or("<disabled>")
     );
     tracing::info!("  Database: {}", cfg.db_path.display());
     tracing::info!("  State dir: {}", cfg.state_dir.display());
@@ -153,6 +162,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .as_deref()
         .map(|addr| parse_socket_addr(addr, "https_listen"))
         .transpose()?;
+    let metrics_addr =
+        optional_socket_addr(cfg.metrics_listen_addr.as_deref(), "metrics_listen_addr")?;
     let grpc_addr = parse_socket_addr(&cfg.grpc_listen_addr, "grpc_listen_addr")?;
     let tls_hostname = cfg
         .tls_hostname
@@ -166,6 +177,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         state_dir: cfg.state_dir.clone(),
         sans: sans.clone(),
         oidc: runtime.oidc,
+        metrics_addr,
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
@@ -593,37 +605,27 @@ async fn await_serve_handle(
     local_grpc: tokio::task::JoinHandle<Result<()>>,
     remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
-    let serve::ServeHandle { http, https, .. } = handle;
-    match (https, remote_grpc) {
-        (Some(https), Some(remote_grpc)) => {
-            tokio::select! {
-                result = http => flatten_listener_result(result, "http"),
-                result = https => flatten_listener_result(result, "https"),
-                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
-                result = remote_grpc => flatten_anyhow_task_result(result, "remote grpc"),
-            }
-        }
-        (Some(https), None) => {
-            tokio::select! {
-                result = http => flatten_listener_result(result, "http"),
-                result = https => flatten_listener_result(result, "https"),
-                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
-            }
-        }
-        (None, Some(remote_grpc)) => {
-            tokio::select! {
-                result = http => flatten_listener_result(result, "http"),
-                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
-                result = remote_grpc => flatten_anyhow_task_result(result, "remote grpc"),
-            }
-        }
-        (None, None) => {
-            tokio::select! {
-                result = http => flatten_listener_result(result, "http"),
-                result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
-            }
-        }
+    let serve::ServeHandle {
+        http,
+        https,
+        metrics,
+        ..
+    } = handle;
+    tokio::select! {
+        result = http => flatten_listener_result(result, "http"),
+        result = await_optional_listener_result(https, "https") => result,
+        result = await_optional_listener_result(metrics, "metrics") => result,
+        result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
+        result = await_optional_anyhow_task_result(remote_grpc, "remote grpc") => result,
     }
+}
+
+fn optional_socket_addr(value: Option<&str>, field: &str) -> Result<Option<SocketAddr>> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_socket_addr(value, field))
+        .transpose()
 }
 
 fn flatten_listener_result(
@@ -637,6 +639,16 @@ fn flatten_listener_result(
     }
 }
 
+async fn await_optional_listener_result(
+    handle: Option<tokio::task::JoinHandle<std::result::Result<(), std::io::Error>>>,
+    label: &'static str,
+) -> Result<()> {
+    match handle {
+        Some(handle) => flatten_listener_result(handle.await, label),
+        None => std::future::pending::<Result<()>>().await,
+    }
+}
+
 fn flatten_anyhow_task_result(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
     label: &str,
@@ -645,6 +657,16 @@ fn flatten_anyhow_task_result(
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(err).with_context(|| format!("{label} listener failed")),
         Err(err) => Err(err).with_context(|| format!("{label} listener task failed")),
+    }
+}
+
+async fn await_optional_anyhow_task_result(
+    handle: Option<tokio::task::JoinHandle<Result<()>>>,
+    label: &'static str,
+) -> Result<()> {
+    match handle {
+        Some(handle) => flatten_anyhow_task_result(handle.await, label),
+        None => std::future::pending::<Result<()>>().await,
     }
 }
 
@@ -1478,6 +1500,7 @@ mod tests {
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
             https_listen: None,
+            metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
             unix_socket: dir.path().join("state/headscale.sock"),
             unix_socket_permission: 0o700,
@@ -1512,6 +1535,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_socket_addr_treats_empty_metrics_addr_as_disabled() {
+        assert_eq!(
+            optional_socket_addr(Some("127.0.0.1:9090"), "metrics_listen_addr").unwrap(),
+            Some("127.0.0.1:9090".parse::<SocketAddr>().unwrap())
+        );
+        assert_eq!(
+            optional_socket_addr(Some(""), "metrics_listen_addr").unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_socket_addr(Some("   "), "metrics_listen_addr").unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_socket_addr(None, "metrics_listen_addr").unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn non_oidc_server_requires_public_server_url_before_binding() {
         let dir = tempfile::tempdir().unwrap();
@@ -1524,6 +1567,7 @@ mod tests {
             server_url: None,
             state_dir: dir.path().join("state"),
             https_listen: None,
+            metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
             unix_socket: dir.path().join("state/headscale.sock"),
             unix_socket_permission: 0o700,

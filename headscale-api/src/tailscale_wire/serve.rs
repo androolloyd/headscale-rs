@@ -1,11 +1,13 @@
 //! Multi-listener entry point for the Tailscale wire surface.
 //!
-//! [`serve`] can bind the control surface on two public addresses plus
+//! [`serve`] can bind the control surface on one or two public addresses plus
 //! an optional operator diagnostics listener:
 //!
-//!   1. A plaintext HTTP listener (typically `127.0.0.1:51821`) for `GET /key`
-//!      and any other unauthenticated probe.
-//!   2. A `rustls`-terminated HTTPS listener (typically `127.0.0.1:443`) for
+//!   1. An optional plaintext HTTP listener (typically `127.0.0.1:51821`) for
+//!      `GET /key` and any other unauthenticated probe.
+//!   2. An optional `rustls`-terminated HTTPS listener for upstream-style
+//!      TLS-on-`listen_addr` deployments or the Rust dual-listener harness. It
+//!      serves ordinary public routes over TLS and handles
 //!      the `Upgrade: tailscale-control-protocol` path the client uses after
 //!      its forced-443 dial. The `/machine/...` control paths are served
 //!      inside the Noise h2 session, not on the outer HTTP router.
@@ -31,10 +33,9 @@
 //! - **Listeners run as separate tasks.** A single listener failure
 //!   shouldn't hide failures from the others; the entry point logs
 //!   and returns the first error it sees.
-//! - **Plain HTTP fallback stays bound.** The keyed paths + the
-//!   admin shim used by the harness still flow through `:51821`; we
-//!   don't migrate them under TLS to keep the existing tests + curl
-//!   probes working.
+//! - **Plain HTTP is optional.** Upstream manual-TLS mode terminates TLS on the
+//!   main `listen_addr`; the interop harness can still opt into a separate
+//!   plaintext listener for curl probes and its admin shim.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -50,9 +51,9 @@ use super::{WireError, WireState, control_router, control_router_with_oidc, metr
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
 pub struct ServeConfig {
-    /// Plain-HTTP bind address. Defaults and helpers stay loopback-only;
-    /// expose a public address explicitly in docker/interop harnesses.
-    pub http_addr: SocketAddr,
+    /// Plain-HTTP bind address. `None` disables the plaintext public listener,
+    /// which matches upstream when TLS is configured directly on `listen_addr`.
+    pub http_addr: Option<SocketAddr>,
     /// HTTPS bind address. Defaults and helpers stay loopback-only.
     /// `None` ⇒ skip the
     /// TLS listener (useful for tests + dev hosts that don't have
@@ -81,7 +82,7 @@ impl ServeConfig {
         let state_dir = state_dir.as_ref().to_path_buf();
         let sans = SanConfig::with_hostname(hostname);
         Self {
-            http_addr: "127.0.0.1:51821".parse().unwrap(),
+            http_addr: Some("127.0.0.1:51821".parse().unwrap()),
             https_addr: Some("127.0.0.1:443".parse().unwrap()),
             state_dir: state_dir.clone(),
             sans: sans.clone(),
@@ -95,7 +96,7 @@ impl ServeConfig {
 /// Handles to the spawned listener tasks. Drop or abort the handles to
 /// stop the listeners.
 pub struct ServeHandle {
-    pub http: JoinHandle<Result<(), std::io::Error>>,
+    pub http: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub https: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub metrics: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub metrics_addr: Option<SocketAddr>,
@@ -119,14 +120,11 @@ pub async fn serve(
     let oidc = cfg.oidc.clone();
     let app = extra_routes.merge(public_router(state.clone(), oidc));
 
-    let http_listener = tokio::net::TcpListener::bind(cfg.http_addr)
-        .await
-        .map_err(|e| WireError::Internal(format!("bind {}: {e}", cfg.http_addr)))?;
-    tracing::info!(
-        target = "tailscale_wire::serve",
-        addr = %cfg.http_addr,
-        "wire surface listening (HTTP)"
-    );
+    if cfg.http_addr.is_none() && cfg.https_addr.is_none() {
+        return Err(WireError::Internal(
+            "at least one public wire listener must be configured".into(),
+        ));
+    }
 
     let metrics_listener = if let Some(metrics_addr) = cfg.metrics_addr {
         let listener = tokio::net::TcpListener::bind(metrics_addr)
@@ -147,12 +145,28 @@ pub async fn serve(
         None
     };
 
-    let http_app = app.clone();
-    let http = tokio::spawn(async move {
-        axum::serve(http_listener, http_app)
+    let http = if let Some(http_addr) = cfg.http_addr {
+        let http_listener = tokio::net::TcpListener::bind(http_addr)
             .await
-            .map_err(std::io::Error::other)
-    });
+            .map_err(|e| WireError::Internal(format!("bind {http_addr}: {e}")))?;
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            addr = %http_addr,
+            "wire surface listening (HTTP)"
+        );
+        let http_app = app.clone();
+        Some(tokio::spawn(async move {
+            axum::serve(http_listener, http_app)
+                .await
+                .map_err(std::io::Error::other)
+        }))
+    } else {
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            "wire surface plaintext HTTP listener disabled"
+        );
+        None
+    };
 
     let (metrics, metrics_addr) = if let Some((metrics_listener, metrics_addr)) = metrics_listener {
         let metrics_app = metrics_debug_router(state.clone());
@@ -258,7 +272,7 @@ mod tests {
     async fn dual_bind_serves_plain_http_key() {
         let (state, dir) = fixture_state();
         let cfg = ServeConfig {
-            http_addr: "127.0.0.1:0".parse().unwrap(),
+            http_addr: Some("127.0.0.1:0".parse().unwrap()),
             // Skip HTTPS in this test — binding :0 with axum-server
             // requires a different API path. The minted material is
             // still exercised by the standalone `tls::tests`.
@@ -275,7 +289,9 @@ mod tests {
         // We need the actual bound port; tokio::net::TcpListener::bind
         // returns it via local_addr. Inline the relevant piece of
         // `serve` rather than pry inside.
-        let listener = tokio::net::TcpListener::bind(cfg.http_addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(cfg.http_addr.unwrap())
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let app = axum::Router::new().merge(crate::tailscale_wire::router(state));
         let handle = tokio::spawn(async move {
@@ -286,6 +302,65 @@ mod tests {
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_success());
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_missing_public_listener() {
+        let (state, dir) = fixture_state();
+        let Err(err) = serve(
+            state,
+            ServeConfig {
+                http_addr: None,
+                https_addr: None,
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+                tls_source: TlsMaterialSource::SelfSigned {
+                    state_dir: dir.path().into(),
+                    sans: SanConfig::with_hostname("test-host"),
+                },
+                oidc: None,
+                metrics_addr: None,
+            },
+            Router::new(),
+        )
+        .await
+        else {
+            panic!("serve unexpectedly accepted a config without public listeners");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("at least one public wire listener must be configured"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_supports_https_only_topology() {
+        let (state, dir) = fixture_state();
+        let handle = serve(
+            state,
+            ServeConfig {
+                http_addr: None,
+                https_addr: Some("127.0.0.1:0".parse().unwrap()),
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+                tls_source: TlsMaterialSource::SelfSigned {
+                    state_dir: dir.path().into(),
+                    sans: SanConfig::with_hostname("test-host"),
+                },
+                oidc: None,
+                metrics_addr: None,
+            },
+            Router::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.http.is_none());
+        assert!(handle.https.is_some());
+        assert!(handle.tls.is_some());
+        handle.https.unwrap().abort();
     }
 
     #[tokio::test]
@@ -347,7 +422,7 @@ mod tests {
     async fn serve_binds_optional_metrics_debug_listener() {
         let (state, dir) = fixture_state();
         let cfg = ServeConfig {
-            http_addr: "127.0.0.1:0".parse().unwrap(),
+            http_addr: Some("127.0.0.1:0".parse().unwrap()),
             https_addr: None,
             state_dir: dir.path().into(),
             sans: SanConfig::with_hostname("test-host"),
@@ -365,7 +440,7 @@ mod tests {
         let body = reqwest::get(&url).await.unwrap().text().await.unwrap();
         assert!(body.contains("headscale_http_requests_total"), "{body}");
 
-        handle.http.abort();
+        handle.http.unwrap().abort();
         if let Some(metrics) = handle.metrics {
             metrics.abort();
         }

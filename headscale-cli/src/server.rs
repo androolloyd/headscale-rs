@@ -125,11 +125,15 @@ pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
 }
 
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
+    let public_listeners = public_listener_plan(&cfg)?;
     tracing::info!("Starting headscale-compatible Tailscale control plane");
-    tracing::info!("  Listen: {}", cfg.listen);
     tracing::info!(
-        "  HTTPS: {}",
-        cfg.https_listen.as_deref().unwrap_or("<disabled>")
+        "  Public HTTP: {}",
+        optional_addr_status(public_listeners.http_addr)
+    );
+    tracing::info!(
+        "  Public HTTPS: {}",
+        optional_addr_status(public_listeners.https_addr)
     );
     tracing::info!(
         "  Metrics/debug: {}",
@@ -215,12 +219,6 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let node_expiry_waker =
         spawn_node_expiry_waker(runtime.state.machines.clone(), NODE_EXPIRY_UPDATE_INTERVAL);
 
-    let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
-    let https_addr = cfg
-        .https_listen
-        .as_deref()
-        .map(|addr| parse_socket_addr(addr, "https_listen"))
-        .transpose()?;
     let metrics_addr =
         optional_socket_addr(cfg.metrics_listen_addr.as_deref(), "metrics_listen_addr")?;
     let grpc_addr = parse_socket_addr(&cfg.grpc_listen_addr, "grpc_listen_addr")?;
@@ -232,8 +230,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let tls_source = tls_material_source(&cfg, &sans)?;
     let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
-        http_addr,
-        https_addr,
+        http_addr: public_listeners.http_addr,
+        https_addr: public_listeners.https_addr,
         state_dir: cfg.state_dir.clone(),
         sans: sans.clone(),
         tls_source: tls_source.clone(),
@@ -619,6 +617,44 @@ fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMat
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublicListenerPlan {
+    http_addr: Option<SocketAddr>,
+    https_addr: Option<SocketAddr>,
+}
+
+fn public_listener_plan(cfg: &RunServerConfig) -> Result<PublicListenerPlan> {
+    let listen_addr = parse_socket_addr(&cfg.listen, "listen")?;
+    let explicit_https_addr = cfg
+        .https_listen
+        .as_deref()
+        .map(|addr| parse_socket_addr(addr, "https_listen"))
+        .transpose()?;
+
+    if let Some(https_addr) = explicit_https_addr {
+        return Ok(PublicListenerPlan {
+            http_addr: Some(listen_addr),
+            https_addr: Some(https_addr),
+        });
+    }
+
+    if cfg.tls.has_manual_tls() || cfg.tls.letsencrypt_enabled() {
+        return Ok(PublicListenerPlan {
+            http_addr: None,
+            https_addr: Some(listen_addr),
+        });
+    }
+
+    Ok(PublicListenerPlan {
+        http_addr: Some(listen_addr),
+        https_addr: None,
+    })
+}
+
+fn optional_addr_status(addr: Option<SocketAddr>) -> String {
+    addr.map_or_else(|| "<disabled>".to_string(), |addr| addr.to_string())
+}
+
 fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
     if !cfg.enabled {
         return DerpMap::default();
@@ -922,7 +958,7 @@ async fn await_serve_handle(
         ..
     } = handle;
     tokio::select! {
-        result = http => flatten_listener_result(result, "http"),
+        result = await_optional_listener_result(http, "http") => result,
         result = await_optional_listener_result(https, "https") => result,
         result = await_optional_listener_result(metrics, "metrics") => result,
         result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
@@ -1355,6 +1391,31 @@ mod tests {
             pkce: OidcPkceConfig::default(),
             policy: OidcPolicyConfig::default(),
         })
+    }
+
+    fn test_run_server_config(dir: &tempfile::TempDir) -> RunServerConfig {
+        RunServerConfig {
+            listen: "127.0.0.1:8080".into(),
+            db_path: dir.path().join("db.sqlite"),
+            mesh_cidr: "100.64.0.0/10".into(),
+            mesh_cidr_v6: None,
+            ip_allocation: "sequential".into(),
+            server_url: Some("https://headscale.example".into()),
+            state_dir: dir.path().join("state"),
+            https_listen: None,
+            metrics_listen_addr: Some("127.0.0.1:9090".into()),
+            tls_hostname: None,
+            unix_socket: dir.path().join("state/headscale.sock"),
+            unix_socket_permission: 0o700,
+            grpc_listen_addr: ":50443".into(),
+            grpc_allow_insecure: false,
+            tls: TlsRuntimeConfig::default(),
+            oidc: OidcConfig::default(),
+            embedded_derp: EmbeddedDerpConfig::default(),
+            derp: None,
+            dns: None,
+            ephemeral_node_inactivity_timeout: Duration::from_secs(120),
+        }
     }
 
     #[test]
@@ -1992,6 +2053,59 @@ regions:
             }
             TlsMaterialSource::SelfSigned { .. } => panic!("expected manual TLS source"),
         }
+    }
+
+    #[test]
+    fn public_listener_plan_uses_plain_listen_without_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_run_server_config(&dir);
+
+        assert_eq!(
+            public_listener_plan(&cfg).unwrap(),
+            PublicListenerPlan {
+                http_addr: Some("127.0.0.1:8080".parse().unwrap()),
+                https_addr: None,
+            }
+        );
+    }
+
+    #[test]
+    fn public_listener_plan_uses_listen_for_manual_tls_without_https_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls = TlsRuntimeConfig {
+            cert_path: Some(dir.path().join("tls.crt")),
+            key_path: Some(dir.path().join("tls.key")),
+            ..TlsRuntimeConfig::default()
+        };
+
+        assert_eq!(
+            public_listener_plan(&cfg).unwrap(),
+            PublicListenerPlan {
+                http_addr: None,
+                https_addr: Some("127.0.0.1:8080".parse().unwrap()),
+            }
+        );
+    }
+
+    #[test]
+    fn public_listener_plan_preserves_explicit_dual_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.https_listen = Some("127.0.0.1:8443".into());
+        cfg.tls = TlsRuntimeConfig {
+            cert_path: Some(dir.path().join("tls.crt")),
+            key_path: Some(dir.path().join("tls.key")),
+            ..TlsRuntimeConfig::default()
+        };
+
+        assert_eq!(
+            public_listener_plan(&cfg).unwrap(),
+            PublicListenerPlan {
+                http_addr: Some("127.0.0.1:8080".parse().unwrap()),
+                https_addr: Some("127.0.0.1:8443".parse().unwrap()),
+            }
+        );
     }
 
     #[test]

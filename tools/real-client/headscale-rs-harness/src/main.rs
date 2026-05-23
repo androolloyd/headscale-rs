@@ -331,7 +331,7 @@ async fn main() -> Result<()> {
     let state_dir = args.state_dir;
     let sans = headscale_api::tailscale_wire::tls::SanConfig::with_hostname(args.hostname);
     let cfg = serve::ServeConfig {
-        http_addr: args.http,
+        http_addr: Some(args.http),
         https_addr: (!args.no_https).then_some(args.https),
         state_dir: state_dir.clone(),
         sans: sans.clone(),
@@ -368,17 +368,27 @@ async fn main() -> Result<()> {
     );
 
     let serve::ServeHandle { http, https, .. } = handle;
-    if let Some(https) = https {
-        tokio::select! {
-            _ = signal::ctrl_c() => Ok(()),
-            result = http => flatten_join(result, "http"),
-            result = https => flatten_join(result, "https"),
+    match (http, https) {
+        (Some(http), Some(https)) => {
+            tokio::select! {
+                _ = signal::ctrl_c() => Ok(()),
+                result = http => flatten_join(result, "http"),
+                result = https => flatten_join(result, "https"),
+            }
         }
-    } else {
-        tokio::select! {
-            _ = signal::ctrl_c() => Ok(()),
-            result = http => flatten_join(result, "http"),
+        (Some(http), None) => {
+            tokio::select! {
+                _ = signal::ctrl_c() => Ok(()),
+                result = http => flatten_join(result, "http"),
+            }
         }
+        (None, Some(https)) => {
+            tokio::select! {
+                _ = signal::ctrl_c() => Ok(()),
+                result = https => flatten_join(result, "https"),
+            }
+        }
+        (None, None) => anyhow::bail!("wire harness started without public listeners"),
     }
 }
 

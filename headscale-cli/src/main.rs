@@ -27,17 +27,27 @@ use headscale_cli::admin::{
     PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
-/// Headscale-rs: WireGuard mesh networking with resource accounting.
 #[derive(Parser)]
 #[command(name = "headscale")]
-#[command(author, version, about, long_about = None)]
+#[command(author, version)]
+#[command(about = "headscale - a Tailscale control server")]
+#[command(
+    long_about = "headscale is an open source implementation of the Tailscale control server\n\nhttps://github.com/juanfont/headscale"
+)]
+#[command(disable_version_flag = true)]
 struct Cli {
-    /// Path to config file.
+    /// config file (default is /etc/headscale/config.yaml).
     #[arg(short, long, env = "HEADSCALE_CONFIG", global = true)]
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
-    #[arg(long, default_value = "info", env = "HEADSCALE_LOG", global = true)]
+    #[arg(
+        long,
+        default_value = "info",
+        env = "HEADSCALE_LOG",
+        global = true,
+        hide = true
+    )]
     log_level: String,
 
     #[command(flatten)]
@@ -49,8 +59,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the control plane server.
-    #[command(alias = "serve")]
+    /// Launches the headscale server.
+    #[command(name = "serve", alias = "server")]
     Server {
         /// Listen address for the API.
         #[arg(short, long, default_value = "0.0.0.0:8080")]
@@ -67,6 +77,7 @@ enum Commands {
     },
 
     /// Run as a mesh node (connects to a control plane).
+    #[command(name = "mesh-node", hide = true)]
     Node {
         /// Control plane URL.
         #[arg(short, long, env = "HEADSCALE_SERVER")]
@@ -83,13 +94,14 @@ enum Commands {
     },
 
     /// Generate a new identity.
+    #[command(hide = true)]
     Identity {
         #[command(subcommand)]
         action: IdentityAction,
     },
 
     // ----- Admin surface ----------------------------------------------------
-    /// Manage users on the admin surface.
+    /// Manage the users of Headscale.
     #[command(
         alias = "user",
         alias = "namespace",
@@ -100,40 +112,42 @@ enum Commands {
         #[command(subcommand)]
         action: UsersCmd,
     },
-    /// Manage registered nodes.
-    #[command(alias = "machine", alias = "machines")]
+    /// Manage the nodes of Headscale.
+    #[command(alias = "node", alias = "machine", alias = "machines")]
     Nodes {
         #[command(subcommand)]
         action: NodesCmd,
     },
-    /// Manage pre-auth keys.
+    /// Handle the preauthkeys in Headscale.
     #[command(alias = "preauthkey", alias = "authkey", alias = "pre")]
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
     },
     /// Manage node authentication and approval.
+    #[command(hide = true)]
     Auth {
         #[command(subcommand)]
         action: AuthCmd,
     },
-    /// Manage API keys.
+    /// Handle the Api keys in Headscale.
     #[command(alias = "apikey", alias = "api")]
     Apikeys {
         #[command(subcommand)]
         action: ApiKeysCmd,
     },
-    /// Inspect or update the network policy.
+    /// Manage the Headscale ACL Policy.
     Policy {
         #[command(subcommand)]
         action: PolicyCmd,
     },
     /// Inspect tailnet-wide state.
+    #[command(hide = true)]
     Tailnet {
         #[command(subcommand)]
         action: TailnetCmd,
     },
-    /// Debug and testing commands.
+    /// debug and testing commands.
     Debug {
         #[command(subcommand)]
         action: DebugCmd,
@@ -170,6 +184,7 @@ enum Commands {
 
     /// Check control plane status (legacy health probe — not the admin
     /// surface; uses the wire layer's `/health` endpoint).
+    #[command(hide = true)]
     Status {
         /// Control plane URL (uses config if not provided).
         #[arg(long)]
@@ -177,6 +192,7 @@ enum Commands {
     },
 
     /// Generate example configuration file.
+    #[command(hide = true)]
     InitConfig {
         /// Output path for config file.
         #[arg(short, long, default_value = "headscale.toml")]
@@ -890,15 +906,23 @@ mod tests {
             }
         ));
 
+        let parsed = Cli::try_parse_from(["headscale", "node", "ls"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Nodes {
+                action: NodesCmd::List { .. }
+            }
+        ));
+
         let parsed =
-            Cli::try_parse_from(["headscale", "node", "--server", "http://127.0.0.1"]).unwrap();
+            Cli::try_parse_from(["headscale", "mesh-node", "--server", "http://127.0.0.1"])
+                .unwrap();
         assert!(matches!(parsed.command, Commands::Node { .. }));
     }
 
     #[test]
     fn standalone_cli_accepts_preauthkey_aliases_from_upstream() {
-        let parsed =
-            Cli::try_parse_from(["headscale", "authkey", "new", "--user", "alice"]).unwrap();
+        let parsed = Cli::try_parse_from(["headscale", "authkey", "new", "--user", "42"]).unwrap();
         assert!(matches!(
             parsed.command,
             Commands::Preauthkeys {
@@ -931,7 +955,7 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Preauthkeys {
-                action: PreauthKeysCmd::Delete { id: 42 }
+                action: PreauthKeysCmd::Delete { id: Some(42) }
             }
         ));
     }

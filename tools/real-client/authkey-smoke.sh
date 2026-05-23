@@ -11,6 +11,7 @@ client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+advertise_routes_by_client="${REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
@@ -21,7 +22,12 @@ expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
+expected_peer_route_owners="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS:-}"
+expected_route_health_failover_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE:-}"
+route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-}"
+route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
+preauth_tags_by_client="${REAL_CLIENT_PREAUTH_TAGS_BY_CLIENT:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
@@ -310,6 +316,57 @@ if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
   exit 2
 fi
+split_client_values() {
+  local spec="$1"
+  local label="$2"
+  split_values=()
+  [[ -z "${spec}" ]] && return 0
+  IFS=';' read -r -a split_values <<<"${spec}"
+  if ((${#split_values[@]} != client_count)); then
+    echo "${label} must contain ${client_count} semicolon-separated values, got ${spec}" >&2
+    exit 2
+  fi
+  local idx
+  for idx in "${!split_values[@]}"; do
+    if [[ "${split_values[$idx]}" == "-" ]]; then
+      split_values[$idx]=""
+    fi
+  done
+}
+
+advertise_routes_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  advertise_routes_values+=("${advertise_routes}")
+done
+split_client_values "${advertise_routes_by_client}" "REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT"
+if [[ -n "${advertise_routes_by_client}" ]]; then
+  advertise_routes_values=("${split_values[@]}")
+fi
+
+preauth_tags_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  preauth_tags_values+=("${preauth_tags}")
+done
+split_client_values "${preauth_tags_by_client}" "REAL_CLIENT_PREAUTH_TAGS_BY_CLIENT"
+if [[ -n "${preauth_tags_by_client}" ]]; then
+  preauth_tags_values=("${split_values[@]}")
+fi
+
+if [[ -n "${route_health_probe_interval_secs}" ]] &&
+  (! [[ "${route_health_probe_interval_secs}" =~ ^[0-9]+$ ]] || ((route_health_probe_interval_secs < 1))); then
+  echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS must be a positive integer, got ${route_health_probe_interval_secs}" >&2
+  exit 2
+fi
+if [[ -n "${route_health_probe_timeout_secs}" ]] &&
+  (! [[ "${route_health_probe_timeout_secs}" =~ ^[0-9]+$ ]] || ((route_health_probe_timeout_secs < 1))); then
+  echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be a positive integer, got ${route_health_probe_timeout_secs}" >&2
+  exit 2
+fi
+if [[ -n "${expected_route_health_failover_route}" ]] &&
+  [[ -z "${route_health_probe_interval_secs}" || -z "${route_health_probe_timeout_secs}" ]]; then
+  echo "REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE requires REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
+  exit 2
+fi
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
   echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
   exit 2
@@ -481,6 +538,75 @@ tailscale_peer_count_matches() {
     peers = status["Peer"] || {}
     exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
   ' "${count}" <<<"${status_json}"
+}
+
+peer_netmap_route_owner_matches() {
+  local source_name="$1"
+  local peer_name="$2"
+  local route="$3"
+  local output_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${source_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected_peer = ARGV.fetch(1)
+      expected_route = ARGV.fetch(2)
+      peers = Array(netmap["Peers"] || netmap["peers"])
+
+      def names_for(peer)
+        [
+          peer["HostName"],
+          peer["Name"],
+          peer["DNSName"],
+          peer["ComputedName"],
+          peer["Hostinfo"] && peer["Hostinfo"]["Hostname"],
+          peer["HostInfo"] && peer["HostInfo"]["Hostname"],
+        ].compact.map(&:to_s)
+      end
+
+      def route_fields(peer)
+        [
+          peer["AllowedIPs"],
+          peer["AllowedIps"],
+          peer["allowedIPs"],
+          peer["allowed_ips"],
+          peer["PrimaryRoutes"],
+          peer["primaryRoutes"],
+          peer["primary_routes"],
+          peer["SubnetRoutes"],
+          peer["subnetRoutes"],
+          peer["subnet_routes"],
+        ].compact.flatten.map(&:to_s)
+      end
+
+      peer = peers.find do |candidate|
+        names_for(candidate).any? do |name|
+          name == expected_peer || name.split(".").first == expected_peer || name.include?(expected_peer)
+        end
+      end
+      abort("missing peer #{expected_peer.inspect} in netmap peers #{peers.inspect}") unless peer
+
+      owner_routes = route_fields(peer)
+      unless owner_routes.include?(expected_route)
+        abort("expected #{expected_peer.inspect} to own route #{expected_route.inspect}, got #{owner_routes.inspect} in #{peer.inspect}")
+      end
+
+      other_owners = peers.reject { |candidate| candidate.equal?(peer) }.select do |candidate|
+        route_fields(candidate).include?(expected_route)
+      end
+      unless other_owners.empty?
+        details = other_owners.map { |candidate| {names: names_for(candidate), routes: route_fields(candidate)} }
+        abort("expected only #{expected_peer.inspect} to own #{expected_route.inspect}, but found #{details.inspect}")
+      end
+
+      puts JSON.pretty_generate({
+        source: netmap.dig("SelfNode", "HostName") || netmap.dig("SelfNode", "Name"),
+        peer: expected_peer,
+        route: expected_route,
+        peer_names: names_for(peer),
+        peer_routes: owner_routes,
+      })
+    ' "${netmap_path}" "${peer_name}" "${route}" >"${output_path}"
 }
 
 tailscale_ssh_attempt() {
@@ -823,6 +949,12 @@ fi
 if [[ -n "${dns_override_local}" ]]; then
   export HSRS_HARNESS_DNS_OVERRIDE_LOCAL="${dns_override_local}"
 fi
+if [[ -n "${route_health_probe_interval_secs}" ]]; then
+  export HSRS_HARNESS_ROUTE_HEALTH_PROBE_INTERVAL_SECS="${route_health_probe_interval_secs}"
+fi
+if [[ -n "${route_health_probe_timeout_secs}" ]]; then
+  export HSRS_HARNESS_ROUTE_HEALTH_PROBE_TIMEOUT_SECS="${route_health_probe_timeout_secs}"
+fi
 "${harness_args[@]}" \
   >"${work_dir}/harness.stdout" \
   2>"${work_dir}/harness.stderr" &
@@ -860,13 +992,13 @@ authkey=""
 authkeys=()
 if [[ "${login_mode}" == "authkey" ]]; then
   echo "::group::mint preauth key"
-  if [[ -n "${client_users_csv}" ]]; then
+  if [[ -n "${client_users_csv}" || -n "${preauth_tags_by_client}" ]]; then
     for idx in "${!client_names[@]}"; do
       preauth_body="$(
         ruby -rjson -e '
           tags = ARGV.fetch(1).split(",").reject(&:empty?)
           puts JSON.generate({user: ARGV.fetch(0), reusable: true, tags: tags})
-        ' "${client_users[$idx]}" "${preauth_tags}"
+        ' "${client_users[$idx]}" "${preauth_tags_values[$idx]}"
       )"
       preauth_json="$(
         curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
@@ -940,8 +1072,8 @@ for idx in "${!client_names[@]}"; do
   if [[ "${login_mode}" == "authkey" ]]; then
     up_args+=("--authkey=${authkeys[$idx]}")
   fi
-  if [[ -n "${advertise_routes}" ]]; then
-    up_args+=("--advertise-routes=${advertise_routes}")
+  if [[ -n "${advertise_routes_values[$idx]}" ]]; then
+    up_args+=("--advertise-routes=${advertise_routes_values[$idx]}")
   fi
   if ((enable_tailscale_ssh_flag)); then
     up_args+=(--ssh)
@@ -1469,6 +1601,37 @@ if [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]]; then
   echo "::endgroup::"
 fi
 
+if [[ -n "${expected_peer_route_owners}" ]]; then
+  echo "::group::assert route-via peer route owners"
+  IFS=';' read -r -a peer_route_owner_checks <<<"${expected_peer_route_owners}"
+  for raw_check in "${peer_route_owner_checks[@]}"; do
+    IFS=':' read -r source_idx peer_idx route extra <<<"${raw_check}"
+    if [[ -n "${extra:-}" ||
+      ! "${source_idx}" =~ ^[0-9]+$ ||
+      ! "${peer_idx}" =~ ^[0-9]+$ ||
+      -z "${route}" ||
+      "${source_idx}" -lt 1 ||
+      "${peer_idx}" -lt 1 ||
+      "${source_idx}" -gt "${client_count}" ||
+      "${peer_idx}" -gt "${client_count}" ]]; then
+      echo "REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS entries must be source_index:peer_index:route, got ${raw_check}" >&2
+      exit 2
+    fi
+    source_name="${client_names[$((source_idx - 1))]}"
+    peer_name="${client_names[$((peer_idx - 1))]}"
+    safe_check="${source_idx}-${peer_idx}-${route//[^a-zA-Z0-9_.-]/-}"
+    if ! wait_for "route ${route} from ${source_name} via ${peer_name}" \
+      "peer_netmap_route_owner_matches '${source_name}' '${peer_name}' '${route}' '${work_dir}/route-owner-${safe_check}.json'"; then
+      cat "${work_dir}/route-owner-${safe_check}.json.err" >&2 || true
+      dump_client_debug "${source_name}"
+      dump_client_debug "${peer_name}"
+      exit 1
+    fi
+    cat "${work_dir}/route-owner-${safe_check}.json"
+  done
+  echo "::endgroup::"
+fi
+
 if [[ -n "${expected_derp_region_id}" ]]; then
   echo "::group::assert DERP map metadata"
   for client_name in "${client_names[@]}"; do
@@ -1880,6 +2043,113 @@ if [[ -n "${expected_primary_withdraw_route}" ]]; then
     fi
     sleep 1
   done
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_route_health_failover_route}" ]]; then
+  echo "::group::assert route-health primary failover"
+  curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-route-health.json"
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes-before-route-health.json"
+  route_health_client_name="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(2)
+
+      def stable_id_from_key(hex)
+        h = 0xcbf29ce484222325
+        hex.each_byte do |byte|
+          h ^= byte
+          h = (h * 0x100000001b3) & 0xffffffffffffffff
+        end
+        h & 0x7fffffffffffffff
+      end
+
+      machines = JSON.parse(File.read(ARGV.fetch(0)))
+      debug_routes = JSON.parse(File.read(ARGV.fetch(1)))
+      primary_owner = debug_routes.fetch("primary_routes").fetch(route) {
+        abort("missing primary route #{route.inspect} before route-health failover")
+      }
+      machine = machines.find do |candidate|
+        stable_id_from_key(candidate.fetch("node_key").sub(/\Anodekey:/, "")) == primary_owner
+      end
+      abort("primary owner #{primary_owner.inspect} did not match a registered machine") unless machine
+      puts machine.fetch("hostname")
+    ' "${work_dir}/machines-before-route-health.json" "${work_dir}/debug-routes-before-route-health.json" "${expected_route_health_failover_route}"
+  )"
+
+  docker pause "${route_health_client_name}" >/dev/null
+  deadline=$((SECONDS + timeout_secs))
+  until
+    curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-route-health.json" &&
+      curl -fsS -H 'accept: application/json' \
+        "http://127.0.0.1:${http_port}/debug/routes" \
+        >"${work_dir}/debug-routes-after-route-health.json" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(4)
+        paused_client = ARGV.fetch(5)
+        expected_count = Integer(ARGV.fetch(6))
+
+        def stable_id_from_key(hex)
+          h = 0xcbf29ce484222325
+          hex.each_byte do |byte|
+            h ^= byte
+            h = (h * 0x100000001b3) & 0xffffffffffffffff
+          end
+          h & 0x7fffffffffffffff
+        end
+
+        before_machines = JSON.parse(File.read(ARGV.fetch(0)))
+        before_debug = JSON.parse(File.read(ARGV.fetch(1)))
+        after_machines = JSON.parse(File.read(ARGV.fetch(2)))
+        after_debug = JSON.parse(File.read(ARGV.fetch(3)))
+        abort("expected #{expected_count} machines before route-health, got #{before_machines.length}") unless before_machines.length == expected_count
+        abort("expected #{expected_count} machines after route-health, got #{after_machines.length}") unless after_machines.length == expected_count
+
+        before_owner = before_debug.fetch("primary_routes").fetch(route)
+        after_owner = after_debug.fetch("primary_routes").fetch(route) {
+          abort("missing primary route #{route.inspect} after route-health failover")
+        }
+        abort("expected route-health primary owner to change, still #{after_owner.inspect}") if after_owner == before_owner
+
+        remaining_ids = after_machines
+          .reject { |machine| machine.fetch("hostname") == paused_client }
+          .select { |machine| Array(machine["available_routes"]).include?(route) && Array(machine["approved_routes"]).include?(route) }
+          .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
+        abort("new primary owner #{after_owner.inspect} not among remaining active routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_owner)
+
+        puts JSON.pretty_generate({
+          paused_client: paused_client,
+          before_owner: before_owner,
+          after_owner: after_owner,
+          debug_routes: after_debug,
+        })
+      ' "${work_dir}/machines-before-route-health.json" "${work_dir}/debug-routes-before-route-health.json" "${work_dir}/machines-after-route-health.json" "${work_dir}/debug-routes-after-route-health.json" "${expected_route_health_failover_route}" "${route_health_client_name}" "${expected_machine_count}"
+  do
+    if ((SECONDS >= deadline)); then
+      docker unpause "${route_health_client_name}" >/dev/null 2>&1 || true
+      echo "timed out waiting for route-health failover" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  docker unpause "${route_health_client_name}" >/dev/null
+  if ! wait_for "tailscale logged-in netmap after route-health recovery ${route_health_client_name}" "tailscale_logged_in '${route_health_client_name}'"; then
+    dump_client_debug "${route_health_client_name}"
+    exit 1
+  fi
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  curl -fsS -H 'accept: application/json' \
+    "http://127.0.0.1:${http_port}/debug/routes" \
+    >"${work_dir}/debug-routes-after-route-health-recovery.json"
+  ruby -rjson -e '
+    route = ARGV.fetch(2)
+    failed_over_owner = JSON.parse(File.read(ARGV.fetch(0))).fetch("primary_routes").fetch(route)
+    recovered_owner = JSON.parse(File.read(ARGV.fetch(1))).fetch("primary_routes").fetch(route)
+    abort("route-health recovery stole #{route}: #{recovered_owner.inspect}, expected sticky #{failed_over_owner.inspect}") unless recovered_owner == failed_over_owner
+    puts JSON.pretty_generate({route: route, sticky_owner: recovered_owner})
+  ' "${work_dir}/debug-routes-after-route-health.json" "${work_dir}/debug-routes-after-route-health-recovery.json" "${expected_route_health_failover_route}"
   echo "::endgroup::"
 fi
 

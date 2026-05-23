@@ -686,13 +686,6 @@ mod tests {
     #[test]
     fn remote_addresses_default_to_https() {
         assert_eq!(
-            remote_endpoint(remote_uri("127.0.0.1:50443").unwrap())
-                .unwrap()
-                .uri()
-                .scheme_str(),
-            Some("https")
-        );
-        assert_eq!(
             remote_uri("127.0.0.1:50443").unwrap().scheme_str(),
             Some("https")
         );

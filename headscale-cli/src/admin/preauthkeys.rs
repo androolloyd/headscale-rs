@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::grpc_client::{GrpcAdminClient, UserSelector};
+use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured, print_table};
 
 #[allow(clippy::too_many_arguments)]
@@ -51,18 +51,17 @@ pub async fn create(
 #[allow(clippy::too_many_arguments)]
 pub async fn create_grpc(
     client: &mut GrpcAdminClient,
-    user: &str,
+    user: u64,
     reusable: bool,
     ephemeral: bool,
     tags: Vec<String>,
     expires_in_secs: u64,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let user_id = resolve_user_id(client, user).await?;
     let key = PreauthOutput::from(
         client
             .create_pre_auth_key(
-                user_id,
+                user,
                 reusable,
                 ephemeral,
                 expiration_unix(expires_in_secs),
@@ -131,18 +130,25 @@ pub async fn expire(client: &AdminClient, prefix: &str) -> Result<(), AdminError
     Ok(())
 }
 
-pub async fn expire_grpc(client: &mut GrpcAdminClient, prefix: &str) -> Result<(), AdminError> {
-    let id = resolve_key_id(client, prefix).await?;
+pub async fn expire_grpc(
+    client: &mut GrpcAdminClient,
+    id: Option<u64>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let id = id.unwrap_or_default();
+    if id == 0 {
+        return Err(AdminError::Local("missing --id parameter".into()));
+    }
     client.expire_pre_auth_key(id).await?;
-    println!("Expired preauth key '{prefix}'");
-    Ok(())
+    print_result(fmt, "Key expired")
 }
 
 pub async fn delete_grpc(
     client: &mut GrpcAdminClient,
-    id: u64,
+    id: Option<u64>,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
+    let id = id.unwrap_or_default();
     if id == 0 {
         return Err(AdminError::Local("missing --id parameter".into()));
     }
@@ -162,47 +168,6 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
     } else {
         println!("{message}");
         Ok(())
-    }
-}
-
-async fn resolve_user_id(client: &mut GrpcAdminClient, user: &str) -> Result<u64, AdminError> {
-    let users = client
-        .list_users(UserSelector {
-            id: None,
-            name: Some(user),
-            email: None,
-        })
-        .await?;
-    match users.as_slice() {
-        [user] => Ok(user.id),
-        [] => Err(AdminError::NotFound(format!("user {user:?} not found"))),
-        _ => Err(AdminError::Local(
-            "multiple users match query, specify an ID".into(),
-        )),
-    }
-}
-
-async fn resolve_key_id(client: &mut GrpcAdminClient, prefix: &str) -> Result<u64, AdminError> {
-    if prefix.len() < 4 {
-        return Err(AdminError::Local(
-            "prefix must be at least 4 chars".to_string(),
-        ));
-    }
-    let matches: Vec<PreauthOutput> = client
-        .list_pre_auth_keys()
-        .await?
-        .into_iter()
-        .map(PreauthOutput::from)
-        .filter(|key| key.matches_prefix(prefix))
-        .collect();
-    match matches.as_slice() {
-        [key] => Ok(key.id),
-        [] => Err(AdminError::NotFound(format!(
-            "preauth key prefix {prefix:?} not found"
-        ))),
-        _ => Err(AdminError::Local(format!(
-            "preauth key prefix {prefix:?} matched multiple keys"
-        ))),
     }
 }
 
@@ -324,6 +289,7 @@ struct PreauthOutput {
 }
 
 impl PreauthOutput {
+    #[cfg(test)]
     fn matches_prefix(&self, prefix: &str) -> bool {
         self.key.starts_with(prefix) || short_prefix(&self.key) == prefix
     }

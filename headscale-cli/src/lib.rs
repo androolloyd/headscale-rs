@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn embedded_admin_accepts_preauthkey_and_apikey_aliases_from_upstream() {
         let parsed =
-            AdminHarness::try_parse_from(["headscale", "pre", "new", "--user", "alice"]).unwrap();
+            AdminHarness::try_parse_from(["headscale", "pre", "new", "--user", "42"]).unwrap();
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Preauthkeys {

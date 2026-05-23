@@ -110,6 +110,11 @@ pub(crate) struct CliConfig {
     /// Upstream-compatible Taildrop/file-sharing switch.
     #[serde(default, skip_serializing_if = "taildrop_config_is_default")]
     pub(crate) taildrop: TaildropConfig,
+    /// Pinned v0.28 top-level default client-port randomization switch.
+    /// Current upstream also supports policy-scoped `randomizeClientPort`;
+    /// this field keeps v0.28 config files parse-compatible.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) randomize_client_port: bool,
     /// Upstream-compatible Logtail switch. Parsed and projected only.
     #[serde(default, skip_serializing_if = "enabled_config_is_default")]
     pub(crate) logtail: EnabledConfig,
@@ -945,7 +950,9 @@ impl CliConfig {
             .as_ref()
             .is_some_and(|value| !value.as_os_str().is_empty());
         if letsencrypt_hostname && (cert_path || key_path) {
-            bail!("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both");
+            bail!(
+                "Fatal config error: set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both"
+            );
         }
         if cert_path != key_path {
             bail!("tls_cert_path and tls_key_path must both be set");
@@ -959,7 +966,7 @@ impl CliConfig {
             && challenge_type != "TLS-ALPN-01"
         {
             bail!(
-                "the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
+                "Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
             );
         }
 
@@ -1322,14 +1329,6 @@ const REMOVED_CONFIG_KEYS: &[RemovedConfigKey] = &[
         replacement: Some("node.expiry"),
         hint: None,
     },
-    RemovedConfigKey {
-        path: &["randomize_client_port"],
-        display: "randomize_client_port",
-        replacement: Some("randomizeClientPort"),
-        hint: Some(
-            r#"Set "randomizeClientPort": true at the top level of your policy file, or grant the cap per-node via a "nodeAttrs" entry."#,
-        ),
-    },
 ];
 
 const REMOVED_OIDC_ENV_KEYS: &[(&str, &str)] = &[(
@@ -1532,6 +1531,12 @@ fn parse_u32_repr(value: U32Repr) -> Result<u32, String> {
                 .or_else(|| trimmed.strip_prefix("0O"))
             {
                 u32::from_str_radix(octal, 8)
+                    .map_err(|err| format!("invalid octal permission {trimmed:?}: {err}"))
+            } else if trimmed.starts_with('0')
+                && trimmed.len() > 1
+                && trimmed.chars().all(|ch| matches!(ch, '0'..='7'))
+            {
+                u32::from_str_radix(trimmed, 8)
                     .map_err(|err| format!("invalid octal permission {trimmed:?}: {err}"))
             } else {
                 trimmed
@@ -2321,6 +2326,32 @@ server_url: "https://derp.no"
     }
 
     #[test]
+    fn parses_pinned_headscale_go_v0_28_config_example_fixture() {
+        let source = include_str!("../tests/fixtures/headscale-go-v0.28-config-example.yaml");
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        assert!(!config.randomize_client_port);
+        assert_eq!(
+            config.acme_url.as_deref(),
+            Some("https://acme-v02.api.letsencrypt.org/directory")
+        );
+        assert_eq!(
+            config.tls_letsencrypt_challenge_type.as_deref(),
+            Some("HTTP-01")
+        );
+        assert_eq!(
+            config.database.as_ref().unwrap().debug_postgres().ssl(),
+            "false"
+        );
+        assert_eq!(
+            config.server.as_ref().unwrap().unix_socket_permission,
+            0o770
+        );
+    }
+
+    #[test]
     fn configtest_rejects_invalid_prefix_allocation_strategy() {
         let source = r#"
 server_url: "https://headscale.example"
@@ -2378,9 +2409,9 @@ tls_cert_path: "/etc/headscale/cert.pem"
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
         let err = config.validate_for_configtest().unwrap_err();
 
-        assert!(
-            format!("{err:#}")
-                .contains("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path")
+        assert_eq!(
+            format!("{err:#}"),
+            "Fatal config error: set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both"
         );
     }
 
@@ -3119,14 +3150,11 @@ oidc:
     }
 
     #[test]
-    fn rejects_removed_randomize_client_port_config_key() {
-        let err =
-            CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap_err();
-        let err = format!("{err:#}");
+    fn accepts_pinned_randomize_client_port_config_key() {
+        let config =
+            CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap();
 
-        assert!(err.contains("randomize_client_port"));
-        assert!(err.contains("randomizeClientPort"));
-        assert!(err.contains("policy file"));
+        assert!(config.randomize_client_port);
     }
 
     #[test]

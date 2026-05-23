@@ -969,10 +969,6 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
             errs.push(format!(
                 "autogroup {user:?} is not supported for SSH user, can be [autogroup:nonroot]"
             ));
-        } else if user.starts_with("localpart:") && !is_valid_ssh_localpart_pattern(user) {
-            errs.push(format!(
-                "SSH user {user:?} uses invalid localpart pattern, want localpart:*@<domain>"
-            ));
         }
     }
 
@@ -987,11 +983,6 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         validate_tag_ref(doc, dst, errs);
     }
     validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
-}
-
-fn is_valid_ssh_localpart_pattern(user: &str) -> bool {
-    user.strip_prefix("localpart:*@")
-        .is_some_and(|domain| !domain.is_empty() && !domain.contains('*'))
 }
 
 fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<String>) {
@@ -3536,7 +3527,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_ssh_localpart_user_pattern() {
+    fn accepts_ssh_localpart_like_user_literals_like_headscale_go() {
         parse_hujson_policy(
             r#"{
               "tagOwners": {"tag:server": ["alice@example.com"]},
@@ -3544,34 +3535,11 @@ mod tests {
                 "action": "accept",
                 "src": ["autogroup:member"],
                 "dst": ["tag:server"],
-                "users": ["localpart:*@example.com"]
+                "users": ["localpart:*@example.com", "localpart:alice@example.com", "localpart:*@"]
               }]
             }"#,
         )
         .unwrap();
-    }
-
-    #[test]
-    fn rejects_invalid_ssh_localpart_user_patterns() {
-        for user in [
-            "localpart:alice@example.com",
-            "localpart:*@",
-            "localpart:*@*.example.com",
-        ] {
-            let raw = format!(
-                r#"{{
-                  "tagOwners": {{"tag:server": ["alice@example.com"]}},
-                  "ssh": [{{
-                    "action": "accept",
-                    "src": ["autogroup:member"],
-                    "dst": ["tag:server"],
-                    "users": ["{user}"]
-                  }}]
-                }}"#
-            );
-            let err = parse_hujson_policy(&raw).expect_err(user).to_string();
-            assert!(err.contains("invalid localpart pattern"), "{err}");
-        }
     }
 
     #[test]

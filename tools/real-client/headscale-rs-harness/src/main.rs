@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +28,7 @@ use headscale_api::{
         PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
         derp_config,
         routes::normalize_routes,
-        serve,
+        serve, spawn_route_health_probe,
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
     },
 };
@@ -150,6 +150,18 @@ struct Args {
     ip_families: IpFamilies,
     #[arg(long = "authkey", value_name = "KEY=USER")]
     authkeys: Vec<String>,
+    #[arg(
+        long,
+        default_value_t = 0,
+        env = "HSRS_HARNESS_ROUTE_HEALTH_PROBE_INTERVAL_SECS"
+    )]
+    route_health_probe_interval_secs: u64,
+    #[arg(
+        long,
+        default_value_t = 0,
+        env = "HSRS_HARNESS_ROUTE_HEALTH_PROBE_TIMEOUT_SECS"
+    )]
+    route_health_probe_timeout_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -483,6 +495,11 @@ async fn main() -> Result<()> {
         oidc: None,
         metrics_addr: None,
     };
+    let route_health_probe = spawn_route_health_probe(
+        state.clone(),
+        Duration::from_secs(args.route_health_probe_interval_secs),
+        Duration::from_secs(args.route_health_probe_timeout_secs),
+    );
     let handle = serve::serve(state, cfg, extra_routes).await?;
     let tls_cert_path = handle
         .tls
@@ -510,6 +527,12 @@ async fn main() -> Result<()> {
             ],
         })?
     );
+    if route_health_probe.is_some() {
+        eprintln!(
+            "route health probe enabled interval={}s timeout={}s",
+            args.route_health_probe_interval_secs, args.route_health_probe_timeout_secs
+        );
+    }
 
     let serve::ServeHandle { http, https, .. } = handle;
     match (http, https) {

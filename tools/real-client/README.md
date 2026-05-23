@@ -106,6 +106,8 @@ with the same stock `tailscaled` image.
 | Routes | `route-primary-sticky` | `route-primary-sticky-smoke.sh` | `route-primary-sticky-headscale-go-smoke.sh` | Sticky primary route ownership |
 | Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
+| Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
+| Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
@@ -549,6 +551,45 @@ Additional knobs:
 - `REAL_CLIENT_EXIT_ROUTES` defaults to `0.0.0.0/0,::/0`.
 - `REAL_CLIENT_ADVERTISE_EXIT_NODE` defaults to `true` in the exit-node
   wrappers.
+
+The route-via scenario uses current-head `grants[].via` policy semantics. It
+starts two tagged routers and two user nodes, has both routers advertise the
+same subnet, and asserts from each user node's stock-client netmap that the
+route is owned only by the router selected by that user's `via` grant:
+
+```sh
+tools/real-client/route-via-smoke.sh
+tools/real-client/route-via-headscale-go-smoke.sh
+```
+
+The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited
+current-head commit because pinned v0.28 does not implement `grants[].via`.
+
+The route-health scenario enables HA route probes, pauses the current primary
+router container without removing route approval, and asserts that the route
+fails over to the other router. After unpausing the old primary, it waits for a
+recovery probe and asserts sticky ownership remains with the failover router:
+
+```sh
+tools/real-client/route-health-smoke.sh
+tools/real-client/route-health-headscale-go-smoke.sh
+```
+
+The headscale-go wrapper also defaults to the audited current-head commit
+because pinned v0.28 does not expose `node.routes.ha`.
+
+Additional knobs:
+
+- `REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT` accepts semicolon-separated
+  per-client route advertisements; use `-` for no routes.
+- `REAL_CLIENT_PREAUTH_TAGS_BY_CLIENT` accepts semicolon-separated per-client
+  preauth-key tags; use `-` for no tags.
+- `REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS` entries are
+  `source_index:peer_index:route` and assert route ownership in
+  `tailscale debug netmap`.
+- `REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS` and
+  `REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS` default to `2` and `1` in the
+  route-health wrappers.
 
 ## Tailscale SSH Smoke
 

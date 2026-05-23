@@ -76,10 +76,10 @@ fn top_level_help_exposes_upstream_operator_commands() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let out = stdout(&output);
     for command in [
+        "serve",
         "users",
         "nodes",
         "preauthkeys",
-        "auth",
         "apikeys",
         "policy",
         "debug",
@@ -91,6 +91,15 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "configtest",
     ] {
         assert!(out.contains(command), "missing {command} in help:\n{out}");
+    }
+    for hidden in [
+        "  server",
+        "  auth ",
+        "  tailnet",
+        "  status",
+        "  init-config",
+    ] {
+        assert!(!out.contains(hidden), "unexpected {hidden} in help:\n{out}");
     }
 }
 
@@ -118,7 +127,7 @@ fn auth_and_preauth_delete_help_are_accepted() {
 fn serve_alias_and_debug_create_node_help_are_accepted() {
     let serve = headscale(&["serve", "--help"]);
     assert!(serve.status.success(), "stderr: {}", stderr(&serve));
-    assert!(stdout(&serve).contains("Run the control plane server"));
+    assert!(stdout(&serve).contains("Launches the headscale server"));
 
     let debug = headscale(&["debug", "create-node", "--help"]);
     assert!(debug.status.success(), "stderr: {}", stderr(&debug));
@@ -288,6 +297,10 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/preauthkeys_create_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["preauthkeys", "expire", "--help"],
+        include_str!("snapshots/preauthkeys_expire_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["apikeys", "delete", "--help"],
         include_str!("snapshots/apikeys_delete_help.stdout"),
     );
@@ -313,7 +326,7 @@ fn implemented_admin_command_help_matches_snapshots() {
 fn implemented_admin_clap_error_matches_snapshot() {
     let output = headscale_clean(&["users", "list", "--output", "xml"]);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(6));
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),

@@ -106,35 +106,50 @@ impl AdminError {
 #[derive(Args, Debug, Clone)]
 pub struct ConnectArgs {
     /// Legacy admin HTTP URL. Falls back to `$HEADSCALE_URL`. Trailing `/` is OK.
-    #[arg(long, env = "HEADSCALE_URL", global = true)]
+    #[arg(long, env = "HEADSCALE_URL", global = true, hide = true)]
     pub server: Option<String>,
     /// Legacy admin HTTP bearer token. Falls back to `$HEADSCALE_ADMIN_TOKEN`.
-    #[arg(long, env = "HEADSCALE_ADMIN_TOKEN", global = true)]
+    #[arg(long, env = "HEADSCALE_ADMIN_TOKEN", global = true, hide = true)]
     pub token: Option<String>,
     /// Upstream gRPC address. If unset, connect to the local Unix socket.
-    #[arg(long = "address", env = "HEADSCALE_CLI_ADDRESS", global = true)]
+    #[arg(
+        long = "address",
+        env = "HEADSCALE_CLI_ADDRESS",
+        global = true,
+        hide = true
+    )]
     pub address: Option<String>,
     /// Upstream gRPC API key for remote addresses.
-    #[arg(long = "api-key", env = "HEADSCALE_CLI_API_KEY", global = true)]
+    #[arg(
+        long = "api-key",
+        env = "HEADSCALE_CLI_API_KEY",
+        global = true,
+        hide = true
+    )]
     pub api_key: Option<String>,
     /// Local upstream gRPC Unix socket used when `--address` is unset.
-    #[arg(long = "unix-socket", env = "HEADSCALE_UNIX_SOCKET", global = true)]
+    #[arg(
+        long = "unix-socket",
+        env = "HEADSCALE_UNIX_SOCKET",
+        global = true,
+        hide = true
+    )]
     pub unix_socket: Option<PathBuf>,
     /// Disable TLS certificate verification for a remote gRPC address.
-    #[arg(long = "insecure", env = "HEADSCALE_CLI_INSECURE", global = true)]
+    #[arg(
+        long = "insecure",
+        env = "HEADSCALE_CLI_INSECURE",
+        global = true,
+        hide = true
+    )]
     pub insecure: bool,
     /// Emit raw JSON instead of the default table view.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub json: bool,
-    /// Output format. Empty for human-readable, `json`, `json-line`, or `yaml`.
-    #[arg(
-        short = 'o',
-        long = "output",
-        global = true,
-        value_parser = ["json", "json-line", "yaml"]
-    )]
+    /// Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'.
+    #[arg(short = 'o', long = "output", global = true)]
     pub output: Option<String>,
-    /// Disable confirmation prompts.
+    /// Disable prompts and forces the execution.
     #[arg(long, global = true)]
     pub force: bool,
 }
@@ -184,7 +199,7 @@ impl ConnectArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum UsersCmd {
-    /// Create a new user.
+    /// Creates a new user.
     #[command(alias = "c", alias = "new")]
     Create {
         name: String,
@@ -198,7 +213,7 @@ pub enum UsersCmd {
         #[arg(short = 'p', long = "picture-url")]
         picture_url: Option<String>,
     },
-    /// List all users.
+    /// List all the users.
     #[command(alias = "ls", alias = "show")]
     List {
         /// User identifier (ID).
@@ -211,7 +226,7 @@ pub enum UsersCmd {
         #[arg(short = 'e', long)]
         email: Option<String>,
     },
-    /// Destroy a user.
+    /// Destroys a user.
     #[command(name = "destroy", alias = "delete")]
     Destroy {
         /// User identifier (ID).
@@ -221,7 +236,7 @@ pub enum UsersCmd {
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
     },
-    /// Rename a user.
+    /// Renames a user.
     #[command(alias = "mv")]
     Rename {
         /// User identifier (ID).
@@ -238,8 +253,8 @@ pub enum UsersCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum NodesCmd {
-    /// List registered nodes (optionally filter by user).
-    #[command(alias = "ls")]
+    /// List nodes.
+    #[command(alias = "ls", alias = "show")]
     List {
         #[arg(short = 'u', long)]
         user: Option<String>,
@@ -252,12 +267,12 @@ pub enum NodesCmd {
         id: Option<String>,
     },
     /// Show one node by numeric identifier. Legacy HTTP also accepts node_key hex or hostname.
-    #[command(alias = "get")]
+    #[command(name = "get", hide = true)]
     Show {
         #[arg(value_name = "ID")]
         id_or_name: Option<String>,
     },
-    /// Register a pending node with a user and node key.
+    /// Registers a node to your network.
     Register {
         #[arg(short = 'u', long)]
         user: String,
@@ -283,7 +298,7 @@ pub enum NodesCmd {
         #[arg(short = 'd', long = "disable")]
         disable: bool,
     },
-    /// Rename a node (operator-driven hostname rewrite).
+    /// Renames a node in your network.
     Rename {
         /// New hostname in upstream form, or node ID in legacy positional form.
         #[arg(value_name = "NEW_NAME_OR_ID")]
@@ -297,7 +312,7 @@ pub enum NodesCmd {
     },
     /// Replace the node's forced-tags list. Empty list clears the
     /// override; tags are matched by exact string against the policy.
-    #[command(alias = "tag", alias = "t")]
+    #[command(name = "tag", alias = "tags", alias = "t")]
     Tags {
         /// Node identifier (ID). Positional form is kept for legacy compatibility.
         #[arg(value_name = "ID")]
@@ -343,22 +358,22 @@ pub enum NodesCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum PreauthKeysCmd {
-    /// Mint a fresh preauth key.
+    /// Creates a new preauthkey.
     #[command(alias = "c", alias = "new")]
     Create {
-        /// User the key belongs to.
-        #[arg(long)]
-        user: String,
-        /// Allow more than one redemption.
+        /// User identifier (ID).
+        #[arg(short = 'u', long)]
+        user: Option<u64>,
+        /// Make the preauthkey reusable.
         #[arg(long)]
         reusable: bool,
-        /// Mark the resulting device ephemeral (auto-clean).
+        /// Preauthkey for ephemeral nodes.
         #[arg(long)]
         ephemeral: bool,
-        /// Comma-separated `tag:foo,tag:bar` tags.
+        /// Tags to automatically assign to node.
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        /// Duration the key is valid (e.g. `1h`, `24h`, `30m`).
+        /// Human-readable expiration of the key (e.g. 30m, 24h).
         #[arg(
             short = 'e',
             long = "expiration",
@@ -367,25 +382,26 @@ pub enum PreauthKeysCmd {
         )]
         expires_in: String,
     },
-    /// List all known preauth keys.
+    /// List all preauthkeys.
     #[command(alias = "ls", alias = "show")]
     List {
         /// Restrict to a single user.
         #[arg(long)]
         user: Option<String>,
     },
-    /// Expire a key identified by its visible prefix.
+    /// Expire a preauthkey.
     #[command(alias = "revoke", alias = "exp", alias = "e")]
     Expire {
-        #[arg(value_name = "PREFIX")]
-        prefix: String,
+        /// Authkey ID.
+        #[arg(short = 'i', long = "id")]
+        id: Option<u64>,
     },
     /// Delete a preauth key by numeric ID.
     #[command(alias = "del", alias = "rm", alias = "d")]
     Delete {
         /// Authkey ID.
         #[arg(short = 'i', long = "id")]
-        id: u64,
+        id: Option<u64>,
     },
 }
 
@@ -689,9 +705,10 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
                 expires_in,
             } => {
                 let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
+                let user = user.unwrap_or_default().to_string();
                 preauthkeys::create(
                     &client,
-                    user,
+                    &user,
                     *reusable,
                     *ephemeral,
                     tags.clone(),
@@ -701,11 +718,26 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
                 .await
             }
             PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
-            PreauthKeysCmd::Expire { prefix } => preauthkeys::expire(&client, prefix).await,
+            PreauthKeysCmd::Expire { id } => {
+                let id = id.unwrap_or_default();
+                if id == 0 {
+                    return Err(AdminError::Local("missing --id parameter".into()));
+                }
+                preauthkeys::expire(&client, &id.to_string()).await
+            }
             PreauthKeysCmd::Delete { .. } => Err(AdminError::Local(
                 "preauthkeys delete requires the upstream gRPC transport".into(),
             )),
         };
+    }
+
+    match cmd {
+        PreauthKeysCmd::Expire { id } | PreauthKeysCmd::Delete { id } => {
+            if id.unwrap_or_default() == 0 {
+                return Err(AdminError::Local("missing --id parameter".into()));
+            }
+        }
+        _ => {}
     }
 
     let mut client = conn.build_grpc_client().await?;
@@ -718,6 +750,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             expires_in,
         } => {
             let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
+            let user = user.unwrap_or_default();
             preauthkeys::create_grpc(
                 &mut client,
                 user,
@@ -732,7 +765,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
         PreauthKeysCmd::List { user } => {
             preauthkeys::list_grpc(&mut client, user.as_deref(), fmt).await
         }
-        PreauthKeysCmd::Expire { prefix } => preauthkeys::expire_grpc(&mut client, prefix).await,
+        PreauthKeysCmd::Expire { id } => preauthkeys::expire_grpc(&mut client, *id, fmt).await,
         PreauthKeysCmd::Delete { id } => preauthkeys::delete_grpc(&mut client, *id, fmt).await,
     }
 }
@@ -1029,7 +1062,7 @@ mod tests {
             NodesHarness::try_parse_from(["headscale", "show"])
                 .unwrap()
                 .action,
-            NodesCmd::Show { id_or_name: None }
+            NodesCmd::List { user: None }
         ));
         assert!(matches!(
             NodesHarness::try_parse_from(["headscale", "get", "42"])
@@ -1163,7 +1196,7 @@ mod tests {
             "headscale",
             "--server",
             "http://127.0.0.1:51822",
-            "show",
+            "get",
             "node-key-hex",
         ])
         .unwrap();
@@ -1279,28 +1312,39 @@ mod tests {
     }
 
     #[test]
-    fn preauthkeys_accepts_upstream_delete_by_id() {
+    fn preauthkeys_accepts_upstream_expire_and_delete_by_id() {
+        assert!(matches!(
+            PreauthKeysHarness::try_parse_from(["headscale", "expire", "--id", "41"])
+                .unwrap()
+                .action,
+            PreauthKeysCmd::Expire { id: Some(41) }
+        ));
         assert!(matches!(
             PreauthKeysHarness::try_parse_from(["headscale", "delete", "--id", "42"])
                 .unwrap()
                 .action,
-            PreauthKeysCmd::Delete { id: 42 }
+            PreauthKeysCmd::Delete { id: Some(42) }
         ));
         assert!(matches!(
             PreauthKeysHarness::try_parse_from(["headscale", "del", "-i", "43"])
                 .unwrap()
                 .action,
-            PreauthKeysCmd::Delete { id: 43 }
+            PreauthKeysCmd::Delete { id: Some(43) }
         ));
     }
 
     #[test]
     fn preauthkeys_create_uses_upstream_expiration_flag_and_default() {
-        match PreauthKeysHarness::try_parse_from(["headscale", "create", "--user", "alice"])
+        match PreauthKeysHarness::try_parse_from(["headscale", "create", "--user", "42"])
             .unwrap()
             .action
         {
-            PreauthKeysCmd::Create { expires_in, .. } => assert_eq!(expires_in, "1h"),
+            PreauthKeysCmd::Create {
+                user, expires_in, ..
+            } => {
+                assert_eq!(user, Some(42));
+                assert_eq!(expires_in, "1h");
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
@@ -1308,7 +1352,7 @@ mod tests {
             "headscale",
             "create",
             "--user",
-            "alice",
+            "42",
             "--expiration",
             "30m",
         ])
@@ -1323,7 +1367,7 @@ mod tests {
             "headscale",
             "create",
             "--user",
-            "alice",
+            "42",
             "--expires-in",
             "24h",
         ])

@@ -1,6 +1,1 @@
-error: invalid value 'xml' for '--output <OUTPUT>'
-  [possible values: json, json-line, yaml]
-
-  tip: a similar value exists: 'yaml'
-
-For more information, try '--help'.
+error: unsupported output format 'xml' (valid: json, json-line, yaml)

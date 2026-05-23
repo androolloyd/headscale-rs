@@ -292,7 +292,7 @@ fn ssh_reachability(
         {
             continue;
         }
-        if !ssh_users_allow(&rule.users, src, user) {
+        if !ssh_users_allow(&rule.users, user) {
             continue;
         }
 
@@ -330,32 +330,20 @@ fn ssh_destination_matches(
         .any(|candidate| endpoint_matches_node(candidate, dst))
 }
 
-fn ssh_users_allow(users: &[String], src: &Endpoint, user: &str) -> bool {
+fn ssh_users_allow(users: &[String], user: &str) -> bool {
     if user.is_empty() {
         return false;
     }
     if users.iter().any(|candidate| candidate == user) {
         return true;
     }
-    if user != "root" && users.iter().any(|candidate| candidate == "*") {
+    if users.iter().any(|candidate| candidate == "*") {
         return true;
     }
     if user != "root"
         && users
             .iter()
             .any(|candidate| candidate == "autogroup:nonroot")
-    {
-        return true;
-    }
-    if users
-        .iter()
-        .filter_map(|candidate| localpart_pattern_domain(candidate))
-        .any(|domain| {
-            src.user
-                .as_deref()
-                .and_then(|login| localpart_for_login(login, domain))
-                .is_some_and(|localpart| localpart == user)
-        })
     {
         return true;
     }
@@ -603,19 +591,6 @@ fn user_matches(entry: &str, user: &str) -> bool {
     entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
 }
 
-fn localpart_pattern_domain(user: &str) -> Option<&str> {
-    user.strip_prefix("localpart:*@")
-        .filter(|domain| !domain.is_empty())
-}
-
-fn localpart_for_login(login: &str, domain: &str) -> Option<String> {
-    let (localpart, login_domain) = login.rsplit_once('@')?;
-    if localpart.is_empty() || !login_domain.eq_ignore_ascii_case(domain) {
-        return None;
-    }
-    Some(localpart.to_string())
-}
-
 fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
     node_tag == policy_tag_without_prefix
         || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
@@ -703,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_tests_respect_localpart_user_patterns() {
+    fn ssh_tests_treat_localpart_like_users_as_literals() {
         let doc = parse_hujson_policy(
             r#"{
                 "tagOwners": {"tag:server": ["alice@example.com"]},
@@ -716,8 +691,8 @@ mod tests {
                     }
                 ],
                 "sshTests": [
-                    {"src": "alice@example.com", "dst": ["tag:server"], "accept": ["alice"], "deny": ["bob"]},
-                    {"src": "bob@example.com", "dst": ["tag:server"], "accept": ["bob"], "deny": ["alice"]},
+                    {"src": "alice@example.com", "dst": ["tag:server"], "accept": ["localpart:*@example.com"], "deny": ["alice"]},
+                    {"src": "bob@example.com", "dst": ["tag:server"], "accept": ["localpart:*@example.com"], "deny": ["bob"]},
                     {"src": "eve@other.example", "dst": ["tag:server"], "deny": ["eve"]}
                 ]
             }"#,
@@ -734,6 +709,28 @@ mod tests {
                 "100.64.0.4",
                 &["tag:server"],
             ),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_treat_star_user_as_literal_tailcfg_wildcard() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["*"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["root", "ubuntu"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "alice", "100.64.0.2", &["tag:server"]),
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();

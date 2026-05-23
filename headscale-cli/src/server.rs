@@ -1528,11 +1528,21 @@ mod tests {
     use axum::{
         body::{Body, to_bytes},
         http::{Request as HttpRequest, StatusCode, header},
+        routing::post,
     };
     use headscale_api::generated::{
-        HealthRequest, headscale_service_client::HeadscaleServiceClient,
+        CreatePreAuthKeyRequest, CreateUserRequest, HealthRequest, RegisterNodeRequest,
+        SetApprovedRoutesRequest, SetPolicyRequest, SetTagsRequest,
+        headscale_service_client::HeadscaleServiceClient,
+        headscale_service_server::HeadscaleService,
     };
     use headscale_api::oidc::{OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig};
+    use headscale_api::tailscale_wire::{
+        map as wire_map_handlers,
+        noise::NoisePeerMachineKey,
+        register as wire_register_handlers,
+        wire::{MapResponse, RegisterResponse},
+    };
     use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -1562,6 +1572,176 @@ mod tests {
             pkce: OidcPkceConfig::default(),
             policy: OidcPolicyConfig::default(),
         })
+    }
+
+    fn wire_machine_router(state: WireState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/machine/:node_key/register",
+                post(wire_register_handlers::handle_register),
+            )
+            .route(
+                "/machine/register",
+                post(wire_register_handlers::handle_register_flat),
+            )
+            .route(
+                "/machine/:node_key/map",
+                post(wire_map_handlers::handle_map),
+            )
+            .route("/machine/map", post(wire_map_handlers::handle_map_flat))
+            .with_state(state)
+    }
+
+    async fn wire_register_authkey(
+        state: &WireState,
+        node_key_hex: &str,
+        machine_key_hex: &str,
+        authkey: &str,
+        hostname: &str,
+    ) -> RegisterResponse {
+        let app = wire_machine_router(state.clone());
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "Version": 113,
+                    "NodeKey": format!("nodekey:{node_key_hex}"),
+                    "Auth": {"AuthKey": authkey},
+                    "Hostinfo": {
+                        "Hostname": hostname,
+                        "OS": "linux",
+                        "OSVersion": "6.8",
+                    }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn wire_register_interactive(
+        state: &WireState,
+        node_key_hex: &str,
+        machine_key_hex: &str,
+        hostname: &str,
+        routes: &[&str],
+    ) -> RegisterResponse {
+        let app = wire_machine_router(state.clone());
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "Version": 113,
+                    "NodeKey": format!("nodekey:{node_key_hex}"),
+                    "Hostinfo": {
+                        "Hostname": hostname,
+                        "OS": "linux",
+                        "OSVersion": "6.8",
+                        "RoutableIPs": routes,
+                    }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn registration_id_from_auth_url(auth_url: &str) -> String {
+        auth_url
+            .split_once('?')
+            .map_or(auth_url, |(path, _)| path)
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .expect("auth URL includes registration id")
+            .to_string()
+    }
+
+    async fn wire_map_status(
+        state: &WireState,
+        node_key_hex: &str,
+        machine_key_hex: &str,
+        body: serde_json::Value,
+    ) -> StatusCode {
+        let app = wire_machine_router(state.clone());
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/map"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+        app.oneshot(request).await.unwrap().status()
+    }
+
+    async fn wire_full_map(
+        state: &WireState,
+        node_key_hex: &str,
+        machine_key_hex: &str,
+    ) -> MapResponse {
+        let app = wire_machine_router(state.clone());
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/map"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"Version":113}"#))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn wire_map_stream(state: &WireState, node_key_hex: &str, machine_key_hex: &str) -> Body {
+        let app = wire_machine_router(state.clone());
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/map"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"Version":113,"Stream":true}"#))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body()
+    }
+
+    async fn next_stream_map(body: &mut Body) -> MapResponse {
+        use http_body_util::BodyExt;
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), BodyExt::frame(body))
+            .await
+            .expect("stream frame timeout")
+            .expect("stream frame")
+            .expect("stream frame ok");
+        let chunk = frame.into_data().expect("data frame");
+        assert!(chunk.len() >= 4, "stream frame includes length prefix");
+        let len = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
+        assert_eq!(chunk.len(), 4 + len, "framed chunk size mismatch");
+        serde_json::from_slice(&chunk[4..]).expect("map response json")
     }
 
     fn test_run_server_config(dir: &tempfile::TempDir) -> RunServerConfig {
@@ -2689,6 +2869,233 @@ regions:
         assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.register_method, 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_registrations_mutations_and_streams_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let db = open_sqlite_database(&db_path).await.unwrap();
+        let state_dir = dir.path().join("state");
+
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            &state_dir,
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+        let user = runtime
+            .admin_service
+            .create_user(TonicRequest::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user");
+        runtime
+            .admin_service
+            .set_policy(TonicRequest::new(SetPolicyRequest {
+                policy: r#"{"tagOwners":{"tag:server":["alice@"],"tag:db":["alice@"]}}"#.into(),
+            }))
+            .await
+            .unwrap();
+
+        let auth_key = runtime
+            .admin_service
+            .create_pre_auth_key(TonicRequest::new(CreatePreAuthKeyRequest {
+                user: user.id,
+                reusable: true,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("preauth key")
+            .key;
+        let auth_node_key = "a1".repeat(32);
+        let auth_machine_key = "b1".repeat(32);
+        let auth_register = wire_register_authkey(
+            &runtime.state,
+            &auth_node_key,
+            &auth_machine_key,
+            &auth_key,
+            "auth-router",
+        )
+        .await;
+        assert!(auth_register.machine_authorized);
+        assert!(auth_register.error.is_empty());
+
+        let interactive_node_key = "c1".repeat(32);
+        let interactive_machine_key = "d1".repeat(32);
+        let interactive_register = wire_register_interactive(
+            &runtime.state,
+            &interactive_node_key,
+            &interactive_machine_key,
+            "cli-router",
+            &["10.71.0.0/24"],
+        )
+        .await;
+        assert!(!interactive_register.machine_authorized);
+        let interactive_registration_id =
+            registration_id_from_auth_url(&interactive_register.auth_url);
+        let interactive_node = runtime
+            .admin_service
+            .register_node(TonicRequest::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: interactive_registration_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("interactive node");
+        assert_eq!(
+            interactive_node.node_key,
+            format!("nodekey:{interactive_node_key}")
+        );
+        assert_eq!(interactive_node.available_routes, vec!["10.71.0.0/24"]);
+
+        assert_eq!(
+            wire_map_status(
+                &runtime.state,
+                &auth_node_key,
+                &auth_machine_key,
+                serde_json::json!({
+                    "Version": 113,
+                    "OmitPeers": true,
+                    "DiscoKey": "discokey:auth-restart",
+                    "Endpoints": ["198.51.100.44:41641", "[2001:db8::44]:41641"],
+                    "Hostinfo": {
+                        "Hostname": "auth-router",
+                        "OS": "linux",
+                        "OSVersion": "6.9",
+                        "RoutableIPs": ["10.70.0.0/24"],
+                        "sshHostKeys": ["ssh-ed25519 AAAAC3NzaRestart"],
+                        "NetInfo": {"PreferredDERP": 901}
+                    }
+                }),
+            )
+            .await,
+            StatusCode::OK
+        );
+        let auth_row = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{auth_node_key}"),
+        )
+        .await
+        .unwrap();
+        let auth_node_id = u64::try_from(auth_row.id).unwrap();
+        let tagged = runtime
+            .admin_service
+            .set_tags(TonicRequest::new(SetTagsRequest {
+                node_id: auth_node_id,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("tagged node");
+        assert_eq!(tagged.tags, vec!["tag:server"]);
+        let routed = runtime
+            .admin_service
+            .set_approved_routes(TonicRequest::new(SetApprovedRoutesRequest {
+                node_id: auth_node_id,
+                routes: vec!["10.70.0.0/24".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("routed node");
+        assert_eq!(routed.approved_routes, vec!["10.70.0.0/24"]);
+
+        drop(runtime);
+        db.close().await;
+        let reopened = open_sqlite_database(&db_path).await.unwrap();
+        let restarted = build_persistent_wire_runtime(
+            reopened.pool(),
+            &state_dir,
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+
+        let hydrated_auth = restarted
+            .state
+            .machines
+            .get(&auth_node_key)
+            .expect("auth-key node hydrated");
+        assert_eq!(hydrated_auth.forced_tags, vec!["tag:server"]);
+        assert_eq!(hydrated_auth.available_routes, vec!["10.70.0.0/24"]);
+        assert_eq!(hydrated_auth.approved_routes, vec!["10.70.0.0/24"]);
+        assert_eq!(
+            hydrated_auth.disco_key.as_deref(),
+            Some("discokey:auth-restart")
+        );
+        assert_eq!(
+            hydrated_auth.endpoints,
+            vec!["198.51.100.44:41641", "[2001:db8::44]:41641"]
+        );
+        assert_eq!(hydrated_auth.home_derp, 901);
+        assert_eq!(
+            hydrated_auth.ssh_host_keys,
+            vec!["ssh-ed25519 AAAAC3NzaRestart"]
+        );
+
+        let hydrated_interactive = restarted
+            .state
+            .machines
+            .get(&interactive_node_key)
+            .expect("interactive node hydrated");
+        assert_eq!(hydrated_interactive.user, "alice");
+        assert_eq!(hydrated_interactive.available_routes, vec!["10.71.0.0/24"]);
+        assert_eq!(hydrated_interactive.register_method, 2);
+
+        let full = wire_full_map(&restarted.state, &auth_node_key, &auth_machine_key).await;
+        let self_node = full.node.expect("self node after restart");
+        assert_eq!(self_node.tags, vec!["tag:server"]);
+        assert_eq!(
+            self_node.hostinfo.routable_ips,
+            vec!["10.70.0.0/24".to_string()]
+        );
+
+        let mut stream = wire_map_stream(&restarted.state, &auth_node_key, &auth_machine_key).await;
+        let initial = next_stream_map(&mut stream).await;
+        let initial_self = initial.node.expect("initial streamed self node");
+        assert_eq!(initial_self.tags, vec!["tag:server"]);
+        assert_eq!(initial_self.primary_routes, vec!["10.70.0.0/24"]);
+
+        restarted
+            .admin_service
+            .set_tags(TonicRequest::new(SetTagsRequest {
+                node_id: auth_node_id,
+                tags: vec!["tag:db".into()],
+            }))
+            .await
+            .unwrap();
+        let after_tag_change = next_stream_map(&mut stream).await;
+        let changed_self = after_tag_change
+            .node
+            .expect("streamed self node after tag mutation");
+        assert_eq!(changed_self.tags, vec!["tag:db"]);
+        drop(stream);
+        reopened.close().await;
     }
 
     #[tokio::test]

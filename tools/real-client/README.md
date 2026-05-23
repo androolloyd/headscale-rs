@@ -85,6 +85,7 @@ with the same stock `tailscaled` image.
 | DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix and peer DNS names |
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
+| Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
 | Addresses | `prefix-family-ipv4-only` | `prefix-family-ipv4-only-smoke.sh` | `prefix-family-ipv4-only-headscale-go-smoke.sh` | IPv4-only prefix-family allocation |
 | Addresses | `prefix-family-ipv6-only` | `prefix-family-ipv6-only-smoke.sh` | `prefix-family-ipv6-only-headscale-go-smoke.sh` | IPv6-only prefix-family allocation |
 | ACL | `acl-allow` | `acl-allow-smoke.sh` | `acl-allow-headscale-go-smoke.sh` | Allowed peers visible |

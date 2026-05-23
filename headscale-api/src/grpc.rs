@@ -3645,6 +3645,59 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn persistent_node_grpc_backfill_removes_ipv4_and_assigns_missing_ipv6() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        let service = service.with_ip_allocator(Arc::new(Ipv6OnlyDebugAllocator));
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: serde_json::json!({"Hostname": "needs-v6"}),
+                ipv4: Some("100.64.0.10".into()),
+                ipv6: None,
+                hostname: "needs-v6".into(),
+                given_name: "needs-v6".into(),
+                user_id: Some(1),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let changes = service
+            .backfill_node_i_ps(Request::new(BackfillNodeIPsRequest { confirmed: true }))
+            .await
+            .unwrap()
+            .into_inner()
+            .changes;
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            changes,
+            vec![
+                "removing IPv4 \"100.64.0.10\" from Node(1) \"needs-v6\"",
+                "assigned IPv6 \"fd7a:115c:a1e0::77\" to Node(1) \"needs-v6\""
+            ]
+        );
+        assert!(row.ipv4.is_none());
+        assert_eq!(row.ipv6.as_deref(), Some("fd7a:115c:a1e0::77"));
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn upstream_api_key_grpc_create_list_expire_delete() {
         let service = admin_service().await;
 

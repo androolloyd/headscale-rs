@@ -12,7 +12,7 @@ Options:
       --tags <TAGS>                Comma-separated `tag:foo,tag:bar` tags
       --token <TOKEN>              Legacy admin HTTP bearer token. Falls back to `$HEADSCALE_ADMIN_TOKEN` [env: HEADSCALE_ADMIN_TOKEN=]
       --address <ADDRESS>          Upstream gRPC address. If unset, connect to the local Unix socket [env: HEADSCALE_CLI_ADDRESS=]
-      --expires-in <EXPIRES_IN>    Duration the key is valid (e.g. `24h`, `7d`, `30m`). Defaults to `24h` — same as the admin GUI default [default: 24h]
+  -e, --expiration <EXPIRES_IN>    Duration the key is valid (e.g. `1h`, `24h`, `30m`) [default: 1h]
       --api-key <API_KEY>          Upstream gRPC API key for remote addresses [env: HEADSCALE_CLI_API_KEY=]
       --unix-socket <UNIX_SOCKET>  Local upstream gRPC Unix socket used when `--address` is unset [env: HEADSCALE_UNIX_SOCKET=]
       --insecure                   Disable TLS certificate verification for a remote gRPC address [env: HEADSCALE_CLI_INSECURE=]

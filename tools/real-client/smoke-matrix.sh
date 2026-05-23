@@ -81,6 +81,8 @@ smoke_ids=(
   dns-disabled
   prefix-family-dual-stack
   prefix-family-v4-to-dual-backfill
+  prefix-family-dual-stack-to-ipv4-only-backfill
+  prefix-family-dual-stack-to-ipv6-only-backfill
   prefix-family-ipv4-only
   prefix-family-ipv6-only
   acl-allow
@@ -113,6 +115,8 @@ smoke_areas=(
   addresses
   addresses
   addresses
+  addresses
+  addresses
   acl
   acl
   acl
@@ -141,6 +145,8 @@ smoke_rust_scripts=(
   tools/real-client/dns-disabled-smoke.sh
   tools/real-client/prefix-family-dual-stack-smoke.sh
   tools/real-client/prefix-family-v4-to-dual-backfill-smoke.sh
+  tools/real-client/prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh
+  tools/real-client/prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh
   tools/real-client/prefix-family-ipv4-only-smoke.sh
   tools/real-client/prefix-family-ipv6-only-smoke.sh
   tools/real-client/acl-allow-smoke.sh
@@ -171,6 +177,8 @@ smoke_go_scripts=(
   tools/real-client/dns-disabled-headscale-go-smoke.sh
   tools/real-client/prefix-family-dual-stack-headscale-go-smoke.sh
   tools/real-client/prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
+  tools/real-client/prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh
+  tools/real-client/prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh
   tools/real-client/prefix-family-ipv4-only-headscale-go-smoke.sh
   tools/real-client/prefix-family-ipv6-only-headscale-go-smoke.sh
   tools/real-client/acl-allow-headscale-go-smoke.sh
@@ -201,6 +209,8 @@ smoke_assertions=(
   "MagicDNS disabled fallback names"
   "Dual-stack prefix-family allocation"
   "IPv4-to-dual-stack backfill after prefix migration"
+  "Dual-stack-to-IPv4-only backfill after prefix-family removal"
+  "Dual-stack-to-IPv6-only backfill after prefix-family removal"
   "IPv4-only prefix-family allocation"
   "IPv6-only prefix-family allocation"
   "allowed peers visible"

@@ -12,12 +12,37 @@ case "${target}" in
     exit 2
     ;;
 esac
+migration_case="${REAL_CLIENT_PREFIX_MIGRATION_CASE:-v4-to-dual}"
+case "${migration_case}" in
+  v4-to-dual)
+    initial_family="ipv4-only"
+    final_family="dual-stack"
+    backfill_label="enabling IPv6"
+    expected_change_fragment="assigned IPv6"
+    ;;
+  dual-to-v4)
+    initial_family="dual-stack"
+    final_family="ipv4-only"
+    backfill_label="disabling IPv6"
+    expected_change_fragment="removing IPv6"
+    ;;
+  dual-to-v6)
+    initial_family="dual-stack"
+    final_family="ipv6-only"
+    backfill_label="disabling IPv4"
+    expected_change_fragment="removing IPv4"
+    ;;
+  *)
+    echo "REAL_CLIENT_PREFIX_MIGRATION_CASE must be v4-to-dual, dual-to-v4, or dual-to-v6" >&2
+    exit 2
+    ;;
+esac
 
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
-work_root="${REAL_CLIENT_WORKDIR:-target/real-client/prefix-family-v4-to-dual-backfill-${target}}"
-run_id="hspf-migrate-${target}-$(date +%s)-$$"
+work_root="${REAL_CLIENT_WORKDIR:-target/real-client/prefix-family-${migration_case}-backfill-${target}}"
+run_id="hspf-${migration_case}-${target}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 
@@ -153,9 +178,11 @@ server:
 
 prefixes:
   allocation: sequential
-  v4: 100.64.0.0/10
 EOF
-      if [[ "${family}" == "dual-stack" ]]; then
+      if [[ "${family}" != "ipv6-only" ]]; then
+        printf '  v4: 100.64.0.0/10\n' >>"${config_path}"
+      fi
+      if [[ "${family}" != "ipv4-only" ]]; then
         printf '  v6: fd7a:115c:a1e0::/48\n' >>"${config_path}"
       fi
       cat >>"${config_path}" <<EOF
@@ -179,9 +206,11 @@ noise:
 
 prefixes:
   allocation: sequential
-  v4: 100.64.0.0/10
 EOF
-      if [[ "${family}" == "dual-stack" ]]; then
+      if [[ "${family}" != "ipv6-only" ]]; then
+        printf '  v4: 100.64.0.0/10\n' >>"${config_path}"
+      fi
+      if [[ "${family}" != "ipv4-only" ]]; then
         printf '  v6: fd7a:115c:a1e0::/48\n' >>"${config_path}"
       fi
       cat >>"${config_path}" <<EOF
@@ -326,6 +355,8 @@ assert_status_family_file() {
     case expected
     when "ipv4-only"
       ok &&= has_v4 && !has_v6
+    when "ipv6-only"
+      ok &&= !has_v4 && has_v6
     when "dual-stack"
       ok &&= has_v4 && has_v6
     else
@@ -349,8 +380,8 @@ wait_for_client_family() {
   ' "${path}"
 }
 
-login_client_v4_only() {
-  echo "::group::tailscale up against IPv4-only config"
+login_client_initial_family() {
+  echo "::group::tailscale up against ${initial_family} config"
   up_status=0
   docker exec "${client_name}" tailscale up \
     "--login-server=${control_url}" \
@@ -365,27 +396,30 @@ login_client_v4_only() {
   if ((up_status != 0)); then
     echo "tailscale up returned ${up_status}; verifying logged-in netmap"
   fi
-  wait_for_client_family ipv4-only "IPv4-only client netmap"
+  wait_for_client_family "${initial_family}" "${initial_family} client netmap"
   echo "::endgroup::"
 }
 
 run_backfill() {
-  echo "::group::run ${target} backfill after enabling IPv6"
+  echo "::group::run ${target} backfill after ${backfill_label}"
   headscale_cmd --force -o json nodes backfillips >"${work_dir}/backfill.json"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     changes = Array(payload["changes"] || payload["Changes"])
-    abort("expected at least one IPv6 assignment, got #{changes.inspect}") unless changes.any? { |c| c.to_s.include?("IPv6") || c.to_s.include?("fd7a:115c:a1e0") }
+    expected = ARGV.fetch(1)
+    abort("expected #{expected.inspect} change, got #{changes.inspect}") unless changes.any? { |c| c.to_s.include?(expected) }
     puts JSON.pretty_generate({changes: changes})
-  ' "${work_dir}/backfill.json"
+  ' "${work_dir}/backfill.json" "${expected_change_fragment}"
   echo "::endgroup::"
 }
 
-assert_node_state_dual_stack() {
+assert_node_state_family() {
+  local expected_family="$1"
   echo "::group::assert ${target} node state after backfill"
   headscale_cmd -o json nodes list >"${work_dir}/nodes-after-backfill.json"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
+    expected_family = ARGV.fetch(2)
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
     abort("expected one node, got #{nodes.length}") unless nodes.length == 1
     node = nodes.fetch(0)
@@ -394,16 +428,37 @@ assert_node_state_dual_stack() {
     has_v4 = addresses.any? { |ip| ip.to_s.include?(".") }
     has_v6 = addresses.any? { |ip| ip.to_s.include?(":") }
     abort("expected #{ARGV.fetch(1)}, got #{name.inspect}") unless name.to_s == ARGV.fetch(1)
-    abort("expected dual-stack node addresses, got #{addresses.inspect}") unless has_v4 && has_v6
+    case expected_family
+    when "ipv4-only"
+      abort("expected IPv4-only node addresses, got #{addresses.inspect}") unless has_v4 && !has_v6
+    when "ipv6-only"
+      abort("expected IPv6-only node addresses, got #{addresses.inspect}") unless !has_v4 && has_v6
+    when "dual-stack"
+      abort("expected dual-stack node addresses, got #{addresses.inspect}") unless has_v4 && has_v6
+    else
+      abort("unsupported expected family #{expected_family.inspect}")
+    end
     puts JSON.pretty_generate(node)
-  ' "${work_dir}/nodes-after-backfill.json" "${client_name}"
+  ' "${work_dir}/nodes-after-backfill.json" "${client_name}" "${expected_family}"
 
   local db_row
-  db_row="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(ipv4,''), COALESCE(ipv6,'') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+  db_row="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
   local db_ipv4 db_ipv6
   IFS=$'\t' read -r db_ipv4 db_ipv6 <<<"${db_row}"
-  [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
-  [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+  case "${expected_family}" in
+    ipv4-only)
+      [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+      [[ "${db_ipv6}" == "<empty>" ]] || { echo "expected empty DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+      ;;
+    ipv6-only)
+      [[ "${db_ipv4}" == "<empty>" ]] || { echo "expected empty DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+      [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+      ;;
+    dual-stack)
+      [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+      [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+      ;;
+  esac
   echo "::endgroup::"
 }
 
@@ -440,18 +495,18 @@ install_or_build_headscale
 if [[ "${target}" == "headscale-go" ]]; then
   generate_headscale_go_tls
 fi
-start_server ipv4-only
+start_server "${initial_family}"
 create_user_and_key
 start_client
-login_client_v4_only
+login_client_initial_family
 
-echo "::group::restart ${target} server with IPv6 prefix"
+echo "::group::restart ${target} server from ${initial_family} to ${final_family}"
 stop_server
-start_server dual-stack
+start_server "${final_family}"
 echo "::endgroup::"
 
 run_backfill
-wait_for_client_family dual-stack "dual-stack client netmap after backfill"
-assert_node_state_dual_stack
+wait_for_client_family "${final_family}" "${final_family} client netmap after backfill"
+assert_node_state_family "${final_family}"
 
-echo "${target} prefix-family v4-to-dual backfill real-client smoke passed"
+echo "${target} prefix-family ${migration_case} backfill real-client smoke passed"

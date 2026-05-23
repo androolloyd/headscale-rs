@@ -87,6 +87,8 @@ with the same stock `tailscaled` image.
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
 | Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill after prefix migration |
+| Addresses | `prefix-family-dual-stack-to-ipv4-only-backfill` | `prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv4-only backfill after prefix-family removal |
+| Addresses | `prefix-family-dual-stack-to-ipv6-only-backfill` | `prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv6-only backfill after prefix-family removal |
 | Addresses | `prefix-family-ipv4-only` | `prefix-family-ipv4-only-smoke.sh` | `prefix-family-ipv4-only-headscale-go-smoke.sh` | IPv4-only prefix-family allocation |
 | Addresses | `prefix-family-ipv6-only` | `prefix-family-ipv6-only-smoke.sh` | `prefix-family-ipv6-only-headscale-go-smoke.sh` | IPv6-only prefix-family allocation |
 | ACL | `acl-allow` | `acl-allow-smoke.sh` | `acl-allow-headscale-go-smoke.sh` | Allowed peers visible |
@@ -139,7 +141,7 @@ protocol failure is separated from a stock-client behavior mismatch:
 
 ```sh
 FUZZ_RUNS=10000 FUZZ_TIMEOUT_SECS=30 ./scripts/fuzz_ci.sh
-REAL_CLIENT_SMOKES=authkey,web-register,oidc,magicdns,acl-allow,route-approve,prefix-family-v4-to-dual-backfill \
+REAL_CLIENT_SMOKES=authkey,web-register,oidc,magicdns,acl-allow,route-approve,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill \
 REAL_CLIENT_TARGETS='rust headscale-go' \
 tools/real-client/smoke-matrix.sh
 ```

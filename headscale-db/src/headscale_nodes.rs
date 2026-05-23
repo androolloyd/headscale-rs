@@ -33,6 +33,7 @@ const NODE_COLUMNS: &str = r"
         CASE
             WHEN expiry IS NULL THEN NULL
             WHEN typeof(expiry) = 'integer' THEN expiry
+            WHEN CAST(expiry AS TEXT) LIKE '0001-01-01%' THEN NULL
             ELSE unixepoch(expiry)
         END AS expiry,
         CASE

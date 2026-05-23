@@ -1,5 +1,5 @@
 use headscale_db::{
-    Database, DbError, HeadscaleGoImportCompatibility, headscale_nodes,
+    Database, DbError, HeadscaleGoImportCompatibility, api_keys, headscale_nodes,
     preauth_keys::{self, CreateParams as PreauthCreateParams},
     users::{self, CreateParams as UserCreateParams},
 };
@@ -7,6 +7,16 @@ use tempfile::TempDir;
 
 const LEGACY_ROUTES_MIGRATION: &str =
     include_str!("../migrations/20260522000010_migrate_legacy_routes.sql");
+const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
+const MODERN_PREAUTH_TOKEN: &str = concat!(
+    "hskey-auth-AuthPrefix01-",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+);
+const MODERN_API_KEY: &str = concat!(
+    "hskey-api-ApiPrefix001-",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+);
 
 const HEADSCALE_GO_V028_FIXTURE: &str = r#"
 CREATE TABLE migrations(id text, PRIMARY KEY(id));
@@ -160,6 +170,13 @@ async fn seed_headscale_go_v028_fixture(db: &Database) {
         .expect("seed headscale-go v0.28 fixture");
 }
 
+async fn seed_headscale_go_v028_auth_rows_fixture(db: &Database) {
+    sqlx::raw_sql(HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE)
+        .execute(db.pool())
+        .await
+        .expect("seed headscale-go v0.28 auth rows fixture");
+}
+
 async fn user_id(db: &Database) -> i64 {
     users::create(
         db.pool(),
@@ -272,6 +289,81 @@ async fn accepts_existing_headscale_go_v028_rows_and_marks_rust_managed_after_mi
         .expect("query imported policy")
         .expect("imported policy");
     assert_eq!(policy.data, r#"{"acls":[]}"#);
+
+    let after = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check post-migration compatibility");
+    assert_eq!(after, HeadscaleGoImportCompatibility::RustManaged);
+
+    db.migrate()
+        .await
+        .expect("repeat migration stays idempotent");
+}
+
+#[tokio::test]
+async fn imports_headscale_go_v028_modern_auth_rows() {
+    let (_dir, db) = file_db().await;
+    seed_headscale_go_v028_auth_rows_fixture(&db).await;
+
+    let before = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check import compatibility");
+    assert!(matches!(
+        before,
+        HeadscaleGoImportCompatibility::GoMigrations { .. }
+    ));
+
+    db.migrate()
+        .await
+        .expect("migrate imported headscale-go db");
+
+    api_keys::validate(db.pool(), MODERN_API_KEY)
+        .await
+        .expect("modern imported API key validates");
+    let api_key = api_keys::get_by_prefix(db.pool(), "ApiPrefix001")
+        .await
+        .expect("read imported API key");
+    assert_eq!(api_key.last_seen, Some(1_767_323_045));
+    assert_eq!(api_key.display_prefix(), "hskey-api-ApiPrefix001-***");
+
+    let preauth = preauth_keys::get_by_token(db.pool(), MODERN_PREAUTH_TOKEN)
+        .await
+        .expect("modern imported preauth key validates");
+    assert_eq!(preauth.user_id, "1");
+    assert_eq!(preauth.prefix.as_deref(), Some("AuthPrefix01"));
+    assert_eq!(preauth.tag_list(), vec!["tag:server"]);
+    assert!(preauth.ephemeral);
+    assert!(!preauth.reusable);
+    assert!(!preauth.is_used());
+    assert!(preauth.is_live(1_767_323_045));
+
+    let node = headscale_nodes::get_by_id(db.pool(), 1)
+        .await
+        .expect("read imported node");
+    assert_eq!(node.auth_key_id, Some(preauth.id));
+    assert_eq!(
+        node.endpoint_list(),
+        vec!["1.2.3.4:41641", "[2001:db8::1]:41641"]
+    );
+    assert_eq!(node.tag_list(), vec!["tag:server"]);
+    assert_eq!(node.approved_route_list(), vec!["10.0.0.0/24"]);
+    assert_eq!(node.host_info_value()["NetInfo"]["PreferredDERP"], 901);
+    assert_eq!(
+        node.host_info_value()["RequestTags"],
+        serde_json::json!(["tag:server"])
+    );
+    assert_eq!(
+        node.expiry, None,
+        "Go zero-time node expiry imports as non-expiring"
+    );
+
+    let policy = headscale_db::policies::get_latest(db.pool())
+        .await
+        .expect("query imported policy")
+        .expect("imported policy");
+    assert_eq!(policy.data, r#"{"tagOwners":{"tag:server":["alice@"]}}"#);
 
     let after = db
         .check_headscale_go_import_compatibility()

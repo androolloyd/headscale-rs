@@ -844,6 +844,8 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
             id: profile.id,
             provider: if record.is_tagged() {
                 String::new()
+            } else if record.register_method == 3 {
+                "oidc".into()
             } else if record.register_method == 2 {
                 "cli".into()
             } else {

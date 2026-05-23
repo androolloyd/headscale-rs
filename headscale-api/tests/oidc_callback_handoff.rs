@@ -140,6 +140,7 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     assert!(completed.machine_authorized);
     assert!(completed.auth_url.is_empty());
     assert!(!completed.node_key_expired);
+    assert_eq!(completed.login.provider, "oidc");
     assert_eq!(completed.login.login_name, "userinfo@example.com");
 
     let registered = state.machines.get(&node_key_hex).unwrap();

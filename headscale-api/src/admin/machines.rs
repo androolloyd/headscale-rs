@@ -488,7 +488,7 @@ impl PersistentMachineAdmin {
         record: MachineAdminRecord,
         policy: &PolicyStore,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path_inner(record, policy, None, true, None)
+        self.create_or_update_auth_path_inner(record, policy, None, None, true, None)
             .await
     }
 
@@ -505,6 +505,7 @@ impl PersistentMachineAdmin {
             record,
             policy,
             auth_key_id,
+            None,
             false,
             Some(&wire_record),
         )
@@ -516,6 +517,7 @@ impl PersistentMachineAdmin {
         mut record: MachineAdminRecord,
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
         validate_requested_tags: bool,
         wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
@@ -527,7 +529,10 @@ impl PersistentMachineAdmin {
         let ipv4 = optional_ipv4(&record.ipv4)?;
         let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
         require_any_address(ipv4, ipv6)?;
-        let user_id = self.user_id_for_record(&record).await?;
+        let user_id = match user_id_override {
+            Some(user_id) => Some(user_id),
+            None => self.user_id_for_record(&record).await?,
+        };
         if validate_requested_tags
             && validate_requested_tags_for_node(
                 policy,
@@ -731,7 +736,7 @@ impl PersistentMachineAdmin {
         };
         match u64::try_from(user_id).ok().map(|id| users.get_by_id(id)) {
             Some(fut) => match fut.await {
-                Ok(Some(user)) => user.name,
+                Ok(Some(user)) => user_login_name(&user),
                 Ok(None) | Err(_) => user_id.to_string(),
             },
             None => user_id.to_string(),
@@ -903,7 +908,14 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
 
         let result = self
             .machines
-            .create_or_update_auth_path_inner(record, &self.policy, None, true, Some(&pending))
+            .create_or_update_auth_path_inner(
+                record,
+                &self.policy,
+                None,
+                Some(user.id as i64),
+                true,
+                Some(&pending),
+            )
             .await
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
         let wire_record = canonical_wire_record_for_auth_path(&result.record, Some(&pending))
@@ -1089,8 +1101,15 @@ impl MachineAdmin for PersistentMachineAdmin {
         policy: &PolicyStore,
         wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path_inner(record, policy, None, true, wire_record.as_ref())
-            .await
+        self.create_or_update_auth_path_inner(
+            record,
+            policy,
+            None,
+            None,
+            true,
+            wire_record.as_ref(),
+        )
+        .await
     }
 
     async fn expire_at(
@@ -1684,12 +1703,18 @@ fn unix_timestamp_for_record(
 }
 
 fn oidc_user_name(user: &crate::oidc::OidcStoredUser) -> String {
-    if !user.name.is_empty() {
-        user.name.clone()
-    } else if !user.email.is_empty() {
+    user.username()
+}
+
+fn user_login_name(user: &crate::admin::users::UserRecord) -> String {
+    if !user.email.is_empty() {
         user.email.clone()
+    } else if !user.name.is_empty() {
+        user.name.clone()
+    } else if !user.provider_id.is_empty() {
+        user.provider_id.clone()
     } else {
-        user.provider_identifier.clone()
+        user.id.to_string()
     }
 }
 
@@ -1885,16 +1910,39 @@ mod tests {
             .unwrap()
     }
 
-    fn oidc_test_user() -> crate::oidc::OidcStoredUser {
-        crate::oidc::OidcStoredUser {
-            id: 1,
-            name: "alice".into(),
-            display_name: "Alice Smith".into(),
-            email: "alice@example.com".into(),
-            provider_identifier: "https://issuer.example/subject".into(),
-            provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-            profile_pic_url: String::new(),
-        }
+    async fn create_oidc_test_user(
+        users: &Arc<PersistentUserAdmin>,
+    ) -> crate::oidc::OidcStoredUser {
+        create_oidc_test_user_with(
+            users,
+            "alice",
+            "Alice Smith",
+            "alice@example.com",
+            "https://issuer.example/subject",
+        )
+        .await
+    }
+
+    async fn create_oidc_test_user_with(
+        users: &Arc<PersistentUserAdmin>,
+        name: &str,
+        display_name: &str,
+        email: &str,
+        provider_identifier: &str,
+    ) -> crate::oidc::OidcStoredUser {
+        crate::oidc::OidcUserStore::create_or_update_oidc_user(
+            users.as_ref(),
+            crate::oidc::OidcUserProfile {
+                name: name.into(),
+                display_name: display_name.into(),
+                email: email.into(),
+                provider_identifier: provider_identifier.into(),
+                provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap()
     }
 
     fn fixture() -> (WireMachineAdmin, Arc<MachineRegistry>) {
@@ -2913,10 +2961,11 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_oidc_registration_handler_writes_db_and_completes_cache() {
-        let (admin, db, _users) = persistent_fixture().await;
+        let (admin, db, users) = persistent_fixture().await;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
+        let user = create_oidc_test_user(&users).await;
         let mut pending = MachineRecord::new_at(
             Utc::now(),
             "dd".repeat(32),
@@ -2944,26 +2993,14 @@ mod tests {
         .with_wire_registry(registry.clone());
         let expiry = Utc.timestamp_opt(4_102_444_800, 0).unwrap();
         let result = handler
-            .complete_oidc_registration(
-                &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 1,
-                    name: "alice".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
-                Some(expiry),
-            )
+            .complete_oidc_registration(&registration_id, &user, Some(expiry))
             .await
             .unwrap();
 
         assert!(result.new_node);
         assert!(cache.get(&registration_id).is_none());
         let stored = admin.get(&pending.node_key_hex).await.unwrap();
-        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.user, "alice@example.com");
         assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
         assert_eq!(stored.expiry, Some(4_102_444_800));
         assert_eq!(stored.routes, vec!["10.20.0.0/24"]);
@@ -2978,7 +3015,7 @@ mod tests {
             headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
         );
         let wire = registry.get(&pending.node_key_hex).unwrap();
-        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.user, "alice@example.com");
         assert_eq!(wire.expiry, Some(expiry));
 
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
@@ -2987,7 +3024,7 @@ mod tests {
             .unwrap();
         match outcome {
             crate::tailscale_wire::RegistrationWaitOutcome::Registered(record) => {
-                assert_eq!(record.user, "alice");
+                assert_eq!(record.user, "alice@example.com");
                 assert_eq!(record.register_method, REGISTER_METHOD_OIDC);
             }
             other => panic!("unexpected registration outcome: {other:?}"),
@@ -2995,9 +3032,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_oidc_registration_prefers_email_for_owner_identity() {
+        let (admin, _db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let user = create_oidc_test_user_with(
+            &users,
+            "preferred",
+            "Preferred User",
+            "preferred@example.com",
+            "https://issuer.example/preferred",
+        )
+        .await;
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "c9".repeat(32),
+            "ca".repeat(32),
+            String::new(),
+            "oidc-email-owner".into(),
+            Ipv4Addr::new(100, 64, 0, 64),
+            false,
+        );
+        pending.user.clear();
+        let registration_id = "y".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache,
+            admin.clone(),
+            Arc::new(PolicyStore::new()),
+        )
+        .with_wire_registry(registry.clone());
+        handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.user, "preferred@example.com");
+        let wire = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(wire.user, "preferred@example.com");
+    }
+
+    #[tokio::test]
     async fn persistent_oidc_registration_handler_preserves_pending_expiry_without_provider_expiry()
     {
-        let (admin, _db, _users) = persistent_fixture().await;
+        let (admin, _db, users) = persistent_fixture().await;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
@@ -3021,7 +3102,7 @@ mod tests {
             Arc::new(PolicyStore::new()),
         )
         .with_wire_registry(registry.clone());
-        let user = oidc_test_user();
+        let user = create_oidc_test_user(&users).await;
         let result = handler
             .complete_oidc_registration(&registration_id, &user, None)
             .await
@@ -3030,7 +3111,7 @@ mod tests {
         assert!(result.new_node);
         assert!(cache.get(&registration_id).is_none());
         let stored = admin.get(&pending.node_key_hex).await.unwrap();
-        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.user, "alice@example.com");
         assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
         assert_eq!(stored.expiry, Some(4_102_358_400));
         let wire = registry.get(&pending.node_key_hex).unwrap();
@@ -3039,7 +3120,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_oidc_registration_handler_provider_expiry_overrides_pending_expiry() {
-        let (admin, _db, _users) = persistent_fixture().await;
+        let (admin, _db, users) = persistent_fixture().await;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
@@ -3063,7 +3144,7 @@ mod tests {
             Arc::new(PolicyStore::new()),
         )
         .with_wire_registry(registry.clone());
-        let user = oidc_test_user();
+        let user = create_oidc_test_user(&users).await;
         let result = handler
             .complete_oidc_registration(&registration_id, &user, Some(token_expiry))
             .await
@@ -3088,7 +3169,8 @@ mod tests {
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let policy = Arc::new(PolicyStore::new());
-        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        let user = create_oidc_test_user(&users).await;
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#;
         policy.set(
             parse_hujson_policy(raw_policy).unwrap(),
             raw_policy.to_string(),
@@ -3118,19 +3200,7 @@ mod tests {
         let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy);
         let expiry = Utc.timestamp_opt(4_102_444_800, 0).unwrap();
         let result = handler
-            .complete_oidc_registration(
-                &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 1,
-                    name: "alice".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
-                Some(expiry),
-            )
+            .complete_oidc_registration(&registration_id, &user, Some(expiry))
             .await
             .unwrap();
 
@@ -3138,7 +3208,7 @@ mod tests {
         let stored = admin.get(&node_key).await.unwrap();
         assert_eq!(stored.node_id, 1);
         assert_eq!(stored.id, node_key);
-        assert_eq!(stored.user, "alice");
+        assert_eq!(stored.user, "alice@example.com");
         assert_eq!(stored.machine_key_hex, machine_key);
         assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
         assert_eq!(stored.expiry, None);
@@ -3150,7 +3220,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.id, 1);
-        assert_eq!(raw.user_id, Some(1));
+        assert_eq!(raw.user_id, Some(user.id as i64));
         assert_eq!(raw.node_key, format!("nodekey:{}", pending.node_key_hex));
         assert_eq!(raw.machine_key, format!("mkey:{}", pending.machine_key_hex));
         assert_eq!(raw.disco_key, "discokey:oidc-node");
@@ -3197,7 +3267,7 @@ mod tests {
         let hydrated = registry.get(&pending.node_key_hex).unwrap();
         assert_eq!(hydrated.node_key_hex, pending.node_key_hex);
         assert_eq!(hydrated.machine_key_hex, pending.machine_key_hex);
-        assert_eq!(hydrated.user, "alice");
+        assert_eq!(hydrated.user, "alice@example.com");
         assert_eq!(hydrated.hostname, "oidc-node");
         assert_eq!(
             hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
@@ -3221,8 +3291,23 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_oidc_registration_handler_rekeys_live_registry() {
-        let (admin, db, _users) = persistent_fixture().await;
-        let created = admin.create(persistent_record()).await.unwrap();
+        let (admin, db, users) = persistent_fixture().await;
+        let user = create_oidc_test_user(&users).await;
+        let mut existing = persistent_record();
+        existing.user = user.username();
+        existing.register_method = REGISTER_METHOD_OIDC;
+        let created = admin
+            .create_or_update_auth_path_inner(
+                existing,
+                &PolicyStore::new(),
+                None,
+                Some(user.id as i64),
+                false,
+                None,
+            )
+            .await
+            .unwrap()
+            .record;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
@@ -3257,15 +3342,7 @@ mod tests {
         let result = handler
             .complete_oidc_registration(
                 &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 1,
-                    name: "alice".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
+                &user,
                 Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
@@ -3279,7 +3356,7 @@ mod tests {
             Some(created.ipv4.as_str())
         );
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
-        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.user, "alice@example.com");
         assert_eq!(wire.disco_key.as_deref(), Some("discokey:oidc-rekey"));
         assert_eq!(wire.endpoints, vec!["192.0.2.30:41641"]);
         assert_eq!(wire.home_derp, 30);
@@ -3293,12 +3370,13 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_oidc_registration_handler_validates_requested_tags() {
-        let (admin, db, _users) = persistent_fixture().await;
+        let (admin, db, users) = persistent_fixture().await;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
         let policy = Arc::new(PolicyStore::new());
-        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        let user = create_oidc_test_user(&users).await;
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#;
         policy.set(
             parse_hujson_policy(raw_policy).unwrap(),
             raw_policy.to_string(),
@@ -3322,15 +3400,7 @@ mod tests {
         let result = handler
             .complete_oidc_registration(
                 &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 1,
-                    name: "alice".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
+                &user,
                 Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await
@@ -3357,12 +3427,13 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_oidc_registration_handler_rejects_unowned_requested_tags() {
-        let (admin, db, _users) = persistent_fixture().await;
+        let (admin, db, users) = persistent_fixture().await;
         let admin = Arc::new(admin);
         let cache = Arc::new(RegistrationCache::new());
         let registry = Arc::new(MachineRegistry::new());
         let policy = Arc::new(PolicyStore::new());
-        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
+        let user = create_oidc_test_user(&users).await;
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#;
         policy.set(
             parse_hujson_policy(raw_policy).unwrap(),
             raw_policy.to_string(),
@@ -3386,15 +3457,7 @@ mod tests {
         let err = handler
             .complete_oidc_registration(
                 &registration_id,
-                &crate::oidc::OidcStoredUser {
-                    id: 1,
-                    name: "alice".into(),
-                    display_name: "Alice Smith".into(),
-                    email: "alice@example.com".into(),
-                    provider_identifier: "https://issuer.example/subject".into(),
-                    provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
-                    profile_pic_url: String::new(),
-                },
+                &user,
                 Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap()),
             )
             .await

@@ -594,6 +594,18 @@ pub struct OidcStoredUser {
     pub profile_pic_url: String,
 }
 
+impl OidcStoredUser {
+    pub fn username(&self) -> String {
+        if !self.email.is_empty() {
+            self.email.clone()
+        } else if !self.name.is_empty() {
+            self.name.clone()
+        } else {
+            self.provider_identifier.clone()
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait OidcUserStore: Send + Sync {
     async fn create_or_update_oidc_user(

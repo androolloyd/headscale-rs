@@ -2652,6 +2652,37 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn wire_oidc_registration_handler_prefers_email_for_owner_identity() {
+        let state = test_state();
+        let registration_id = "i".repeat(24);
+        let mut pending = mk_record(13);
+        pending.user.clear();
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let user = crate::oidc::OidcStoredUser {
+            id: 8,
+            name: "preferred".into(),
+            display_name: "Preferred User".into(),
+            email: "preferred@example.com".into(),
+            provider_identifier: "https://issuer.example/preferred".into(),
+            provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+            profile_pic_url: String::new(),
+        };
+        handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert_eq!(registered.user, "preferred@example.com");
+    }
+
+    #[tokio::test]
     async fn wire_oidc_registration_handler_preserves_pending_expiry_without_provider_expiry() {
         let state = test_state();
         let registration_id = "e".repeat(24);
@@ -3688,13 +3719,7 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
 }
 
 fn oidc_wire_user_name(user: &crate::oidc::OidcStoredUser) -> String {
-    if !user.name.is_empty() {
-        user.name.clone()
-    } else if !user.email.is_empty() {
-        user.email.clone()
-    } else {
-        user.provider_identifier.clone()
-    }
+    user.username()
 }
 
 fn control_router_with_optional_oidc(

@@ -9,6 +9,24 @@ fn headscale(args: &[&str]) -> Output {
         .expect("run headscale binary")
 }
 
+fn headscale_clean(args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
+    command.args(args);
+    for key in [
+        "HEADSCALE_CONFIG",
+        "HEADSCALE_LOG",
+        "HEADSCALE_URL",
+        "HEADSCALE_ADMIN_TOKEN",
+        "HEADSCALE_CLI_ADDRESS",
+        "HEADSCALE_CLI_API_KEY",
+        "HEADSCALE_UNIX_SOCKET",
+        "HEADSCALE_CLI_INSECURE",
+    ] {
+        command.env_remove(key);
+    }
+    command.output().expect("run headscale binary")
+}
+
 fn headscale_in(args: &[&str], cwd: &Path, home: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_headscale"))
         .args(args)
@@ -25,6 +43,30 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("stderr utf8")
+}
+
+fn trim_line_end_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for segment in text.split_inclusive('\n') {
+        if let Some(line) = segment.strip_suffix('\n') {
+            out.push_str(line.trim_end_matches([' ', '\t']));
+            out.push('\n');
+        } else {
+            out.push_str(segment.trim_end_matches([' ', '\t']));
+        }
+    }
+    out
+}
+
+fn assert_stdout_snapshot(args: &[&str], expected: &str) {
+    let output = headscale_clean(args);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        trim_line_end_spaces(&stdout(&output)),
+        trim_line_end_spaces(expected),
+        "stdout snapshot for {args:?}"
+    );
+    assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
 }
 
 #[test]
@@ -173,6 +215,54 @@ dns:
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn implemented_admin_command_help_matches_snapshots() {
+    assert_stdout_snapshot(
+        &["users", "list", "--help"],
+        include_str!("snapshots/users_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "approve-routes", "--help"],
+        include_str!("snapshots/nodes_approve_routes_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["preauthkeys", "create", "--help"],
+        include_str!("snapshots/preauthkeys_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["apikeys", "delete", "--help"],
+        include_str!("snapshots/apikeys_delete_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["policy", "check", "--help"],
+        include_str!("snapshots/policy_check_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["auth", "approve", "--help"],
+        include_str!("snapshots/auth_approve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["tailnet", "status", "--help"],
+        include_str!("snapshots/tailnet_status_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["debug", "create-node", "--help"],
+        include_str!("snapshots/debug_create_node_help.stdout"),
+    );
+}
+
+#[test]
+fn implemented_admin_clap_error_matches_snapshot() {
+    let output = headscale_clean(&["users", "list", "--output", "xml"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/invalid_output_format.stderr")
+    );
 }
 
 #[test]

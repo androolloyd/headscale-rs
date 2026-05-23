@@ -381,6 +381,34 @@ async fn grpc_gateway_auth_runs_before_unmatched_api_routes() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/not-implemented-yet",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_status_json(resp, 404, 5, "Not Found", "unmatched route").await;
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/user/1",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_status_json(resp, 501, 12, "Method Not Allowed", "method mismatch").await;
+}
+
+#[tokio::test]
 async fn grpc_gateway_health_surfaces_database_ping_failure() {
     let (app, token) = fixture_with_failing_health().await;
 

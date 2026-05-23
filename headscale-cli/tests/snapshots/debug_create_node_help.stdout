@@ -1,0 +1,21 @@
+Create a node that can be registered with `nodes register`
+
+Usage: headscale debug create-node [OPTIONS] --key <KEY> --name <NAME>
+
+Options:
+  -c, --config <CONFIG>            Path to config file [env: HEADSCALE_CONFIG=]
+  -u, --user <USER>                User
+      --log-level <LOG_LEVEL>      Log level (trace, debug, info, warn, error) [env: HEADSCALE_LOG=] [default: info]
+  -k, --key <KEY>                  Registration key
+      --server <SERVER>            Legacy admin HTTP URL. Falls back to `$HEADSCALE_URL`. Trailing `/` is OK [env: HEADSCALE_URL=]
+      --name <NAME>                Node name
+      --token <TOKEN>              Legacy admin HTTP bearer token. Falls back to `$HEADSCALE_ADMIN_TOKEN` [env: HEADSCALE_ADMIN_TOKEN=]
+      --address <ADDRESS>          Upstream gRPC address. If unset, connect to the local Unix socket [env: HEADSCALE_CLI_ADDRESS=]
+  -r, --route <ROUTES>             List (or repeated flags) of routes to advertise
+      --api-key <API_KEY>          Upstream gRPC API key for remote addresses [env: HEADSCALE_CLI_API_KEY=]
+      --unix-socket <UNIX_SOCKET>  Local upstream gRPC Unix socket used when `--address` is unset [env: HEADSCALE_UNIX_SOCKET=]
+      --insecure                   Disable TLS certificate verification for a remote gRPC address [env: HEADSCALE_CLI_INSECURE=]
+      --json                       Emit raw JSON instead of the default table view
+  -o, --output <OUTPUT>            Output format. Empty for human-readable, `json`, `json-line`, or `yaml` [possible values: json, json-line, yaml]
+      --force                      Disable confirmation prompts
+  -h, --help                       Print help

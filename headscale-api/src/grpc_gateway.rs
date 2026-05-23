@@ -84,6 +84,8 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/auth/reject", post(auth_reject))
         .route("/api/v1/policy", get(get_policy).put(set_policy))
         .route("/api/v1/policy/check", post(check_policy))
+        .fallback(grpc_gateway_not_found)
+        .method_not_allowed_fallback(grpc_gateway_method_not_allowed)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             http_authentication_middleware,
@@ -859,6 +861,14 @@ async fn check_policy(
         Ok(_) => json_ok(json!({})),
         Err(status) => status_response(&status),
     }
+}
+
+async fn grpc_gateway_not_found() -> Response {
+    status_response(&Status::not_found("Not Found"))
+}
+
+async fn grpc_gateway_method_not_allowed() -> Response {
+    status_response(&Status::unimplemented("Method Not Allowed"))
 }
 
 fn tonic_request<T>(headers: &HeaderMap, body: T) -> TonicRequest<T> {

@@ -218,6 +218,62 @@ dns:
 }
 
 #[test]
+fn configtest_rejects_unsupported_acme_runtime() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("ACME TLS is not implemented"), "stderr: {err}");
+    assert!(err.contains("TLS-ALPN-01"), "stderr: {err}");
+}
+
+#[test]
+fn configtest_rejects_unsupported_postgres_runtime() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: postgres
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("headscale-rs server currently supports SQLite only"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["users", "list", "--help"],

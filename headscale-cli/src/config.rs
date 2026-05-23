@@ -34,9 +34,8 @@ pub(crate) struct CliConfig {
     /// Upstream top-level `grpc_allow_insecure`.
     #[serde(default, skip_serializing)]
     pub(crate) grpc_allow_insecure: Option<bool>,
-    /// Upstream top-level `trusted_proxies` CIDR list. Parsed and
-    /// validated for config parity; reverse-proxy header trust is not
-    /// wired into the Rust HTTP runtime yet.
+    /// Upstream/top-level `trusted_proxies` CIDR list. Runtime serving keeps
+    /// forwarded headers only when the direct peer is in this set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) trusted_proxies: Vec<String>,
     /// Upstream top-level update-check switch. Parsed and projected in
@@ -791,6 +790,7 @@ impl CliConfig {
         self.validate_trusted_proxies()?;
         self.validate_upstream_database_config()?;
         self.validate_upstream_tls_config()?;
+        self.validate_unsupported_runtime_features()?;
         self.validate_upstream_node_config()?;
         self.validate_policy_config()?;
 
@@ -916,7 +916,9 @@ impl CliConfig {
                 {
                     bail!("database.postgres connection pool fields must be >= 0");
                 }
-                bail!("database.type \"postgres\" is not supported yet; only sqlite is wired");
+                bail!(
+                    "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
+                );
             }
             other => bail!(
                 "database.type {other:?} is invalid; supported values are sqlite, sqlite3, postgres"
@@ -940,6 +942,9 @@ impl CliConfig {
         if letsencrypt_hostname && (cert_path || key_path) {
             bail!("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both");
         }
+        if cert_path != key_path {
+            bail!("tls_cert_path and tls_key_path must both be set");
+        }
 
         if let Some(challenge_type) = self
             .tls_letsencrypt_challenge_type
@@ -950,6 +955,35 @@ impl CliConfig {
         {
             bail!(
                 "the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn validate_unsupported_runtime_features(&self) -> Result<()> {
+        if self
+            .tls_letsencrypt_hostname
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            let challenge = self
+                .tls_letsencrypt_challenge_type
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("HTTP-01");
+            let listen = self
+                .tls_letsencrypt_listen
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(":http");
+            let acme_url = self
+                .acme_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("https://acme-v02.api.letsencrypt.org/directory");
+            bail!(
+                "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured challenge {challenge} would require ACME certificate issuance using acme_url {acme_url} and challenge listener {listen}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs."
             );
         }
 
@@ -983,6 +1017,10 @@ impl CliConfig {
 }
 
 impl UpstreamDatabaseConfig {
+    pub(crate) fn is_postgres(&self) -> bool {
+        self.database_type.as_deref() == Some("postgres")
+    }
+
     fn sqlite_path(&self) -> Option<PathBuf> {
         self.sqlite
             .as_ref()
@@ -2300,7 +2338,7 @@ database:
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
         let err = config.validate_for_configtest().unwrap_err();
 
-        assert!(format!("{err:#}").contains("database.type \"postgres\" is not supported"));
+        assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
     }
 
     #[test]
@@ -2352,7 +2390,22 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
             config.tls_letsencrypt_challenge_type.as_deref(),
             Some("TLS-ALPN-01")
         );
-        config.validate_for_configtest().unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+        assert!(format!("{err:#}").contains("ACME TLS is not implemented"));
+        assert!(format!("{err:#}").contains("TLS-ALPN-01"));
+    }
+
+    #[test]
+    fn configtest_rejects_incomplete_manual_tls_paths() {
+        let source = r#"
+server_url: "https://headscale.example"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("tls_cert_path and tls_key_path must both be set"));
     }
 
     #[test]

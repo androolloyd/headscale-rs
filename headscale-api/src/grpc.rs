@@ -355,6 +355,49 @@ pub mod upstream {
             Ok(true)
         }
 
+        /// Reload the configured policy source and fan out route/policy changes.
+        ///
+        /// This is the production SIGHUP path: headscale-go v0.28 reloads the
+        /// ACL policy on SIGHUP rather than reparsing the full server config.
+        pub async fn reload_policy_from_config(&self) -> Result<bool, Status> {
+            let loaded = match &self.policy_mode {
+                PolicyMode::File { path } => {
+                    if path.as_os_str().is_empty() {
+                        return Ok(false);
+                    }
+                    let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
+                        Status::unknown(format!("reloading policy file {}: {e}", path.display()))
+                    })?;
+                    if raw.is_empty() {
+                        return Ok(false);
+                    }
+                    let doc = parse_hujson_policy(&raw).map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "reloading policy file {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    self.validate_candidate_policy(&doc, "reloading policy")
+                        .await?;
+                    self.policy.set(doc, raw);
+                    true
+                }
+                PolicyMode::Database => self.load_policy_from_persistence().await?,
+                PolicyMode::Memory => false,
+            };
+
+            if loaded {
+                crate::admin::machines::apply_policy_auto_approvals(
+                    &self.policy,
+                    self.machines.as_ref(),
+                )
+                .await
+                .map_err(machine_error_to_status)?;
+            }
+
+            Ok(loaded)
+        }
+
         pub async fn authorize_api_key_metadata(
             &self,
             metadata: &MetadataMap,
@@ -4135,6 +4178,54 @@ mod upstream_tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
         assert!(err.message().contains("update is disabled"));
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_reload_from_file_updates_live_policy_and_auto_approvals() {
+        let (service, machines) = admin_service_with_machines().await;
+        let node_key = "97".repeat(32);
+        let mut rec = MachineRecord::new_at(
+            Utc::now(),
+            node_key.clone(),
+            "98".repeat(32),
+            "alice".into(),
+            "router".into(),
+            Ipv4Addr::new(100, 64, 0, 9),
+            false,
+        );
+        rec.available_routes = vec!["10.88.1.0/24".into(), "10.99.1.0/24".into()];
+        machines.upsert(node_key.clone(), rec);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl.hujson");
+        fs::write(&path, r#"{"acls":[]}"#).unwrap();
+        let service = service.with_policy_file(path.clone());
+
+        assert!(service.reload_policy_from_config().await.unwrap());
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, r#"{"acls":[]}"#);
+
+        let raw = r#"{
+          "autoApprovers": {
+            "routes": {"10.88.0.0/16": ["alice@"]}
+          }
+        }"#;
+        fs::write(&path, raw).unwrap();
+
+        assert!(service.reload_policy_from_config().await.unwrap());
+
+        let got = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.policy, raw);
+        let rec = machines.get(&node_key).expect("node remains registered");
+        assert_eq!(rec.approved_routes, vec!["10.88.1.0/24"]);
     }
 
     #[tokio::test]

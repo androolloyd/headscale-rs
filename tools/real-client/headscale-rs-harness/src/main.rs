@@ -479,6 +479,7 @@ async fn main() -> Result<()> {
             state_dir,
             sans,
         },
+        trusted_proxies: serve::TrustedProxyConfig::default(),
         oidc: None,
         metrics_addr: None,
     };

@@ -47,6 +47,10 @@ use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
 const NODE_EXPIRY_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
+const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
+const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunServerConfig {
@@ -121,15 +125,36 @@ impl TlsRuntimeConfig {
             .as_ref()
             .filter(|path| !path.as_os_str().is_empty())
             .map_or_else(
-                || "/var/www/.cache".to_string(),
+                || DEFAULT_LETSENCRYPT_CACHE_DIR.to_string(),
                 |path| path.display().to_string(),
             )
     }
 
+    fn letsencrypt_listen_string(&self) -> String {
+        non_empty_str(self.letsencrypt_listen.as_deref())
+            .unwrap_or(DEFAULT_LETSENCRYPT_LISTEN)
+            .to_string()
+    }
+
     fn challenge_type_string(&self) -> String {
         non_empty_str(self.letsencrypt_challenge_type.as_deref())
-            .unwrap_or("HTTP-01")
+            .unwrap_or(DEFAULT_LETSENCRYPT_CHALLENGE_TYPE)
             .to_string()
+    }
+
+    fn acme_url_string(&self) -> String {
+        non_empty_str(self.acme_url.as_deref())
+            .unwrap_or(DEFAULT_ACME_URL)
+            .to_string()
+    }
+
+    fn unsupported_acme_message(&self) -> String {
+        format!(
+            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured challenge {} would require ACME certificate issuance using acme_url {} and challenge listener {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
+            self.challenge_type_string(),
+            self.acme_url_string(),
+            self.letsencrypt_listen_string()
+        )
     }
 }
 
@@ -140,6 +165,7 @@ pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
 
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let public_listeners = public_listener_plan(&cfg)?;
+    validate_supported_runtime_config(&cfg)?;
     tracing::info!("Starting headscale-compatible Tailscale control plane");
     tracing::info!(
         "  Public HTTP: {}",
@@ -256,6 +282,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         state_dir: cfg.state_dir.clone(),
         sans: sans.clone(),
         tls_source: tls_source.clone(),
+        trusted_proxies: serve::TrustedProxyConfig::parse(&cfg.trusted_proxies)
+            .map_err(anyhow::Error::msg)
+            .context("parse trusted_proxies")?,
         oidc: runtime.oidc,
         metrics_addr,
     };
@@ -291,8 +320,12 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let remote_grpc = remote_grpc_listener.map(|(listener, addr, security)| {
         spawn_remote_grpc_listener(listener, addr, runtime.admin_service.clone(), security)
     });
+    let policy_reload = spawn_policy_reload_signal_task(runtime.admin_service.clone());
     tracing::info!("Headscale-compatible Tailscale control plane ready");
     let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    if let Some(handle) = policy_reload {
+        handle.abort();
+    }
     node_expiry_waker.abort();
     if let Some(handle) = route_health_probe {
         handle.abort();
@@ -630,13 +663,9 @@ fn runtime_config_snapshot(
         .unwrap_or("")
         .to_string();
     snapshot.tls.lets_encrypt.cache_dir = cfg.tls.cache_dir_string();
-    snapshot.tls.lets_encrypt.listen = non_empty_str(cfg.tls.letsencrypt_listen.as_deref())
-        .unwrap_or("")
-        .to_string();
+    snapshot.tls.lets_encrypt.listen = cfg.tls.letsencrypt_listen_string();
     snapshot.tls.lets_encrypt.challenge_type = cfg.tls.challenge_type_string();
-    snapshot.acme_url = non_empty_str(cfg.tls.acme_url.as_deref())
-        .unwrap_or("")
-        .to_string();
+    snapshot.acme_url = cfg.tls.acme_url_string();
     snapshot.acme_email = non_empty_str(cfg.tls.acme_email.as_deref())
         .unwrap_or("")
         .to_string();
@@ -729,6 +758,22 @@ fn runtime_config_snapshot(
     snapshot
 }
 
+fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
+    if cfg
+        .database
+        .as_ref()
+        .is_some_and(UpstreamDatabaseConfig::is_postgres)
+    {
+        anyhow::bail!(
+            "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
+        );
+    }
+    if cfg.tls.letsencrypt_enabled() {
+        anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
+    }
+    Ok(())
+}
+
 fn upstream_oidc_runtime_config(oidc: &OidcConfig) -> OidcConfig {
     let mut oidc = oidc.clone();
     oidc.expiry = Duration::ZERO;
@@ -741,9 +786,7 @@ fn u64_nanos_to_i64(value: u64) -> i64 {
 
 fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMaterialSource> {
     if cfg.tls.letsencrypt_enabled() {
-        anyhow::bail!(
-            "tls_letsencrypt_hostname/ACME TLS is parsed but not implemented in headscale-rs yet"
-        );
+        anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
     }
 
     let has_cert = cfg
@@ -906,6 +949,44 @@ fn spawn_derp_auto_update_task(
             }
         }
     }))
+}
+
+#[cfg(unix)]
+fn spawn_policy_reload_signal_task(
+    admin_service: HeadscaleAdminService,
+) -> Option<tokio::task::JoinHandle<()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sighup = match signal(SignalKind::hangup()) {
+        Ok(signal) => signal,
+        Err(err) => {
+            tracing::warn!(error = ?err, "failed to install SIGHUP handler; policy reload disabled");
+            return None;
+        }
+    };
+
+    Some(tokio::spawn(async move {
+        loop {
+            if sighup.recv().await.is_none() {
+                return;
+            }
+            tracing::info!("Received SIGHUP, reloading ACL policy");
+            match admin_service.reload_policy_from_config().await {
+                Ok(true) => tracing::info!("ACL policy reloaded"),
+                Ok(false) => {
+                    tracing::info!("ACL policy reload skipped; no configured policy source");
+                }
+                Err(err) => tracing::error!(error = ?err, "reloading ACL policy failed"),
+            }
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+fn spawn_policy_reload_signal_task(
+    _admin_service: HeadscaleAdminService,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 fn derp_auto_update_enabled(upstream: &DerpConfig) -> bool {
@@ -2742,6 +2823,41 @@ regions:
     }
 
     #[test]
+    fn runtime_config_rejects_unsupported_acme_before_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_challenge_type = Some("TLS-ALPN-01".into());
+
+        let err = validate_supported_runtime_config(&cfg).unwrap_err();
+
+        assert!(format!("{err:#}").contains("ACME TLS is not implemented"));
+        assert!(format!("{err:#}").contains("TLS-ALPN-01"));
+    }
+
+    #[test]
+    fn runtime_config_rejects_unsupported_postgres_before_opening_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+database:
+  type: postgres
+"#,
+        )
+        .unwrap();
+        let parsed = crate::config::CliConfig::load(&config_path).unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.database = parsed.database;
+
+        let err = validate_supported_runtime_config(&cfg).unwrap_err();
+
+        assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+    }
+
+    #[test]
     fn socket_addr_parser_accepts_upstream_leading_colon_listens() {
         assert_eq!(
             parse_socket_addr(":50443", "grpc_listen_addr").unwrap(),
@@ -2875,6 +2991,26 @@ regions:
     }
 
     #[test]
+    fn runtime_config_snapshot_uses_upstream_acme_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_run_server_config(&dir);
+        let dns = DnsStore::new();
+
+        let snapshot = runtime_config_snapshot(&cfg, &DerpMap::default(), &dns);
+
+        assert_eq!(snapshot.acme_url, DEFAULT_ACME_URL);
+        assert_eq!(
+            snapshot.tls.lets_encrypt.cache_dir,
+            DEFAULT_LETSENCRYPT_CACHE_DIR
+        );
+        assert_eq!(snapshot.tls.lets_encrypt.listen, DEFAULT_LETSENCRYPT_LISTEN);
+        assert_eq!(
+            snapshot.tls.lets_encrypt.challenge_type,
+            DEFAULT_LETSENCRYPT_CHALLENGE_TYPE
+        );
+    }
+
+    #[test]
     fn runtime_config_snapshot_projects_current_upstream_schema_fields() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
@@ -2934,7 +3070,7 @@ database:
         cfg.db_path = parsed.server.as_ref().unwrap().db_path.clone();
         cfg.trusted_proxies = parsed.trusted_proxies.clone();
         cfg.disable_check_updates = parsed.disable_check_updates;
-        cfg.database = parsed.database.clone();
+        cfg.database = parsed.database;
         cfg.logtail_enabled = parsed.logtail.enabled;
         cfg.auto_update_enabled = parsed.auto_update.enabled;
         cfg.tuning = parsed.tuning;

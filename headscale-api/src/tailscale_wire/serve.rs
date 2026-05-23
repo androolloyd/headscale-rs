@@ -37,11 +37,17 @@
 //!   main `listen_addr`; the interop harness can still opt into a separate
 //!   plaintext listener for curl probes and its admin shim.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{
+    Router,
+    extract::{ConnectInfo, State},
+    middleware::{self, Next},
+    response::Response,
+};
+use ipnet::IpNet;
 use tokio::task::JoinHandle;
 
 use super::raw_tls;
@@ -66,6 +72,11 @@ pub struct ServeConfig {
     pub sans: SanConfig,
     /// TLS material source used when `https_addr` is configured.
     pub tls_source: TlsMaterialSource,
+    /// CIDRs allowed to supply reverse-proxy forwarding headers.
+    ///
+    /// Requests from other peers have `Forwarded`, `X-Forwarded-*`, and
+    /// `X-Real-IP` stripped before public handlers derive helper URLs.
+    pub trusted_proxies: TrustedProxyConfig,
     /// Optional OIDC auth runtime. When present, the public `/register/{id}`
     /// route starts the OIDC auth-code flow and `/oidc/callback` is mounted.
     pub oidc: Option<crate::oidc::OidcAuthRuntime>,
@@ -87,6 +98,7 @@ impl ServeConfig {
             state_dir: state_dir.clone(),
             sans: sans.clone(),
             tls_source: TlsMaterialSource::SelfSigned { state_dir, sans },
+            trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: None,
         }
@@ -106,6 +118,36 @@ pub struct ServeHandle {
     pub tls: Option<TlsMaterial>,
 }
 
+/// Trusted reverse-proxy CIDRs for forwarding headers.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedProxyConfig {
+    cidrs: Arc<Vec<IpNet>>,
+}
+
+impl TrustedProxyConfig {
+    pub fn parse<I, S>(values: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let cidrs = values
+            .into_iter()
+            .map(|value| {
+                value.as_ref().parse::<IpNet>().map_err(|err| {
+                    format!("invalid trusted proxy CIDR {:?}: {err}", value.as_ref())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            cidrs: Arc::new(cidrs),
+        })
+    }
+
+    fn is_trusted(&self, ip: IpAddr) -> bool {
+        self.cidrs.iter().any(|cidr| cidr.contains(&ip))
+    }
+}
+
 /// Bind configured listeners and return without blocking. The caller
 /// is responsible for awaiting the listener handles or aborting them
 /// on shutdown.
@@ -119,6 +161,10 @@ pub async fn serve(
 ) -> Result<ServeHandle, WireError> {
     let oidc = cfg.oidc.clone();
     let app = extra_routes.merge(public_router(state.clone(), oidc));
+    let app = app.layer(middleware::from_fn_with_state(
+        cfg.trusted_proxies.clone(),
+        trusted_proxy_headers,
+    ));
 
     if cfg.http_addr.is_none() && cfg.https_addr.is_none() {
         return Err(WireError::Internal(
@@ -156,9 +202,12 @@ pub async fn serve(
         );
         let http_app = app.clone();
         Some(tokio::spawn(async move {
-            axum::serve(http_listener, http_app)
-                .await
-                .map_err(std::io::Error::other)
+            axum::serve(
+                http_listener,
+                http_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(std::io::Error::other)
         }))
     } else {
         tracing::info!(
@@ -222,6 +271,32 @@ pub async fn serve(
     })
 }
 
+async fn trusted_proxy_headers(
+    State(trusted): State<TrustedProxyConfig>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    mut request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    sanitize_forwarded_headers(request.headers_mut(), peer.ip(), &trusted);
+    next.run(request).await
+}
+
+fn sanitize_forwarded_headers(
+    headers: &mut axum::http::HeaderMap,
+    peer: IpAddr,
+    trusted: &TrustedProxyConfig,
+) {
+    if trusted.is_trusted(peer) {
+        return;
+    }
+
+    headers.remove("forwarded");
+    headers.remove("x-forwarded-for");
+    headers.remove("x-forwarded-host");
+    headers.remove("x-forwarded-proto");
+    headers.remove("x-real-ip");
+}
+
 fn public_router(state: WireState, oidc: Option<crate::oidc::OidcAuthRuntime>) -> Router {
     match oidc {
         Some(oidc) => control_router_with_oidc(state, oidc),
@@ -266,6 +341,39 @@ mod tests {
         (state, dir)
     }
 
+    #[test]
+    fn trusted_proxy_config_matches_configured_cidrs() {
+        let trusted = TrustedProxyConfig::parse(["127.0.0.1/32", "fd7a:115c:a1e0::/48"]).unwrap();
+
+        assert!(trusted.is_trusted("127.0.0.1".parse().unwrap()));
+        assert!(trusted.is_trusted("fd7a:115c:a1e0::5".parse().unwrap()));
+        assert!(!trusted.is_trusted("192.0.2.10".parse().unwrap()));
+    }
+
+    #[test]
+    fn forwarded_headers_are_only_kept_for_trusted_proxies() {
+        let trusted = TrustedProxyConfig::parse(["127.0.0.1/32"]).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-host", "proxy.example".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        headers.insert("x-real-ip", "203.0.113.5".parse().unwrap());
+        headers.insert("forwarded", "for=203.0.113.5".parse().unwrap());
+
+        sanitize_forwarded_headers(&mut headers, "192.0.2.10".parse().unwrap(), &trusted);
+
+        assert!(!headers.contains_key("x-forwarded-host"));
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        assert!(!headers.contains_key("x-forwarded-for"));
+        assert!(!headers.contains_key("x-real-ip"));
+        assert!(!headers.contains_key("forwarded"));
+
+        headers.insert("x-forwarded-host", "proxy.example".parse().unwrap());
+        sanitize_forwarded_headers(&mut headers, "127.0.0.1".parse().unwrap(), &trusted);
+
+        assert_eq!(headers.get("x-forwarded-host").unwrap(), "proxy.example");
+    }
+
     /// Bind both listeners on ephemeral ports and probe `GET /key?v=39`
     /// over plain HTTP. We don't drive a TLS client in-process — the
     /// docker harness does that — but we *do* assert the HTTPS
@@ -285,6 +393,7 @@ mod tests {
                 state_dir: dir.path().into(),
                 sans: SanConfig::with_hostname("test-host"),
             },
+            trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: None,
         };
@@ -320,6 +429,7 @@ mod tests {
                     state_dir: dir.path().into(),
                     sans: SanConfig::with_hostname("test-host"),
                 },
+                trusted_proxies: TrustedProxyConfig::default(),
                 oidc: None,
                 metrics_addr: None,
             },
@@ -351,6 +461,7 @@ mod tests {
                     state_dir: dir.path().into(),
                     sans: SanConfig::with_hostname("test-host"),
                 },
+                trusted_proxies: TrustedProxyConfig::default(),
                 oidc: None,
                 metrics_addr: None,
             },
@@ -432,6 +543,7 @@ mod tests {
                 state_dir: dir.path().into(),
                 sans: SanConfig::with_hostname("test-host"),
             },
+            trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: Some("127.0.0.1:0".parse().unwrap()),
         };

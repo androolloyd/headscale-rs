@@ -253,7 +253,10 @@ async fn handle_one(
             // re-wrapping the hyper Incoming body.
             let (parts, body) = req.into_parts();
             let body = axum::body::Body::new(body);
-            let axum_req = http::Request::from_parts(parts, body);
+            let mut axum_req = http::Request::from_parts(parts, body);
+            axum_req
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
             // `Router::oneshot` makes a fresh service for this request.
             let resp = router
                 .oneshot(axum_req)

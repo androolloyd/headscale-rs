@@ -59,12 +59,12 @@ struct Semver {
 pub async fn check_headscale_go_import_compatibility(
     pool: &SqlitePool,
 ) -> Result<HeadscaleGoImportCompatibility> {
-    if table_exists(pool, "database_versions").await? {
-        return check_database_versions_table(pool).await;
-    }
-
     if table_exists(pool, "_sqlx_migrations").await? {
         return Ok(HeadscaleGoImportCompatibility::RustManaged);
+    }
+
+    if table_exists(pool, "database_versions").await? {
+        return check_database_versions_table(pool).await;
     }
 
     if table_exists(pool, "migrations").await? {
@@ -118,9 +118,7 @@ async fn check_database_versions_table(
     }
 
     if is_development_version(stored_version) {
-        return Ok(HeadscaleGoImportCompatibility::DevelopmentVersion {
-            stored_version: stored_version.to_string(),
-        });
+        return check_database_versions_without_comparable_version(pool, stored_version).await;
     }
 
     let stored = parse_version(stored_version).map_err(|message| {
@@ -133,9 +131,12 @@ async fn check_database_versions_table(
         stored.major == SUPPORTED_MAJOR,
         stored.minor.cmp(&SUPPORTED_MINOR),
     ) {
-        (true, std::cmp::Ordering::Equal) => Ok(HeadscaleGoImportCompatibility::Versioned {
-            stored_version: stored_version.to_string(),
-        }),
+        (true, std::cmp::Ordering::Equal) => {
+            validate_versioned_go_shape(pool, stored_version).await?;
+            Ok(HeadscaleGoImportCompatibility::Versioned {
+                stored_version: stored_version.to_string(),
+            })
+        }
         (false, _) => unsupported(format!(
             "database was last used by headscale-go {stored_version}, but this crate only \
              imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible SQLite schemas"
@@ -149,6 +150,42 @@ async fn check_database_versions_table(
              imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible SQLite schemas"
         )),
     }
+}
+
+async fn check_database_versions_without_comparable_version(
+    pool: &SqlitePool,
+    stored_version: &str,
+) -> Result<HeadscaleGoImportCompatibility> {
+    if table_exists(pool, "migrations").await? {
+        return check_go_migrations_table(pool).await;
+    }
+
+    if has_any_go_shaped_table(pool).await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but a Go-shaped database without \
+             supported headscale-go migration history cannot be imported"
+        ));
+    }
+
+    Ok(HeadscaleGoImportCompatibility::DevelopmentVersion {
+        stored_version: stored_version.to_string(),
+    })
+}
+
+async fn validate_versioned_go_shape(pool: &SqlitePool, stored_version: &str) -> Result<()> {
+    if table_exists(pool, "migrations").await? {
+        check_go_migrations_table(pool).await?;
+        return Ok(());
+    }
+
+    if has_any_go_shaped_table(pool).await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but Go-shaped tables are present \
+             without headscale-go migration history through {REQUIRED_GO_MIGRATION}"
+        ));
+    }
+
+    Ok(())
 }
 
 async fn check_go_migrations_table(pool: &SqlitePool) -> Result<HeadscaleGoImportCompatibility> {

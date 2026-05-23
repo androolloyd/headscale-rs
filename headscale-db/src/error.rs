@@ -29,6 +29,10 @@ pub enum DbError {
     #[error("Unsupported headscale-go database: {0}")]
     UnsupportedHeadscaleGoDatabaseVersion(String),
 
+    /// Unsupported database backend
+    #[error("Unsupported database backend: {0}")]
+    UnsupportedDatabaseBackend(String),
+
     /// General error
     #[error("Database operation failed: {0}")]
     General(String),

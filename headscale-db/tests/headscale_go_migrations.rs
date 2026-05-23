@@ -1,5 +1,6 @@
 use headscale_db::{
-    Database, DbError, HeadscaleGoImportCompatibility, api_keys, headscale_nodes,
+    DATABASE_BACKEND_MATRIX, Database, DbError, HeadscaleGoImportCompatibility, api_keys,
+    headscale_nodes,
     preauth_keys::{self, CreateParams as PreauthCreateParams},
     users::{self, CreateParams as UserCreateParams},
 };
@@ -9,13 +10,31 @@ const LEGACY_ROUTES_MIGRATION: &str =
     include_str!("../migrations/20260522000010_migrate_legacy_routes.sql");
 const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
+const HEADSCALE_GO_V0260_EMPTY_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_26_0_sqlite_empty.sql");
+const HEADSCALE_GO_V0271_EMPTY_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_27_1_sqlite_empty.sql");
+const HEADSCALE_GO_V0280_BETA1_EMPTY_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_28_0_beta_1_sqlite_empty.sql");
+const HEADSCALE_GO_V0280_BETA2_EMPTY_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_28_0_beta_2_sqlite_empty.sql");
+const HEADSCALE_GO_V0280_EMPTY_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_28_0_sqlite_empty.sql");
 const MODERN_PREAUTH_TOKEN: &str = concat!(
     "hskey-auth-AuthPrefix01-",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 );
+const WRONG_MODERN_PREAUTH_TOKEN: &str = concat!(
+    "hskey-auth-AuthPrefix01-",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+);
 const MODERN_API_KEY: &str = concat!(
     "hskey-api-ApiPrefix001-",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+);
+const WRONG_MODERN_API_KEY: &str = concat!(
+    "hskey-api-ApiPrefix001-",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 );
 
 const HEADSCALE_GO_V028_FIXTURE: &str = r#"
@@ -164,17 +183,43 @@ async fn file_db() -> (TempDir, Database) {
 }
 
 async fn seed_headscale_go_v028_fixture(db: &Database) {
-    sqlx::raw_sql(HEADSCALE_GO_V028_FIXTURE)
-        .execute(db.pool())
-        .await
-        .expect("seed headscale-go v0.28 fixture");
+    seed_fixture(db, HEADSCALE_GO_V028_FIXTURE, "headscale-go v0.28 fixture").await;
 }
 
 async fn seed_headscale_go_v028_auth_rows_fixture(db: &Database) {
-    sqlx::raw_sql(HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE)
+    seed_fixture(
+        db,
+        HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE,
+        "headscale-go v0.28 auth rows fixture",
+    )
+    .await;
+}
+
+async fn seed_fixture(db: &Database, fixture: &str, description: &str) {
+    sqlx::raw_sql(fixture)
         .execute(db.pool())
         .await
-        .expect("seed headscale-go v0.28 auth rows fixture");
+        .unwrap_or_else(|e| panic!("seed {description}: {e}"));
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(db.pool())
+        .await
+        .unwrap_or_else(|e| panic!("reenable foreign keys after {description}: {e}"));
+}
+
+async fn sqlite_table_exists(db: &Database, table: &str) -> bool {
+    let count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        ",
+    )
+    .bind(table)
+    .fetch_one(db.pool())
+    .await
+    .expect("query sqlite schema");
+
+    count > 0
 }
 
 async fn user_id(db: &Database) -> i64 {
@@ -242,6 +287,130 @@ async fn node_with_route(
     )
     .await
     .expect("create node")
+}
+
+#[tokio::test]
+async fn database_backend_matrix_is_sqlite_only_for_headscale_db() {
+    let sqlite = DATABASE_BACKEND_MATRIX
+        .iter()
+        .find(|entry| entry.upstream_name == "sqlite3")
+        .expect("sqlite backend matrix entry");
+    assert!(sqlite.headscale_go_supported);
+    assert!(sqlite.headscale_db_supported);
+    assert!(sqlite.sqlite_import_supported);
+    assert_eq!(sqlite.url_schemes, &["sqlite"]);
+
+    let postgres = DATABASE_BACKEND_MATRIX
+        .iter()
+        .find(|entry| entry.upstream_name == "postgres")
+        .expect("postgres backend matrix entry");
+    assert!(postgres.headscale_go_supported);
+    assert!(!postgres.headscale_db_supported);
+    assert!(!postgres.sqlite_import_supported);
+    assert_eq!(postgres.url_schemes, &["postgres", "postgresql"]);
+
+    let db = Database::new("sqlite::memory:")
+        .await
+        .expect("sqlite URL is supported");
+    db.close().await;
+
+    let Err(postgres_err) = Database::new("postgres://localhost/headscale").await else {
+        panic!("postgres URL should be rejected by headscale-db");
+    };
+    assert!(matches!(
+        postgres_err,
+        DbError::UnsupportedDatabaseBackend(_)
+    ));
+    assert!(postgres_err.to_string().contains("SQLite URLs only"));
+}
+
+#[tokio::test]
+async fn headscale_go_sqlite_release_fixture_matrix_matches_supported_import_window() {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        supported: bool,
+        error_contains: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "v0.26.0",
+            fixture: HEADSCALE_GO_V0260_EMPTY_FIXTURE,
+            supported: false,
+            error_contains: "upgrade with headscale-go v0.28.0",
+        },
+        Case {
+            name: "v0.27.1",
+            fixture: HEADSCALE_GO_V0271_EMPTY_FIXTURE,
+            supported: false,
+            error_contains: "202601121700-migrate-hostinfo-request-tags",
+        },
+        Case {
+            name: "v0.28.0-beta.1",
+            fixture: HEADSCALE_GO_V0280_BETA1_EMPTY_FIXTURE,
+            supported: false,
+            error_contains: "202601121700-migrate-hostinfo-request-tags",
+        },
+        Case {
+            name: "v0.28.0-beta.2",
+            fixture: HEADSCALE_GO_V0280_BETA2_EMPTY_FIXTURE,
+            supported: true,
+            error_contains: "",
+        },
+        Case {
+            name: "v0.28.0",
+            fixture: HEADSCALE_GO_V0280_EMPTY_FIXTURE,
+            supported: true,
+            error_contains: "",
+        },
+    ];
+
+    for case in cases {
+        let (_dir, db) = file_db().await;
+        seed_fixture(&db, case.fixture, case.name).await;
+
+        if case.supported {
+            let before = db
+                .check_headscale_go_import_compatibility()
+                .await
+                .unwrap_or_else(|e| panic!("{} should be import-compatible: {e}", case.name));
+            assert!(matches!(
+                before,
+                HeadscaleGoImportCompatibility::GoMigrations { .. }
+            ));
+
+            db.migrate()
+                .await
+                .unwrap_or_else(|e| panic!("{} should migrate: {e}", case.name));
+
+            let after = db
+                .check_headscale_go_import_compatibility()
+                .await
+                .expect("check post-migration compatibility");
+            assert_eq!(after, HeadscaleGoImportCompatibility::RustManaged);
+        } else {
+            let err = match db.migrate().await {
+                Ok(()) => panic!("{} should be rejected", case.name),
+                Err(err) => err,
+            };
+            assert!(matches!(
+                err,
+                DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+            ));
+            assert!(
+                err.to_string().contains(case.error_contains),
+                "{} error should mention {:?}, got {err}",
+                case.name,
+                case.error_contains
+            );
+            assert!(
+                !sqlite_table_exists(&db, "_sqlx_migrations").await,
+                "{} should be rejected before sqlx migrations run",
+                case.name
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -322,27 +491,55 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     api_keys::validate(db.pool(), MODERN_API_KEY)
         .await
         .expect("modern imported API key validates");
+    let api_err = api_keys::validate(db.pool(), WRONG_MODERN_API_KEY)
+        .await
+        .expect_err("wrong modern API key secret is rejected");
+    assert!(matches!(api_err, api_keys::ApiKeyError::Invalid));
     let api_key = api_keys::get_by_prefix(db.pool(), "ApiPrefix001")
         .await
         .expect("read imported API key");
+    assert!(api_key.secret_hash.starts_with("$2b$04$"));
+    assert_eq!(api_key.expiration, Some(1_893_456_000));
     assert_eq!(api_key.last_seen, Some(1_767_323_045));
+    assert_eq!(api_key.created_at, 1_767_225_600);
     assert_eq!(api_key.display_prefix(), "hskey-api-ApiPrefix001-***");
 
     let preauth = preauth_keys::get_by_token(db.pool(), MODERN_PREAUTH_TOKEN)
         .await
         .expect("modern imported preauth key validates");
+    let preauth_err = preauth_keys::get_by_token(db.pool(), WRONG_MODERN_PREAUTH_TOKEN)
+        .await
+        .expect_err("wrong modern preauth secret is rejected");
+    assert!(matches!(preauth_err, DbError::NotFound(_)));
+    assert!(preauth.key.is_none());
     assert_eq!(preauth.user_id, "1");
     assert_eq!(preauth.prefix.as_deref(), Some("AuthPrefix01"));
+    assert_eq!(preauth.display_key(), "hskey-auth-AuthPrefix01-***");
+    assert!(preauth.key_hash.starts_with("$2b$04$"));
     assert_eq!(preauth.tag_list(), vec!["tag:server"]);
     assert!(preauth.ephemeral);
     assert!(!preauth.reusable);
     assert!(!preauth.is_used());
     assert!(preauth.is_live(1_767_323_045));
+    assert_eq!(preauth.created_at, 1_767_225_600);
+    assert_eq!(preauth.expiration, None);
 
     let node = headscale_nodes::get_by_id(db.pool(), 1)
         .await
         .expect("read imported node");
+    assert_eq!(node.machine_key, "mkey:modern");
+    assert_eq!(node.node_key, "nodekey:modern");
+    assert_eq!(node.disco_key, "discokey:modern");
+    assert_eq!(node.user_id, Some(1));
+    assert_eq!(
+        node.register_method,
+        headscale_nodes::REGISTER_METHOD_AUTH_KEY
+    );
     assert_eq!(node.auth_key_id, Some(preauth.id));
+    assert_eq!(node.hostname, "alice-router");
+    assert_eq!(node.given_name, "alice-router");
+    assert_eq!(node.ipv4.as_deref(), Some("100.64.0.10"));
+    assert_eq!(node.ipv6.as_deref(), Some("fd7a:115c:a1e0::10"));
     assert_eq!(
         node.endpoint_list(),
         vec!["1.2.3.4:41641", "[2001:db8::1]:41641"]
@@ -357,6 +554,31 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     assert_eq!(
         node.expiry, None,
         "Go zero-time node expiry imports as non-expiring"
+    );
+    assert_eq!(node.last_seen, Some(1_767_323_045));
+    assert_eq!(node.created_at, 1_767_225_600);
+    assert_eq!(node.updated_at, 1_767_225_600);
+    assert_eq!(node.deleted_at, None);
+
+    let linked_metadata: (String, String, String) = sqlx::query_as(
+        "
+        SELECT users.name, pre_auth_keys.prefix, nodes.register_method
+        FROM nodes
+        JOIN users ON users.id = nodes.user_id
+        JOIN pre_auth_keys ON pre_auth_keys.id = nodes.auth_key_id
+        WHERE nodes.id = 1
+        ",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("linked auth-key node metadata");
+    assert_eq!(
+        linked_metadata,
+        (
+            "alice".to_string(),
+            "AuthPrefix01".to_string(),
+            headscale_nodes::REGISTER_METHOD_AUTH_KEY.to_string()
+        )
     );
 
     let policy = headscale_db::policies::get_latest(db.pool())
@@ -408,6 +630,82 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
     db.migrate()
         .await
         .expect("v0.28 database_versions row is accepted");
+
+    let after = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check post-migration compatibility");
+    assert_eq!(after, HeadscaleGoImportCompatibility::RustManaged);
+}
+
+#[tokio::test]
+async fn database_versions_v028_cannot_mask_unsupported_go_migrations() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.28.0', '2026-05-22 00:00:00');
+
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
+        INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed database_versions plus newer migration history");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("version row must not hide unsupported migration history");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("202602201200-clear-tagged-node-user-id")
+    );
+}
+
+#[tokio::test]
+async fn development_database_versions_require_supported_go_migration_history_for_go_shape() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, '(devel)', '2026-05-22 00:00:00');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed devel database_versions and Go-shaped table");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("devel Go-shaped DB without migration history is rejected");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("without supported headscale-go migration history")
+    );
 }
 
 #[tokio::test]

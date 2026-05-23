@@ -90,6 +90,10 @@ pub struct EmbeddedDerpConfig {
     pub omit_default_regions: bool,
     /// Test-only DERP map escape hatch for self-signed sidecar TLS.
     pub insecure_for_tests: bool,
+    /// Optional public IPv4 hint advertised for the embedded DERP node.
+    pub ipv4: String,
+    /// Optional public IPv6 hint advertised for the embedded DERP node.
+    pub ipv6: String,
     /// Path to the upstream `derper` binary. Required unless `stun_only = true`.
     pub derper_binary: PathBuf,
     /// TCP bind address passed to `derper -a`.
@@ -122,6 +126,8 @@ impl Default for EmbeddedDerpConfig {
             region_name: "Embedded headscale-rs DERP".to_string(),
             omit_default_regions: false,
             insecure_for_tests: false,
+            ipv4: String::new(),
+            ipv6: String::new(),
             derper_binary: PathBuf::new(),
             derper_listen_addr: "127.0.0.1:8443".parse().unwrap(),
             derper_config_path: PathBuf::new(),

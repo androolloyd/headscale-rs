@@ -38,6 +38,8 @@ use headscale_api::tailscale_wire::{
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
+
+use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
 const NODE_EXPIRY_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
@@ -60,6 +62,7 @@ pub(crate) struct RunServerConfig {
     pub grpc_allow_insecure: bool,
     pub oidc: OidcConfig,
     pub embedded_derp: EmbeddedDerpConfig,
+    pub derp: Option<DerpConfig>,
     pub dns: Option<DnsConfigSpec>,
     pub ephemeral_node_inactivity_timeout: Duration,
 }
@@ -124,7 +127,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(status) = embedded_derp_runtime.sidecar_status() {
         tracing::info!(?status, "embedded DERP sidecar ready");
     }
-    let derp_map = derp_map_from_embedded_config(embedded_derp_runtime.config());
+    let derp_map = derp_map_from_runtime_config(cfg.derp.as_ref(), embedded_derp_runtime.config())
+        .await
+        .context("load DERP runtime config")?;
     let (dns_store, dns_extra_records_path) =
         dns_store_from_config(cfg.dns.clone()).context("load DNS runtime config")?;
     let runtime = build_persistent_wire_runtime_with_dns(
@@ -351,8 +356,8 @@ fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
         region_id: cfg.region_id,
         host_name: cfg.host_name.clone(),
         cert_name: String::new(),
-        ipv4: String::new(),
-        ipv6: String::new(),
+        ipv4: cfg.ipv4.clone(),
+        ipv6: cfg.ipv6.clone(),
         derp_port: if cfg.derp_port == 443 {
             0
         } else {
@@ -379,6 +384,36 @@ fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
         home_params: None,
         regions: HashMap::from([(cfg.region_id, region)]),
         omit_default_regions: cfg.omit_default_regions,
+    }
+}
+
+async fn derp_map_from_runtime_config(
+    upstream: Option<&DerpConfig>,
+    embedded: &EmbeddedDerpConfig,
+) -> Result<DerpMap> {
+    let mut map = if let Some(upstream) = upstream {
+        crate::derp_config::load_derp_map(upstream).await?
+    } else {
+        DerpMap::default()
+    };
+
+    let add_embedded_region = upstream
+        .filter(|derp| derp.server.enabled)
+        .is_none_or(|derp| derp.server.automatically_add_embedded_derp_region);
+    if embedded.enabled && add_embedded_region {
+        merge_derp_maps(&mut map, derp_map_from_embedded_config(embedded));
+    }
+
+    Ok(map)
+}
+
+fn merge_derp_maps(dest: &mut DerpMap, source: DerpMap) {
+    if source.home_params.is_some() {
+        dest.home_params = source.home_params;
+    }
+    dest.regions.extend(source.regions);
+    if source.omit_default_regions {
+        dest.omit_default_regions = true;
     }
 }
 
@@ -1048,6 +1083,8 @@ mod tests {
             region_name: "Test DERP".into(),
             omit_default_regions: true,
             insecure_for_tests: true,
+            ipv4: "198.51.100.1".into(),
+            ipv6: "2001:db8::1".into(),
             ..EmbeddedDerpConfig::default()
         };
 
@@ -1063,6 +1100,8 @@ mod tests {
         assert_eq!(node.stun_port, 3478);
         assert!(node.stun_only);
         assert!(node.insecure_for_tests);
+        assert_eq!(node.ipv4, "198.51.100.1");
+        assert_eq!(node.ipv6, "2001:db8::1");
     }
 
     #[test]
@@ -1085,6 +1124,90 @@ mod tests {
         let node = &map.regions.get(&900).unwrap().nodes[0];
 
         assert_eq!(node.stun_port, -1);
+    }
+
+    #[tokio::test]
+    async fn runtime_derp_config_merges_static_paths_and_embedded_region() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br"
+regions:
+  901:
+    regionid: 901
+    regioncode: static
+    regionname: Static DERP
+    nodes:
+      - name: 901a
+        regionid: 901
+        hostname: static.example.com
+",
+        )
+        .unwrap();
+        let derp = DerpConfig {
+            urls: Vec::new(),
+            paths: vec![file.path().to_path_buf()],
+            ..DerpConfig::default()
+        };
+        let embedded = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "embedded.example.com".into(),
+            region_id: 900,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let map = derp_map_from_runtime_config(Some(&derp), &embedded)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            map.regions
+                .get(&901)
+                .unwrap()
+                .nodes
+                .first()
+                .unwrap()
+                .host_name,
+            "static.example.com"
+        );
+        assert_eq!(
+            map.regions
+                .get(&900)
+                .unwrap()
+                .nodes
+                .first()
+                .unwrap()
+                .host_name,
+            "embedded.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_derp_config_rejects_disable_embedded_region_without_paths() {
+        let derp = DerpConfig {
+            server: crate::derp_config::UpstreamDerpServerConfig {
+                enabled: true,
+                automatically_add_embedded_derp_region: false,
+                ..Default::default()
+            },
+            urls: Vec::new(),
+            ..DerpConfig::default()
+        };
+        let embedded = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "embedded.example.com".into(),
+            region_id: 900,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let err = derp_map_from_runtime_config(Some(&derp), &embedded)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("requires at least one derp.paths entry"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -1508,6 +1631,7 @@ mod tests {
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
+            derp: None,
             dns: None,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
@@ -1575,6 +1699,7 @@ mod tests {
             grpc_allow_insecure: false,
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
+            derp: None,
             dns: None,
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })

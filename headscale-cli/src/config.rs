@@ -7,6 +7,8 @@ use headscale_api::dns::DnsConfigSpec;
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+use crate::derp_config::DerpConfig;
+
 const DEFAULT_CONFIG_FILENAMES: &[&str] =
     &["config.yaml", "config.yml", "config.json", "config.toml"];
 
@@ -23,6 +25,7 @@ pub(crate) struct CliConfig {
     pub(crate) listen_addr: Option<String>,
     /// Upstream top-level `metrics_listen_addr`.
     #[serde(default, skip_serializing)]
+    #[allow(clippy::option_option)]
     pub(crate) metrics_listen_addr: Option<Option<String>>,
     /// Upstream top-level `grpc_listen_addr`.
     #[serde(default, skip_serializing)]
@@ -53,6 +56,9 @@ pub(crate) struct CliConfig {
     /// Upstream top-level `database` block.
     #[serde(default, skip_serializing)]
     pub(crate) database: Option<UpstreamDatabaseConfig>,
+    /// Upstream top-level `derp` block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) derp: Option<DerpConfig>,
     /// Upstream top-level TLS/ACME fields used by config validation.
     #[serde(default, skip_serializing)]
     pub(crate) tls_letsencrypt_hostname: Option<String>,
@@ -354,7 +360,8 @@ impl CliConfig {
             || self
                 .database
                 .as_ref()
-                .is_some_and(|database| database.sqlite_path().is_some());
+                .is_some_and(|database| database.sqlite_path().is_some())
+            || self.derp.as_ref().is_some_and(|derp| derp.server.enabled);
 
         if !has_server_alias {
             return;
@@ -368,7 +375,7 @@ impl CliConfig {
             server.listen = listen_addr;
         }
         if let Some(metrics_listen_addr) = &self.metrics_listen_addr {
-            server.metrics_listen_addr = metrics_listen_addr.clone();
+            server.metrics_listen_addr.clone_from(metrics_listen_addr);
         }
         if let Some(grpc_listen_addr) = non_empty_clone(self.grpc_listen_addr.as_ref()) {
             server.grpc_listen_addr = grpc_listen_addr;
@@ -420,6 +427,37 @@ impl CliConfig {
             .and_then(UpstreamDatabaseConfig::sqlite_path)
         {
             server.db_path = sqlite_path;
+        }
+        if let Some(derp) = &self.derp
+            && derp.server.enabled
+            && embedded_derp_config_is_default(&server.embedded_derp)
+        {
+            server.embedded_derp.enabled = true;
+            server.embedded_derp.region_id = derp.server.region_id;
+            server
+                .embedded_derp
+                .region_code
+                .clone_from(&derp.server.region_code);
+            server
+                .embedded_derp
+                .region_name
+                .clone_from(&derp.server.region_name);
+            server.embedded_derp.stun_addr = derp.server.stun_listen_addr;
+            server.embedded_derp.stun_only = true;
+            server.embedded_derp.verify_clients = derp.server.verify_clients;
+            server
+                .embedded_derp
+                .derper_config_path
+                .clone_from(&derp.server.private_key_path);
+            server.embedded_derp.ipv4 = derp.server.ipv4.clone().unwrap_or_default();
+            server.embedded_derp.ipv6 = derp.server.ipv6.clone().unwrap_or_default();
+            let (host, port) = server
+                .server_url
+                .as_deref()
+                .and_then(host_port_from_url)
+                .unwrap_or_default();
+            server.embedded_derp.host_name = host;
+            server.embedded_derp.derp_port = port;
         }
 
         self.server = Some(server);
@@ -476,6 +514,10 @@ impl CliConfig {
 
         if let Some(dns) = &self.dns {
             dns.validate().context("invalid DNS configuration")?;
+        }
+        if let Some(derp) = &self.derp {
+            crate::derp_config::validate_static_derp_config(derp)
+                .context("invalid static DERP configuration")?;
         }
 
         if server.embedded_derp.enabled {
@@ -585,6 +627,40 @@ fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf()
+}
+
+fn host_port_from_url(url: &str) -> Option<(String, u16)> {
+    let default_port = if url.starts_with("https://") {
+        443
+    } else if url.starts_with("http://") {
+        80
+    } else {
+        return None;
+    };
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .trim();
+    let (host, port) = if let Some(bracketed) = host.strip_prefix('[') {
+        let (addr, rest) = bracketed.split_once(']')?;
+        let port = rest
+            .strip_prefix(':')
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(default_port);
+        (addr, port)
+    } else {
+        let (host, port) = host
+            .split_once(':')
+            .map_or((host, default_port), |(host, port)| {
+                (host, port.parse().unwrap_or(default_port))
+            });
+        (host, port)
+    };
+    (!host.is_empty()).then(|| (host.to_string(), port))
 }
 
 #[derive(Clone, Copy)]
@@ -741,7 +817,9 @@ where
     parse_u32_repr(value).map(Some).map_err(de::Error::custom)
 }
 
-fn deserialize_duration_secs_from_int_or_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+pub(crate) fn deserialize_duration_secs_from_int_or_string<'de, D>(
+    deserializer: D,
+) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1445,6 +1523,164 @@ verify_clients = true
             Some("https://headscale.example/verify")
         );
         assert!(embedded.verify_clients);
+    }
+
+    #[test]
+    fn loads_upstream_v028_top_level_derp_yaml() {
+        let source = r#"
+server_url: "https://headscale.example"
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: headscale
+    region_name: Headscale Embedded DERP
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: 198.51.100.1
+    ipv6: 2001:db8::1
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths:
+    - /etc/headscale/derp.yaml
+  auto_update_enabled: true
+  update_frequency: 3h
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let derp = config.derp.as_ref().unwrap();
+
+        assert!(derp.server.enabled);
+        assert_eq!(derp.server.region_id, 999);
+        assert_eq!(derp.server.region_code, "headscale");
+        assert_eq!(derp.server.region_name, "Headscale Embedded DERP");
+        assert!(derp.server.verify_clients);
+        assert_eq!(
+            derp.server.stun_listen_addr,
+            Some("0.0.0.0:3478".parse().unwrap())
+        );
+        assert_eq!(
+            derp.server.private_key_path,
+            PathBuf::from("/var/lib/headscale/derp_server_private.key")
+        );
+        assert!(derp.server.automatically_add_embedded_derp_region);
+        assert_eq!(derp.server.ipv4.as_deref(), Some("198.51.100.1"));
+        assert_eq!(derp.server.ipv6.as_deref(), Some("2001:db8::1"));
+        assert_eq!(
+            derp.urls,
+            ["https://controlplane.tailscale.com/derpmap/default"]
+        );
+        assert_eq!(derp.paths, [PathBuf::from("/etc/headscale/derp.yaml")]);
+        assert!(derp.auto_update_enabled);
+        assert_eq!(derp.update_frequency, 10_800);
+
+        let embedded = config.server.unwrap().embedded_derp;
+        assert!(embedded.enabled);
+        assert_eq!(embedded.region_id, 999);
+        assert_eq!(embedded.region_code, "headscale");
+        assert_eq!(embedded.region_name, "Headscale Embedded DERP");
+        assert_eq!(embedded.host_name, "headscale.example");
+        assert_eq!(embedded.stun_addr, Some("0.0.0.0:3478".parse().unwrap()));
+        assert!(embedded.stun_only);
+        assert!(embedded.verify_clients);
+        assert_eq!(
+            embedded.derper_config_path,
+            PathBuf::from("/var/lib/headscale/derp_server_private.key")
+        );
+        assert_eq!(embedded.ipv4, "198.51.100.1");
+        assert_eq!(embedded.ipv6, "2001:db8::1");
+    }
+
+    #[test]
+    fn upstream_derp_does_not_override_rust_embedded_derp_block() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[server.embedded_derp]
+enabled = true
+host_name = "rust-derp.example"
+region_id = 901
+region_code = "rust"
+region_name = "Rust DERP"
+stun_only = true
+
+[derp.server]
+enabled = true
+region_id = 999
+region_code = "headscale"
+region_name = "Headscale Embedded DERP"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert_eq!(embedded.host_name, "rust-derp.example");
+        assert_eq!(embedded.region_id, 901);
+        assert_eq!(embedded.region_code, "rust");
+        assert_eq!(embedded.region_name, "Rust DERP");
+        assert!(embedded.stun_only);
+    }
+
+    #[test]
+    fn upstream_derp_applies_when_server_block_has_no_rust_embedded_derp() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[server]
+listen = "127.0.0.1:8080"
+
+[derp.server]
+enabled = true
+region_id = 999
+region_code = "headscale"
+region_name = "Headscale Embedded DERP"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert!(embedded.enabled);
+        assert_eq!(embedded.host_name, "headscale.example");
+        assert_eq!(embedded.region_id, 999);
+        assert_eq!(embedded.region_code, "headscale");
+        assert!(embedded.stun_only);
+    }
+
+    #[test]
+    fn upstream_derp_derives_non_default_server_url_port() {
+        let source = r#"
+server_url = "https://headscale.example:8443"
+
+[derp.server]
+enabled = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let embedded = config.server.unwrap().embedded_derp;
+
+        assert_eq!(embedded.host_name, "headscale.example");
+        assert_eq!(embedded.derp_port, 8443);
+    }
+
+    #[test]
+    fn configtest_rejects_disabled_embedded_derp_injection_without_path_map() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[derp.server]
+enabled = true
+automatically_add_embedded_derp_region = false
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("requires at least one derp.paths entry"),
+            "{err:#}"
+        );
     }
 
     #[test]

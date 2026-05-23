@@ -16,6 +16,7 @@ use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod derp_config;
 mod mockoidc;
 mod node;
 mod server;
@@ -343,6 +344,7 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                     }),
                 embedded_derp: server_config
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
+                derp: config.as_ref().and_then(|c| c.derp.clone()),
                 dns: config.as_ref().and_then(|c| c.dns.clone()),
                 ephemeral_node_inactivity_timeout: Duration::from_secs(
                     server_config.map_or(defaults.ephemeral_node_inactivity_timeout_secs, |s| {

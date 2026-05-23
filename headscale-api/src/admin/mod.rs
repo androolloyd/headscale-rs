@@ -43,6 +43,7 @@
 //!     # knock: tailscale_wire::KnockConfig::disabled(),
 //!     # dns: Arc::new(Default::default()),
 //!     # public_control_url: Some("https://headscale.example".into()),
+//!     # runtime_config: Arc::new(tailscale_wire::RuntimeConfigSnapshot::default()),
 //!     # registration_cache: Arc::new(tailscale_wire::RegistrationCache::new()),
 //!     # pings: Arc::new(tailscale_wire::PingTracker::new()),
 //! };

@@ -2479,6 +2479,7 @@ mod upstream_tests {
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: Some("https://headscale.example".into()),
+            runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: registration_cache.clone(),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
         };

@@ -337,6 +337,24 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 grpc_listen_addr: server_config
                     .map_or(defaults.grpc_listen_addr, |s| s.grpc_listen_addr.clone()),
                 grpc_allow_insecure: server_config.is_some_and(|s| s.grpc_allow_insecure),
+                tls: server::TlsRuntimeConfig {
+                    acme_url: config.as_ref().and_then(|c| c.acme_url.clone()),
+                    acme_email: config.as_ref().and_then(|c| c.acme_email.clone()),
+                    letsencrypt_hostname: config
+                        .as_ref()
+                        .and_then(|c| c.tls_letsencrypt_hostname.clone()),
+                    letsencrypt_cache_dir: config
+                        .as_ref()
+                        .and_then(|c| c.tls_letsencrypt_cache_dir.clone()),
+                    letsencrypt_listen: config
+                        .as_ref()
+                        .and_then(|c| c.tls_letsencrypt_listen.clone()),
+                    letsencrypt_challenge_type: config
+                        .as_ref()
+                        .and_then(|c| c.tls_letsencrypt_challenge_type.clone()),
+                    cert_path: config.as_ref().and_then(|c| c.tls_cert_path.clone()),
+                    key_path: config.as_ref().and_then(|c| c.tls_key_path.clone()),
+                },
                 oidc: config
                     .as_ref()
                     .map_or_else(headscale_core::config::OidcConfig::default, |c| {

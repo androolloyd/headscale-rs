@@ -65,6 +65,32 @@ pub struct TlsMaterial {
     pub server_config: Arc<ServerConfig>,
 }
 
+/// Source for public-control TLS material.
+#[derive(Clone, Debug)]
+pub enum TlsMaterialSource {
+    /// Interop harness mode: persist a generated self-signed pair under
+    /// `state_dir`.
+    SelfSigned { state_dir: PathBuf, sans: SanConfig },
+    /// Upstream manual TLS mode: load operator-provided PEM files from
+    /// `tls_cert_path` and `tls_key_path`.
+    Files {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+}
+
+impl TlsMaterialSource {
+    pub fn load(&self) -> Result<TlsMaterial, WireError> {
+        match self {
+            Self::SelfSigned { state_dir, sans } => load_or_generate(state_dir, sans),
+            Self::Files {
+                cert_path,
+                key_path,
+            } => load_from_files(cert_path, key_path),
+        }
+    }
+}
+
 /// Subject Alternative Name set for the minted cert.
 ///
 /// All entries are accepted by `tailscale up`'s SNI verification: the
@@ -126,6 +152,25 @@ pub fn load_or_generate(
         _ => mint_and_persist(&cert_path, &key_path, sans)?,
     };
 
+    let server_config = build_server_config(&cert_pem, &key_pem)?;
+    Ok(TlsMaterial {
+        cert_pem,
+        key_pem,
+        cert_path,
+        key_path,
+        server_config: Arc::new(server_config),
+    })
+}
+
+/// Load manual PEM material from configured files.
+pub fn load_from_files(
+    cert_path: impl AsRef<Path>,
+    key_path: impl AsRef<Path>,
+) -> Result<TlsMaterial, WireError> {
+    let cert_path = cert_path.as_ref().to_path_buf();
+    let key_path = key_path.as_ref().to_path_buf();
+    let cert_pem = read_pem(&cert_path)?;
+    let key_pem = read_pem(&key_path)?;
     let server_config = build_server_config(&cert_pem, &key_pem)?;
     Ok(TlsMaterial {
         cert_pem,
@@ -285,5 +330,19 @@ mod tests {
             m.key_pem.contains("BEGIN PRIVATE KEY") || m.key_pem.contains("BEGIN EC PRIVATE KEY"),
             "expected PEM-encoded private key"
         );
+    }
+
+    #[test]
+    fn load_from_files_reuses_manual_pem_paths() {
+        let dir = tempdir().unwrap();
+        let sans = SanConfig::with_hostname("manual.example");
+        let generated = load_or_generate(dir.path(), &sans).unwrap();
+
+        let loaded = load_from_files(&generated.cert_path, &generated.key_path).unwrap();
+
+        assert_eq!(loaded.cert_pem, generated.cert_pem);
+        assert_eq!(loaded.key_pem, generated.key_pem);
+        assert_eq!(loaded.cert_path, generated.cert_path);
+        assert_eq!(loaded.key_path, generated.key_path);
     }
 }

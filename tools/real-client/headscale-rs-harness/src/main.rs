@@ -316,6 +316,7 @@ async fn main() -> Result<()> {
         knock: KnockConfig::disabled(),
         dns,
         public_control_url: Some(public_url.clone()),
+        runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: registration_cache.clone(),
         pings: Arc::new(PingTracker::new()),
     };
@@ -327,11 +328,17 @@ async fn main() -> Result<()> {
         registration_cache,
     };
     let extra_routes = harness_router(app_state);
+    let state_dir = args.state_dir;
+    let sans = headscale_api::tailscale_wire::tls::SanConfig::with_hostname(args.hostname);
     let cfg = serve::ServeConfig {
         http_addr: args.http,
         https_addr: (!args.no_https).then_some(args.https),
-        state_dir: args.state_dir,
-        sans: headscale_api::tailscale_wire::tls::SanConfig::with_hostname(args.hostname),
+        state_dir: state_dir.clone(),
+        sans: sans.clone(),
+        tls_source: headscale_api::tailscale_wire::tls::TlsMaterialSource::SelfSigned {
+            state_dir,
+            sans,
+        },
         oidc: None,
         metrics_addr: None,
     };

@@ -31,10 +31,11 @@ use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls;
-use headscale_api::tailscale_wire::tls::SanConfig;
+use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    PingTracker, RegistrationCache, ServerNoiseKey, WireState, serve, spawn_node_expiry_waker,
+    PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey, WireState, serve,
+    spawn_node_expiry_waker,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -60,11 +61,62 @@ pub(crate) struct RunServerConfig {
     pub unix_socket_permission: u32,
     pub grpc_listen_addr: String,
     pub grpc_allow_insecure: bool,
+    pub tls: TlsRuntimeConfig,
     pub oidc: OidcConfig,
     pub embedded_derp: EmbeddedDerpConfig,
     pub derp: Option<DerpConfig>,
     pub dns: Option<DnsConfigSpec>,
     pub ephemeral_node_inactivity_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TlsRuntimeConfig {
+    pub acme_url: Option<String>,
+    pub acme_email: Option<String>,
+    pub letsencrypt_hostname: Option<String>,
+    pub letsencrypt_cache_dir: Option<PathBuf>,
+    pub letsencrypt_listen: Option<String>,
+    pub letsencrypt_challenge_type: Option<String>,
+    pub cert_path: Option<PathBuf>,
+    pub key_path: Option<PathBuf>,
+}
+
+impl TlsRuntimeConfig {
+    fn letsencrypt_enabled(&self) -> bool {
+        non_empty_str(self.letsencrypt_hostname.as_deref()).is_some()
+    }
+
+    fn manual_paths(&self) -> Option<(&Path, &Path)> {
+        let cert_path = self
+            .cert_path
+            .as_deref()
+            .filter(|path| !path.as_os_str().is_empty())?;
+        let key_path = self
+            .key_path
+            .as_deref()
+            .filter(|path| !path.as_os_str().is_empty())?;
+        Some((cert_path, key_path))
+    }
+
+    fn has_manual_tls(&self) -> bool {
+        self.manual_paths().is_some()
+    }
+
+    fn cache_dir_string(&self) -> String {
+        self.letsencrypt_cache_dir
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map_or_else(
+                || "/var/www/.cache".to_string(),
+                |path| path.display().to_string(),
+            )
+    }
+
+    fn challenge_type_string(&self) -> String {
+        non_empty_str(self.letsencrypt_challenge_type.as_deref())
+            .unwrap_or("HTTP-01")
+            .to_string()
+    }
 }
 
 /// Run the control plane server.
@@ -132,6 +184,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .context("load DERP runtime config")?;
     let (dns_store, dns_extra_records_path) =
         dns_store_from_config(cfg.dns.clone()).context("load DNS runtime config")?;
+    let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
     let runtime = build_persistent_wire_runtime_with_dns(
         db.pool(),
         &cfg.state_dir,
@@ -142,6 +195,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         oidc,
         derp_map,
         dns_store.clone(),
+        runtime_config,
     )
     .await?;
     let ephemeral_gc = runtime.state.machines.configure_ephemeral_gc(
@@ -175,18 +229,20 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(|| hostname_from_server_url(server_url));
     let sans = SanConfig::with_hostname(tls_hostname);
+    let tls_source = tls_material_source(&cfg, &sans)?;
     let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
         http_addr,
         https_addr,
         state_dir: cfg.state_dir.clone(),
         sans: sans.clone(),
+        tls_source: tls_source.clone(),
         oidc: runtime.oidc,
         metrics_addr,
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
-    let remote_grpc_security = remote_grpc_security(&cfg, &sans)?;
+    let remote_grpc_security = remote_grpc_security(&cfg, &tls_source)?;
     let remote_grpc_listener = match remote_grpc_security {
         Some(security) => Some((
             bind_tcp_grpc_listener(grpc_addr).await?,
@@ -256,6 +312,7 @@ async fn build_persistent_wire_runtime(
         oidc,
         derp_map,
         Arc::new(DnsStore::new()),
+        Arc::new(RuntimeConfigSnapshot::default()),
     )
     .await
 }
@@ -270,6 +327,7 @@ async fn build_persistent_wire_runtime_with_dns(
     oidc: Option<OidcAuthRuntime>,
     derp_map: DerpMap,
     dns: Arc<DnsStore>,
+    runtime_config: Arc<RuntimeConfigSnapshot>,
 ) -> Result<PersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
@@ -334,6 +392,7 @@ async fn build_persistent_wire_runtime_with_dns(
         knock: KnockConfig::disabled(),
         dns,
         public_control_url: Some(server_url.to_string()),
+        runtime_config,
         registration_cache,
         pings: Arc::new(PingTracker::new()),
     };
@@ -342,6 +401,221 @@ async fn build_persistent_wire_runtime_with_dns(
         state,
         oidc,
         admin_service,
+    })
+}
+
+fn runtime_config_snapshot(
+    cfg: &RunServerConfig,
+    derp_map: &DerpMap,
+    dns: &DnsStore,
+) -> RuntimeConfigSnapshot {
+    let mut snapshot = RuntimeConfigSnapshot {
+        server_url: cfg.server_url.clone().unwrap_or_default(),
+        addr: cfg.listen.clone(),
+        metrics_addr: cfg.metrics_listen_addr.clone().unwrap_or_default(),
+        grpc_addr: cfg.grpc_listen_addr.clone(),
+        grpc_allow_insecure: cfg.grpc_allow_insecure,
+        ephemeral_node_inactivity_timeout: duration_nanos(cfg.ephemeral_node_inactivity_timeout),
+        prefix_v4: non_empty_string(&cfg.mesh_cidr),
+        prefix_v6: cfg
+            .mesh_cidr_v6
+            .as_ref()
+            .and_then(|prefix| non_empty_string(prefix)),
+        ip_allocation: cfg.ip_allocation.clone(),
+        noise_private_key_path: cfg
+            .state_dir
+            .join(headscale_api::tailscale_wire::noise::NOISE_STATIC_KEY_FILENAME)
+            .display()
+            .to_string(),
+        unix_socket: cfg.unix_socket.display().to_string(),
+        unix_socket_permission: cfg.unix_socket_permission,
+        ..RuntimeConfigSnapshot::default()
+    };
+
+    snapshot.database.database_type = "sqlite3".to_string();
+    snapshot.database.sqlite.path = cfg.db_path.display().to_string();
+
+    if let Some(derp) = &cfg.derp {
+        snapshot.derp.server_enabled = derp.server.enabled;
+        snapshot.derp.automatically_add_embedded_derp_region =
+            derp.server.automatically_add_embedded_derp_region;
+        snapshot.derp.server_region_id = i32::from(derp.server.region_id);
+        snapshot
+            .derp
+            .server_region_code
+            .clone_from(&derp.server.region_code);
+        snapshot
+            .derp
+            .server_region_name
+            .clone_from(&derp.server.region_name);
+        snapshot.derp.server_private_key_path = derp.server.private_key_path.display().to_string();
+        snapshot.derp.server_verify_clients = derp.server.verify_clients;
+        snapshot.derp.stun_addr = derp
+            .server
+            .stun_listen_addr
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+        snapshot.derp.urls.clone_from(&derp.urls);
+        snapshot.derp.paths = derp
+            .paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        snapshot.derp.auto_update = derp.auto_update_enabled;
+        snapshot.derp.update_frequency = duration_nanos(Duration::from_secs(derp.update_frequency));
+        snapshot.derp.ipv4 = derp.server.ipv4.clone().unwrap_or_default();
+        snapshot.derp.ipv6 = derp.server.ipv6.clone().unwrap_or_default();
+    } else if cfg.embedded_derp.enabled {
+        snapshot.derp.server_enabled = true;
+        snapshot.derp.server_region_id = i32::from(cfg.embedded_derp.region_id);
+        snapshot
+            .derp
+            .server_region_code
+            .clone_from(&cfg.embedded_derp.region_code);
+        snapshot
+            .derp
+            .server_region_name
+            .clone_from(&cfg.embedded_derp.region_name);
+        snapshot.derp.server_private_key_path =
+            cfg.embedded_derp.derper_config_path.display().to_string();
+        snapshot.derp.server_verify_clients = cfg.embedded_derp.verify_clients;
+        snapshot.derp.stun_addr = cfg
+            .embedded_derp
+            .stun_addr
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+        snapshot.derp.ipv4.clone_from(&cfg.embedded_derp.ipv4);
+        snapshot.derp.ipv6.clone_from(&cfg.embedded_derp.ipv6);
+    }
+    snapshot.derp.derp_map = serde_json::to_value(derp_map).unwrap_or(serde_json::Value::Null);
+
+    snapshot.tls.cert_path = cfg
+        .tls
+        .cert_path
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    snapshot.tls.key_path = cfg
+        .tls
+        .key_path
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    snapshot.tls.lets_encrypt.hostname = non_empty_str(cfg.tls.letsencrypt_hostname.as_deref())
+        .unwrap_or("")
+        .to_string();
+    snapshot.tls.lets_encrypt.cache_dir = cfg.tls.cache_dir_string();
+    snapshot.tls.lets_encrypt.listen = non_empty_str(cfg.tls.letsencrypt_listen.as_deref())
+        .unwrap_or("")
+        .to_string();
+    snapshot.tls.lets_encrypt.challenge_type = cfg.tls.challenge_type_string();
+    snapshot.acme_url = non_empty_str(cfg.tls.acme_url.as_deref())
+        .unwrap_or("")
+        .to_string();
+    snapshot.acme_email = non_empty_str(cfg.tls.acme_email.as_deref())
+        .unwrap_or("")
+        .to_string();
+
+    let dns_spec = dns.spec();
+    snapshot.base_domain.clone_from(&dns_spec.base_domain);
+    snapshot.dns_config.magic_dns = dns_spec.magic_dns;
+    snapshot
+        .dns_config
+        .base_domain
+        .clone_from(&dns_spec.base_domain);
+    snapshot
+        .dns_config
+        .nameservers
+        .global
+        .clone_from(&dns_spec.nameservers);
+    snapshot.dns_config.nameservers.split = dns_spec
+        .restricted_nameservers
+        .iter()
+        .map(|(suffix, resolvers)| (suffix.clone(), resolvers.clone()))
+        .collect();
+    snapshot
+        .dns_config
+        .search_domains
+        .clone_from(&dns_spec.search_domains);
+    snapshot.dns_config.extra_records = dns_spec
+        .extra_records
+        .iter()
+        .filter_map(|record| serde_json::to_value(record).ok())
+        .collect();
+    snapshot.dns_config.extra_records_path = dns_spec
+        .extra_records_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    snapshot.tailcfg_dns_config =
+        serde_json::to_value(dns.build(&[])).unwrap_or(serde_json::Value::Null);
+
+    snapshot.oidc.only_start_if_oidc_is_available = cfg.oidc.only_start_if_oidc_is_available;
+    snapshot.oidc.issuer.clone_from(&cfg.oidc.issuer);
+    snapshot.oidc.client_id.clone_from(&cfg.oidc.client_id);
+    snapshot
+        .oidc
+        .client_secret
+        .clone_from(&cfg.oidc.client_secret);
+    snapshot.oidc.scope.clone_from(&cfg.oidc.scope);
+    snapshot
+        .oidc
+        .extra_params
+        .clone_from(&cfg.oidc.extra_params);
+    snapshot
+        .oidc
+        .allowed_domains
+        .clone_from(&cfg.oidc.allowed_domains);
+    snapshot
+        .oidc
+        .allowed_users
+        .clone_from(&cfg.oidc.allowed_users);
+    snapshot
+        .oidc
+        .allowed_groups
+        .clone_from(&cfg.oidc.allowed_groups);
+    snapshot.oidc.email_verified_required = cfg.oidc.email_verified_required;
+    snapshot.oidc.expiry = duration_nanos(cfg.oidc.expiry);
+    snapshot.oidc.use_expiry_from_token = cfg.oidc.use_expiry_from_token;
+    snapshot.oidc.pkce.enabled = cfg.oidc.pkce.enabled;
+    snapshot.oidc.pkce.method.clone_from(&cfg.oidc.pkce.method);
+
+    snapshot
+}
+
+fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMaterialSource> {
+    if cfg.tls.letsencrypt_enabled() {
+        anyhow::bail!(
+            "tls_letsencrypt_hostname/ACME TLS is parsed but not implemented in headscale-rs yet"
+        );
+    }
+
+    let has_cert = cfg
+        .tls
+        .cert_path
+        .as_ref()
+        .is_some_and(|path| !path.as_os_str().is_empty());
+    let has_key = cfg
+        .tls
+        .key_path
+        .as_ref()
+        .is_some_and(|path| !path.as_os_str().is_empty());
+    if has_cert != has_key {
+        anyhow::bail!("tls_cert_path and tls_key_path must both be set");
+    }
+
+    if let Some((cert_path, key_path)) = cfg.tls.manual_paths() {
+        return Ok(TlsMaterialSource::Files {
+            cert_path: cert_path.to_path_buf(),
+            key_path: key_path.to_path_buf(),
+        });
+    }
+
+    Ok(TlsMaterialSource::SelfSigned {
+        state_dir: cfg.state_dir.clone(),
+        sans: sans.clone(),
     })
 }
 
@@ -464,7 +738,7 @@ impl AsyncWrite for ConnectedTlsStream {
 }
 
 fn remote_grpc_status(cfg: &RunServerConfig) -> String {
-    if cfg.https_listen.is_some() {
+    if cfg.tls.has_manual_tls() || cfg.tls.letsencrypt_enabled() || cfg.https_listen.is_some() {
         format!("{} (TLS)", cfg.grpc_listen_addr)
     } else if cfg.grpc_allow_insecure {
         format!("{} (insecure)", cfg.grpc_listen_addr)
@@ -475,10 +749,11 @@ fn remote_grpc_status(cfg: &RunServerConfig) -> String {
 
 fn remote_grpc_security(
     cfg: &RunServerConfig,
-    sans: &SanConfig,
+    tls_source: &TlsMaterialSource,
 ) -> Result<Option<RemoteGrpcSecurity>> {
-    if cfg.https_listen.is_some() {
-        let material = tls::load_or_generate(&cfg.state_dir, sans)
+    if cfg.tls.has_manual_tls() || cfg.https_listen.is_some() {
+        let material = tls_source
+            .load()
             .context("load TLS material for remote gRPC")?;
         let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
             .context("build remote gRPC TLS config")?;
@@ -661,6 +936,18 @@ fn optional_socket_addr(value: Option<&str>, field: &str) -> Result<Option<Socke
         .filter(|value| !value.is_empty())
         .map(|value| parse_socket_addr(value, field))
         .transpose()
+}
+
+fn non_empty_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    non_empty_str(Some(value)).map(str::to_string)
+}
+
+fn duration_nanos(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
 }
 
 fn flatten_listener_result(
@@ -1348,6 +1635,7 @@ regions:
             None,
             DerpMap::default(),
             dns_store,
+            Arc::new(RuntimeConfigSnapshot::default()),
         )
         .await
         .unwrap();
@@ -1629,6 +1917,7 @@ regions:
             unix_socket_permission: 0o700,
             grpc_listen_addr: ":50443".into(),
             grpc_allow_insecure: false,
+            tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
@@ -1636,19 +1925,73 @@ regions:
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
+        let tls_source = tls_material_source(&cfg, &sans).unwrap();
 
-        assert!(remote_grpc_security(&cfg, &sans).unwrap().is_none());
+        assert!(remote_grpc_security(&cfg, &tls_source).unwrap().is_none());
         cfg.grpc_allow_insecure = true;
         assert!(matches!(
-            remote_grpc_security(&cfg, &sans).unwrap(),
+            remote_grpc_security(&cfg, &tls_source).unwrap(),
             Some(RemoteGrpcSecurity::Insecure)
         ));
         cfg.grpc_allow_insecure = false;
         cfg.https_listen = Some("127.0.0.1:0".into());
+        let tls_source = tls_material_source(&cfg, &sans).unwrap();
         assert!(matches!(
-            remote_grpc_security(&cfg, &sans).unwrap(),
+            remote_grpc_security(&cfg, &tls_source).unwrap(),
             Some(RemoteGrpcSecurity::Tls(_))
         ));
+    }
+
+    #[test]
+    fn remote_grpc_security_uses_manual_tls_without_https_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let material =
+            tls::load_or_generate(dir.path().join("manual"), &SanConfig::with_hostname("test"))
+                .unwrap();
+        let cfg = RunServerConfig {
+            listen: "127.0.0.1:0".into(),
+            db_path: dir.path().join("db.sqlite"),
+            mesh_cidr: "100.64.0.0/10".into(),
+            mesh_cidr_v6: None,
+            ip_allocation: "sequential".into(),
+            server_url: Some("https://headscale.example".into()),
+            state_dir: dir.path().join("state"),
+            https_listen: None,
+            metrics_listen_addr: Some("127.0.0.1:9090".into()),
+            tls_hostname: None,
+            unix_socket: dir.path().join("state/headscale.sock"),
+            unix_socket_permission: 0o700,
+            grpc_listen_addr: ":50443".into(),
+            grpc_allow_insecure: false,
+            tls: TlsRuntimeConfig {
+                cert_path: Some(material.cert_path.clone()),
+                key_path: Some(material.key_path.clone()),
+                ..TlsRuntimeConfig::default()
+            },
+            oidc: OidcConfig::default(),
+            embedded_derp: EmbeddedDerpConfig::default(),
+            derp: None,
+            dns: None,
+            ephemeral_node_inactivity_timeout: Duration::from_secs(120),
+        };
+        let sans = SanConfig::with_hostname("headscale.example");
+        let tls_source = tls_material_source(&cfg, &sans).unwrap();
+
+        assert_eq!(remote_grpc_status(&cfg), ":50443 (TLS)");
+        assert!(matches!(
+            remote_grpc_security(&cfg, &tls_source).unwrap(),
+            Some(RemoteGrpcSecurity::Tls(_))
+        ));
+        match tls_source {
+            TlsMaterialSource::Files {
+                cert_path,
+                key_path,
+            } => {
+                assert_eq!(cert_path, material.cert_path);
+                assert_eq!(key_path, material.key_path);
+            }
+            TlsMaterialSource::SelfSigned { .. } => panic!("expected manual TLS source"),
+        }
     }
 
     #[test]
@@ -1679,6 +2022,82 @@ regions:
         );
     }
 
+    #[test]
+    fn runtime_config_snapshot_reflects_server_tls_and_dns_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let dns = Arc::new(
+            DnsStore::try_from_spec(DnsConfigSpec {
+                magic_dns: true,
+                base_domain: "tail.example".to_string(),
+                nameservers: vec!["1.1.1.1".to_string()],
+                ..DnsConfigSpec::default()
+            })
+            .unwrap(),
+        );
+        let cfg = RunServerConfig {
+            listen: "0.0.0.0:443".into(),
+            db_path: dir.path().join("db.sqlite"),
+            mesh_cidr: "100.100.0.0/16".into(),
+            mesh_cidr_v6: Some("fd7a:115c:a1e0::/48".into()),
+            ip_allocation: "random".into(),
+            server_url: Some("https://headscale.example".into()),
+            state_dir: dir.path().join("state"),
+            https_listen: None,
+            metrics_listen_addr: Some("127.0.0.1:9090".into()),
+            tls_hostname: None,
+            unix_socket: dir.path().join("headscale.sock"),
+            unix_socket_permission: 0o760,
+            grpc_listen_addr: "127.0.0.1:50443".into(),
+            grpc_allow_insecure: true,
+            tls: TlsRuntimeConfig {
+                acme_url: Some("https://acme.example/directory".into()),
+                acme_email: Some("ops@example.com".into()),
+                letsencrypt_hostname: Some("headscale.example".into()),
+                letsencrypt_cache_dir: Some(dir.path().join("cache")),
+                letsencrypt_listen: Some(":http".into()),
+                letsencrypt_challenge_type: Some("TLS-ALPN-01".into()),
+                cert_path: Some(dir.path().join("tls.crt")),
+                key_path: Some(dir.path().join("tls.key")),
+            },
+            oidc: OidcConfig::default(),
+            embedded_derp: EmbeddedDerpConfig::default(),
+            derp: None,
+            dns: None,
+            ephemeral_node_inactivity_timeout: Duration::from_secs(180),
+        };
+
+        let snapshot = runtime_config_snapshot(&cfg, &DerpMap::default(), dns.as_ref());
+
+        assert_eq!(snapshot.server_url, "https://headscale.example");
+        assert_eq!(snapshot.addr, "0.0.0.0:443");
+        assert_eq!(snapshot.metrics_addr, "127.0.0.1:9090");
+        assert_eq!(snapshot.grpc_addr, "127.0.0.1:50443");
+        assert!(snapshot.grpc_allow_insecure);
+        assert_eq!(snapshot.prefix_v4.as_deref(), Some("100.100.0.0/16"));
+        assert_eq!(snapshot.prefix_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
+        assert_eq!(snapshot.ip_allocation, "random");
+        assert_eq!(
+            snapshot.tls.cert_path,
+            dir.path().join("tls.crt").display().to_string()
+        );
+        assert_eq!(
+            snapshot.tls.key_path,
+            dir.path().join("tls.key").display().to_string()
+        );
+        assert_eq!(snapshot.tls.lets_encrypt.hostname, "headscale.example");
+        assert_eq!(
+            snapshot.tls.lets_encrypt.cache_dir,
+            dir.path().join("cache").display().to_string()
+        );
+        assert_eq!(snapshot.tls.lets_encrypt.listen, ":http");
+        assert_eq!(snapshot.tls.lets_encrypt.challenge_type, "TLS-ALPN-01");
+        assert_eq!(snapshot.acme_url, "https://acme.example/directory");
+        assert_eq!(snapshot.acme_email, "ops@example.com");
+        assert!(snapshot.dns_config.magic_dns);
+        assert_eq!(snapshot.dns_config.base_domain, "tail.example");
+        assert_eq!(snapshot.unix_socket_permission, 0o760);
+    }
+
     #[tokio::test]
     async fn non_oidc_server_requires_public_server_url_before_binding() {
         let dir = tempfile::tempdir().unwrap();
@@ -1697,6 +2116,7 @@ regions:
             unix_socket_permission: 0o700,
             grpc_listen_addr: "127.0.0.1:0".into(),
             grpc_allow_insecure: false,
+            tls: TlsRuntimeConfig::default(),
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
             derp: None,
@@ -1819,6 +2239,7 @@ regions:
             None,
             DerpMap::default(),
             Arc::new(DnsStore::new()),
+            Arc::new(RuntimeConfigSnapshot::default()),
         )
         .await
         .unwrap();
@@ -1853,6 +2274,7 @@ regions:
             None,
             DerpMap::default(),
             Arc::new(DnsStore::new()),
+            Arc::new(RuntimeConfigSnapshot::default()),
         )
         .await
         .unwrap();

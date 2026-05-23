@@ -61,7 +61,15 @@ pub(crate) struct CliConfig {
     pub(crate) derp: Option<DerpConfig>,
     /// Upstream top-level TLS/ACME fields used by config validation.
     #[serde(default, skip_serializing)]
+    pub(crate) acme_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub(crate) acme_email: Option<String>,
+    #[serde(default, skip_serializing)]
     pub(crate) tls_letsencrypt_hostname: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_letsencrypt_cache_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    pub(crate) tls_letsencrypt_listen: Option<String>,
     #[serde(default, skip_serializing)]
     pub(crate) tls_cert_path: Option<PathBuf>,
     #[serde(default, skip_serializing)]
@@ -267,6 +275,9 @@ impl CliConfig {
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let mut config = Self::parse(&contents, ConfigFormat::from_path(path))?;
+        if let Some(parent) = path.parent() {
+            config.resolve_config_relative_paths(parent);
+        }
         config.normalize_upstream_aliases();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
@@ -463,6 +474,12 @@ impl CliConfig {
         self.server = Some(server);
     }
 
+    fn resolve_config_relative_paths(&mut self, config_dir: &Path) {
+        resolve_optional_path(config_dir, &mut self.tls_cert_path);
+        resolve_optional_path(config_dir, &mut self.tls_key_path);
+        resolve_optional_path(config_dir, &mut self.tls_letsencrypt_cache_dir);
+    }
+
     /// Save configuration to a file.
     #[allow(dead_code)]
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
@@ -620,6 +637,16 @@ fn default_config_dirs() -> Vec<PathBuf> {
 
 fn non_empty_clone(value: Option<&String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty()).cloned()
+}
+
+fn resolve_optional_path(config_dir: &Path, path: &mut Option<PathBuf>) {
+    let Some(value) = path else {
+        return;
+    };
+    if value.as_os_str().is_empty() || value.is_absolute() {
+        return;
+    }
+    *value = config_dir.join(&*value);
 }
 
 fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
@@ -1327,6 +1354,72 @@ tls_cert_path: "/etc/headscale/cert.pem"
         assert!(
             format!("{err:#}")
                 .contains("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path")
+        );
+    }
+
+    #[test]
+    fn loads_upstream_tls_acme_keys() {
+        let source = r#"
+server_url: "https://headscale.example"
+acme_url: "https://acme.example/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: "/var/lib/headscale/cache"
+tls_letsencrypt_listen: ":http"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        assert_eq!(
+            config.acme_url.as_deref(),
+            Some("https://acme.example/directory")
+        );
+        assert_eq!(config.acme_email.as_deref(), Some("ops@example.com"));
+        assert_eq!(
+            config.tls_letsencrypt_hostname.as_deref(),
+            Some("headscale.example")
+        );
+        assert_eq!(
+            config.tls_letsencrypt_cache_dir.as_deref(),
+            Some(Path::new("/var/lib/headscale/cache"))
+        );
+        assert_eq!(config.tls_letsencrypt_listen.as_deref(), Some(":http"));
+        assert_eq!(
+            config.tls_letsencrypt_challenge_type.as_deref(),
+            Some("TLS-ALPN-01")
+        );
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn load_resolves_relative_tls_paths_from_config_file_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+tls_cert_path: "certs/headscale.crt"
+tls_key_path: "certs/headscale.key"
+tls_letsencrypt_cache_dir: "cache/acme"
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load(&config_path).unwrap();
+
+        assert_eq!(
+            config.tls_cert_path.as_deref(),
+            Some(dir.path().join("certs/headscale.crt").as_path())
+        );
+        assert_eq!(
+            config.tls_key_path.as_deref(),
+            Some(dir.path().join("certs/headscale.key").as_path())
+        );
+        assert_eq!(
+            config.tls_letsencrypt_cache_dir.as_deref(),
+            Some(dir.path().join("cache/acme").as_path())
         );
     }
 

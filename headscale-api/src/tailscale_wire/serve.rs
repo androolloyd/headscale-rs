@@ -44,7 +44,7 @@ use axum::Router;
 use tokio::task::JoinHandle;
 
 use super::raw_tls;
-use super::tls::{self, SanConfig, TlsMaterial};
+use super::tls::{SanConfig, TlsMaterial, TlsMaterialSource};
 use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
 
 /// Configuration for [`serve`].
@@ -63,6 +63,8 @@ pub struct ServeConfig {
     /// SAN hostname for the minted cert. Cert is reused across
     /// restarts as long as the SAN list doesn't change.
     pub sans: SanConfig,
+    /// TLS material source used when `https_addr` is configured.
+    pub tls_source: TlsMaterialSource,
     /// Optional OIDC auth runtime. When present, the public `/register/{id}`
     /// route starts the OIDC auth-code flow and `/oidc/callback` is mounted.
     pub oidc: Option<crate::oidc::OidcAuthRuntime>,
@@ -76,11 +78,14 @@ impl ServeConfig {
     /// loopback `:51821` and HTTPS on loopback `:443`, cache material under
     /// `state_dir`, with a SAN list rooted at `hostname`.
     pub fn for_interop(state_dir: impl AsRef<Path>, hostname: impl Into<String>) -> Self {
+        let state_dir = state_dir.as_ref().to_path_buf();
+        let sans = SanConfig::with_hostname(hostname);
         Self {
             http_addr: "127.0.0.1:51821".parse().unwrap(),
             https_addr: Some("127.0.0.1:443".parse().unwrap()),
-            state_dir: state_dir.as_ref().into(),
-            sans: SanConfig::with_hostname(hostname),
+            state_dir: state_dir.clone(),
+            sans: sans.clone(),
+            tls_source: TlsMaterialSource::SelfSigned { state_dir, sans },
             oidc: None,
             metrics_addr: None,
         }
@@ -176,12 +181,12 @@ pub async fn serve(
     // `noise::drive_ts2021` for the upgrade path; everything else
     // still flows through the same axum router via hyper http1.
     let (https, tls) = if let Some(https_addr) = cfg.https_addr {
-        let material = tls::load_or_generate(&cfg.state_dir, &cfg.sans)?;
+        let material = cfg.tls_source.load()?;
         tracing::info!(
             target = "tailscale_wire::serve",
             addr = %https_addr,
             cert_path = %material.cert_path.display(),
-            "wire surface listening (HTTPS, self-signed, raw rustls)"
+            "wire surface listening (HTTPS, raw rustls)"
         );
         let server_config = Arc::clone(&material.server_config);
         let https_app = app.clone();
@@ -238,6 +243,7 @@ mod tests {
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
+            runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
         };
@@ -259,6 +265,10 @@ mod tests {
             https_addr: None,
             state_dir: dir.path().into(),
             sans: SanConfig::with_hostname("test-host"),
+            tls_source: TlsMaterialSource::SelfSigned {
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+            },
             oidc: None,
             metrics_addr: None,
         };
@@ -267,7 +277,7 @@ mod tests {
         // `serve` rather than pry inside.
         let listener = tokio::net::TcpListener::bind(cfg.http_addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = axum::Router::new().merge(super::router(state));
+        let app = axum::Router::new().merge(crate::tailscale_wire::router(state));
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -341,6 +351,10 @@ mod tests {
             https_addr: None,
             state_dir: dir.path().into(),
             sans: SanConfig::with_hostname("test-host"),
+            tls_source: TlsMaterialSource::SelfSigned {
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+            },
             oidc: None,
             metrics_addr: Some("127.0.0.1:0".parse().unwrap()),
         };

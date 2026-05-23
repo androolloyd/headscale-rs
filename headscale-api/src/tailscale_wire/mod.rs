@@ -84,6 +84,7 @@ pub mod serve;
 pub mod tls;
 pub mod wire;
 
+pub use basic_handlers::DebugConfigInfo as RuntimeConfigSnapshot;
 pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use wire::{
@@ -382,6 +383,12 @@ pub struct WireState {
     /// fall back to request host/proto so older embedders keep working
     /// until full config loading is wired through.
     pub public_control_url: Option<String>,
+    /// Loaded runtime configuration serialized by `/debug/config`.
+    ///
+    /// Headscale-go returns its loaded `types.Config` directly from this
+    /// endpoint. Keep static operator settings here and let the handler overlay
+    /// live DNS/DERP stores that can change after startup.
+    pub runtime_config: Arc<RuntimeConfigSnapshot>,
     /// Pending web/CLI registration cache. Headscale-go stores nodes
     /// that reached the interactive registration flow here, keyed by
     /// the 24-byte registration ID shown in `/register/{id}`. The
@@ -2175,6 +2182,7 @@ mod registry_tests {
             knock: KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
+            runtime_config: Arc::new(RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(RegistrationCache::new()),
             pings: Arc::new(PingTracker::new()),
         }

@@ -105,6 +105,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),
         dns: Arc::new(headscale_api::dns::DnsStore::new()),
         public_control_url: None,
+        runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: Arc::new(headscale_api::tailscale_wire::RegistrationCache::new()),
         pings: Arc::new(headscale_api::tailscale_wire::PingTracker::new()),
     };

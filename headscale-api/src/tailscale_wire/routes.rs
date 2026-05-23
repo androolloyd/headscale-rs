@@ -89,8 +89,6 @@ pub struct PrimaryRouteState {
 pub struct DebugRoutes {
     pub available_routes: BTreeMap<u64, Vec<String>>,
     pub primary_routes: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unhealthy_nodes: Vec<u64>,
 }
 
 impl PrimaryRouteState {
@@ -157,7 +155,6 @@ impl PrimaryRouteState {
                 .map(|(node_id, routes)| (*node_id, routes.iter().cloned().collect()))
                 .collect(),
             primary_routes: self.primaries.clone(),
-            unhealthy_nodes: self.unhealthy.iter().copied().collect(),
         }
     }
 
@@ -287,6 +284,18 @@ pub fn active_approved_routes(
         .collect()
 }
 
+/// Return active approved subnet routes. Exit routes are served
+/// separately from primary-route election.
+pub fn active_primary_routes(
+    available_routes: &[String],
+    approved_routes: &[String],
+) -> Vec<String> {
+    active_approved_routes(available_routes, approved_routes)
+        .into_iter()
+        .filter(|route| !is_exit_route_str(route))
+        .collect()
+}
+
 /// Preserve existing approved routes and add newly announced routes
 /// that the loaded policy auto-approves for this node.
 ///
@@ -345,7 +354,7 @@ where
             .or_insert_with(|| node_key.to_string());
         active_by_id.push((
             node_id,
-            active_approved_routes(available_routes, approved_routes),
+            active_primary_routes(available_routes, approved_routes),
         ));
     }
 
@@ -731,7 +740,6 @@ mod tests {
                     (2, p(&["10.0.0.0/24"])),
                 ]),
                 primary_routes: primary_map(&[("10.0.0.0/24", 1), ("10.1.0.0/24", 1)]),
-                unhealthy_nodes: Vec::new(),
             }
         );
         assert_eq!(

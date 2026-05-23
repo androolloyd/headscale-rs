@@ -54,7 +54,7 @@ use thiserror::Error;
 use tokio::sync::{Notify, oneshot, watch};
 
 use self::routes::{
-    DebugRoutes, PrimaryRouteState, active_approved_routes, auto_approved_routes_for_node,
+    DebugRoutes, PrimaryRouteState, active_primary_routes, auto_approved_routes_for_node,
 };
 use self::wire::stable_id_from_key;
 
@@ -610,6 +610,108 @@ impl PingTracker {
 impl Default for PingTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteHealthProbeResult {
+    pub node_id: u64,
+    pub healthy: bool,
+    pub latency: Option<Duration>,
+}
+
+#[derive(Debug)]
+pub struct RouteHealthProbeHandle {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RouteHealthProbeHandle {
+    pub fn abort(&self) {
+        self.task.abort();
+    }
+}
+
+/// Start periodic route-candidate health probes.
+///
+/// Candidates are online, non-expired nodes that currently advertise and
+/// are approved for at least one subnet route. Exit routes are excluded
+/// from this probe path because they do not participate in primary-route
+/// election.
+pub fn spawn_route_health_probe(
+    state: WireState,
+    probe_interval: Duration,
+    probe_timeout: Duration,
+) -> Option<RouteHealthProbeHandle> {
+    if probe_interval.is_zero() || probe_timeout.is_zero() {
+        return None;
+    }
+
+    Some(RouteHealthProbeHandle {
+        task: tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(probe_interval).await;
+                let _ = run_route_health_probe_once(&state, probe_timeout).await;
+            }
+        }),
+    })
+}
+
+pub(crate) async fn run_route_health_probe_once(
+    state: &WireState,
+    probe_timeout: Duration,
+) -> Vec<RouteHealthProbeResult> {
+    let candidates = route_health_probe_candidates(&state.machines);
+    futures_util::future::join_all(
+        candidates
+            .into_iter()
+            .map(|node_id| probe_route_candidate(state, node_id, probe_timeout)),
+    )
+    .await
+}
+
+pub(crate) fn route_health_probe_candidates(machines: &MachineRegistry) -> Vec<u64> {
+    let snapshot = machines.snapshot();
+    let online_states = machines.online_states();
+    let now = Utc::now();
+    let mut candidates = snapshot
+        .iter()
+        .filter_map(|(node_key, rec)| {
+            let node_id = stable_id_from_key(node_key);
+            if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false) {
+                return None;
+            }
+            (!active_primary_routes(&rec.available_routes, &rec.approved_routes).is_empty())
+                .then_some(node_id)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
+async fn probe_route_candidate(
+    state: &WireState,
+    node_id: u64,
+    probe_timeout: Duration,
+) -> RouteHealthProbeResult {
+    let (ping_id, rx) = state.register_ping(node_id);
+    state.dispatch_ping_request(node_id, &ping_id, false, false);
+
+    if let Ok(Ok(latency)) = tokio::time::timeout(probe_timeout, rx).await {
+        state.machines.set_route_candidate_health(node_id, true);
+        RouteHealthProbeResult {
+            node_id,
+            healthy: true,
+            latency: Some(latency),
+        }
+    } else {
+        state.pings.cancel(&ping_id);
+        state.machines.set_route_candidate_health(node_id, false);
+        RouteHealthProbeResult {
+            node_id,
+            healthy: false,
+            latency: None,
+        }
     }
 }
 
@@ -1270,7 +1372,7 @@ impl MachineRegistry {
                 .map(|(node_key, rec)| {
                     (
                         stable_id_from_key(node_key),
-                        active_approved_routes(&rec.available_routes, &rec.approved_routes),
+                        active_primary_routes(&rec.available_routes, &rec.approved_routes),
                     )
                 }),
         );
@@ -2238,6 +2340,27 @@ mod registry_tests {
         keys
     }
 
+    fn ping_id_from_url(url: &str) -> String {
+        url.split("id=")
+            .nth(1)
+            .and_then(|id| id.split('&').next())
+            .expect("ping URL contains id query")
+            .to_string()
+    }
+
+    async fn complete_next_pending_ping_for_node(state: &WireState, node_id: u64) -> String {
+        for _ in 0..20 {
+            if let Some(request) = state.pings.pop_next_for_node(node_id) {
+                let ping_id = ping_id_from_url(&request.url);
+                if state.pings.complete(&ping_id).is_some() {
+                    return ping_id;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("no pending ping request for node {node_id}");
+    }
+
     fn test_state() -> WireState {
         let dir = tempfile::tempdir().unwrap();
         WireState {
@@ -3051,6 +3174,137 @@ mod registry_tests {
         );
         assert!(!failed_over.contains_key(&keys[0]));
         assert!(!reg.is_route_candidate_healthy(stable_id_from_key(&keys[0])));
+    }
+
+    #[test]
+    fn route_health_probe_candidates_require_online_active_subnet_routes() {
+        let state = test_state();
+        let route = "10.0.0.0/24";
+        let active = "route-health-active";
+        let offline = "route-health-offline";
+        let exit_only = "route-health-exit";
+        let unapproved = "route-health-unapproved";
+
+        state
+            .machines
+            .upsert(active.to_string(), route_record(active, 10, route));
+        state
+            .machines
+            .upsert(offline.to_string(), route_record(offline, 11, route));
+
+        let mut exit = route_record(exit_only, 12, "0.0.0.0/0");
+        exit.available_routes = vec!["0.0.0.0/0".into(), "::/0".into()];
+        exit.approved_routes = exit.available_routes.clone();
+        state.machines.upsert(exit_only.to_string(), exit);
+
+        let mut advertised = route_record(unapproved, 13, route);
+        advertised.approved_routes.clear();
+        state.machines.upsert(unapproved.to_string(), advertised);
+
+        let _active_guard = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(active),
+            Duration::ZERO,
+        );
+        let _exit_guard = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(exit_only),
+            Duration::ZERO,
+        );
+        let _unapproved_guard = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(unapproved),
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            route_health_probe_candidates(&state.machines),
+            vec![stable_id_from_key(active)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn route_health_probe_timeout_fails_over_and_recovery_stays_sticky() {
+        let state = test_state();
+        let keys = stable_sorted_keys(&["route-health-probe-a", "route-health-probe-b"]);
+        let route = "10.0.0.0/24";
+        state
+            .machines
+            .upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        state
+            .machines
+            .upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+        let node_a = stable_id_from_key(&keys[0]);
+        let node_b = stable_id_from_key(&keys[1]);
+
+        let first = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            first.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        let probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let results = probe.await.unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|result| result.node_id == node_a && !result.healthy)
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.node_id == node_b && result.healthy)
+        );
+        assert!(!state.machines.is_route_candidate_healthy(node_a));
+        assert!(state.machines.is_route_candidate_healthy(node_b));
+        let failed_over = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            failed_over.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+
+        let recovery_probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_a).await;
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        let recovery_results = recovery_probe.await.unwrap();
+
+        assert!(
+            recovery_results
+                .iter()
+                .any(|result| result.node_id == node_a && result.healthy)
+        );
+        assert!(state.machines.is_route_candidate_healthy(node_a));
+        let sticky = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            sticky.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!sticky.contains_key(&keys[0]));
     }
 
     #[test]

@@ -319,6 +319,8 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 mesh_cidr_v6: server_config
                     .and_then(|s| s.mesh_cidr_v6.clone())
                     .or(mesh_cidr_v6),
+                ip_allocation: server_config
+                    .map_or(defaults.ip_allocation, |s| s.ip_allocation.clone()),
                 server_url: server_config.and_then(|s| s.server_url.clone()),
                 state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
                 https_listen: server_config.and_then(|s| s.https_listen.clone()),

@@ -1033,7 +1033,17 @@ impl MachineAdmin for PersistentMachineAdmin {
             let mut next_ipv4 = row.ipv4.clone();
             let mut next_ipv6 = row.ipv6.clone();
             let mut changed = false;
-            if row.ipv4.as_deref().is_none_or(str::is_empty) {
+            if !ip_allocator.ipv4_enabled()
+                && let Some(ipv4) = row.ipv4.as_deref().filter(|value| !value.is_empty())
+            {
+                next_ipv4 = None;
+                changed = true;
+                changes.push(format!(
+                    "removing IPv4 \"{ipv4}\" from Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
+            if row.ipv4.as_deref().is_none_or(str::is_empty) && ip_allocator.ipv4_enabled() {
                 let ipv4 = ip_allocator
                     .allocate(&alloc_input)
                     .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv4: {e}")))?
@@ -1045,7 +1055,18 @@ impl MachineAdmin for PersistentMachineAdmin {
                     row.id, row.hostname
                 ));
             }
+            if !ip_allocator.ipv6_enabled()
+                && let Some(ipv6) = row.ipv6.as_deref().filter(|value| !value.is_empty())
+            {
+                next_ipv6 = None;
+                changed = true;
+                changes.push(format!(
+                    "removing IPv6 \"{ipv6}\" from Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
             if row.ipv6.as_deref().is_none_or(str::is_empty)
+                && ip_allocator.ipv6_enabled()
                 && let Some(ipv6) = ip_allocator
                     .allocate_ipv6(&alloc_input)
                     .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv6: {e}")))?
@@ -1058,11 +1079,12 @@ impl MachineAdmin for PersistentMachineAdmin {
                 ));
             }
             if changed {
-                headscale_db::headscale_nodes::set_ip_addresses(
+                let row = headscale_db::headscale_nodes::set_ip_addresses(
                     &self.pool, row.id, next_ipv4, next_ipv6,
                 )
                 .await
                 .map_err(|e| db_error_to_machine(e, &row.id.to_string()))?;
+                self.sync_wire_row(row).await?;
             }
         }
         Ok(changes)
@@ -1661,6 +1683,18 @@ mod tests {
         }
     }
 
+    struct FixedIpv4OnlyAllocator(Ipv4Addr);
+
+    impl IpAllocator for FixedIpv4OnlyAllocator {
+        fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+            Ok(self.0)
+        }
+
+        fn ipv6_enabled(&self) -> bool {
+            false
+        }
+    }
+
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .build()
@@ -2012,6 +2046,44 @@ mod tests {
         );
         assert_eq!(row.ipv4.as_deref(), Some("100.64.0.10"));
         assert_eq!(row.ipv6.as_deref(), Some("fd7a:115c:a1e0::10"));
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_backfill_removes_disabled_ipv6_family() {
+        let (admin, db, users) = persistent_fixture().await;
+        let user = users.get("alice").await.unwrap().unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: json!({"Hostname": "v4-only"}),
+                ipv4: Some("100.64.0.10".into()),
+                ipv6: Some("fd7a:115c:a1e0::10".into()),
+                hostname: "v4-only".into(),
+                given_name: "v4-only".into(),
+                user_id: Some(user.id as i64),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let changes = admin
+            .backfill_node_ips(Some(&FixedIpv4OnlyAllocator(Ipv4Addr::new(100, 64, 0, 20))))
+            .await
+            .unwrap();
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            changes,
+            vec!["removing IPv6 \"fd7a:115c:a1e0::10\" from Node(1) \"v4-only\""]
+        );
+        assert_eq!(row.ipv4.as_deref(), Some("100.64.0.10"));
+        assert!(row.ipv6.is_none());
     }
 
     #[tokio::test]

@@ -246,6 +246,15 @@ pub trait PreauthRedeemer: Send + Sync {
 pub trait IpAllocator: Send + Sync {
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError>;
 
+    /// Whether IPv4 is enabled in the current prefix config.
+    ///
+    /// Existing embedders are IPv4-first, so the default remains
+    /// enabled. Production headscale-rs overrides this from loaded
+    /// `prefixes` config.
+    fn ipv4_enabled(&self) -> bool {
+        true
+    }
+
     /// Optionally allocate an IPv6 address for the same node.
     ///
     /// The default preserves the original IPv4-only embedder contract.
@@ -253,6 +262,17 @@ pub trait IpAllocator: Send + Sync {
     /// `prefixes.v6` is configured.
     fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
         Ok(None)
+    }
+
+    /// Whether IPv6 is enabled in the current prefix config.
+    ///
+    /// The default is conservative for third-party allocators that
+    /// already have IPv6 rows they want to preserve. The production
+    /// allocator returns false when `prefixes.v6` is unset so
+    /// `BackfillNodeIPs` can mirror headscale-go's destructive
+    /// disabled-family cleanup.
+    fn ipv6_enabled(&self) -> bool {
+        true
     }
 }
 

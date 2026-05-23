@@ -1,15 +1,16 @@
 //! Server mode - runs the control plane.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use rand_core::{OsRng, RngCore};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio_rustls::TlsAcceptor;
@@ -47,6 +48,7 @@ pub(crate) struct RunServerConfig {
     pub db_path: PathBuf,
     pub mesh_cidr: String,
     pub mesh_cidr_v6: Option<String>,
+    pub ip_allocation: String,
     pub server_url: Option<String>,
     pub state_dir: PathBuf,
     pub https_listen: Option<String>,
@@ -118,6 +120,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         server_url,
         &cfg.mesh_cidr,
         cfg.mesh_cidr_v6.as_deref(),
+        &cfg.ip_allocation,
         oidc,
         derp_map,
         dns_store.clone(),
@@ -228,6 +231,7 @@ async fn build_persistent_wire_runtime(
         server_url,
         mesh_cidr,
         None,
+        "sequential",
         oidc,
         derp_map,
         Arc::new(DnsStore::new()),
@@ -241,10 +245,12 @@ async fn build_persistent_wire_runtime_with_dns(
     server_url: &str,
     mesh_cidr: &str,
     mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
     oidc: Option<OidcAuthRuntime>,
     derp_map: DerpMap,
     dns: Arc<DnsStore>,
 ) -> Result<PersistentWireRuntime> {
+    let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
     let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
     let preauth =
@@ -257,7 +263,7 @@ async fn build_persistent_wire_runtime_with_dns(
     );
     let registration_cache = Arc::new(RegistrationCache::new());
     let ip_allocator: Arc<dyn IpAllocator> =
-        Arc::new(CidrIpAllocator::from_cidrs(mesh_cidr, mesh_cidr_v6)?);
+        Arc::new(CidrIpAllocator::from_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?);
     let policy = Arc::new(PolicyStore::new());
     let policy_loaded = load_persisted_policy(pool, &policy).await?;
     tracing::info!(
@@ -650,17 +656,36 @@ fn hostname_from_server_url(server_url: &str) -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone)]
-struct CidrIpAllocator {
-    network: u32,
-    usable_hosts: u64,
-    ipv6: Option<Ipv6CidrAllocator>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpAllocationStrategy {
+    Sequential,
+    Random,
 }
 
-#[derive(Debug, Clone)]
-struct Ipv6CidrAllocator {
+impl IpAllocationStrategy {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim() {
+            "" | "sequential" => Ok(Self::Sequential),
+            "random" => Ok(Self::Random),
+            other => anyhow::bail!(
+                "config error, prefixes.allocation is set to {other}, which is not a valid strategy, allowed options: sequential, random"
+            ),
+        }
+    }
+}
+
+struct CidrIpAllocator {
+    ipv4: Mutex<IpFamilyAllocator>,
+    ipv6: Option<Mutex<IpFamilyAllocator>>,
+    strategy: IpAllocationStrategy,
+}
+
+#[derive(Debug)]
+struct IpFamilyAllocator {
     network: u128,
-    usable_hosts: u64,
+    end: u128,
+    prev: u128,
+    used: BTreeSet<u128>,
 }
 
 impl CidrIpAllocator {
@@ -669,7 +694,32 @@ impl CidrIpAllocator {
         Self::from_cidrs(cidr, None)
     }
 
+    #[cfg(test)]
     fn from_cidrs(cidr: &str, cidr_v6: Option<&str>) -> Result<Self> {
+        Self::from_cidrs_with_strategy(cidr, cidr_v6, IpAllocationStrategy::Sequential)
+    }
+
+    async fn from_database(
+        pool: &sqlx::SqlitePool,
+        cidr: &str,
+        cidr_v6: Option<&str>,
+        strategy: IpAllocationStrategy,
+    ) -> Result<Self> {
+        let allocator = Self::from_cidrs_with_strategy(cidr, cidr_v6, strategy)?;
+        let rows = headscale_db::headscale_nodes::list(pool)
+            .await
+            .context("read existing node IP addresses for allocator")?;
+        for row in rows {
+            allocator.seed_existing(row.ipv4.as_deref(), row.ipv6.as_deref())?;
+        }
+        Ok(allocator)
+    }
+
+    fn from_cidrs_with_strategy(
+        cidr: &str,
+        cidr_v6: Option<&str>,
+        strategy: IpAllocationStrategy,
+    ) -> Result<Self> {
         let (addr, prefix) = cidr
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
@@ -684,35 +734,57 @@ impl CidrIpAllocator {
         }
 
         let host_bits = 32u32 - u32::from(prefix);
-        let total_hosts = if host_bits == 32 {
-            1u64 << 32
-        } else {
-            1u64 << host_bits
-        };
-        let usable_hosts = total_hosts.saturating_sub(3);
-        if usable_hosts == 0 {
-            anyhow::bail!(
-                "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
-            );
-        }
-
         let mask = if prefix == 0 {
             0
         } else {
             u32::MAX << host_bits
         };
+        let network = u32::from(addr) & mask;
+        let end = network | !mask;
+        if end.saturating_sub(network) < 2 {
+            anyhow::bail!(
+                "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
+            );
+        }
+
         Ok(Self {
-            network: u32::from(addr) & mask,
-            usable_hosts,
+            ipv4: Mutex::new(IpFamilyAllocator::new(u128::from(network), u128::from(end))),
             ipv6: cidr_v6
                 .filter(|cidr| !cidr.trim().is_empty())
                 .map(parse_ipv6_cidr)
                 .transpose()?,
+            strategy,
         })
+    }
+
+    fn seed_existing(&self, ipv4: Option<&str>, ipv6: Option<&str>) -> Result<()> {
+        if let Some(ipv4) = ipv4.filter(|value| !value.is_empty()) {
+            let ip: Ipv4Addr = ipv4
+                .parse()
+                .with_context(|| format!("parsing IPv4 address from database: {ipv4}"))?;
+            self.ipv4
+                .lock()
+                .expect("IPv4 allocator lock poisoned")
+                .used
+                .insert(u128::from(u32::from(ip)));
+        }
+        if let Some(ipv6) = ipv6.filter(|value| !value.is_empty()) {
+            let ip: Ipv6Addr = ipv6
+                .parse()
+                .with_context(|| format!("parsing IPv6 address from database: {ipv6}"))?;
+            if let Some(state) = &self.ipv6 {
+                state
+                    .lock()
+                    .expect("IPv6 allocator lock poisoned")
+                    .used
+                    .insert(u128::from(ip));
+            }
+        }
+        Ok(())
     }
 }
 
-fn parse_ipv6_cidr(cidr: &str) -> Result<Ipv6CidrAllocator> {
+fn parse_ipv6_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
     let (addr, prefix) = cidr
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr_v6 {cidr:?}: missing prefix"))?;
@@ -727,55 +799,153 @@ fn parse_ipv6_cidr(cidr: &str) -> Result<Ipv6CidrAllocator> {
     }
 
     let host_bits = 128u32 - u32::from(prefix);
-    let usable_hosts = match host_bits {
-        0 | 1 => 0,
-        2..=63 => (1u64 << host_bits) - 2,
-        _ => u64::MAX - 1,
-    };
-    if usable_hosts == 0 {
-        anyhow::bail!(
-            "invalid server.mesh_cidr_v6 {cidr:?}: prefix must leave assignable host addresses"
-        );
-    }
-
     let mask = if prefix == 0 {
         0
     } else {
         u128::MAX << host_bits
     };
-    Ok(Ipv6CidrAllocator {
-        network: u128::from(addr) & mask,
-        usable_hosts,
-    })
+    let network = u128::from(addr) & mask;
+    let end = network | !mask;
+    if end.saturating_sub(network) < 2 {
+        anyhow::bail!(
+            "invalid server.mesh_cidr_v6 {cidr:?}: prefix must leave assignable host addresses"
+        );
+    }
+
+    Ok(Mutex::new(IpFamilyAllocator::new(network, end)))
+}
+
+impl IpFamilyAllocator {
+    fn new(network: u128, end: u128) -> Self {
+        let mut used = BTreeSet::new();
+        used.insert(network);
+        used.insert(end);
+        Self {
+            network,
+            end,
+            prev: network,
+            used,
+        }
+    }
+
+    fn allocate(
+        &mut self,
+        strategy: IpAllocationStrategy,
+        reserved: impl Fn(u128) -> bool + Copy,
+    ) -> std::result::Result<u128, AllocError> {
+        match strategy {
+            IpAllocationStrategy::Sequential => self.allocate_sequential(reserved),
+            IpAllocationStrategy::Random => self.allocate_random(reserved),
+        }
+    }
+
+    fn allocate_sequential(
+        &mut self,
+        reserved: impl Fn(u128) -> bool,
+    ) -> std::result::Result<u128, AllocError> {
+        let Some(mut candidate) = self.prev.checked_add(1) else {
+            return Err(AllocError::Exhausted);
+        };
+        while candidate <= self.end {
+            if !self.used.contains(&candidate) && !reserved(candidate) {
+                self.used.insert(candidate);
+                self.prev = candidate;
+                return Ok(candidate);
+            }
+            let Some(next) = candidate.checked_add(1) else {
+                return Err(AllocError::Exhausted);
+            };
+            candidate = next;
+        }
+        Err(AllocError::Exhausted)
+    }
+
+    fn allocate_random(
+        &mut self,
+        reserved: impl Fn(u128) -> bool + Copy,
+    ) -> std::result::Result<u128, AllocError> {
+        if let Some(count) = self
+            .end
+            .checked_sub(self.network)
+            .and_then(|span| span.checked_add(1))
+            && self.used.len() as u128 >= count
+        {
+            return Err(AllocError::Exhausted);
+        }
+
+        for _ in 0..1024 {
+            let candidate = random_between(self.network, self.end);
+            if !self.used.contains(&candidate) && !reserved(candidate) {
+                self.used.insert(candidate);
+                self.prev = candidate;
+                return Ok(candidate);
+            }
+        }
+
+        self.allocate_sequential(reserved)
+    }
 }
 
 impl IpAllocator for CidrIpAllocator {
     fn allocate(&self, node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
-        let h = fnv1a64(node_key_hex);
-        let host = (h % self.usable_hosts) + 2;
-        Ok(Ipv4Addr::from(self.network + host as u32))
+        let _ = node_key_hex;
+        let value = self
+            .ipv4
+            .lock()
+            .expect("IPv4 allocator lock poisoned")
+            .allocate(self.strategy, |candidate| {
+                is_tailscale_reserved_ipv4(Ipv4Addr::from(candidate as u32))
+            })?;
+        Ok(Ipv4Addr::from(value as u32))
+    }
+
+    fn ipv4_enabled(&self) -> bool {
+        true
     }
 
     fn allocate_ipv6(
         &self,
         node_key_hex: &str,
     ) -> std::result::Result<Option<Ipv6Addr>, AllocError> {
+        let _ = node_key_hex;
         let Some(ipv6) = &self.ipv6 else {
             return Ok(None);
         };
-        let h = fnv1a64(node_key_hex);
-        let host = (h % ipv6.usable_hosts) + 2;
-        Ok(Some(Ipv6Addr::from(ipv6.network + u128::from(host))))
+        let value = ipv6
+            .lock()
+            .expect("IPv6 allocator lock poisoned")
+            .allocate(self.strategy, |candidate| {
+                is_tailscale_reserved_ipv6(Ipv6Addr::from(candidate))
+            })?;
+        Ok(Some(Ipv6Addr::from(value)))
+    }
+
+    fn ipv6_enabled(&self) -> bool {
+        self.ipv6.is_some()
     }
 }
 
-fn fnv1a64(input: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in input.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+fn random_between(start: u128, end: u128) -> u128 {
+    let span = end - start;
+    let mut raw = [0u8; 16];
+    OsRng.fill_bytes(&mut raw);
+    let sample = u128::from_be_bytes(raw);
+    if span == u128::MAX {
+        sample
+    } else {
+        start + (sample % (span + 1))
     }
-    h
+}
+
+fn is_tailscale_reserved_ipv4(ip: Ipv4Addr) -> bool {
+    let value = u32::from(ip);
+    let chrome_start = u32::from(Ipv4Addr::new(100, 115, 92, 0));
+    let chrome_end = u32::from(Ipv4Addr::new(100, 115, 93, 255));
+    ip == Ipv4Addr::new(100, 100, 100, 100) || (chrome_start..=chrome_end).contains(&value)
+}
+
+fn is_tailscale_reserved_ipv6(ip: Ipv6Addr) -> bool {
+    ip == Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x53)
 }
 
 #[cfg(test)]
@@ -1006,6 +1176,7 @@ mod tests {
             "https://headscale.example",
             "100.64.0.0/10",
             None,
+            "sequential",
             None,
             DerpMap::default(),
             dns_store,
@@ -1280,6 +1451,7 @@ mod tests {
             db_path: dir.path().join("db.sqlite"),
             mesh_cidr: "100.64.0.0/10".into(),
             mesh_cidr_v6: None,
+            ip_allocation: "sequential".into(),
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
             https_listen: None,
@@ -1325,6 +1497,7 @@ mod tests {
             db_path: dir.path().join("db.sqlite"),
             mesh_cidr: "100.64.0.0/10".into(),
             mesh_cidr_v6: None,
+            ip_allocation: "sequential".into(),
             server_url: None,
             state_dir: dir.path().join("state"),
             https_listen: None,
@@ -1410,6 +1583,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_wire_runtime_allocator_seeds_existing_sqlite_ips() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let user = headscale_db::users::create(
+            db.pool(),
+            headscale_db::users::CreateParams {
+                name: "alice".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "bb".repeat(32)),
+                node_key: format!("nodekey:{}", "aa".repeat(32)),
+                host_info: serde_json::json!({"Hostname": "alice-laptop"}),
+                ipv4: Some("100.64.0.1".into()),
+                ipv6: Some("fd7a:115c:a1e0::1".into()),
+                hostname: "alice-laptop".into(),
+                given_name: "alice-laptop".into(),
+                user_id: Some(user.id),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime = build_persistent_wire_runtime_with_dns(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/30",
+            Some("fd7a:115c:a1e0::/126"),
+            "sequential",
+            None,
+            DerpMap::default(),
+            Arc::new(DnsStore::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            runtime.state.ip_allocator.allocate("new-node").unwrap(),
+            Ipv4Addr::new(100, 64, 0, 2)
+        );
+        assert_eq!(
+            runtime
+                .state
+                .ip_allocator
+                .allocate_ipv6("new-node")
+                .unwrap(),
+            Some("fd7a:115c:a1e0::2".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn persistent_wire_runtime_loads_latest_sqlite_policy() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
@@ -1478,6 +1711,58 @@ mod tests {
         let ip = allocator.allocate_ipv6("node-key").unwrap().unwrap();
 
         assert!(ip.to_string().starts_with("fd7a:115c:a1e0:"));
+    }
+
+    #[test]
+    fn cidr_allocator_sequential_skips_database_seeded_ips() {
+        let allocator =
+            CidrIpAllocator::from_cidrs("100.64.0.0/30", Some("fd7a:115c:a1e0::/126")).unwrap();
+        allocator
+            .seed_existing(Some("100.64.0.1"), Some("fd7a:115c:a1e0::1"))
+            .unwrap();
+
+        assert_eq!(
+            allocator.allocate("first").unwrap(),
+            Ipv4Addr::new(100, 64, 0, 2)
+        );
+        assert_eq!(
+            allocator.allocate_ipv6("first").unwrap(),
+            Some("fd7a:115c:a1e0::2".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn cidr_allocator_skips_tailscale_reserved_addresses() {
+        let allocator =
+            CidrIpAllocator::from_cidrs("100.100.100.96/29", Some("fd7a:115c:a1e0::50/124"))
+                .unwrap();
+        for ip in ["100.100.100.97", "100.100.100.98", "100.100.100.99"] {
+            allocator.seed_existing(Some(ip), None).unwrap();
+        }
+        for ip in ["fd7a:115c:a1e0::51", "fd7a:115c:a1e0::52"] {
+            allocator.seed_existing(None, Some(ip)).unwrap();
+        }
+
+        assert_eq!(
+            allocator.allocate("reserved-v4").unwrap(),
+            Ipv4Addr::new(100, 100, 100, 101)
+        );
+        assert_eq!(
+            allocator.allocate_ipv6("reserved-v6").unwrap(),
+            Some("fd7a:115c:a1e0::54".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn cidr_allocator_reports_exhaustion() {
+        let allocator = CidrIpAllocator::from_cidr("100.64.0.0/30").unwrap();
+        allocator.seed_existing(Some("100.64.0.1"), None).unwrap();
+        allocator.seed_existing(Some("100.64.0.2"), None).unwrap();
+
+        assert!(matches!(
+            allocator.allocate("full"),
+            Err(AllocError::Exhausted)
+        ));
     }
 
     #[test]

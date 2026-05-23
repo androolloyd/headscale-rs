@@ -106,6 +106,9 @@ pub(crate) struct ServerConfig {
     /// Optional IPv6 mesh network CIDR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_cidr_v6: Option<String>,
+    /// Upstream `prefixes.allocation` strategy.
+    #[serde(default = "default_ip_allocation")]
+    pub ip_allocation: String,
     /// Public control server URL used for client helper pages and OIDC redirects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
@@ -335,10 +338,9 @@ impl CliConfig {
                 .noise
                 .as_ref()
                 .is_some_and(|noise| noise.private_key_path.is_some())
-            || self
-                .prefixes
-                .as_ref()
-                .is_some_and(|prefixes| prefixes.v4.is_some() || prefixes.v6.is_some())
+            || self.prefixes.as_ref().is_some_and(|prefixes| {
+                prefixes.v4.is_some() || prefixes.v6.is_some() || prefixes.allocation.is_some()
+            })
             || self
                 .database
                 .as_ref()
@@ -393,6 +395,14 @@ impl CliConfig {
         {
             server.mesh_cidr_v6 = Some(prefix_v6.clone());
         }
+        if let Some(allocation) = self
+            .prefixes
+            .as_ref()
+            .and_then(|prefixes| prefixes.allocation.as_ref())
+            && !allocation.trim().is_empty()
+        {
+            server.ip_allocation.clone_from(allocation);
+        }
         if let Some(sqlite_path) = self
             .database
             .as_ref()
@@ -436,6 +446,12 @@ impl CliConfig {
             bail!(
                 "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 65s",
                 server.ephemeral_node_inactivity_timeout_secs
+            );
+        }
+        if !matches!(server.ip_allocation.as_str(), "" | "sequential" | "random") {
+            bail!(
+                "config error, prefixes.allocation is set to {}, which is not a valid strategy, allowed options: sequential, random",
+                server.ip_allocation
             );
         }
 
@@ -843,6 +859,10 @@ fn default_mesh_cidr() -> String {
     "100.64.0.0/10".to_string()
 }
 
+fn default_ip_allocation() -> String {
+    "sequential".to_string()
+}
+
 fn default_wg_interface() -> String {
     "wg0".to_string()
 }
@@ -874,6 +894,7 @@ impl Default for ServerConfig {
             db_path: default_db_path(),
             mesh_cidr: default_mesh_cidr(),
             mesh_cidr_v6: None,
+            ip_allocation: default_ip_allocation(),
             server_url: None,
             state_dir: default_state_dir(),
             https_listen: None,
@@ -1033,6 +1054,7 @@ noise:
 prefixes:
   v4: "100.100.0.0/16"
   v6: "fd7a:115c:a1e0::/48"
+  allocation: random
 
 database:
   type: sqlite
@@ -1059,6 +1081,7 @@ database:
         assert_eq!(server.state_dir, PathBuf::from("/srv/headscale"));
         assert_eq!(server.mesh_cidr, "100.100.0.0/16");
         assert_eq!(server.mesh_cidr_v6.as_deref(), Some("fd7a:115c:a1e0::/48"));
+        assert_eq!(server.ip_allocation, "random");
         assert_eq!(server.db_path, PathBuf::from("/srv/headscale/db.sqlite"));
     }
 
@@ -1076,6 +1099,25 @@ server_url: "https://derp.no"
         let server = config.server.unwrap();
         assert_eq!(server.server_url.as_deref(), Some("https://derp.no"));
         assert_eq!(server.state_dir, PathBuf::from("."));
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_prefix_allocation_strategy() {
+        let source = r#"
+server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
+  allocation: "hash"
+dns:
+  magic_dns: false
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err().to_string();
+
+        assert!(err.contains("prefixes.allocation"));
+        assert!(err.contains("sequential"));
+        assert!(err.contains("random"));
     }
 
     #[test]

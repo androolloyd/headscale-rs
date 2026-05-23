@@ -144,6 +144,7 @@ fn build_dns_for_snapshot(dns: &DnsStore, snapshot: &HashMap<String, MachineReco
         .map(|(node_hex, rec)| MachineDnsRecord {
             hostname: rec.hostname.clone(),
             ipv4: rec.ipv4,
+            ipv6: rec.ipv6,
             node_id: stable_id_from_key(node_hex),
         })
         .collect();
@@ -188,7 +189,7 @@ fn peer_map_nodes_from_snapshot(
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
             id: stable_id_from_key(node_key),
-            addr: rec.ipv4.to_string(),
+            addr: rec.primary_addr_string().unwrap_or_default(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
             routes: active_routes.get(node_key).cloned().unwrap_or_default(),
@@ -505,9 +506,9 @@ fn apply_policy_attrs_to_map_node(
     rec: &super::MachineRecord,
     policy: &PolicyStore,
 ) {
-    let addr = rec.ipv4.to_string();
+    let addr = rec.primary_addr_string();
     let view = NodeView {
-        addr: Some(&addr),
+        addr: addr.as_deref(),
         user: Some(&rec.user),
         tags: &rec.forced_tags,
     };
@@ -770,7 +771,7 @@ async fn map_inner(
         };
         let mut hostinfo = host_info_for_map_update(&own.host_info_for_node(), hostinfo);
         hostinfo.routable_ips.clone_from(&announced_routes);
-        let addr = own.ipv4.to_string();
+        let addr = own.primary_addr_string().unwrap_or_default();
         let user = (!own.user.is_empty()).then_some(own.user.as_str());
         let approved_routes = match auto_approved_routes_for_node(
             &state.policy,

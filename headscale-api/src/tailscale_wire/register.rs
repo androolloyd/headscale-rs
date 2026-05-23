@@ -1,7 +1,7 @@
 //! `POST /machine/{node_key}/register` — initial join handler.
 //!
 //! Validates a presented preauth key against [`PreauthMinter`],
-//! allocates a tailnet IPv4 for the new machine, persists the
+//! allocates configured tailnet addresses for the new machine, persists the
 //! `MachineRecord`, and returns a Tailscale-shaped
 //! `RegisterResponse`.
 //!
@@ -307,7 +307,7 @@ async fn register_inner(
             Err(resp) => return resp,
         }
     };
-    let addr = ipv4.to_string();
+    let addr = policy_addr(ipv4, ipv6);
     let forced_tags = existing_machine.as_ref().map_or_else(
         || redeemed.tags.clone(),
         |(_, existing)| existing.forced_tags.clone(),
@@ -727,16 +727,20 @@ fn register_error_response(error: impl Into<String>) -> axum::response::Response
 fn allocate_register_ips(
     state: &WireState,
     alloc_input: &str,
-) -> Result<(Ipv4Addr, Option<Ipv6Addr>), axum::response::Response> {
-    let ipv4 = state.ip_allocator.allocate(alloc_input).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: format!("ip allocation failed: {e}"),
-            }),
-        )
-            .into_response()
-    })?;
+) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), axum::response::Response> {
+    let ipv4 = if state.ip_allocator.ipv4_enabled() {
+        Some(state.ip_allocator.allocate(alloc_input).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("ip allocation failed: {e}"),
+                }),
+            )
+                .into_response()
+        })?)
+    } else {
+        None
+    };
     let ipv6 = state.ip_allocator.allocate_ipv6(alloc_input).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -746,7 +750,22 @@ fn allocate_register_ips(
         )
             .into_response()
     })?;
+    if ipv4.is_none() && ipv6.is_none() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: "ip allocation failed: no IP prefixes enabled".into(),
+            }),
+        )
+            .into_response());
+    }
     Ok((ipv4, ipv6))
+}
+
+fn policy_addr(ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) -> String {
+    ipv4.map(|addr| addr.to_string())
+        .or_else(|| ipv6.map(|addr| addr.to_string()))
+        .unwrap_or_default()
 }
 
 fn empty_simple_user() -> SimpleUser {
@@ -933,8 +952,8 @@ fn default_node_cap_map() -> BTreeMap<String, Vec<serde_json::Value>> {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        MachineRegistrationStore, MachineRegistry, PersistedMachineRegistration, RedeemOk,
-        WireState,
+        AllocError, IpAllocator, MachineRegistrationStore, MachineRegistry,
+        PersistedMachineRegistration, RedeemOk, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -1025,11 +1044,29 @@ mod tests {
         ) -> Result<PersistedMachineRegistration, String> {
             self.calls.lock().push((record.clone(), auth_key_id));
             record.hostname = "persisted-peer".into();
-            record.ipv4 = Ipv4Addr::new(100, 64, 9, 9);
+            record.ipv4 = Some(Ipv4Addr::new(100, 64, 9, 9));
             Ok(PersistedMachineRegistration {
                 record,
                 replaced_node_key_hex: None,
             })
+        }
+    }
+
+    struct Ipv6OnlyAllocator;
+
+    impl IpAllocator for Ipv6OnlyAllocator {
+        fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+            Err(AllocError::Internal(
+                "IPv4 allocator should not be called when disabled".into(),
+            ))
+        }
+
+        fn ipv4_enabled(&self) -> bool {
+            false
+        }
+
+        fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
+            Ok(Some("fd7a:115c:a1e0::66".parse().unwrap()))
         }
     }
 
@@ -1085,6 +1122,25 @@ mod tests {
             node.allowed_ips,
             vec!["100.64.0.9/32", "fd7a:115c:a1e0::9/128", "10.10.0.0/24"]
         );
+    }
+
+    #[test]
+    fn record_to_map_node_emits_ipv6_only_prefixes() {
+        let record = MachineRecord::new_at_with_addresses(
+            chrono::Utc::now(),
+            "af".repeat(32),
+            "cd".repeat(32),
+            "alice".into(),
+            "v6-only".into(),
+            None,
+            Some("fd7a:115c:a1e0::66".parse().unwrap()),
+            false,
+        );
+
+        let node = record_to_map_node(&record, "octra.test");
+
+        assert_eq!(node.addresses, vec!["fd7a:115c:a1e0::66/128"]);
+        assert_eq!(node.allowed_ips, vec!["fd7a:115c:a1e0::66/128"]);
     }
 
     #[tokio::test]
@@ -1273,7 +1329,41 @@ mod tests {
         assert_eq!(rec.os, "linux");
         assert_eq!(rec.os_version, "6.6");
         // Allocated IP is in CGNAT.
-        assert!(rec.ipv4.octets()[0] == 100);
+        assert!(rec.ipv4.expect("IPv4 allocated").octets()[0] == 100);
+    }
+
+    #[tokio::test]
+    async fn authkey_register_accepts_ipv6_only_allocator() {
+        let (mut state, redeemer, _dir) = fixture();
+        state.ip_allocator = Arc::new(Ipv6OnlyAllocator);
+        let authkey = "hskey-auth-v6-only";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "1f".repeat(32);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body(&node_key_hex, authkey)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.ipv4, None);
+        assert_eq!(
+            rec.ipv6.map(|ip| ip.to_string()).as_deref(),
+            Some("fd7a:115c:a1e0::66")
+        );
+        let node = record_to_map_node(&rec, "octra.test");
+        assert_eq!(node.addresses, vec!["fd7a:115c:a1e0::66/128"]);
     }
 
     #[tokio::test]
@@ -1312,7 +1402,7 @@ mod tests {
 
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(rec.hostname, "persisted-peer");
-        assert_eq!(rec.ipv4, Ipv4Addr::new(100, 64, 9, 9));
+        assert_eq!(rec.ipv4, Some(Ipv4Addr::new(100, 64, 9, 9)));
     }
 
     #[cfg(feature = "admin")]
@@ -1490,7 +1580,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(raw.auth_key_id, Some(second_key.id as i64));
-        assert_eq!(raw.ipv4, Some(first_ip.to_string()));
+        assert_eq!(raw.ipv4, first_ip.map(|ip| ip.to_string()));
     }
 
     #[tokio::test]

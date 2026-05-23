@@ -52,12 +52,14 @@ fn build_dns_config_emits_magic_a_records_per_machine() {
     let machines = [
         MachineDnsRecord {
             hostname: "peer-1".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 11),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 11)),
+            ipv6: None,
             node_id: 1,
         },
         MachineDnsRecord {
             hostname: "peer-2".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 22),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 22)),
+            ipv6: None,
             node_id: 2,
         },
     ];
@@ -269,24 +271,28 @@ fn collision_handling_is_stable_under_node_id_reorder() {
     let machines_a = [
         MachineDnsRecord {
             hostname: "dup".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 1),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 1)),
+            ipv6: None,
             node_id: 7,
         },
         MachineDnsRecord {
             hostname: "dup".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 2),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 2)),
+            ipv6: None,
             node_id: 42,
         },
     ];
     let machines_b = [
         MachineDnsRecord {
             hostname: "dup".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 2),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 2)),
+            ipv6: None,
             node_id: 42,
         },
         MachineDnsRecord {
             hostname: "dup".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 1),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 1)),
+            ipv6: None,
             node_id: 7,
         },
     ];
@@ -314,7 +320,8 @@ fn extra_records_combined_with_magic_dns_records() {
     }];
     let machines = [MachineDnsRecord {
         hostname: "peer-a".into(),
-        ipv4: Ipv4Addr::new(100, 64, 0, 5),
+        ipv4: Some(Ipv4Addr::new(100, 64, 0, 5)),
+        ipv6: None,
         node_id: 100,
     }];
     let cfg = build_dns_config(&spec, &machines, &extra);

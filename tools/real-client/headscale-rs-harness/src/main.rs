@@ -491,7 +491,7 @@ fn machine_summary(machine: &MachineRecord) -> MachineSummary {
         },
         user: machine.user.clone(),
         hostname: machine.hostname.clone(),
-        ipv4: machine.ipv4.to_string(),
+        ipv4: machine.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
         ephemeral: machine.ephemeral,
         forced_tags: machine.forced_tags.clone(),
         available_routes: machine.available_routes.clone(),
@@ -508,9 +508,9 @@ fn apply_requested_tags(policy: &PolicyStore, record: &mut MachineRecord) -> Res
 
     record.forced_tags.sort();
     record.forced_tags.dedup();
-    let addr = record.ipv4.to_string();
+    let addr = record.primary_addr_string();
     let node = NodeView {
-        addr: Some(addr.as_str()),
+        addr: addr.as_deref(),
         user: Some(record.user.as_str()),
         tags: &[],
     };

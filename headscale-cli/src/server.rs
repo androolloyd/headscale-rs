@@ -1574,7 +1574,10 @@ mod tests {
         assert_eq!(wire.machine_key_hex, "bb".repeat(32));
         assert_eq!(wire.hostname, "alice-laptop");
         assert_eq!(wire.user, "alice");
-        assert_eq!(wire.ipv4.to_string(), "100.64.0.9");
+        assert_eq!(
+            wire.ipv4.map(|addr| addr.to_string()).as_deref(),
+            Some("100.64.0.9")
+        );
         assert_eq!(wire.os, "linux");
         assert_eq!(wire.os_version, "1.80.0");
         assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);

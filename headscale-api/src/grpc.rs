@@ -482,13 +482,20 @@ pub mod upstream {
                 return Ok(());
             };
 
-            let ipv4 = ip_allocator.allocate(&record.id).map_err(|e| {
-                Status::internal(format!("allocating IPs: allocating IPv4 address: {e}"))
-            })?;
+            let ipv4 = if ip_allocator.ipv4_enabled() {
+                Some(ip_allocator.allocate(&record.id).map_err(|e| {
+                    Status::internal(format!("allocating IPs: allocating IPv4 address: {e}"))
+                })?)
+            } else {
+                None
+            };
             let ipv6 = ip_allocator.allocate_ipv6(&record.id).map_err(|e| {
                 Status::internal(format!("allocating IPs: allocating IPv6 address: {e}"))
             })?;
-            record.ipv4 = ipv4.to_string();
+            if ipv4.is_none() && ipv6.is_none() {
+                return Err(Status::internal("allocating IPs: no IP prefixes enabled"));
+            }
+            record.ipv4 = ipv4.map(|ip| ip.to_string()).unwrap_or_default();
             record.ipv6 = ipv6.map(|ip| ip.to_string());
             Ok(())
         }
@@ -1324,24 +1331,26 @@ pub mod upstream {
             chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now);
         let last_seen =
             chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at);
-        let ipv4 = machine
-            .ipv4
-            .parse()
-            .unwrap_or_else(|_| cgnat_ip_from_key(&machine.id));
-        let mut record = MachineRecord::new_at(
+        let ipv4 = machine.ipv4.parse().ok().or_else(|| {
+            machine
+                .ipv6
+                .is_none()
+                .then(|| cgnat_ip_from_key(&machine.id))
+        });
+        let mut record = MachineRecord::new_at_with_addresses(
             created_at,
             machine.id.clone(),
             machine.machine_key_hex.clone(),
             machine.user.clone(),
             machine.name.clone(),
             ipv4,
+            machine
+                .ipv6
+                .as_deref()
+                .filter(|ipv6| !ipv6.is_empty())
+                .and_then(|ipv6| ipv6.parse().ok()),
             false,
         );
-        record.ipv6 = machine
-            .ipv6
-            .as_deref()
-            .filter(|ipv6| !ipv6.is_empty())
-            .and_then(|ipv6| ipv6.parse().ok());
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1364,10 +1373,12 @@ pub mod upstream {
         record.machine_key_hex.clone_from(&machine.machine_key_hex);
         record.user.clone_from(&machine.user);
         record.hostname.clone_from(&machine.name);
-        record.ipv4 = machine
-            .ipv4
-            .parse()
-            .unwrap_or_else(|_| cgnat_ip_from_key(&machine.id));
+        record.ipv4 = machine.ipv4.parse().ok().or_else(|| {
+            machine
+                .ipv6
+                .is_none()
+                .then(|| cgnat_ip_from_key(&machine.id))
+        });
         record.ipv6 = machine
             .ipv6
             .as_deref()
@@ -1395,7 +1406,7 @@ pub mod upstream {
             id: record.node_key_hex,
             name: record.hostname,
             user: record.user,
-            ipv4: record.ipv4.to_string(),
+            ipv4: record.ipv4.map(|ip| ip.to_string()).unwrap_or_default(),
             ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
             online: !expired,
             last_seen: record.last_seen.timestamp().max(0) as u64,
@@ -1674,7 +1685,7 @@ pub mod upstream {
 
         if validate_requested_tags_for_node(
             policy,
-            record.ipv4.as_str(),
+            &machine_primary_addr(record),
             record.user.as_str(),
             &mut record.tags,
         )
@@ -1684,6 +1695,20 @@ pub mod upstream {
         }
 
         Ok(())
+    }
+
+    fn machine_primary_addr(record: &MachineAdminRecord) -> String {
+        if record.ipv4.trim().is_empty() {
+            record
+                .ipv6
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            record.ipv4.trim().to_string()
+        }
     }
 
     fn user_record_to_proto(user: &UserRecord) -> ProtoUser {
@@ -1762,6 +1787,24 @@ mod upstream_tests {
 
         fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
             Ok(Some("fd7a:115c:a1e0::42".parse().unwrap()))
+        }
+    }
+
+    struct Ipv6OnlyDebugAllocator;
+
+    impl IpAllocator for Ipv6OnlyDebugAllocator {
+        fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+            Err(AllocError::Internal(
+                "IPv4 allocator should not be called when disabled".into(),
+            ))
+        }
+
+        fn ipv4_enabled(&self) -> bool {
+            false
+        }
+
+        fn allocate_ipv6(&self, _node_key_hex: &str) -> Result<Option<Ipv6Addr>, AllocError> {
+            Ok(Some("fd7a:115c:a1e0::77".parse().unwrap()))
         }
     }
 
@@ -2214,6 +2257,50 @@ mod upstream_tests {
             registered.ip_addresses,
             vec!["100.64.0.42".to_string(), "fd7a:115c:a1e0::42".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_register_node_accepts_ipv6_only_allocator() {
+        let (service, _machines) = admin_service_with_machines().await;
+        let service = service.with_ip_allocator(Arc::new(Ipv6OnlyDebugAllocator));
+        const REGISTRATION_ID: &str = "debugv6onlyabcdefghijklm";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let debug_node = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+                name: "debug-v6".into(),
+                routes: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("debug node");
+        assert!(debug_node.ip_addresses.is_empty());
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: REGISTRATION_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.ip_addresses, vec!["fd7a:115c:a1e0::77"]);
     }
 
     #[tokio::test]
@@ -2698,7 +2785,7 @@ mod upstream_tests {
         assert!(wire_registry.get(&first_node_key).is_none());
         let live = wire_registry.get(&second_node_key).unwrap();
         assert_eq!(live.machine_key_hex, machine_key_hex);
-        assert_eq!(live.ipv4, Ipv4Addr::new(100, 64, 0, 50));
+        assert_eq!(live.ipv4, Some(Ipv4Addr::new(100, 64, 0, 50)));
         assert!(live.forced_tags.is_empty());
         assert_eq!(live.available_routes, vec!["10.60.0.0/24"]);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
@@ -3352,7 +3439,7 @@ mod upstream_tests {
         for (node_key, name, octet) in &nodes {
             let mut machine =
                 fixture_machine_with_routes(node_key, "alice", name, vec![route.clone()]);
-            machine.ipv4 = Ipv4Addr::new(100, 64, 0, *octet);
+            machine.ipv4 = Some(Ipv4Addr::new(100, 64, 0, *octet));
             machine.approved_routes = vec![route.clone()];
             machines.upsert(node_key.clone(), machine);
             guards.push(MachineRegistry::track_stream_connection(

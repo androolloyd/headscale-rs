@@ -31,10 +31,14 @@ headscale_go_tls="${REAL_CLIENT_HEADSCALE_GO_TLS:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 magic_dns="${REAL_CLIENT_MAGIC_DNS:-}"
+prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
+prefix_v6="${REAL_CLIENT_PREFIX_V6-fd7a:115c:a1e0::/48}"
+prefix_allocation="${REAL_CLIENT_PREFIX_ALLOCATION:-sequential}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
+expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
@@ -267,6 +271,17 @@ if [[ -n "${expected_peer_counts}" ]]; then
       exit 2
     fi
   done
+fi
+case "${expected_tailscale_ip_families}" in
+  "" | ipv4 | ipv4-only | dual | dual-stack) ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES must be empty, ipv4-only, or dual-stack; got ${expected_tailscale_ip_families}" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${prefix_v4}" && -z "${prefix_v6}" ]]; then
+  echo "at least one of REAL_CLIENT_PREFIX_V4 or REAL_CLIENT_PREFIX_V6 must be non-empty" >&2
+  exit 2
 fi
 
 if [[ -n "${preauth_tags}" && -z "${policy_json}" ]]; then
@@ -532,9 +547,15 @@ noise:
   private_key_path: ${work_dir}/noise_private.key
 
 prefixes:
-  v4: 100.64.0.0/10
-  v6: fd7a:115c:a1e0::/48
-  allocation: sequential
+  allocation: ${prefix_allocation}
+EOF
+if [[ -n "${prefix_v4}" ]]; then
+  printf '  v4: %s\n' "${prefix_v4}" >>"${config_path}"
+fi
+if [[ -n "${prefix_v6}" ]]; then
+  printf '  v6: %s\n' "${prefix_v6}" >>"${config_path}"
+fi
+cat >>"${config_path}" <<EOF
 
 database:
   type: sqlite
@@ -1072,6 +1093,35 @@ if ((expect_no_magic_dns)); then
     end
     puts JSON.pretty_generate({magic_dns: false, clients: status_paths.length})
   ' "${no_magicdns_status_paths[@]}"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_tailscale_ip_families}" ]]; then
+  echo "::group::assert Tailscale IP families"
+  family_status_paths=()
+  for client_name in "${client_names[@]}"; do
+    status_path="${work_dir}/${client_name}.ip-family-status.json"
+    docker exec "${client_name}" tailscale status --json >"${status_path}"
+    family_status_paths+=("${status_path}")
+  done
+  ruby -rjson -e '
+    expected = ARGV.fetch(0)
+    ARGV.drop(1).each do |path|
+      status = JSON.parse(File.read(path))
+      ips = Array(status["TailscaleIPs"])
+      has_v4 = ips.any? { |ip| ip.to_s.include?(".") }
+      has_v6 = ips.any? { |ip| ip.to_s.include?(":") }
+      case expected
+      when "ipv4", "ipv4-only"
+        abort("#{path}: expected IPv4-only TailscaleIPs, got #{ips.inspect}") unless has_v4 && !has_v6
+      when "dual", "dual-stack"
+        abort("#{path}: expected dual-stack TailscaleIPs, got #{ips.inspect}") unless has_v4 && has_v6
+      else
+        abort("unsupported expected IP family #{expected.inspect}")
+      end
+      puts JSON.pretty_generate({path: path, tailscale_ips: ips})
+    end
+  ' "${expected_tailscale_ip_families}" "${family_status_paths[@]}"
   echo "::endgroup::"
 fi
 

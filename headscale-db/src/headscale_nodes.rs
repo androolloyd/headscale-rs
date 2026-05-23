@@ -1022,6 +1022,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_duplicate_manual_addresses() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut duplicate_ipv4 = node_params(user_id, auth_key_id);
+        duplicate_ipv4.machine_key = "mkey:dup-ipv4".into();
+        duplicate_ipv4.node_key = "nodekey:dup-ipv4".into();
+        duplicate_ipv4.disco_key = "discokey:dup-ipv4".into();
+        duplicate_ipv4.hostname = "dup-ipv4".into();
+        duplicate_ipv4.given_name = "dup-ipv4".into();
+        duplicate_ipv4.ipv6 = Some("fd7a:115c:a1e0::44".into());
+        let err = create(db.pool(), duplicate_ipv4).await.unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+
+        let mut duplicate_ipv6 = node_params(user_id, auth_key_id);
+        duplicate_ipv6.machine_key = "mkey:dup-ipv6".into();
+        duplicate_ipv6.node_key = "nodekey:dup-ipv6".into();
+        duplicate_ipv6.disco_key = "discokey:dup-ipv6".into();
+        duplicate_ipv6.hostname = "dup-ipv6".into();
+        duplicate_ipv6.given_name = "dup-ipv6".into();
+        duplicate_ipv6.ipv4 = Some("100.64.0.44".into());
+        let err = create(db.pool(), duplicate_ipv6).await.unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+    }
+
+    #[tokio::test]
+    async fn set_ip_addresses_rejects_duplicate_manual_addresses() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let first = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut second_params = node_params(user_id, auth_key_id);
+        second_params.machine_key = "mkey:def".into();
+        second_params.node_key = "nodekey:def".into();
+        second_params.disco_key = "discokey:def".into();
+        second_params.hostname = "bob-laptop".into();
+        second_params.given_name = "bob-laptop".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let second = create(db.pool(), second_params).await.unwrap();
+
+        let err = set_ip_addresses(
+            db.pool(),
+            second.id,
+            first.ipv4.clone(),
+            Some("fd7a:115c:a1e0::3".into()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+
+        let err = set_ip_addresses(
+            db.pool(),
+            second.id,
+            Some("100.64.0.3".into()),
+            first.ipv6.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+    }
+
+    #[tokio::test]
     async fn rename_validates_like_headscale_go() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;
@@ -1052,6 +1122,8 @@ mod tests {
         second_params.disco_key = "discokey:def".into();
         second_params.hostname = "bob-laptop".into();
         second_params.given_name = "bob-laptop".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
         let second = create(db.pool(), second_params).await.unwrap();
 
         let err = rename(db.pool(), second.id, &first.given_name)

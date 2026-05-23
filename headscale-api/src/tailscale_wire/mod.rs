@@ -2145,7 +2145,7 @@ mod registry_tests {
                 os_version: "test".to_string(),
                 ..wire::HostInfo::default()
             },
-            ipv4: Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8),
+            ipv4: Some(Ipv4Addr::new(100, 64, (host >> 8) as u8, host as u8)),
             ipv6: None,
             disco_key: Some(format!("disco-{host:08x}")),
             endpoints: vec![format!("198.51.100.{}:41641", host & 0xff)],
@@ -3071,7 +3071,7 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
 
         pending.approved_routes = auto_approved_routes_for_node(
             &self.state.policy,
-            &pending.ipv4.to_string(),
+            &pending.primary_addr_string().unwrap_or_default(),
             Some(&user_name),
             &pending.forced_tags,
             &pending.approved_routes,

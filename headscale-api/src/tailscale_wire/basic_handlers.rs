@@ -1850,7 +1850,7 @@ fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNod
                     machine_key: rec.machine_key_hex.clone(),
                     user: rec.user.clone(),
                     hostname: rec.hostname.clone(),
-                    ipv4: rec.ipv4.to_string(),
+                    ipv4: rec.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
                     online: !rec.is_expired_at(now)
                         && online_states.get(&id).copied().unwrap_or(false),
                     expired: rec.is_expired_at(now),
@@ -2004,7 +2004,7 @@ fn debug_policy_manager_string(state: &WireState) -> String {
             stable_id_from_key(node_key),
             rec.hostname,
             rec.user,
-            rec.ipv4
+            rec.primary_addr_string().unwrap_or_default()
         ));
     }
 
@@ -2043,7 +2043,7 @@ fn debug_peer_map_for_snapshot(
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
             id: stable_id_from_key(node_key),
-            addr: rec.ipv4.to_string(),
+            addr: rec.primary_addr_string().unwrap_or_default(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
             routes: primary_routes.get(node_key).cloned().unwrap_or_default(),

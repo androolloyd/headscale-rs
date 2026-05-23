@@ -109,8 +109,12 @@ pub struct MachineRecord {
     /// paths, but peer map responses and persistent `host_info` writes should
     /// use this richer value.
     pub host_info: HostInfo,
-    /// Allocated tailnet IPv4 in the CGNAT range.
-    pub ipv4: std::net::Ipv4Addr,
+    /// Optional allocated tailnet IPv4 in the CGNAT range.
+    ///
+    /// Headscale-go supports disabling either configured prefix family.
+    /// Keeping this optional lets the Rust wire model represent
+    /// IPv6-only deployments without inventing a sentinel IPv4 address.
+    pub ipv4: Option<std::net::Ipv4Addr>,
     /// Optional allocated tailnet IPv6.
     ///
     /// Headscale-go stores IPv4 and IPv6 independently and emits both
@@ -184,7 +188,10 @@ pub struct MachineRecord {
 
 impl MachineRecord {
     pub fn address_strings(&self) -> Vec<String> {
-        let mut addrs = vec![self.ipv4.to_string()];
+        let mut addrs = Vec::new();
+        if let Some(ipv4) = self.ipv4 {
+            addrs.push(ipv4.to_string());
+        }
         if let Some(ipv6) = self.ipv6 {
             addrs.push(ipv6.to_string());
         }
@@ -192,11 +199,20 @@ impl MachineRecord {
     }
 
     pub fn address_prefixes(&self) -> Vec<String> {
-        let mut addrs = vec![format!("{}/32", self.ipv4)];
+        let mut addrs = Vec::new();
+        if let Some(ipv4) = self.ipv4 {
+            addrs.push(format!("{ipv4}/32"));
+        }
         if let Some(ipv6) = self.ipv6 {
             addrs.push(format!("{ipv6}/128"));
         }
         addrs
+    }
+
+    pub fn primary_addr_string(&self) -> Option<String> {
+        self.ipv4
+            .map(|addr| addr.to_string())
+            .or_else(|| self.ipv6.map(|addr| addr.to_string()))
     }
 
     /// True when the node is owned by tags instead of its registering user.
@@ -258,6 +274,28 @@ impl MachineRecord {
         ipv4: std::net::Ipv4Addr,
         ephemeral: bool,
     ) -> Self {
+        Self::new_at_with_addresses(
+            now,
+            node_key_hex,
+            machine_key_hex,
+            user,
+            hostname,
+            Some(ipv4),
+            None,
+            ephemeral,
+        )
+    }
+
+    pub fn new_at_with_addresses(
+        now: DateTime<Utc>,
+        node_key_hex: String,
+        machine_key_hex: String,
+        user: String,
+        hostname: String,
+        ipv4: Option<std::net::Ipv4Addr>,
+        ipv6: Option<std::net::Ipv6Addr>,
+        ephemeral: bool,
+    ) -> Self {
         Self {
             node_key_hex,
             machine_key_hex,
@@ -270,7 +308,7 @@ impl MachineRecord {
                 ..HostInfo::default()
             },
             ipv4,
-            ipv6: None,
+            ipv6,
             disco_key: None,
             endpoints: Vec::new(),
             home_derp: 0,

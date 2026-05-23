@@ -51,7 +51,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    net::Ipv4Addr,
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -316,7 +316,8 @@ impl DnsConfigSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineDnsRecord {
     pub hostname: String,
-    pub ipv4: Ipv4Addr,
+    pub ipv4: Option<Ipv4Addr>,
+    pub ipv6: Option<Ipv6Addr>,
     /// Stable per-tailnet node ID. Used as the collision-suffix when
     /// two machines advertise the same hostname.
     pub node_id: u64,
@@ -594,11 +595,11 @@ fn derive_authoritative_suffixes(spec: &DnsConfigSpec) -> Vec<String> {
     out
 }
 
-/// Generate the per-machine A records that make `ssh peer-1` work.
+/// Generate the per-machine A/AAAA records that make `ssh peer-1` work.
 ///
-/// Each record is `<hostname>.<base_domain> → IPv4`. The hostname is
-/// normalised (lowercased, ASCII-only, dot-stripped) so DNS labels
-/// stay legal even if the client advertised a quirky name.
+/// Each record is `<hostname>.<base_domain> → node addresses`. The
+/// hostname is normalised (lowercased, ASCII-only, dot-stripped) so
+/// DNS labels stay legal even if the client advertised a quirky name.
 ///
 /// Collision handling: if N machines advertise the same normalised
 /// hostname, the first (lowest node-id) keeps the canonical name and
@@ -614,32 +615,35 @@ pub fn magic_dns_records(base_domain: &str, machines: &[MachineDnsRecord]) -> Ve
     sorted.sort_by_key(|m| m.node_id);
 
     let mut seen: HashSet<String> = HashSet::new();
-    let mut out = Vec::with_capacity(sorted.len());
+    let mut out = Vec::with_capacity(sorted.len() * 2);
     for m in sorted {
         let normalised = normalise_hostname(&m.hostname);
-        if normalised.is_empty() {
+        let label = if normalised.is_empty() {
             // Hostname is empty after normalisation (e.g. all symbols).
             // Use `n{id}` as the label so the record still lands.
-            let name = format!("n{}.{}", m.node_id, base_domain);
             seen.insert(format!("n{}", m.node_id));
-            out.push(DnsRecord {
-                name,
-                record_type: "A".into(),
-                value: m.ipv4.to_string(),
-            });
-            continue;
-        }
-        let label = if seen.contains(&normalised) {
+            format!("n{}", m.node_id)
+        } else if seen.contains(&normalised) {
             format!("{normalised}-n{}", m.node_id)
         } else {
             normalised.clone()
         };
         seen.insert(label.clone());
-        out.push(DnsRecord {
-            name: format!("{label}.{base_domain}"),
-            record_type: "A".into(),
-            value: m.ipv4.to_string(),
-        });
+        let name = format!("{label}.{base_domain}");
+        if let Some(ipv4) = m.ipv4 {
+            out.push(DnsRecord {
+                name: name.clone(),
+                record_type: "A".into(),
+                value: ipv4.to_string(),
+            });
+        }
+        if let Some(ipv6) = m.ipv6 {
+            out.push(DnsRecord {
+                name,
+                record_type: "AAAA".into(),
+                value: ipv6.to_string(),
+            });
+        }
     }
     out
 }
@@ -781,7 +785,8 @@ mod tests {
     fn machine(host: &str, last: u8, id: u64) -> MachineDnsRecord {
         MachineDnsRecord {
             hostname: host.into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, last),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, last)),
+            ipv6: None,
             node_id: id,
         }
     }
@@ -858,6 +863,23 @@ mod tests {
     }
 
     #[test]
+    fn magic_dns_records_emit_aaaa_for_ipv6_only_machine() {
+        let machines = [MachineDnsRecord {
+            hostname: "v6-only".into(),
+            ipv4: None,
+            ipv6: Some("fd7a:115c:a1e0::66".parse().unwrap()),
+            node_id: 66,
+        }];
+
+        let cfg = DnsStore::from_spec(magic_spec()).build(&machines);
+
+        assert_eq!(cfg.extra_records.len(), 1);
+        assert_eq!(cfg.extra_records[0].name, "v6-only.headscale.test");
+        assert_eq!(cfg.extra_records[0].record_type, "AAAA");
+        assert_eq!(cfg.extra_records[0].value, "fd7a:115c:a1e0::66");
+    }
+
+    #[test]
     fn hostname_collision_lowest_node_id_keeps_canonical_name() {
         let machines = [
             machine("dup", 11, 42), // higher id ⇒ collision-suffixed
@@ -896,7 +918,8 @@ mod tests {
     fn empty_hostname_falls_back_to_node_id_label() {
         let machines = [MachineDnsRecord {
             hostname: "!!!".into(),
-            ipv4: Ipv4Addr::new(100, 64, 0, 9),
+            ipv4: Some(Ipv4Addr::new(100, 64, 0, 9)),
+            ipv6: None,
             node_id: 99,
         }];
         let cfg = DnsStore::from_spec(magic_spec()).build(&machines);

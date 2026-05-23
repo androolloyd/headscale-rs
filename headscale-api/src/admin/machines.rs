@@ -317,8 +317,8 @@ impl WireMachineAdmin {
             id: id.to_string(),
             name: rec.hostname.clone(),
             user: rec.user.clone(),
-            ipv4: rec.ipv4.to_string(),
-            ipv6: None,
+            ipv4: rec.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
+            ipv6: rec.ipv6.map(|addr| addr.to_string()),
             online: online && !is_expired,
             last_seen,
             created_at: rec.created_at.timestamp().max(0) as u64,
@@ -341,6 +341,58 @@ fn nonempty_or_unknown(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn optional_ipv4(value: &str) -> Result<Option<Ipv4Addr>, MachineAdminError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<Ipv4Addr>()
+        .map(Some)
+        .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))
+}
+
+fn optional_ipv6(value: Option<&str>) -> Result<Option<Ipv6Addr>, MachineAdminError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    value
+        .parse::<Ipv6Addr>()
+        .map(Some)
+        .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))
+}
+
+fn require_any_address(
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
+) -> Result<(), MachineAdminError> {
+    if ipv4.is_none() && ipv6.is_none() {
+        return Err(MachineAdminError::BadRequest(
+            "node must have at least one IP address".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn primary_admin_addr(record: &MachineAdminRecord) -> String {
+    if record.ipv4.trim().is_empty() {
+        record
+            .ipv6
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        record.ipv4.trim().to_string()
+    }
+}
+
+fn optional_ipv4_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// sqlx-backed node admin adapter over the canonical headscale-go
@@ -472,19 +524,14 @@ impl PersistentMachineAdmin {
                 "node key must not be empty".into(),
             ));
         }
-        record
-            .ipv4
-            .parse::<Ipv4Addr>()
-            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
-        if let Some(ipv6) = &record.ipv6 {
-            ipv6.parse::<Ipv6Addr>()
-                .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))?;
-        }
+        let ipv4 = optional_ipv4(&record.ipv4)?;
+        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+        require_any_address(ipv4, ipv6)?;
         let user_id = self.user_id_for_record(&record).await?;
         if validate_requested_tags
             && validate_requested_tags_for_node(
                 policy,
-                record.ipv4.as_str(),
+                &primary_admin_addr(&record),
                 record.user.as_str(),
                 &mut record.tags,
             )
@@ -544,7 +591,7 @@ impl PersistentMachineAdmin {
             approved.extend(record.approved_routes.clone());
             record.approved_routes = auto_approved_routes_for_node(
                 policy,
-                &record.ipv4,
+                &primary_admin_addr(&record),
                 Some(&record.user),
                 &record.tags,
                 &approved,
@@ -569,7 +616,7 @@ impl PersistentMachineAdmin {
         } else {
             record.approved_routes = auto_approved_routes_for_node(
                 policy,
-                &record.ipv4,
+                &primary_admin_addr(&record),
                 Some(&record.user),
                 &record.tags,
                 &record.approved_routes,
@@ -747,14 +794,15 @@ impl PersistentMachineAdmin {
         let ipv4 = row
             .ipv4
             .as_deref()
-            .unwrap_or_default()
-            .parse()
-            .map_err(|e| {
-                MachineAdminError::BadRequest(format!(
-                    "persisted node {node_key} has invalid IPv4 '{}': {e}",
-                    row.ipv4.as_deref().unwrap_or_default()
-                ))
-            })?;
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value.parse::<Ipv4Addr>().map_err(|e| {
+                    MachineAdminError::BadRequest(format!(
+                        "persisted node {node_key} has invalid IPv4 '{value}': {e}"
+                    ))
+                })
+            })
+            .transpose()?;
         let ipv6 = row
             .ipv6
             .as_deref()
@@ -767,21 +815,22 @@ impl PersistentMachineAdmin {
                 })
             })
             .transpose()?;
+        require_any_address(ipv4, ipv6)?;
         let name = if row.given_name.is_empty() {
             row.hostname.clone()
         } else {
             row.given_name.clone()
         };
-        let mut record = MachineRecord::new_at(
+        let mut record = MachineRecord::new_at_with_addresses(
             created_at,
             node_key.clone(),
             key_without_prefix("mkey:", &row.machine_key),
             self.user_name_for_row(&row).await,
             name.clone(),
             ipv4,
+            ipv6,
             false,
         );
-        record.ipv6 = ipv6;
         record.replace_host_info(host_info_from_value(&host_info));
         record.os = os_from_host_info(&host_info);
         record.os_version = version_from_host_info(&host_info);
@@ -999,14 +1048,9 @@ impl MachineAdmin for PersistentMachineAdmin {
             Err(headscale_db::DbError::NotFound(_)) => {}
             Err(e) => return Err(db_error_to_machine(e, &record.id)),
         }
-        record
-            .ipv4
-            .parse::<Ipv4Addr>()
-            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
-        if let Some(ipv6) = &record.ipv6 {
-            ipv6.parse::<Ipv6Addr>()
-                .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))?;
-        }
+        let ipv4 = optional_ipv4(&record.ipv4)?;
+        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+        require_any_address(ipv4, ipv6)?;
         self.reject_duplicate_addresses(None, &record).await?;
         let user_id = self.user_id_for_record(&record).await?;
         let row = headscale_db::headscale_nodes::create(
@@ -1253,26 +1297,17 @@ impl MachineAdmin for WireMachineAdmin {
         if self.registry.get(&record.id).is_some() {
             return Err(MachineAdminError::BadRequest("node already exists".into()));
         }
-        let ipv4 = record
-            .ipv4
-            .parse()
-            .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv4: {e}")))?;
-        let ipv6 = record
-            .ipv6
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .map(|value| {
-                value
-                    .parse::<Ipv6Addr>()
-                    .map_err(|e| MachineAdminError::BadRequest(format!("invalid IPv6: {e}")))
-            })
-            .transpose()?;
+        let ipv4 = optional_ipv4(&record.ipv4)?;
+        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+        require_any_address(ipv4, ipv6)?;
         let snapshot = self.registry.snapshot();
         for (node_key, existing) in snapshot.iter() {
             if node_key == &record.id {
                 continue;
             }
-            if existing.ipv4 == ipv4 {
+            if let Some(ipv4) = ipv4
+                && existing.ipv4 == Some(ipv4)
+            {
                 return Err(MachineAdminError::BadRequest(format!(
                     "IPv4 address {ipv4} already in use"
                 )));
@@ -1290,16 +1325,16 @@ impl MachineAdmin for WireMachineAdmin {
         let expiry = record
             .expiry
             .and_then(|seconds| DateTime::from_timestamp(seconds as i64, 0));
-        let mut rec = crate::tailscale_wire::MachineRecord::new_at(
+        let mut rec = crate::tailscale_wire::MachineRecord::new_at_with_addresses(
             created_at,
             record.id.clone(),
             record.machine_key_hex.clone(),
             record.user.clone(),
             record.name.clone(),
             ipv4,
+            ipv6,
             false,
         );
-        rec.ipv6 = ipv6;
         rec.expiry = expiry;
         rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
         rec.os = record.os.clone();
@@ -1466,7 +1501,7 @@ fn create_params_for_record_with_auth_key(
         disco_key: String::new(),
         endpoints: Vec::new(),
         host_info: host_info_for_record(record),
-        ipv4: Some(record.ipv4.clone()),
+        ipv4: optional_ipv4_string(&record.ipv4),
         ipv6: record.ipv6.clone(),
         hostname: record.name.clone(),
         given_name: record.name.clone(),
@@ -1508,25 +1543,11 @@ fn canonical_wire_record_for_auth_path(
         .clone_from(&record.machine_key_hex);
     canonical.user.clone_from(&record.user);
     canonical.hostname.clone_from(&record.name);
-    canonical.ipv4 = record.ipv4.parse().map_err(|e| {
-        MachineAdminError::BadRequest(format!(
-            "persisted node {} has invalid IPv4 '{}': {e}",
-            record.id, record.ipv4
-        ))
-    })?;
-    canonical.ipv6 = record
-        .ipv6
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            value.parse::<Ipv6Addr>().map_err(|e| {
-                MachineAdminError::BadRequest(format!(
-                    "persisted node {} has invalid IPv6 '{}': {e}",
-                    record.id, value
-                ))
-            })
-        })
-        .transpose()?;
+    let ipv4 = optional_ipv4(&record.ipv4)?;
+    let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+    require_any_address(ipv4, ipv6)?;
+    canonical.ipv4 = ipv4;
+    canonical.ipv6 = ipv6;
     canonical.last_seen = unix_timestamp_for_record(record.last_seen, &record.id, "last_seen")?;
     canonical.expiry = record
         .expiry
@@ -1563,7 +1584,7 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
         id: record.node_key_hex.clone(),
         name: record.hostname.clone(),
         user: record.user.clone(),
-        ipv4: record.ipv4.to_string(),
+        ipv4: record.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
         ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
         online: !expired,
         last_seen: record.last_seen.timestamp().max(0) as u64,
@@ -1590,19 +1611,17 @@ fn machine_admin_record_to_wire(
     }
     let created_at = unix_timestamp_for_record(machine.created_at, &machine.id, "created_at")?;
     let last_seen = unix_timestamp_for_record(machine.last_seen, &machine.id, "last_seen")?;
-    let ipv4 = machine.ipv4.parse().map_err(|e| {
-        MachineAdminError::BadRequest(format!(
-            "persisted node {} has invalid IPv4 '{}': {e}",
-            machine.id, machine.ipv4
-        ))
-    })?;
-    let mut record = MachineRecord::new_at(
+    let ipv4 = optional_ipv4(&machine.ipv4)?;
+    let ipv6 = optional_ipv6(machine.ipv6.as_deref())?;
+    require_any_address(ipv4, ipv6)?;
+    let mut record = MachineRecord::new_at_with_addresses(
         created_at,
         machine.id.clone(),
         machine.machine_key_hex.clone(),
         machine.user.clone(),
         machine.name.clone(),
         ipv4,
+        ipv6,
         false,
     );
     record.expiry = machine
@@ -2158,6 +2177,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_machine_admin_allows_ipv6_only_nodes() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let mut record = persistent_record();
+        record.ipv4 = String::new();
+        record.ipv6 = Some("fd7a:115c:a1e0::66".into());
+
+        let created = admin.create(record).await.unwrap();
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), created.node_id as i64)
+            .await
+            .unwrap();
+        let registry = MachineRegistry::new();
+
+        let hydrated = admin.hydrate_wire_registry(&registry).await.unwrap();
+        let wire = registry.get(&created.id).unwrap();
+
+        assert_eq!(row.ipv4, None);
+        assert_eq!(row.ipv6.as_deref(), Some("fd7a:115c:a1e0::66"));
+        assert_eq!(hydrated, 1);
+        assert_eq!(wire.ipv4, None);
+        assert_eq!(
+            wire.ipv6.map(|addr| addr.to_string()).as_deref(),
+            Some("fd7a:115c:a1e0::66")
+        );
+    }
+
+    #[tokio::test]
     async fn persistent_machine_admin_rejects_duplicate_ipv4_on_create() {
         let (admin, _db, _users) = persistent_fixture().await;
         admin.create(persistent_record()).await.unwrap();
@@ -2297,7 +2342,10 @@ mod tests {
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
         assert_eq!(wire.hostname, "alice-laptop");
         assert_eq!(wire.user, "alice");
-        assert_eq!(wire.ipv4.to_string(), "100.64.0.9");
+        assert_eq!(
+            wire.ipv4.map(|ip| ip.to_string()).as_deref(),
+            Some("100.64.0.9")
+        );
         assert_eq!(
             wire.ipv6.map(|ipv6| ipv6.to_string()).as_deref(),
             Some("fd7a:115c:a1e0::9")
@@ -2596,7 +2644,10 @@ mod tests {
         assert_eq!(hydrated.machine_key_hex, record.machine_key_hex);
         assert_eq!(hydrated.user, "alice");
         assert_eq!(hydrated.hostname, "authkey-node");
-        assert_eq!(hydrated.ipv4.to_string(), "100.64.0.88");
+        assert_eq!(
+            hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
+            Some("100.64.0.88")
+        );
         assert_eq!(hydrated.disco_key, Some("discokey:authkey-node".into()));
         assert_eq!(hydrated.endpoints, record.endpoints);
         assert_eq!(hydrated.home_derp, 7);
@@ -2652,7 +2703,7 @@ mod tests {
         let mut rotated = original.clone();
         rotated.node_key_hex = "cc".repeat(32);
         rotated.hostname = "alice-rotated".into();
-        rotated.ipv4 = Ipv4Addr::new(100, 64, 99, 99);
+        rotated.ipv4 = Some(Ipv4Addr::new(100, 64, 99, 99));
         rotated.available_routes = vec!["10.1.0.0/24".into()];
         let result = admin
             .create_or_update_auth_key_path(
@@ -2891,7 +2942,10 @@ mod tests {
         assert_eq!(hydrated.machine_key_hex, pending.machine_key_hex);
         assert_eq!(hydrated.user, "alice");
         assert_eq!(hydrated.hostname, "oidc-node");
-        assert_eq!(hydrated.ipv4.to_string(), "100.64.0.89");
+        assert_eq!(
+            hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
+            Some("100.64.0.89")
+        );
         assert_eq!(hydrated.disco_key, Some("discokey:oidc-node".into()));
         assert_eq!(hydrated.endpoints, pending.endpoints);
         assert_eq!(hydrated.home_derp, 9);
@@ -2963,7 +3017,10 @@ mod tests {
         assert!(!result.new_node);
         assert!(registry.get(&created.id).is_none());
         let wire = registry.get(&pending.node_key_hex).unwrap();
-        assert_eq!(wire.ipv4.to_string(), created.ipv4);
+        assert_eq!(
+            wire.ipv4.map(|ip| ip.to_string()).as_deref(),
+            Some(created.ipv4.as_str())
+        );
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
         assert_eq!(wire.user, "alice");
         assert_eq!(wire.disco_key.as_deref(), Some("discokey:oidc-rekey"));

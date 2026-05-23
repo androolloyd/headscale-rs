@@ -319,6 +319,40 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
 }
 
 #[tokio::test]
+async fn node_address_uniqueness_indexes_are_partial() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
+
+    let indexes: Vec<(String, String)> = sqlx::query_as(
+        "
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN ('idx_nodes_ipv4', 'idx_nodes_ipv6')
+        ORDER BY name
+        ",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("query node address indexes");
+
+    assert_eq!(indexes.len(), 2);
+    assert_eq!(indexes[0].0, "idx_nodes_ipv4");
+    assert!(indexes[0].1.contains("UNIQUE INDEX"));
+    assert!(
+        indexes[0]
+            .1
+            .contains("WHERE ipv4 IS NOT NULL AND ipv4 != ''")
+    );
+    assert_eq!(indexes[1].0, "idx_nodes_ipv6");
+    assert!(indexes[1].1.contains("UNIQUE INDEX"));
+    assert!(
+        indexes[1]
+            .1
+            .contains("WHERE ipv6 IS NOT NULL AND ipv6 != ''")
+    );
+}
+
+#[tokio::test]
 async fn rejects_database_versions_from_newer_headscale_go() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(

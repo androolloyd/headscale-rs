@@ -346,6 +346,7 @@ fn nonempty_or_unknown(value: &str) -> String {
 pub struct PersistentMachineAdmin {
     pool: SqlitePool,
     users: Option<Arc<dyn UserAdmin>>,
+    wire_registry: Option<Arc<MachineRegistry>>,
 }
 
 #[derive(Clone)]
@@ -385,11 +386,20 @@ impl PersistentOidcRegistrationHandler {
 
 impl PersistentMachineAdmin {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool, users: None }
+        Self {
+            pool,
+            users: None,
+            wire_registry: None,
+        }
     }
 
     pub fn with_user_admin(mut self, users: Arc<dyn UserAdmin>) -> Self {
         self.users = Some(users);
+        self
+    }
+
+    pub fn with_wire_registry(mut self, registry: Arc<MachineRegistry>) -> Self {
+        self.wire_registry = Some(registry);
         self
     }
 
@@ -740,6 +750,18 @@ impl PersistentMachineAdmin {
         record.register_method = register_method_from_db(&row.register_method);
         Ok(record)
     }
+
+    async fn sync_wire_row(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<(), MachineAdminError> {
+        let Some(registry) = &self.wire_registry else {
+            return Ok(());
+        };
+        let record = self.row_to_wire_record(row).await?;
+        registry.upsert(record.node_key_hex.clone(), record);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -838,6 +860,12 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             replaced_node_key_hex: None,
         })
     }
+
+    async fn delete_machine_registration(&self, node_key_hex: &str) -> Result<(), String> {
+        self.delete(node_key_hex)
+            .await
+            .map_err(|err| err.to_string())
+    }
 }
 
 #[async_trait]
@@ -899,6 +927,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         )
         .await
         .map_err(|e| db_error_to_machine(e, &record.id))?;
+        self.sync_wire_row(row.clone()).await?;
         Ok(self.row_to_record(row).await)
     }
 
@@ -919,26 +948,26 @@ impl MachineAdmin for PersistentMachineAdmin {
     ) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
         let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
-        headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
+        let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, None)
+        let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, None)
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::logout(&self.pool, row.id)
+        let row = headscale_db::headscale_nodes::logout(&self.pool, row.id)
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
@@ -948,18 +977,18 @@ impl MachineAdmin for PersistentMachineAdmin {
             ));
         }
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::rename(&self.pool, row.id, hostname)
+        let row = headscale_db::headscale_nodes::rename(&self.pool, row.id, hostname)
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::set_tags(&self.pool, row.id, tags)
+        let row = headscale_db::headscale_nodes::set_tags(&self.pool, row.id, tags)
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn set_approved_routes(
@@ -968,18 +997,19 @@ impl MachineAdmin for PersistentMachineAdmin {
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::set_approved_routes(&self.pool, row.id, routes)
+        let row = headscale_db::headscale_nodes::set_approved_routes(&self.pool, row.id, routes)
             .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
-        headscale_db::headscale_nodes::set_host_info_routable_ips(&self.pool, row.id, routes)
-            .await
-            .map(|_| ())
-            .map_err(|e| db_error_to_machine(e, id))
+        let row =
+            headscale_db::headscale_nodes::set_host_info_routable_ips(&self.pool, row.id, routes)
+                .await
+                .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
     }
 
     async fn backfill_node_ips(
@@ -1040,9 +1070,14 @@ impl MachineAdmin for PersistentMachineAdmin {
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
+        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         headscale_db::headscale_nodes::destroy(&self.pool, row.id)
             .await
-            .map_err(|e| db_error_to_machine(e, id))
+            .map_err(|e| db_error_to_machine(e, id))?;
+        if let Some(registry) = &self.wire_registry {
+            registry.delete(&node_key_hex);
+        }
+        Ok(())
     }
 }
 
@@ -2006,6 +2041,34 @@ mod tests {
         assert_eq!(wire.available_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.approved_routes, vec!["10.0.0.0/24"]);
         assert_eq!(wire.register_method, 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_machine_admin_mutations_update_live_wire_registry() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let registry = Arc::new(MachineRegistry::new());
+        let admin = PersistentMachineAdmin::new(db.pool().clone())
+            .with_user_admin(users)
+            .with_wire_registry(registry.clone());
+        let created = admin.create(persistent_record()).await.unwrap();
+        assert!(registry.get(&created.id).is_some());
+
+        let expiry = DateTime::<Utc>::from_timestamp(
+            (Utc::now() + chrono::Duration::seconds(90)).timestamp(),
+            0,
+        )
+        .unwrap();
+        admin.expire_at(&created.id, Some(expiry)).await.unwrap();
+        assert_eq!(registry.get(&created.id).unwrap().expiry, Some(expiry));
+
+        admin.rename(&created.id, "renamed-node").await.unwrap();
+        assert_eq!(registry.get(&created.id).unwrap().hostname, "renamed-node");
+
+        admin.delete(&created.id).await.unwrap();
+        assert!(registry.get(&created.id).is_none());
     }
 
     #[tokio::test]

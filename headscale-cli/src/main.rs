@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -338,6 +339,11 @@ async fn dispatch(cli: Cli) -> Result<(), MainError> {
                 embedded_derp: server_config
                     .map_or(defaults.embedded_derp, |s| s.embedded_derp.clone()),
                 dns: config.as_ref().and_then(|c| c.dns.clone()),
+                ephemeral_node_inactivity_timeout: Duration::from_secs(
+                    server_config.map_or(defaults.ephemeral_node_inactivity_timeout_secs, |s| {
+                        s.ephemeral_node_inactivity_timeout_secs
+                    }),
+                ),
             };
             server::run_server(run_config)
                 .await

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -55,6 +56,7 @@ pub(crate) struct RunServerConfig {
     pub oidc: OidcConfig,
     pub embedded_derp: EmbeddedDerpConfig,
     pub dns: Option<DnsConfigSpec>,
+    pub ephemeral_node_inactivity_timeout: Duration,
 }
 
 /// Run the control plane server.
@@ -119,6 +121,20 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         dns_store.clone(),
     )
     .await?;
+    let ephemeral_gc = runtime.state.machines.configure_ephemeral_gc(
+        runtime
+            .state
+            .registration_store
+            .as_ref()
+            .map(Arc::downgrade),
+        cfg.ephemeral_node_inactivity_timeout,
+    );
+    let scheduled_ephemeral = ephemeral_gc.schedule_existing();
+    tracing::info!(
+        nodes = scheduled_ephemeral,
+        timeout = ?ephemeral_gc.inactivity_timeout(),
+        "scheduled existing ephemeral nodes for garbage collection"
+    );
 
     let http_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let https_addr = cfg
@@ -169,6 +185,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     });
     tracing::info!("Headscale-compatible Tailscale control plane ready");
     let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    ephemeral_gc.abort();
     if let Some(handle) = dns_extra_records_watcher {
         handle.abort();
     }
@@ -227,9 +244,12 @@ async fn build_persistent_wire_runtime_with_dns(
     let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
     let preauth =
         Arc::new(PersistentPreauthAdmin::new(pool.clone()).with_user_admin(users.clone()));
-    let machines =
-        Arc::new(PersistentMachineAdmin::new(pool.clone()).with_user_admin(users.clone()));
     let wire_registry = Arc::new(MachineRegistry::new());
+    let machines = Arc::new(
+        PersistentMachineAdmin::new(pool.clone())
+            .with_user_admin(users.clone())
+            .with_wire_registry(wire_registry.clone()),
+    );
     let registration_cache = Arc::new(RegistrationCache::new());
     let ip_allocator: Arc<dyn IpAllocator> =
         Arc::new(CidrIpAllocator::from_cidrs(mesh_cidr, mesh_cidr_v6)?);
@@ -1266,6 +1286,7 @@ mod tests {
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
             dns: None,
+            ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
         let sans = SanConfig::with_hostname("headscale.example");
 
@@ -1310,6 +1331,7 @@ mod tests {
             oidc: OidcConfig::default(),
             embedded_derp: EmbeddedDerpConfig::default(),
             dns: None,
+            ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })
         .await
         .unwrap_err();

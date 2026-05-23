@@ -34,7 +34,10 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -284,6 +287,10 @@ pub trait MachineRegistrationStore: Send + Sync {
             record,
             replaced_node_key_hex: None,
         })
+    }
+
+    async fn delete_machine_registration(&self, _node_key_hex: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -884,6 +891,10 @@ pub struct MachineRegistry {
     /// Monotonic per-node stream generation used to suppress stale
     /// delayed-offline tasks after a rapid reconnect.
     connection_generations: RwLock<BTreeMap<u64, u64>>,
+    /// Upstream-shaped ephemeral-node lifecycle manager. When
+    /// configured by production startup it cancels per-node deletion
+    /// timers on stream connect and schedules them after disconnect.
+    ephemeral_gc: RwLock<Option<Arc<EphemeralNodeGc>>>,
     /// Prometheus-compatible counters for the Tailscale wire surface.
     metrics: WireMetrics,
 }
@@ -963,6 +974,7 @@ impl Default for MachineRegistry {
             active_connections: RwLock::new(BTreeMap::new()),
             online_states: RwLock::new(BTreeMap::new()),
             connection_generations: RwLock::new(BTreeMap::new()),
+            ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
         }
     }
@@ -971,6 +983,42 @@ impl Default for MachineRegistry {
 impl MachineRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable upstream-shaped ephemeral node garbage collection for
+    /// this live registry projection.
+    ///
+    /// Headscale-go uses per-node timers: existing ephemeral nodes are
+    /// scheduled at startup, active map streams cancel their timer,
+    /// and disconnect schedules a new deletion timer. The returned
+    /// handle owns no listener task; it controls the timers installed
+    /// in this registry.
+    pub fn configure_ephemeral_gc(
+        self: &Arc<Self>,
+        registration_store: Option<Weak<dyn MachineRegistrationStore>>,
+        inactivity_timeout: Duration,
+    ) -> EphemeralGcHandle {
+        let gc = Arc::new(EphemeralNodeGc {
+            machines: Arc::downgrade(self),
+            registration_store,
+            inactivity_timeout,
+            timers: Mutex::new(BTreeMap::new()),
+            closed: AtomicBool::new(false),
+        });
+        if let Some(previous) = self.ephemeral_gc.write().replace(gc.clone()) {
+            previous.abort_all();
+        }
+        EphemeralGcHandle { inner: gc }
+    }
+
+    fn ephemeral_gc(&self) -> Option<Arc<EphemeralNodeGc>> {
+        self.ephemeral_gc.read().clone()
+    }
+
+    fn ephemeral_node_key_by_id(&self, node_id: u64) -> Option<String> {
+        self.snapshot().iter().find_map(|(node_key, rec)| {
+            (rec.ephemeral && stable_id_from_key(node_key) == node_id).then(|| node_key.clone())
+        })
     }
 
     /// Subscribe to the generation-counter wake channel. Each mutating
@@ -1108,6 +1156,11 @@ impl MachineRegistry {
         node_id: u64,
         offline_grace: Duration,
     ) -> StreamConnectionGuard {
+        if let Some(node_key) = machines.ephemeral_node_key_by_id(node_id)
+            && let Some(gc) = machines.ephemeral_gc()
+        {
+            gc.cancel(&node_key);
+        }
         {
             let mut active = machines.active_connections.write();
             *active.entry(node_id).or_insert(0) += 1;
@@ -1441,6 +1494,9 @@ impl MachineRegistry {
             self.active_connections.write().remove(&old_id);
             self.online_states.write().remove(&old_id);
             self.connection_generations.write().remove(&old_id);
+            if let Some(gc) = self.ephemeral_gc() {
+                gc.cancel(old_node_key_hex);
+            }
         }
     }
 
@@ -1616,6 +1672,9 @@ impl MachineRegistry {
             self.active_connections.write().remove(&node_id);
             self.online_states.write().remove(&node_id);
             self.connection_generations.write().remove(&node_id);
+            if let Some(gc) = self.ephemeral_gc() {
+                gc.cancel(node_key_hex);
+            }
         }
         removed
     }
@@ -1698,10 +1757,18 @@ impl MachineRegistry {
         let cutoff_chrono =
             chrono::Duration::from_std(grace).unwrap_or(chrono::Duration::seconds(0));
         let deadline = now - cutoff_chrono;
+        let active_connections = self.active_connections.read().clone();
+        let online_states = self.online_states.read().clone();
         let removed = self.update_with(|map| {
             let to_drop: Vec<String> = map
                 .iter()
-                .filter(|(_, rec)| rec.ephemeral && rec.last_seen < deadline)
+                .filter(|(node_key, rec)| {
+                    let node_id = stable_id_from_key(node_key);
+                    rec.ephemeral
+                        && rec.last_seen < deadline
+                        && active_connections.get(&node_id).copied().unwrap_or(0) == 0
+                        && !online_states.get(&node_id).copied().unwrap_or(false)
+                })
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in &to_drop {
@@ -1731,9 +1798,179 @@ pub struct StreamConnectionGuard {
     offline_grace: Duration,
 }
 
+#[derive(Clone)]
+pub struct EphemeralGcHandle {
+    inner: Arc<EphemeralNodeGc>,
+}
+
+impl EphemeralGcHandle {
+    /// Schedule every currently known ephemeral node for deletion.
+    /// Production startup calls this after hydrating persisted nodes;
+    /// reconnecting clients cancel their own timers when their stream
+    /// opens.
+    pub fn schedule_existing(&self) -> usize {
+        self.inner.schedule_existing()
+    }
+
+    /// Cancel all outstanding timers and prevent future scheduling.
+    pub fn abort(&self) {
+        self.inner.abort_all();
+    }
+
+    pub fn inactivity_timeout(&self) -> Duration {
+        self.inner.inactivity_timeout
+    }
+}
+
+struct EphemeralNodeGc {
+    machines: Weak<MachineRegistry>,
+    registration_store: Option<Weak<dyn MachineRegistrationStore>>,
+    inactivity_timeout: Duration,
+    timers: Mutex<BTreeMap<String, tokio::task::JoinHandle<()>>>,
+    closed: AtomicBool,
+}
+
+impl EphemeralNodeGc {
+    fn schedule_existing(self: &Arc<Self>) -> usize {
+        if self.closed.load(Ordering::SeqCst) {
+            return 0;
+        }
+        let Some(machines) = self.machines.upgrade() else {
+            return 0;
+        };
+        let active = machines.active_connections.read().clone();
+        let node_keys: Vec<String> = machines
+            .snapshot()
+            .iter()
+            .filter(|(node_key, rec)| {
+                rec.ephemeral
+                    && active
+                        .get(&stable_id_from_key(node_key))
+                        .copied()
+                        .unwrap_or(0)
+                        == 0
+            })
+            .map(|(node_key, _)| node_key.clone())
+            .collect();
+        let count = node_keys.len();
+        for node_key in node_keys {
+            self.schedule(node_key);
+        }
+        count
+    }
+
+    fn schedule(self: &Arc<Self>, node_key_hex: String) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(machines) = self.machines.upgrade() else {
+            return;
+        };
+        let Some(rec) = machines.get(&node_key_hex) else {
+            return;
+        };
+        if !rec.ephemeral {
+            self.cancel(&node_key_hex);
+            return;
+        }
+        let node_id = stable_id_from_key(&node_key_hex);
+        if machines
+            .active_connections
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            self.cancel(&node_key_hex);
+            return;
+        }
+
+        let timeout = self.inactivity_timeout;
+        let gc = Arc::downgrade(self);
+        let task_node_key = node_key_hex.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            if let Some(gc) = gc.upgrade() {
+                gc.fire(task_node_key).await;
+            }
+        });
+        if let Some(previous) = self.timers.lock().insert(node_key_hex, handle) {
+            previous.abort();
+        }
+    }
+
+    fn cancel(&self, node_key_hex: &str) {
+        if let Some(handle) = self.timers.lock().remove(node_key_hex) {
+            handle.abort();
+        }
+    }
+
+    fn abort_all(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let timers = std::mem::take(&mut *self.timers.lock());
+        for (_node_key, handle) in timers {
+            handle.abort();
+        }
+    }
+
+    async fn fire(self: Arc<Self>, node_key_hex: String) {
+        self.timers.lock().remove(&node_key_hex);
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(machines) = self.machines.upgrade() else {
+            return;
+        };
+        let node_id = stable_id_from_key(&node_key_hex);
+        if machines
+            .active_connections
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            return;
+        }
+        match machines.get(&node_key_hex) {
+            Some(rec) if rec.ephemeral => {}
+            _ => return,
+        }
+
+        if let Some(store) = self
+            .registration_store
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            && let Err(error) = store.delete_machine_registration(&node_key_hex).await
+        {
+            tracing::warn!(
+                target = "tailscale_wire::gc",
+                node_key = %node_key_hex,
+                %error,
+                "ephemeral GC failed to delete persisted node"
+            );
+            return;
+        }
+
+        if machines.delete(&node_key_hex) {
+            tracing::info!(
+                target = "tailscale_wire::gc",
+                node_key = %node_key_hex,
+                "ephemeral GC removed node"
+            );
+        }
+    }
+}
+
 impl Drop for StreamConnectionGuard {
     fn drop(&mut self) {
         if let Some(generation) = self.machines.release_stream_connection(self.node_id) {
+            if let Some(node_key) = self.machines.ephemeral_node_key_by_id(self.node_id)
+                && let Some(gc) = self.machines.ephemeral_gc()
+            {
+                gc.schedule(node_key);
+            }
             MachineRegistry::schedule_stream_offline_if_idle(
                 self.machines.clone(),
                 self.node_id,
@@ -1745,9 +1982,11 @@ impl Drop for StreamConnectionGuard {
     }
 }
 
-/// Background sweep that calls [`MachineRegistry::gc_ephemeral`] every
-/// `interval`. Spawn at server startup; the returned `JoinHandle` aborts
-/// on drop. Upstream's default tick is 60s.
+/// Legacy/background sweep that calls [`MachineRegistry::gc_ephemeral`]
+/// every `interval`. Production startup uses
+/// [`MachineRegistry::configure_ephemeral_gc`] for upstream-shaped
+/// per-node timers; this helper remains for embedders that explicitly
+/// want a periodic sweep. The returned `JoinHandle` aborts on drop.
 ///
 /// `grace` is forwarded verbatim to `gc_ephemeral`. The first sweep runs
 /// after `interval` has elapsed (matches Tailscale's behaviour — no
@@ -2270,13 +2509,94 @@ mod registry_tests {
         assert!(!reg.delete("nk-a"));
     }
 
+    #[derive(Default)]
+    struct RecordingDeletionStore {
+        deleted: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MachineRegistrationStore for RecordingDeletionStore {
+        async fn create_or_update_auth_key_registration(
+            &self,
+            record: MachineRecord,
+            _policy: &crate::policy::PolicyStore,
+            _auth_key_id: Option<i64>,
+        ) -> Result<PersistedMachineRegistration, String> {
+            Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: None,
+            })
+        }
+
+        async fn delete_machine_registration(&self, node_key_hex: &str) -> Result<(), String> {
+            self.deleted.lock().push(node_key_hex.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_gc_cancels_while_stream_connected_and_deletes_after_disconnect() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(4);
+        rec.ephemeral = true;
+        reg.upsert("nk-a".to_string(), rec);
+
+        let gc = reg.configure_ephemeral_gc(None, Duration::from_millis(25));
+        assert_eq!(gc.schedule_existing(), 1);
+        let node_id = stable_id_from_key("nk-a");
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            reg.get("nk-a").is_some(),
+            "active stream must cancel the startup deletion timer"
+        );
+
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            reg.get("nk-a").is_none(),
+            "disconnect should schedule upstream-style ephemeral deletion"
+        );
+        gc.abort();
+    }
+
+    #[tokio::test]
+    async fn ephemeral_gc_deletes_persistent_row_before_live_record() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(5);
+        rec.ephemeral = true;
+        reg.upsert("nk-a".to_string(), rec);
+        let deleted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let store: Arc<dyn MachineRegistrationStore> = Arc::new(RecordingDeletionStore {
+            deleted: deleted.clone(),
+        });
+
+        let gc =
+            reg.configure_ephemeral_gc(Some(Arc::downgrade(&store)), Duration::from_millis(25));
+        assert_eq!(gc.schedule_existing(), 1);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(&*deleted.lock(), &vec!["nk-a".to_string()]);
+        assert!(reg.get("nk-a").is_none());
+        gc.abort();
+    }
+
     #[test]
     fn batcher_connection_state_keeps_disconnect_until_node_delete() {
         let reg = Arc::new(MachineRegistry::new());
         reg.upsert("nk-a".to_string(), mk_record(4));
         let node_id = stable_id_from_key("nk-a");
 
-        let guard = MachineRegistry::track_stream_connection(reg.clone(), node_id);
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
         assert_eq!(reg.active_connections().get(&node_id), Some(&1));
         assert_eq!(reg.online_states().get(&node_id), Some(&true));
 

@@ -27,6 +27,13 @@ pub(crate) struct CliConfig {
     /// Upstream top-level `grpc_allow_insecure`.
     #[serde(default, skip_serializing)]
     pub(crate) grpc_allow_insecure: Option<bool>,
+    /// Upstream top-level `ephemeral_node_inactivity_timeout`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string",
+        skip_serializing
+    )]
+    pub(crate) ephemeral_node_inactivity_timeout: Option<u64>,
     /// Upstream top-level Unix-socket permission.
     #[serde(
         default,
@@ -132,6 +139,13 @@ pub(crate) struct ServerConfig {
     /// Embedded DERP/STUN runtime.
     #[serde(default, skip_serializing_if = "embedded_derp_config_is_default")]
     pub embedded_derp: EmbeddedDerpConfig,
+    /// Seconds an ephemeral node may remain disconnected before deletion.
+    #[serde(
+        default = "default_ephemeral_node_inactivity_timeout_secs",
+        rename = "ephemeral_node_inactivity_timeout",
+        deserialize_with = "deserialize_duration_secs_from_int_or_string"
+    )]
+    pub ephemeral_node_inactivity_timeout_secs: u64,
 }
 
 /// DERP server configuration.
@@ -314,6 +328,7 @@ impl CliConfig {
             || self.listen_addr.is_some()
             || self.grpc_listen_addr.is_some()
             || self.grpc_allow_insecure.is_some()
+            || self.ephemeral_node_inactivity_timeout.is_some()
             || self.unix_socket.is_some()
             || self.unix_socket_permission.is_some()
             || self
@@ -345,6 +360,9 @@ impl CliConfig {
         }
         if let Some(grpc_allow_insecure) = self.grpc_allow_insecure {
             server.grpc_allow_insecure = grpc_allow_insecure;
+        }
+        if let Some(timeout) = self.ephemeral_node_inactivity_timeout {
+            server.ephemeral_node_inactivity_timeout_secs = timeout;
         }
         if !had_server_block && let Some(unix_socket) = self.unix_socket.clone() {
             server.unix_socket = unix_socket;
@@ -413,6 +431,12 @@ impl CliConfig {
             )?;
         if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
             bail!("server.server_url must start with https:// or http://");
+        }
+        if server.ephemeral_node_inactivity_timeout_secs <= 65 {
+            bail!(
+                "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 65s",
+                server.ephemeral_node_inactivity_timeout_secs
+            );
         }
 
         if let Some(dns) = &self.dns {
@@ -682,10 +706,39 @@ where
     parse_u32_repr(value).map(Some).map_err(de::Error::custom)
 }
 
+fn deserialize_duration_secs_from_int_or_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = DurationRepr::deserialize(deserializer)?;
+    parse_duration_secs_repr(value).map_err(de::Error::custom)
+}
+
+fn deserialize_optional_duration_secs_from_int_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<DurationRepr>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_duration_secs_repr(value)
+        .map(Some)
+        .map_err(de::Error::custom)
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum U32Repr {
     Int(u32),
+    String(String),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DurationRepr {
+    Int(u64),
     String(String),
 }
 
@@ -707,6 +760,46 @@ fn parse_u32_repr(value: U32Repr) -> Result<u32, String> {
             }
         }
     }
+}
+
+fn parse_duration_secs_repr(value: DurationRepr) -> Result<u64, String> {
+    match value {
+        DurationRepr::Int(value) => Ok(value),
+        DurationRepr::String(value) => parse_duration_secs_str(&value),
+    }
+}
+
+fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".into());
+    }
+    let (number, multiplier) = if let Some(number) = trimmed.strip_suffix("ms") {
+        let value = number
+            .parse::<u64>()
+            .map_err(|err| format!("invalid duration magnitude {number:?}: {err}"))?;
+        if value % 1000 != 0 {
+            return Err("duration must resolve to whole seconds".into());
+        }
+        return Ok(value / 1000);
+    } else if let Some(number) = trimmed.strip_suffix('s') {
+        (number, 1)
+    } else if let Some(number) = trimmed.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = trimmed.strip_suffix('h') {
+        (number, 3_600)
+    } else if let Some(number) = trimmed.strip_suffix('d') {
+        (number, 86_400)
+    } else {
+        return trimmed
+            .parse::<u64>()
+            .map_err(|err| format!("invalid duration {trimmed:?}: {err}"));
+    };
+    let n = number
+        .parse::<u64>()
+        .map_err(|err| format!("invalid duration magnitude {number:?}: {err}"))?;
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("duration {trimmed:?} overflows u64 seconds"))
 }
 
 fn oidc_config_is_default(config: &OidcConfig) -> bool {
@@ -740,6 +833,10 @@ fn default_unix_socket_permission() -> u32 {
 
 fn default_grpc_listen_addr() -> String {
     ":50443".to_string()
+}
+
+fn default_ephemeral_node_inactivity_timeout_secs() -> u64 {
+    120
 }
 
 fn default_mesh_cidr() -> String {
@@ -787,6 +884,8 @@ impl Default for ServerConfig {
             grpc_allow_insecure: false,
             derp_servers: Vec::new(),
             embedded_derp: EmbeddedDerpConfig::default(),
+            ephemeral_node_inactivity_timeout_secs: default_ephemeral_node_inactivity_timeout_secs(
+            ),
         }
     }
 }
@@ -889,6 +988,7 @@ unix_socket = "/srv/headscale/headscale.sock"
 unix_socket_permission = 448
 grpc_listen_addr = "127.0.0.1:50443"
 grpc_allow_insecure = true
+ephemeral_node_inactivity_timeout = "5m"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -913,6 +1013,7 @@ grpc_allow_insecure = true
         assert_eq!(server.unix_socket_permission, 0o700);
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
+        assert_eq!(server.ephemeral_node_inactivity_timeout_secs, 300);
     }
 
     #[test]
@@ -922,6 +1023,7 @@ server_url: "https://headscale.example"
 listen_addr: "127.0.0.1:8080"
 grpc_listen_addr: "127.0.0.1:50443"
 grpc_allow_insecure: true
+ephemeral_node_inactivity_timeout: 3m
 unix_socket: "/run/headscale/headscale.sock"
 unix_socket_permission: "0o760"
 
@@ -948,6 +1050,7 @@ database:
         assert_eq!(server.listen, "127.0.0.1:8080");
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
+        assert_eq!(server.ephemeral_node_inactivity_timeout_secs, 180);
         assert_eq!(
             server.unix_socket,
             PathBuf::from("/run/headscale/headscale.sock")
@@ -1004,6 +1107,19 @@ tls_cert_path: "/etc/headscale/cert.pem"
             format!("{err:#}")
                 .contains("set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path")
         );
+    }
+
+    #[test]
+    fn configtest_rejects_too_low_ephemeral_timeout() {
+        let source = r#"
+server_url: "https://headscale.example"
+ephemeral_node_inactivity_timeout: "65s"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("ephemeral_node_inactivity_timeout"));
     }
 
     #[test]

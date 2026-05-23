@@ -81,6 +81,24 @@ wait_for() {
   done
 }
 
+wait_for_server() {
+  local label="$1"
+  local cmd="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  until eval "${cmd}"; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      echo "${target} server exited while waiting for ${label}" >&2
+      sed -n '1,220p' "${work_dir}/${target}.stderr" >&2 || true
+      return 1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 wait_pid_with_timeout() {
   local label="$1"
   local pid="$2"
@@ -292,11 +310,11 @@ start_server() {
       ;;
   esac
   server_pid="$!"
-  wait_for "${target} health" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for_server "${target} health" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
   if [[ "${target}" == "rust" ]]; then
-    wait_for "${target} TLS certificate" "test -s '${tls_cert_path}'"
+    wait_for_server "${target} TLS certificate" "test -s '${tls_cert_path}'"
   fi
-  wait_for "${target} gRPC" "headscale_cmd health >/dev/null 2>&1"
+  wait_for_server "${target} gRPC" "headscale_cmd health >/dev/null 2>&1"
   echo "${target} control=${local_control_url}"
   echo "${target} login=${control_url}"
   echo "::endgroup::"

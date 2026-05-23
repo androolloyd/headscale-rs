@@ -1948,13 +1948,21 @@ impl MachineRegistry {
     /// route approval. The register/map paths maintain
     /// `available_routes`; this method records operator approval.
     pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        self.update_with(|map| match map.get_mut(node_key_hex) {
+        let node_id = stable_id_from_key(node_key_hex);
+        let mut clear_unhealthy = false;
+        let changed = self.update_with(|map| match map.get_mut(node_key_hex) {
             Some(rec) => {
                 rec.approved_routes = routes;
+                clear_unhealthy =
+                    active_primary_routes(&rec.available_routes, &rec.approved_routes).is_empty();
                 true
             }
             None => false,
-        })
+        });
+        if changed && clear_unhealthy {
+            self.primary_routes.write().clear_unhealthy(node_id);
+        }
+        changed
     }
 
     /// Replace a machine's advertised subnet routes. Empty list clears
@@ -3165,6 +3173,26 @@ mod registry_tests {
                 .primary_routes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn set_approved_routes_empty_clears_stale_unhealthy_mark() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_key = "route-clear-unhealthy";
+        let node_id = stable_id_from_key(node_key);
+        let route = "10.0.0.0/24";
+        reg.upsert(node_key.to_string(), route_record(node_key, 9, route));
+        let _guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+
+        let _ = reg.set_route_candidate_health(node_id, false);
+        assert!(!reg.is_route_candidate_healthy(node_id));
+
+        assert!(reg.set_approved_routes(node_key, Vec::new()));
+        assert!(reg.is_route_candidate_healthy(node_id));
     }
 
     #[test]

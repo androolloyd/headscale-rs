@@ -557,6 +557,20 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
             message_fragment: "EOF while parsing",
         },
         Case {
+            name: "whole-message null",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            body: "null",
+            message_fragment: "unexpected token null",
+        },
+        Case {
+            name: "whole-message array",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: "[]",
+            message_fragment: "unexpected token [",
+        },
+        Case {
             name: "set policy body",
             method: Method::PUT,
             uri: "/api/v1/policy",
@@ -601,24 +615,133 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             name: "uint64 query field",
             method: Method::GET,
             uri: "/api/v1/user?id=not-a-number",
-            message_fragment: "invalid digit",
+            message_fragment: r#"parsing field "id": strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
+        },
+        Case {
+            name: "duplicate uint64 query field",
+            method: Method::GET,
+            uri: "/api/v1/user?id=1&id=2",
+            message_fragment: r#"too many values for field "id": 1, 2"#,
+        },
+        Case {
+            name: "empty uint64 query field",
+            method: Method::DELETE,
+            uri: "/api/v1/preauthkey?id=",
+            message_fragment: r#"parsing field "id": strconv.ParseUint: parsing "": invalid syntax"#,
         },
         Case {
             name: "bool query field",
             method: Method::POST,
             uri: "/api/v1/node/backfillips?confirmed=not-bool",
-            message_fragment: "provided string was not `true` or `false`",
+            message_fragment: r#"parsing field "confirmed": strconv.ParseBool: parsing "not-bool": invalid syntax"#,
         },
         Case {
             name: "timestamp seconds query field",
             method: Method::POST,
             uri: "/api/v1/node/1/expire?expiry.seconds=not-a-number",
-            message_fragment: "type mismatch, parameter: expiry.seconds",
+            message_fragment: r#"parsing field "seconds": strconv.ParseInt: parsing "not-a-number": invalid syntax"#,
         },
     ] {
         let resp = app
             .clone()
             .oneshot(req(case.method, case.uri, Some(&token), Body::empty()))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_query_parser_accepts_go_bool_forms() {
+    let (app, token) = fixture().await;
+
+    for value in ["1", "t", "TRUE"] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                &format!("/api/v1/node/backfillips?confirmed={value}"),
+                Some(&token),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "confirmed={value}");
+        let body = body_json(resp).await;
+        assert_eq!(body["changes"], serde_json::json!([]), "confirmed={value}");
+    }
+
+    for value in ["0", "F", "False"] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                &format!("/api/v1/node/backfillips?confirmed={value}"),
+                Some(&token),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 500, "confirmed={value}");
+        let body = body_json(resp).await;
+        assert_ne!(
+            body["code"],
+            serde_json::json!(3),
+            "confirmed={value} should parse as a Go bool before handler validation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "null uint64 body field",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey/expire",
+            body: r#"{"id":null}"#,
+            message_fragment: "invalid value for uint64 field id: null",
+        },
+        Case {
+            name: "base-prefixed body uint64",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey/expire",
+            body: r#"{"id":"0x1"}"#,
+            message_fragment: r#"invalid value for uint64 field id: "0x1""#,
+        },
+        Case {
+            name: "null string body field",
+            method: Method::POST,
+            uri: "/api/v1/auth/approve",
+            body: r#"{"authId":null}"#,
+            message_fragment: "invalid value for string field authId: null",
+        },
+        Case {
+            name: "object timestamp body field",
+            method: Method::POST,
+            uri: "/api/v1/apikey",
+            body: r#"{"expiration":{"seconds":4102444800}}"#,
+            message_fragment: "unexpected token { for timestamp field expiration",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
             .await
             .unwrap();
         assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;

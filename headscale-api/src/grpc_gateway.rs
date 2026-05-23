@@ -16,8 +16,8 @@ use axum::{
     routing::{any, delete, get, post},
 };
 use chrono::{SecondsFormat, TimeZone, Utc};
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
@@ -123,33 +123,38 @@ async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Respon
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct CreateUserBody {
-    name: String,
-    #[serde(rename = "displayName", alias = "display_name")]
-    display_name: String,
-    email: String,
-    #[serde(rename = "pictureUrl", alias = "picture_url")]
-    picture_url: String,
-}
-
 async fn create_user(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let body: CreateUserBody = match read_json(request).await {
-        Ok(body) => body,
+    let value = match read_json_value(request).await {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
+    let name = match string_field(&value, &["name"], "name") {
+        Ok(name) => name,
+        Err(status) => return status_response(&status),
+    };
+    let display_name = match string_field(&value, &["displayName", "display_name"], "displayName") {
+        Ok(display_name) => display_name,
+        Err(status) => return status_response(&status),
+    };
+    let email = match string_field(&value, &["email"], "email") {
+        Ok(email) => email,
+        Err(status) => return status_response(&status),
+    };
+    let picture_url = match string_field(&value, &["pictureUrl", "picture_url"], "pictureUrl") {
+        Ok(picture_url) => picture_url,
         Err(status) => return status_response(&status),
     };
     let request = tonic_request(
         &headers,
         CreateUserRequest {
-            name: body.name,
-            display_name: body.display_name,
-            email: body.email,
-            picture_url: body.picture_url,
+            name,
+            display_name,
+            email,
+            picture_url,
         },
     );
     match state.service.create_user(request).await {
@@ -161,8 +166,7 @@ async fn create_user(
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct ListUsersQuery {
     id: u64,
     name: String,
@@ -174,7 +178,7 @@ async fn list_users(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: ListUsersQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_list_users_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -280,8 +284,7 @@ async fn expire_preauth_key(
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct IdQuery {
     id: u64,
 }
@@ -291,7 +294,7 @@ async fn delete_preauth_key(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: IdQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_id_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -402,7 +405,7 @@ async fn delete_api_key(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: IdQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_id_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -444,8 +447,7 @@ async fn debug_create_node(
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct RegisterNodeQuery {
     user: String,
     key: String,
@@ -456,7 +458,7 @@ async fn register_node(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: RegisterNodeQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_register_node_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -558,8 +560,7 @@ async fn auth_reject(
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct ListNodesQuery {
     user: String,
 }
@@ -569,7 +570,7 @@ async fn list_nodes(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: ListNodesQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_list_nodes_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -710,15 +711,22 @@ async fn expire_node(
         Ok(id) => id,
         Err(status) => return status_response(&status),
     };
-    let expiry = match query_timestamp(raw_query.as_deref(), "expiry") {
+    let query = match parse_query_values(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(status) => return status_response(&status),
+    };
+    let expiry = match query_timestamp(&query, "expiry") {
         Ok(expiry) => expiry,
         Err(status) => return status_response(&status),
     };
-    let disable_expiry =
-        match query_bool(raw_query.as_deref(), "disableExpiry", &["disable_expiry"]) {
-            Ok(disable_expiry) => disable_expiry,
-            Err(status) => return status_response(&status),
-        };
+    let disable_expiry = match query_bool(
+        &query,
+        &["disableExpiry", "disable_expiry"],
+        "disable_expiry",
+    ) {
+        Ok(disable_expiry) => disable_expiry,
+        Err(status) => return status_response(&status),
+    };
     match state
         .service
         .expire_node(tonic_request(
@@ -764,8 +772,7 @@ async fn rename_node(
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct BackfillNodeIpsQuery {
     confirmed: bool,
 }
@@ -775,7 +782,7 @@ async fn backfill_node_ips(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let query: BackfillNodeIpsQuery = match parse_query(raw_query.as_deref()) {
+    let query = match parse_backfill_node_ips_query(raw_query.as_deref()) {
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
@@ -893,19 +900,6 @@ fn authorization_metadata(headers: &HeaderMap) -> MetadataMap {
     metadata
 }
 
-async fn read_json<T>(request: Request) -> Result<T, Status>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    let body = to_bytes(request.into_body(), BODY_LIMIT)
-        .await
-        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-    if body.is_empty() {
-        return Ok(T::default());
-    }
-    serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))
-}
-
 async fn read_json_value(request: Request) -> Result<Value, Status> {
     let body = to_bytes(request.into_body(), BODY_LIMIT)
         .await
@@ -913,24 +907,168 @@ async fn read_json_value(request: Request) -> Result<Value, Status> {
     if body.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))
+    let value: Value =
+        serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    if !value.is_object() {
+        return Err(Status::invalid_argument(format!(
+            "syntax error (line 1:1): unexpected token {}",
+            json_token(&value)
+        )));
+    }
+    Ok(value)
 }
 
-fn parse_query<T>(query: Option<&str>) -> Result<T, Status>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    match query {
-        Some(query) if !query.is_empty() => {
-            serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))
+fn parse_list_users_query(query: Option<&str>) -> Result<ListUsersQuery, Status> {
+    let values = parse_query_values(query)?;
+    Ok(ListUsersQuery {
+        id: query_u64(&values, &["id"], "id")?.unwrap_or(0),
+        name: query_string(&values, &["name"], "name")?.unwrap_or_default(),
+        email: query_string(&values, &["email"], "email")?.unwrap_or_default(),
+    })
+}
+
+fn parse_id_query(query: Option<&str>) -> Result<IdQuery, Status> {
+    let values = parse_query_values(query)?;
+    Ok(IdQuery {
+        id: query_u64(&values, &["id"], "id")?.unwrap_or(0),
+    })
+}
+
+fn parse_register_node_query(query: Option<&str>) -> Result<RegisterNodeQuery, Status> {
+    let values = parse_query_values(query)?;
+    Ok(RegisterNodeQuery {
+        user: query_string(&values, &["user"], "user")?.unwrap_or_default(),
+        key: query_string(&values, &["key"], "key")?.unwrap_or_default(),
+    })
+}
+
+fn parse_list_nodes_query(query: Option<&str>) -> Result<ListNodesQuery, Status> {
+    let values = parse_query_values(query)?;
+    Ok(ListNodesQuery {
+        user: query_string(&values, &["user"], "user")?.unwrap_or_default(),
+    })
+}
+
+fn parse_backfill_node_ips_query(query: Option<&str>) -> Result<BackfillNodeIpsQuery, Status> {
+    let values = parse_query_values(query)?;
+    Ok(BackfillNodeIpsQuery {
+        confirmed: query_bool(&values, &["confirmed"], "confirmed")?,
+    })
+}
+
+fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String>>, Status> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Ok(BTreeMap::new());
+    };
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    let mut values = BTreeMap::<String, Vec<String>>::new();
+    for (key, value) in pairs {
+        if let Some((key, bracket_value)) = split_bracket_query_key(&key) {
+            let entry = values.entry(key).or_default();
+            entry.push(bracket_value);
+            entry.push(value);
+        } else {
+            values.entry(key).or_default().push(value);
         }
-        _ => Ok(T::default()),
     }
+    Ok(values)
+}
+
+fn split_bracket_query_key(key: &str) -> Option<(String, String)> {
+    let open = key.rfind('[')?;
+    if !key.ends_with(']') {
+        return None;
+    }
+    Some((
+        key[..open].to_string(),
+        key[open + 1..key.len() - 1].to_string(),
+    ))
+}
+
+fn query_string(
+    values: &BTreeMap<String, Vec<String>>,
+    names: &[&str],
+    display: &str,
+) -> Result<Option<String>, Status> {
+    let Some(values) = query_values(values, names) else {
+        return Ok(None);
+    };
+    if values.len() > 1 {
+        return Err(Status::invalid_argument(too_many_query_values(
+            display, &values,
+        )));
+    }
+    Ok(values.first().cloned())
+}
+
+fn query_u64(
+    values: &BTreeMap<String, Vec<String>>,
+    names: &[&str],
+    display: &str,
+) -> Result<Option<u64>, Status> {
+    let Some(values) = query_values(values, names) else {
+        return Ok(None);
+    };
+    if values.len() > 1 {
+        return Err(Status::invalid_argument(too_many_query_values(
+            display, &values,
+        )));
+    }
+    let value = values.first().map_or("", String::as_str);
+    parse_go_uint64_base10(value)
+        .map(Some)
+        .map_err(|e| Status::invalid_argument(format!("parsing field {display:?}: {e}")))
+}
+
+fn query_values(values: &BTreeMap<String, Vec<String>>, names: &[&str]) -> Option<Vec<String>> {
+    names.iter().find_map(|name| values.get(*name).cloned())
+}
+
+fn too_many_query_values(display: &str, values: &[String]) -> String {
+    format!(
+        "too many values for field {display:?}: {}",
+        values.join(", ")
+    )
 }
 
 fn parse_path_u64(name: &str, value: &str) -> Result<u64, Status> {
     parse_go_uint64_base0(value).map_err(|e| {
         Status::invalid_argument(format!("type mismatch, parameter: {name}, error: {e}"))
+    })
+}
+
+fn parse_go_uint64_base10(value: &str) -> Result<u64, String> {
+    value.parse::<u64>().map_err(|e| {
+        let reason = match e.kind() {
+            std::num::IntErrorKind::PosOverflow => "value out of range",
+            _ => "invalid syntax",
+        };
+        go_parse_uint_error(value, reason)
+    })
+}
+
+fn parse_go_i64_base10(value: &str) -> Result<i64, String> {
+    value.parse::<i64>().map_err(|e| {
+        let reason = match e.kind() {
+            std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                "value out of range"
+            }
+            _ => "invalid syntax",
+        };
+        format!("strconv.ParseInt: parsing {value:?}: {reason}")
+    })
+}
+
+fn parse_go_i32_base10(value: &str) -> Result<i32, String> {
+    value.parse::<i32>().map_err(|e| {
+        let reason = match e.kind() {
+            std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                "value out of range"
+            }
+            _ => "invalid syntax",
+        };
+        format!("strconv.ParseInt: parsing {value:?}: {reason}")
     })
 }
 
@@ -1187,9 +1325,10 @@ fn field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
 fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, Status> {
     match field(value, names) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(Value::Null) | None => Ok(String::new()),
-        Some(_) => Err(Status::invalid_argument(format!(
-            "invalid value for string field {display}"
+        None => Ok(String::new()),
+        Some(value) => Err(Status::invalid_argument(format!(
+            "invalid value for string field {display}: {}",
+            json_token(value)
         ))),
     }
 }
@@ -1197,24 +1336,29 @@ fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, 
 fn bool_field(value: &Value, names: &[&str], display: &str) -> Result<bool, Status> {
     match field(value, names) {
         Some(Value::Bool(b)) => Ok(*b),
-        Some(Value::Null) | None => Ok(false),
-        Some(_) => Err(Status::invalid_argument(format!(
-            "invalid value for bool field {display}"
+        None => Ok(false),
+        Some(value) => Err(Status::invalid_argument(format!(
+            "invalid value for bool field {display}: {}",
+            json_token(value)
         ))),
     }
 }
 
 fn u64_field(value: &Value, names: &[&str], display: &str) -> Result<u64, Status> {
     match field(value, names) {
-        Some(Value::String(s)) if !s.is_empty() => s.parse::<u64>().map_err(|e| {
-            Status::invalid_argument(format!("type mismatch, parameter: {display}, error: {e}"))
-        }),
-        Some(Value::String(_) | Value::Null) | None => Ok(0),
+        Some(Value::String(s)) => {
+            parse_body_u64(s, display, &json_token(&Value::String(s.clone())))
+        }
+        None => Ok(0),
         Some(Value::Number(n)) => n.as_u64().ok_or_else(|| {
-            Status::invalid_argument(format!("invalid value for uint64 field {display}"))
+            Status::invalid_argument(format!(
+                "invalid value for uint64 field {display}: {}",
+                json_token(&Value::Number(n.clone()))
+            ))
         }),
-        Some(_) => Err(Status::invalid_argument(format!(
-            "invalid value for uint64 field {display}"
+        Some(value) => Err(Status::invalid_argument(format!(
+            "invalid value for uint64 field {display}: {}",
+            json_token(value)
         ))),
     }
 }
@@ -1226,15 +1370,23 @@ fn string_array_field(value: &Value, names: &[&str], display: &str) -> Result<Ve
             .map(|value| match value {
                 Value::String(s) => Ok(s.clone()),
                 _ => Err(Status::invalid_argument(format!(
-                    "invalid value for string array field {display}"
+                    "invalid value for string field {display}: {}",
+                    json_token(value)
                 ))),
             })
             .collect(),
-        Some(Value::Null) | None => Ok(Vec::new()),
-        Some(_) => Err(Status::invalid_argument(format!(
-            "invalid value for string array field {display}"
+        None => Ok(Vec::new()),
+        Some(value) => Err(Status::invalid_argument(format!(
+            "syntax error (line 1:1): unexpected token {}",
+            json_token(value)
         ))),
     }
+}
+
+fn parse_body_u64(value: &str, display: &str, raw: &str) -> Result<u64, Status> {
+    parse_go_uint64_base10(value).map_err(|_| {
+        Status::invalid_argument(format!("invalid value for uint64 field {display}: {raw}"))
+    })
 }
 
 fn timestamp_field(
@@ -1252,104 +1404,107 @@ fn timestamp_field(
                 nanos: parsed.timestamp_subsec_nanos() as i32,
             }))
         }
-        Some(Value::Object(object)) => {
-            let seconds = object
-                .get("seconds")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| {
-                    Status::invalid_argument(format!("invalid timestamp field {display}"))
-                })?;
-            let nanos = object.get("nanos").and_then(Value::as_i64).unwrap_or(0);
-            if !(0..1_000_000_000).contains(&nanos) {
-                return Err(Status::invalid_argument(format!(
-                    "invalid timestamp field {display}"
-                )));
-            }
-            Ok(Some(prost_types::Timestamp {
-                seconds,
-                nanos: nanos as i32,
-            }))
-        }
-        Some(Value::String(_) | Value::Null) | None => Ok(None),
-        Some(_) => Err(Status::invalid_argument(format!(
-            "invalid timestamp field {display}"
+        None => Ok(None),
+        Some(value) => Err(Status::invalid_argument(format!(
+            "syntax error (line 1:1): unexpected token {} for timestamp field {display}",
+            json_token(value)
         ))),
     }
 }
 
 fn query_timestamp(
-    query: Option<&str>,
+    values: &BTreeMap<String, Vec<String>>,
     name: &str,
 ) -> Result<Option<prost_types::Timestamp>, Status> {
-    let Some(query) = query.filter(|query| !query.is_empty()) else {
-        return Ok(None);
-    };
-    let pairs: Vec<(String, String)> =
-        serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
-    let mut direct = None;
-    let mut seconds = None;
-    let mut nanos = None;
-    for (key, value) in pairs {
-        if key == name {
-            direct = Some(value);
-        } else if key == format!("{name}.seconds") {
-            seconds = Some(value);
-        } else if key == format!("{name}.nanos") {
-            nanos = Some(value);
+    if let Some(values) = values.get(name) {
+        if values.len() > 1 {
+            return Err(Status::invalid_argument(too_many_query_values(
+                name, values,
+            )));
         }
-    }
-
-    if let Some(value) = direct {
-        if value.is_empty() {
-            return Ok(None);
-        }
-        let parsed = chrono::DateTime::parse_from_rfc3339(&value).map_err(|e| {
-            Status::invalid_argument(format!("invalid timestamp field {name}: {e}"))
-        })?;
+        let value = values.first().map_or("", String::as_str);
+        let parsed = chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|e| Status::invalid_argument(format!("parsing field {name:?}: {e}")))?;
         return Ok(Some(prost_types::Timestamp {
             seconds: parsed.timestamp(),
             nanos: parsed.timestamp_subsec_nanos() as i32,
         }));
     }
 
-    let Some(seconds) = seconds else {
+    let seconds_key = format!("{name}.seconds");
+    let nanos_key = format!("{name}.nanos");
+    let seconds = match values.get(&seconds_key) {
+        Some(values) if values.len() > 1 => {
+            return Err(Status::invalid_argument(too_many_query_values(
+                "seconds", values,
+            )));
+        }
+        Some(values) => {
+            let value = values.first().map_or("", String::as_str);
+            Some(parse_go_i64_base10(value).map_err(|e| {
+                Status::invalid_argument(format!("parsing field {:?}: {e}", "seconds"))
+            })?)
+        }
+        None => None,
+    };
+    let nanos = match values.get(&nanos_key) {
+        Some(values) if values.len() > 1 => {
+            return Err(Status::invalid_argument(too_many_query_values(
+                "nanos", values,
+            )));
+        }
+        Some(values) => {
+            let value = values.first().map_or("", String::as_str);
+            Some(parse_go_i32_base10(value).map_err(|e| {
+                Status::invalid_argument(format!("parsing field {:?}: {e}", "nanos"))
+            })?)
+        }
+        None => None,
+    };
+
+    if seconds.is_none() && nanos.is_none() {
         return Ok(None);
-    };
-    let seconds = seconds.parse::<i64>().map_err(|e| {
-        Status::invalid_argument(format!(
-            "type mismatch, parameter: {name}.seconds, error: {e}"
-        ))
-    })?;
-    let nanos = match nanos {
-        Some(nanos) if !nanos.is_empty() => nanos.parse::<i32>().map_err(|e| {
-            Status::invalid_argument(format!(
-                "type mismatch, parameter: {name}.nanos, error: {e}"
-            ))
-        })?,
-        _ => 0,
-    };
-    if !(0..1_000_000_000).contains(&nanos) {
-        return Err(Status::invalid_argument(format!(
-            "invalid timestamp field {name}"
-        )));
     }
-    Ok(Some(prost_types::Timestamp { seconds, nanos }))
+    Ok(Some(prost_types::Timestamp {
+        seconds: seconds.unwrap_or(0),
+        nanos: nanos.unwrap_or(0),
+    }))
 }
 
-fn query_bool(query: Option<&str>, name: &str, aliases: &[&str]) -> Result<bool, Status> {
-    let Some(query) = query.filter(|query| !query.is_empty()) else {
+fn query_bool(
+    values: &BTreeMap<String, Vec<String>>,
+    names: &[&str],
+    display: &str,
+) -> Result<bool, Status> {
+    let Some(values) = query_values(values, names) else {
         return Ok(false);
     };
-    let pairs: Vec<(String, String)> =
-        serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
-    for (key, value) in pairs {
-        if key == name || aliases.iter().any(|alias| key == *alias) {
-            return value.parse::<bool>().map_err(|e| {
-                Status::invalid_argument(format!("type mismatch, parameter: {key}, error: {e}"))
-            });
-        }
+    if values.len() > 1 {
+        return Err(Status::invalid_argument(too_many_query_values(
+            display, &values,
+        )));
     }
-    Ok(false)
+    let value = values.first().map_or("", String::as_str);
+    parse_go_bool(value)
+        .map_err(|e| Status::invalid_argument(format!("parsing field {display:?}: {e}")))
+}
+
+fn parse_go_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+        _ => Err(format!(
+            "strconv.ParseBool: parsing {value:?}: invalid syntax"
+        )),
+    }
+}
+
+fn json_token(value: &Value) -> String {
+    match value {
+        Value::Array(_) => "[".to_string(),
+        Value::Object(_) => "{".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn json_ok(value: Value) -> Response {

@@ -1614,7 +1614,8 @@ ruby -rjson -e '
     addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
     available_routes = Array(node["availableRoutes"] || node["available_routes"]).sort
     approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).sort
-    expected_user = if expected_tags.empty?
+    tags = Array(node["tags"] || node["Tags"]).sort
+    expected_user = if tags.empty?
       expected_user_by_host.fetch(given_name.to_s) {
         abort("unexpected node hostname #{given_name.inspect}; expected one of #{expected_names.inspect}")
       }
@@ -1630,7 +1631,6 @@ ruby -rjson -e '
     unless expected_approved.empty? || approved_routes == expected_approved
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
     end
-    tags = Array(node["tags"] || node["Tags"]).sort
     unless (!expect_tags_exact && expected_tags.empty?) || tags == expected_tags
       abort("expected tags #{expected_tags.inspect}, got #{tags.inspect}")
     end

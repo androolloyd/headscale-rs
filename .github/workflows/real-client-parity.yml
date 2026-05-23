@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      PR_SMOKES: authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,route-via,route-health,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill
+      PR_SMOKES: authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,route-via,route-via-multiprefix,route-health,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master

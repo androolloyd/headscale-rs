@@ -107,6 +107,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
+| Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
@@ -560,6 +561,14 @@ route is owned only by the router selected by that user's `via` grant:
 ```sh
 tools/real-client/route-via-smoke.sh
 tools/real-client/route-via-headscale-go-smoke.sh
+```
+
+The multi-prefix route-via variant has both routers advertise two subnets and
+asserts opposite per-prefix steering for two users:
+
+```sh
+tools/real-client/route-via-multiprefix-smoke.sh
+tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited

@@ -379,10 +379,9 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
         .is_some_and(|s| s.eq_ignore_ascii_case(UPGRADE_PROTOCOL));
     if !wants_upgrade {
         return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::from(
-                "expected Upgrade: tailscale-control-protocol header",
-            ))
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from("Internal error\n"))
             .unwrap();
     }
 
@@ -1176,6 +1175,26 @@ mod tests {
             "noise handshake: unsupported client version:  (112)"
         );
         reject_unsupported_noise_capability(113).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ts2021_without_upgrade_header_matches_headscale_go_error_shape() {
+        let (state, _dir) = fixture_state();
+        let app = crate::tailscale_wire::router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/ts2021")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), b"Internal error\n");
     }
 
     #[tokio::test]

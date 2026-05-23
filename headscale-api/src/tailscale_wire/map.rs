@@ -49,20 +49,11 @@ use super::noise::NoisePeerMachineKey;
 /// Decode a `MapRequest` from a raw body without requiring
 /// `Content-Type: application/json`. Stock `tailscale up` (via
 /// controlhttp over the noise tunnel) posts without the header set;
-/// the `axum::Json` extractor 415s those requests. An empty body
-/// decodes to the default-constructed `MapRequest`.
+/// the `axum::Json` extractor 415s those requests.
 fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
-    if raw.is_empty() {
-        return Ok(MapRequest::default());
-    }
     serde_json::from_slice::<MapRequest>(raw).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!("invalid MapRequest JSON: {e}"),
-            }),
-        )
-            .into_response()
+        tracing::error!(target = "tailscale_wire::map", error = %e, "invalid MapRequest JSON");
+        plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     })
 }
 use serde::Serialize;
@@ -71,8 +62,9 @@ use super::register::{CAPABILITY_FILE_SHARING, record_to_map_node};
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
-    PeerChange, PingRequest, PortRange, UserProfile, is_supported_capability_version,
-    stable_id_from_key, strip_key_prefix, unsupported_client_error,
+    PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX,
+    is_supported_capability_version, stable_id_from_key, strip_key_prefix,
+    unsupported_client_error,
 };
 use super::{MachineRecord, WireState};
 
@@ -711,6 +703,9 @@ fn plain_map_error(status: StatusCode, message: &str) -> Response {
 }
 
 fn canonical_map_node_key(node_key: &str) -> String {
+    if node_key.is_empty() {
+        return ZERO_NODE_KEY_HEX.to_string();
+    }
     match strip_key_prefix(node_key) {
         Some(h) => h.to_string(),
         None => node_key.to_string(),
@@ -764,15 +759,6 @@ pub async fn handle_map_flat(
         return resp;
     }
     let node_key_hex = canonical_map_node_key(&req.node_key);
-    if node_key_hex.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "missing NodeKey in body".into(),
-            }),
-        )
-            .into_response();
-    }
     map_inner(state, node_key_hex, machine_key, req).await
 }
 
@@ -1348,13 +1334,10 @@ fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
     if is_supported_capability_version(version) {
         return Ok(());
     }
-    Err((
+    Err(plain_map_error(
         StatusCode::BAD_REQUEST,
-        Json(ErrorBody {
-            error: unsupported_client_error(version),
-        }),
-    )
-        .into_response())
+        &unsupported_client_error(version),
+    ))
 }
 
 /// Rebuild an incremental peer update for an in-flight `Stream:true`
@@ -1858,8 +1841,27 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "unsupported client version:  (112)");
+        assert_eq!(raw.as_ref(), b"unsupported client version:  (112)\n");
+    }
+
+    #[tokio::test]
+    async fn flat_map_invalid_json_matches_headscale_go_internal_error() {
+        let (state, _dir) = fixture();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/map")
+                    .body(axum::body::Body::from(b"{".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(raw.as_ref(), b"internal server error\n");
     }
 
     #[tokio::test]
@@ -3157,9 +3159,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Flat map rejects empty NodeKey body.
+    /// Flat map follows headscale-go: empty NodeKey parses as the zero key
+    /// and misses the registry lookup.
     #[tokio::test]
-    async fn flat_map_rejects_missing_node_key() {
+    async fn flat_map_missing_node_key_returns_not_found() {
         let (state, _dir) = fixture();
         let app = router(state);
         let resp = app
@@ -3173,7 +3176,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(raw.as_ref(), b"node not found\n");
     }
 
     /// Return the body from a single `[u32 LE size][body]` frame.

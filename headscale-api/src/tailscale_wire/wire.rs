@@ -44,9 +44,15 @@ pub const TAGGED_DEVICES_LOGIN_NAME: &str = "tagged-devices";
 pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
 /// Mirrors upstream headscale-go `capver.MinSupportedCapabilityVersion`.
 pub const MIN_SUPPORTED_CAPABILITY_VERSION: u32 = 113;
+pub(crate) const ZERO_NODE_KEY_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 pub(crate) fn is_supported_capability_version(version: u32) -> bool {
     version >= MIN_SUPPORTED_CAPABILITY_VERSION
+}
+
+pub(crate) fn zero_node_key() -> String {
+    format!("nodekey:{ZERO_NODE_KEY_HEX}")
 }
 
 pub(crate) fn unsupported_client_error(version: u32) -> String {
@@ -383,6 +389,7 @@ pub struct RegisterRequest {
     /// `nodekey:` prefixed hex string. The path parameter and this
     /// field both carry the same value in upstream Tailscale; we
     /// trust the body's copy.
+    #[serde(default = "zero_node_key")]
     pub node_key: String,
     /// Previous node key during node-key rotation.
     #[serde(default)]

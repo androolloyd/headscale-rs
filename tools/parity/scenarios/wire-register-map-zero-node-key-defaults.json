@@ -1,0 +1,14 @@
+{
+  "name": "wire-register-map-zero-node-key-defaults",
+  "policy": {
+    "acls": []
+  },
+  "wire": {
+    "register_request": {
+      "Version": 113
+    },
+    "map_request": {
+      "Version": 113
+    }
+  }
+}

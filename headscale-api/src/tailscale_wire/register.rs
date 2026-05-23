@@ -28,7 +28,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -39,16 +39,40 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// them with HTTP 415. We use a `Bytes` extractor + manual
 /// `serde_json::from_slice` to mirror what upstream's
 /// `gorilla/mux`-routed handlers accept.
-fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, axum::response::Response> {
-    serde_json::from_slice::<RegisterRequest>(raw).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: format!("invalid RegisterRequest JSON: {e}"),
-            }),
-        )
-            .into_response()
+fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, RegisterBodyError> {
+    serde_json::from_slice::<RegisterRequest>(raw).map_err(|e| RegisterBodyError {
+        version: register_body_version(raw),
+        error: e.to_string(),
     })
+}
+
+#[derive(Debug)]
+struct RegisterBodyError {
+    version: u32,
+    error: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RegisterRequestVersionOnly {
+    #[serde(default)]
+    version: u32,
+}
+
+fn register_body_version(raw: &[u8]) -> u32 {
+    serde_json::from_slice::<RegisterRequestVersionOnly>(raw)
+        .map(|req| req.version)
+        .unwrap_or_default()
+}
+
+fn parse_register_or_go_error(raw: &[u8]) -> Result<RegisterRequest, axum::response::Response> {
+    match parse_register_body(raw) {
+        Ok(body) => Ok(body),
+        Err(RegisterBodyError { version, error }) => {
+            reject_unsupported_capability(version)?;
+            Err(register_error_response(error))
+        }
+    }
 }
 
 use super::noise::NoisePeerMachineKey;
@@ -85,7 +109,7 @@ pub async fn handle_register(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let body = match parse_register_body(&raw) {
+    let body = match parse_register_or_go_error(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -129,7 +153,7 @@ pub async fn handle_register_flat(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let body = match parse_register_body(&raw) {
+    let body = match parse_register_or_go_error(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -140,15 +164,6 @@ pub async fn handle_register_flat(
         Some(h) => h.to_string(),
         None => body.node_key.clone(),
     };
-    if body_node_key_hex.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "missing NodeKey in body".into(),
-            }),
-        )
-            .into_response();
-    }
     register_inner(state, body_node_key_hex, machine_key, body).await
 }
 
@@ -718,13 +733,14 @@ fn reject_unsupported_capability(version: u32) -> Result<(), axum::response::Res
     if is_supported_capability_version(version) {
         return Ok(());
     }
-    Err((
+    Err(plain_register_error(
         StatusCode::BAD_REQUEST,
-        Json(ErrorBody {
-            error: unsupported_client_error(version),
-        }),
-    )
-        .into_response())
+        &unsupported_client_error(version),
+    ))
+}
+
+fn plain_register_error(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, format!("{message}\n")).into_response()
 }
 
 fn register_error_response(error: impl Into<String>) -> axum::response::Response {
@@ -1306,10 +1322,53 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "unsupported client version:  (112)");
+        assert_eq!(raw.as_ref(), b"unsupported client version:  (112)\n");
         assert!(state.machines.get(&node_key_hex).is_none());
         assert!(redeemer.contains(authkey));
+    }
+
+    #[tokio::test]
+    async fn register_malformed_json_without_version_matches_go_unsupported_response() {
+        let (state, _redeemer, _dir) = fixture();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/register")
+                    .body(axum::body::Body::from(b"{".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(raw.as_ref(), b"unsupported client version:  (0)\n");
+    }
+
+    #[tokio::test]
+    async fn register_supported_bad_json_shape_returns_register_response_error() {
+        let (state, _redeemer, _dir) = fixture();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/machine/register")
+                    .body(axum::body::Body::from(
+                        br#"{"Version":113,"NodeKey":1}"#.to_vec(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!rr.error.is_empty());
+        assert!(!rr.machine_authorized);
     }
 
     #[tokio::test]
@@ -2677,14 +2736,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Flat path rejects an empty NodeKey body.
+    /// Flat path follows headscale-go: a missing NodeKey is still parsed,
+    /// and auth failures come back in the RegisterResponse error field.
     #[tokio::test]
-    async fn flat_register_rejects_missing_node_key() {
+    async fn flat_register_missing_node_key_uses_register_response_error() {
         let (state, _redeemer, _dir) = fixture();
         let app = router(state);
         let body = serde_json::json!({
             "Version": 113,
-            "NodeKey": "",
             "Auth": { "AuthKey": "anything" },
         });
         let resp = app
@@ -2698,7 +2757,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rr.error, "preauth key not recognised");
     }
 
     #[tokio::test]

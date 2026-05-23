@@ -3901,6 +3901,84 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_route_health_failover_emits_peer_deltas() {
+        let (state, _dir) = fixture();
+        let alice = "d1".repeat(32);
+        let router_a = "d2".repeat(32);
+        let router_b = "d3".repeat(32);
+        let route = "10.40.0.0/24";
+
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        for (node_key, host, octet) in [(&router_a, "router-a", 11), (&router_b, "router-b", 12)] {
+            state.machines.upsert(
+                node_key.clone(),
+                routed_record(node_key, host, octet, vec![route.into()]),
+            );
+        }
+
+        let app = router(state.clone());
+        let _router_a_body = open_zstd_stream(app.clone(), &router_a).await;
+        let _router_b_body = open_zstd_stream(app.clone(), &router_b).await;
+        let mut alice_body = open_zstd_stream(app, &alice).await;
+
+        let first = next_zstd_map_response(&mut alice_body).await;
+        let first_route_holders = first
+            .peers
+            .iter()
+            .filter(|peer| peer.allowed_ips.iter().any(|ip| ip == route))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_route_holders.len(),
+            1,
+            "conflicting subnet route should have one primary owner"
+        );
+        let unhealthy_id = first_route_holders[0].id;
+        let healthy_id = [stable_id_from_key(&router_a), stable_id_from_key(&router_b)]
+            .into_iter()
+            .find(|id| *id != unhealthy_id)
+            .expect("second router id present");
+
+        assert!(
+            state
+                .machines
+                .set_route_candidate_health(unhealthy_id, false)
+        );
+
+        let delta = next_zstd_map_response(&mut alice_body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+
+        let old_primary = delta
+            .peers_changed
+            .iter()
+            .find(|peer| peer.id == unhealthy_id)
+            .expect("old primary peer delta present");
+        assert!(
+            !old_primary.allowed_ips.iter().any(|ip| ip == route),
+            "unhealthy old primary should lose route-derived AllowedIPs"
+        );
+        assert!(
+            old_primary.primary_routes.is_empty(),
+            "unhealthy old primary should lose PrimaryRoutes"
+        );
+
+        let new_primary = delta
+            .peers_changed
+            .iter()
+            .find(|peer| peer.id == healthy_id)
+            .expect("new primary peer delta present");
+        assert!(
+            new_primary.allowed_ips.iter().any(|ip| ip == route),
+            "healthy router should receive route-derived AllowedIPs"
+        );
+        assert_eq!(new_primary.primary_routes, vec![route.to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_peer_connect_emits_online_peer_change_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

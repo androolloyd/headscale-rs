@@ -793,6 +793,13 @@ pub struct RouteHealthProbeResult {
     pub latency: Option<Duration>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RouteHealthProbeOutcome {
+    Result(RouteHealthProbeResult),
+    Deferred,
+    Skipped,
+}
+
 #[derive(Debug)]
 pub struct RouteHealthProbeHandle {
     task: tokio::task::JoinHandle<()>,
@@ -835,12 +842,35 @@ pub(crate) async fn run_route_health_probe_once(
     probe_timeout: Duration,
 ) -> Vec<RouteHealthProbeResult> {
     let candidates = route_health_probe_candidates(&state.machines);
-    futures_util::future::join_all(
+    state
+        .machines
+        .retain_route_health_sessions(candidates.iter().copied());
+    let outcomes = futures_util::future::join_all(
         candidates
             .into_iter()
             .map(|node_id| probe_route_candidate(state, node_id, probe_timeout)),
     )
-    .await
+    .await;
+
+    let deferred = outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, RouteHealthProbeOutcome::Deferred));
+    let results = outcomes
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            RouteHealthProbeOutcome::Result(result) => Some(result),
+            RouteHealthProbeOutcome::Deferred | RouteHealthProbeOutcome::Skipped => None,
+        })
+        .collect::<Vec<_>>();
+
+    if !deferred {
+        let updates = results
+            .iter()
+            .map(|result| (result.node_id, result.healthy));
+        state.machines.set_route_candidate_health_batch(updates);
+    }
+
+    results
 }
 
 pub(crate) fn route_health_probe_candidates(machines: &MachineRegistry) -> Vec<u64> {
@@ -874,25 +904,49 @@ async fn probe_route_candidate(
     state: &WireState,
     node_id: u64,
     probe_timeout: Duration,
-) -> RouteHealthProbeResult {
+) -> RouteHealthProbeOutcome {
+    let Some(probe_generation) = state.machines.connection_generation(node_id) else {
+        state.machines.forget_route_health_session(node_id);
+        return RouteHealthProbeOutcome::Skipped;
+    };
+    if !state.machines.is_stream_connected(node_id) {
+        state.machines.forget_route_health_session(node_id);
+        return RouteHealthProbeOutcome::Skipped;
+    }
+
+    let stable_session = state
+        .machines
+        .mark_route_health_session_stable(node_id, probe_generation);
     let (ping_id, rx) = state.register_ping(node_id);
     state.dispatch_ping_request(node_id, &ping_id, false, false);
 
     if let Ok(Ok(latency)) = tokio::time::timeout(probe_timeout, rx).await {
-        state.machines.set_route_candidate_health(node_id, true);
-        RouteHealthProbeResult {
+        RouteHealthProbeOutcome::Result(RouteHealthProbeResult {
             node_id,
             healthy: true,
             latency: Some(latency),
-        }
+        })
     } else {
         state.pings.cancel(&ping_id);
-        state.machines.set_route_candidate_health(node_id, false);
-        RouteHealthProbeResult {
+
+        if !state.machines.is_stream_connected(node_id) {
+            state.machines.forget_route_health_session(node_id);
+            return RouteHealthProbeOutcome::Skipped;
+        }
+
+        if state.machines.connection_generation(node_id) != Some(probe_generation) {
+            return RouteHealthProbeOutcome::Deferred;
+        }
+
+        if !stable_session {
+            return RouteHealthProbeOutcome::Deferred;
+        }
+
+        RouteHealthProbeOutcome::Result(RouteHealthProbeResult {
             node_id,
             healthy: false,
             latency: None,
-        }
+        })
     }
 }
 
@@ -1386,6 +1440,10 @@ pub struct MachineRegistry {
     /// Monotonic per-node stream generation used to suppress stale
     /// delayed-offline tasks after a rapid reconnect.
     connection_generations: RwLock<BTreeMap<u64, u64>>,
+    /// Per-node route-health session generation observed in the
+    /// previous probe cycle. A timeout on a fresh or replaced session
+    /// is deferred to match headscale-go's HA prober.
+    route_health_stable_sessions: RwLock<BTreeMap<u64, u64>>,
     /// Upstream-shaped ephemeral-node lifecycle manager. When
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
@@ -1469,6 +1527,7 @@ impl Default for MachineRegistry {
             active_connections: RwLock::new(BTreeMap::new()),
             online_states: RwLock::new(BTreeMap::new()),
             connection_generations: RwLock::new(BTreeMap::new()),
+            route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
         }
@@ -1685,6 +1744,29 @@ impl MachineRegistry {
         changed
     }
 
+    pub fn set_route_candidate_health_batch<I>(&self, updates: I) -> bool
+    where
+        I: IntoIterator<Item = (u64, bool)>,
+    {
+        let snapshot = self.snapshot();
+        let mut primary_routes = self.primary_routes.write();
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, &snapshot);
+
+        let gated_updates = updates
+            .into_iter()
+            .filter(|(node_id, healthy)| *healthy || primary_routes.has_routes(*node_id))
+            .collect::<Vec<_>>();
+        if gated_updates.is_empty() {
+            return false;
+        }
+
+        let changed = primary_routes.set_node_health_batch(gated_updates);
+        if changed {
+            self.wake_waiters();
+        }
+        changed
+    }
+
     pub fn is_route_candidate_healthy(&self, node_id: u64) -> bool {
         self.primary_routes.read().is_node_healthy(node_id)
     }
@@ -1758,6 +1840,39 @@ impl MachineRegistry {
             node_id,
             offline_grace,
         }
+    }
+
+    pub fn connection_generation(&self, node_id: u64) -> Option<u64> {
+        self.connection_generations.read().get(&node_id).copied()
+    }
+
+    pub fn is_stream_connected(&self, node_id: u64) -> bool {
+        self.active_connections
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
+    }
+
+    fn mark_route_health_session_stable(&self, node_id: u64, generation: u64) -> bool {
+        let mut sessions = self.route_health_stable_sessions.write();
+        let previous = sessions.insert(node_id, generation);
+        previous == Some(generation)
+    }
+
+    fn forget_route_health_session(&self, node_id: u64) {
+        self.route_health_stable_sessions.write().remove(&node_id);
+    }
+
+    fn retain_route_health_sessions<I>(&self, node_ids: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let keep = node_ids.into_iter().collect::<BTreeSet<_>>();
+        self.route_health_stable_sessions
+            .write()
+            .retain(|node_id, _generation| keep.contains(node_id));
     }
 
     fn release_stream_connection(&self, node_id: u64) -> Option<u64> {
@@ -3783,6 +3898,17 @@ mod registry_tests {
             vec![route]
         );
 
+        let prime_probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_a).await;
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        let prime_results = prime_probe.await.unwrap();
+        assert_eq!(prime_results.len(), 2);
+        assert!(state.machines.is_route_candidate_healthy(node_a));
+        assert!(state.machines.is_route_candidate_healthy(node_b));
+
         let probe = tokio::spawn({
             let state = state.clone();
             async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
@@ -3833,6 +3959,108 @@ mod registry_tests {
             vec![route]
         );
         assert!(!sticky.contains_key(&keys[0]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn route_health_probe_fresh_session_timeout_defers_one_cycle() {
+        let state = test_state();
+        let keys = stable_sorted_keys(&["route-health-fresh-a", "route-health-fresh-b"]);
+        let route = "10.0.0.0/24";
+        state
+            .machines
+            .upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        state
+            .machines
+            .upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+        let node_a = stable_id_from_key(&keys[0]);
+        let node_b = stable_id_from_key(&keys[1]);
+
+        let probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let results = probe.await.unwrap();
+
+        assert!(results.is_empty());
+        assert!(state.machines.is_route_candidate_healthy(node_a));
+        assert!(state.machines.is_route_candidate_healthy(node_b));
+        let primary = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            primary.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn route_health_probe_reconnect_during_probe_keeps_node_healthy() {
+        let state = test_state();
+        let keys = stable_sorted_keys(&["route-health-reconnect-a", "route-health-reconnect-b"]);
+        let route = "10.0.0.0/24";
+        state
+            .machines
+            .upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        state
+            .machines
+            .upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let guard_a = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+        let node_a = stable_id_from_key(&keys[0]);
+        let node_b = stable_id_from_key(&keys[1]);
+
+        let prime_probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_a).await;
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        assert_eq!(prime_probe.await.unwrap().len(), 2);
+
+        let probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        drop(guard_a);
+        let _guard_a_reconnected = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let results = probe.await.unwrap();
+
+        assert!(results.iter().any(|result| result.node_id == node_b));
+        assert!(!results.iter().any(|result| result.node_id == node_a));
+        assert!(state.machines.is_route_candidate_healthy(node_a));
+        let primary = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            primary.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
     }
 
     #[test]

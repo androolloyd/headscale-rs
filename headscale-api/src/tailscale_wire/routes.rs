@@ -174,6 +174,28 @@ impl PrimaryRouteState {
         self.update_primary_locked()
     }
 
+    /// Apply several health flips before recalculating primaries.
+    pub fn set_node_health_batch<I>(&mut self, updates: I) -> bool
+    where
+        I: IntoIterator<Item = (u64, bool)>,
+    {
+        let mut health_changed = false;
+        for (node_id, healthy) in updates {
+            let changed = if healthy {
+                self.unhealthy.remove(&node_id)
+            } else {
+                self.unhealthy.insert(node_id)
+            };
+            health_changed |= changed;
+        }
+
+        if !health_changed {
+            return false;
+        }
+
+        self.update_primary_locked()
+    }
+
     /// Clear a stale unhealthy mark without recalculating primaries.
     /// Reconnect paths use this to give a fresh session a clean slate
     /// while preserving sticky ownership by the current healthy primary.

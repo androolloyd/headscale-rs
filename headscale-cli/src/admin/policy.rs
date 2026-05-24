@@ -107,7 +107,7 @@ pub async fn set_grpc(
     if fmt.is_structured() {
         print_structured(fmt, &response)?;
     } else {
-        println!("Policy applied: true");
+        println!("Policy updated.");
     }
     Ok(())
 }
@@ -131,7 +131,7 @@ pub async fn set_direct_db(
     if fmt.is_structured() {
         print_structured(fmt, &response)?;
     } else {
-        println!("Policy applied: true");
+        println!("Policy updated.");
     }
     Ok(())
 }
@@ -151,7 +151,7 @@ pub fn check(path: &Path) -> Result<(), AdminError> {
 pub async fn check_grpc(client: &mut GrpcAdminClient, path: &Path) -> Result<(), AdminError> {
     let raw = read_policy_file(path)?;
     client.check_policy(raw).await?;
-    println!("Policy at {} validates OK.", path.display());
+    println!("Policy is valid");
     Ok(())
 }
 
@@ -159,7 +159,7 @@ pub async fn check_direct_db(db_path: &Path, path: &Path) -> Result<(), AdminErr
     let raw = read_policy_file(path)?;
     let db = open_policy_database(db_path).await?;
     validate_policy_with_database(db.pool(), &raw, "checking policy").await?;
-    println!("Policy at {} validates OK.", path.display());
+    println!("Policy is valid");
     Ok(())
 }
 

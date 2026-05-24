@@ -598,6 +598,9 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
 
 pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
+    if matches!(cmd, NodesCmd::Register { .. }) {
+        eprintln!("use 'headscale auth register --auth-id <id> --user <user>' instead");
+    }
     if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
         return match cmd {

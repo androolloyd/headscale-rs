@@ -259,8 +259,12 @@ pub async fn register_grpc(
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
     } else {
-        println!("Node registered");
-        render_grpc_one(&node);
+        let display_name = if node.given_name.is_empty() {
+            &node.name
+        } else {
+            &node.given_name
+        };
+        println!("Node {display_name} registered");
     }
     Ok(())
 }

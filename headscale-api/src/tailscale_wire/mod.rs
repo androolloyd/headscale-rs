@@ -39,7 +39,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,8 @@ use self::wire::stable_id_from_key;
 pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60);
 /// Headscale-go default cleanup tick for the registration cache.
 pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
+/// Headscale-go default upper bound for pending auth/registration requests.
+pub const REGISTRATION_CACHE_MAX_ENTRIES: usize = 1024;
 /// Upstream debug knob that enables on-disk MapResponse dumps.
 pub const MAPRESPONSE_DEBUG_DUMP_ENV: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH";
 const PING_ID_LENGTH: usize = 16;
@@ -976,6 +978,8 @@ pub struct RegistrationCache {
     last_ssh_auth: RwLock<BTreeMap<SshCheckBinding, SshAuthRecord>>,
     expiration: Duration,
     cleanup: Duration,
+    max_entries: usize,
+    access_counter: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -983,6 +987,7 @@ struct RegistrationEntry {
     record: Option<MachineRecord>,
     ssh_binding: Option<SshCheckBinding>,
     expires_at: Instant,
+    last_used: AtomicU64,
     outcome: Mutex<Option<RegistrationOutcome>>,
     notify: Notify,
 }
@@ -1030,32 +1035,54 @@ pub enum AuthWaitOutcome {
 
 impl RegistrationCache {
     pub fn new() -> Self {
-        Self::with_tuning(REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_CLEANUP)
+        Self::with_tuning_and_max_entries(
+            REGISTRATION_CACHE_EXPIRATION,
+            REGISTRATION_CACHE_CLEANUP,
+            REGISTRATION_CACHE_MAX_ENTRIES,
+        )
     }
 
     pub fn with_tuning(expiration: Duration, cleanup: Duration) -> Self {
+        Self::with_tuning_and_max_entries(expiration, cleanup, REGISTRATION_CACHE_MAX_ENTRIES)
+    }
+
+    pub fn with_tuning_and_max_entries(
+        expiration: Duration,
+        cleanup: Duration,
+        max_entries: usize,
+    ) -> Self {
         Self {
             inner: RwLock::new(BTreeMap::new()),
             last_ssh_auth: RwLock::new(BTreeMap::new()),
             expiration,
             cleanup,
+            max_entries: if max_entries == 0 {
+                REGISTRATION_CACHE_MAX_ENTRIES
+            } else {
+                max_entries
+            },
+            access_counter: AtomicU64::new(0),
         }
     }
 
     pub fn insert(&self, registration_id: String, record: MachineRecord) {
         self.prune_expired();
-        let entry = Arc::new(RegistrationEntry::new_registration(record, self.expiration));
-        if let Some(old) = self.inner.write().insert(registration_id, entry) {
-            old.expire();
-        }
+        let entry = Arc::new(RegistrationEntry::new_registration(
+            record,
+            self.expiration,
+            self.next_access(),
+        ));
+        self.insert_entry(registration_id, entry);
     }
 
     pub fn insert_ssh_check(&self, auth_id: String, binding: SshCheckBinding) {
         self.prune_expired();
-        let entry = Arc::new(RegistrationEntry::new_ssh_check(binding, self.expiration));
-        if let Some(old) = self.inner.write().insert(auth_id, entry) {
-            old.expire();
-        }
+        let entry = Arc::new(RegistrationEntry::new_ssh_check(
+            binding,
+            self.expiration,
+            self.next_access(),
+        ));
+        self.insert_entry(auth_id, entry);
     }
 
     pub fn get(&self, registration_id: &str) -> Option<MachineRecord> {
@@ -1267,6 +1294,10 @@ impl RegistrationCache {
         self.cleanup
     }
 
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
     pub fn prune_expired(&self) -> usize {
         let now = Instant::now();
         let mut expired = Vec::new();
@@ -1294,7 +1325,11 @@ impl RegistrationCache {
 
     fn get_entry(&self, registration_id: &str) -> Option<Arc<RegistrationEntry>> {
         self.prune_expired();
-        self.inner.read().get(registration_id).cloned()
+        let entry = self.inner.read().get(registration_id).cloned();
+        if let Some(entry) = &entry {
+            entry.touch(self.next_access());
+        }
+        entry
     }
 
     fn expire_if_current(&self, registration_id: &str, target: &Arc<RegistrationEntry>) -> bool {
@@ -1314,6 +1349,36 @@ impl RegistrationCache {
             None => false,
         }
     }
+
+    fn insert_entry(&self, id: String, entry: Arc<RegistrationEntry>) {
+        let mut expired = Vec::new();
+        {
+            let mut inner = self.inner.write();
+            if let Some(old) = inner.insert(id, entry) {
+                expired.push(old);
+            }
+            while inner.len() > self.max_entries {
+                let Some(evict_id) = inner
+                    .iter()
+                    .min_by_key(|(_id, entry)| entry.last_used())
+                    .map(|(id, _entry)| id.clone())
+                else {
+                    break;
+                };
+                if let Some(evicted) = inner.remove(&evict_id) {
+                    expired.push(evicted);
+                }
+            }
+        }
+
+        for entry in expired {
+            entry.expire();
+        }
+    }
+
+    fn next_access(&self) -> u64 {
+        self.access_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
 }
 
 impl Default for RegistrationCache {
@@ -1323,24 +1388,34 @@ impl Default for RegistrationCache {
 }
 
 impl RegistrationEntry {
-    fn new_registration(record: MachineRecord, expiration: Duration) -> Self {
+    fn new_registration(record: MachineRecord, expiration: Duration, last_used: u64) -> Self {
         Self {
             record: Some(record),
             ssh_binding: None,
             expires_at: Instant::now() + expiration,
+            last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
             notify: Notify::new(),
         }
     }
 
-    fn new_ssh_check(binding: SshCheckBinding, expiration: Duration) -> Self {
+    fn new_ssh_check(binding: SshCheckBinding, expiration: Duration, last_used: u64) -> Self {
         Self {
             record: None,
             ssh_binding: Some(binding),
             expires_at: Instant::now() + expiration,
+            last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
             notify: Notify::new(),
         }
+    }
+
+    fn touch(&self, last_used: u64) {
+        self.last_used.store(last_used, Ordering::Relaxed);
+    }
+
+    fn last_used(&self) -> u64 {
+        self.last_used.load(Ordering::Relaxed)
     }
 
     fn outcome(&self) -> Option<RegistrationOutcome> {
@@ -3441,6 +3516,40 @@ mod registry_tests {
         .expect("waiter should finish at cache expiry");
         assert!(matches!(outcome, RegistrationWaitOutcome::Expired));
         assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn registration_cache_lru_eviction_notifies_waiting_followups() {
+        let cache = Arc::new(RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            2,
+        ));
+        let first_id = "a".repeat(24);
+        let second_id = "b".repeat(24);
+        let third_id = "c".repeat(24);
+        cache.insert(first_id.clone(), mk_record(1));
+        cache.insert(second_id.clone(), mk_record(2));
+
+        let waiter = {
+            let cache = cache.clone();
+            let second_id = second_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&second_id).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(cache.get(&first_id).is_some(), "first entry becomes MRU");
+
+        cache.insert(third_id.clone(), mk_record(3));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("LRU eviction should notify waiter")
+            .expect("waiter task should not panic");
+        assert!(matches!(outcome, RegistrationWaitOutcome::Expired));
+        assert!(cache.get(&first_id).is_some());
+        assert!(cache.get(&second_id).is_none());
+        assert!(cache.get(&third_id).is_some());
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]

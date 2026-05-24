@@ -1512,7 +1512,7 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
         "--config", config, "--force", "policy", "set", "--file", policy, bypass,
     ]);
     assert!(set_text.status.success(), "stderr: {}", stderr(&set_text));
-    assert_eq!(stdout(&set_text), "Policy applied: true\n");
+    assert_eq!(stdout(&set_text), "Policy updated.\n");
     assert_eq!(stderr(&set_text), "");
 
     let get = headscale_clean(&[
@@ -1531,10 +1531,7 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
         "--config", config, "--force", "policy", "check", "--file", policy, bypass,
     ]);
     assert!(check.status.success(), "stderr: {}", stderr(&check));
-    assert_eq!(
-        stdout(&check),
-        format!("Policy at {} validates OK.\n", policy_path.display())
-    );
+    assert_eq!(stdout(&check), "Policy is valid\n");
     assert_eq!(stderr(&check), "");
 }
 
@@ -2703,7 +2700,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&set_policy)
     );
-    assert_eq!(stdout(&set_policy), "Policy applied: true\n");
+    assert_eq!(stdout(&set_policy), "Policy updated.\n");
     assert_eq!(stderr(&set_policy), "");
 
     let tag_node = headscale_with_config(
@@ -2790,6 +2787,53 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stdout(&empty_nodes), "No nodes registered.\n");
     assert_eq!(stderr(&empty_nodes), "");
+
+    let nodes_register_id = "cccccccccccccccccccccccc";
+    let nodes_register_pending = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            nodes_register_id,
+            "--name",
+            "nodes-register-node",
+        ],
+    );
+    assert!(
+        nodes_register_pending.status.success(),
+        "stderr: {}",
+        stderr(&nodes_register_pending)
+    );
+    assert_eq!(stdout(&nodes_register_pending), "Node created\n");
+    assert_eq!(stderr(&nodes_register_pending), "");
+
+    let nodes_register = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "register",
+            "--user",
+            "alice",
+            "--key",
+            nodes_register_id,
+        ],
+    );
+    assert!(
+        nodes_register.status.success(),
+        "stderr: {}",
+        stderr(&nodes_register)
+    );
+    assert_eq!(
+        stdout(&nodes_register),
+        "Node nodes-register-node registered\n"
+    );
+    assert_eq!(
+        stderr(&nodes_register),
+        "use 'headscale auth register --auth-id <id> --user <user>' instead\n"
+    );
 
     let approve_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
     let approve_pending = headscale_with_config(

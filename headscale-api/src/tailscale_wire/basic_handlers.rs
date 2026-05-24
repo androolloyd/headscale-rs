@@ -521,7 +521,8 @@ pub struct DebugRegistrationCacheInfo {
     #[serde(rename = "type")]
     pub cache_type: String,
     pub expiration: String,
-    pub cleanup: String,
+    pub max_entries: usize,
+    pub current_len: usize,
     pub status: String,
 }
 
@@ -2631,9 +2632,10 @@ fn debug_derp_string(derp_map: &DerpMap) -> String {
 
 fn debug_registration_cache_info(state: &WireState) -> DebugRegistrationCacheInfo {
     DebugRegistrationCacheInfo {
-        cache_type: "zcache".to_string(),
+        cache_type: "expirable-lru".to_string(),
         expiration: go_duration_string(state.registration_cache.expiration()),
-        cleanup: go_duration_string(state.registration_cache.cleanup_interval()),
+        max_entries: state.registration_cache.max_entries(),
+        current_len: state.registration_cache.len(),
         status: "active".to_string(),
     }
 }
@@ -4734,9 +4736,10 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["type"], "zcache");
+        assert_eq!(parsed["type"], "expirable-lru");
         assert_eq!(parsed["expiration"], "15m0s");
-        assert_eq!(parsed["cleanup"], "20m0s");
+        assert_eq!(parsed["max_entries"], 1024);
+        assert_eq!(parsed["current_len"], 0);
         assert_eq!(parsed["status"], "active");
     }
 

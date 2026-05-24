@@ -37,7 +37,8 @@ use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
     DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    MapResponseDebugStore, PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
+    MapResponseDebugStore, PingTracker, REGISTRATION_CACHE_CLEANUP, REGISTRATION_CACHE_EXPIRATION,
+    REGISTRATION_CACHE_MAX_ENTRIES, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
     WireState, serve, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
     spawn_route_health_probe,
 };
@@ -482,7 +483,9 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
             .with_user_admin(users.clone())
             .with_wire_registry(wire_registry.clone()),
     );
-    let registration_cache = Arc::new(RegistrationCache::new());
+    let registration_cache = Arc::new(registration_cache_from_runtime_config(
+        runtime_config.as_ref(),
+    ));
     let ip_allocator: Arc<dyn IpAllocator> =
         Arc::new(CidrIpAllocator::from_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?);
     let policy = Arc::new(PolicyStore::new());
@@ -791,6 +794,22 @@ fn runtime_config_snapshot(
         u64_nanos_to_i64(cfg.tuning.node_store_batch_timeout);
 
     snapshot
+}
+
+fn registration_cache_from_runtime_config(config: &RuntimeConfigSnapshot) -> RegistrationCache {
+    let expiration = u64::try_from(config.tuning.register_cache_expiration)
+        .ok()
+        .filter(|nanos| *nanos > 0)
+        .map_or(REGISTRATION_CACHE_EXPIRATION, Duration::from_nanos);
+    let max_entries = usize::try_from(config.tuning.register_cache_max_entries)
+        .ok()
+        .filter(|entries| *entries > 0)
+        .unwrap_or(REGISTRATION_CACHE_MAX_ENTRIES);
+    RegistrationCache::with_tuning_and_max_entries(
+        expiration,
+        REGISTRATION_CACHE_CLEANUP,
+        max_entries,
+    )
 }
 
 fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
@@ -3200,6 +3219,21 @@ database:
         assert_eq!(snapshot.tuning.node_map_session_buffered_chan_size, 42);
         assert_eq!(snapshot.tuning.register_cache_max_entries, 2048);
         assert_eq!(snapshot.tuning.node_store_batch_timeout, 250_000_000);
+    }
+
+    #[test]
+    fn registration_cache_uses_runtime_tuning_with_upstream_defaults() {
+        let default_cache =
+            registration_cache_from_runtime_config(&RuntimeConfigSnapshot::default());
+        assert_eq!(default_cache.expiration(), REGISTRATION_CACHE_EXPIRATION);
+        assert_eq!(default_cache.max_entries(), REGISTRATION_CACHE_MAX_ENTRIES);
+
+        let mut tuned = RuntimeConfigSnapshot::default();
+        tuned.tuning.register_cache_expiration = 5 * 60 * 1_000_000_000;
+        tuned.tuning.register_cache_max_entries = 7;
+        let tuned_cache = registration_cache_from_runtime_config(&tuned);
+        assert_eq!(tuned_cache.expiration(), Duration::from_secs(5 * 60));
+        assert_eq!(tuned_cache.max_entries(), 7);
     }
 
     #[tokio::test]

@@ -115,11 +115,12 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
+| Routes | `route-via-multiprefix-reload` | `route-via-multiprefix-reload-smoke.sh` | `route-via-multiprefix-reload-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` policy reload steering |
 | Routes | `route-via-multiprefix-restart` | `route-via-multiprefix-restart-smoke.sh` | `route-via-multiprefix-restart-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` restart persistence |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
 | Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
-| Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
+| Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health last-known-primary retention when all candidates are unavailable |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
@@ -604,11 +605,15 @@ tools/real-client/route-via-restart-headscale-go-smoke.sh
 ```
 
 The multi-prefix route-via variant has both routers advertise two subnets and
-asserts opposite per-prefix steering for two users:
+asserts opposite per-prefix steering for two users. The reload variant swaps
+both users' per-prefix owners through a policy reload, and the restart variant
+proves the same ownership survives a production-server restart:
 
 ```sh
 tools/real-client/route-via-multiprefix-smoke.sh
 tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
+tools/real-client/route-via-multiprefix-reload-smoke.sh
+tools/real-client/route-via-multiprefix-reload-headscale-go-smoke.sh
 tools/real-client/route-via-multiprefix-restart-smoke.sh
 tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
 ```
@@ -647,8 +652,9 @@ tools/real-client/route-health-restart-headscale-go-smoke.sh
 
 The all-unhealthy route-health variant pauses the current primary, waits for
 failover, then pauses every remaining route candidate and asserts the route
-keeps a degraded primary instead of disappearing. Current headscale-go retains
-the last known primary in this stock-client unavailable-candidate case:
+keeps the last known primary as a degraded primary instead of disappearing.
+Current headscale-go retains the last known primary in this stock-client
+unavailable-candidate case:
 
 ```sh
 tools/real-client/route-health-all-unhealthy-smoke.sh

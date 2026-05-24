@@ -2439,6 +2439,7 @@ if [[ -n "${expected_route_health_all_unhealthy_route}" ]]; then
           .map { |machine| stable_id_from_key(machine.fetch("node_key").sub(/\Anodekey:/, "")) }
           .sort
         abort("all-unhealthy fallback owner #{after_owner.inspect} not among candidates #{candidate_ids.inspect}") unless candidate_ids.include?(after_owner)
+        abort("all-unhealthy fallback did not retain last known primary for #{route}: got #{after_owner.inspect}, expected #{first_owner.inspect}") unless after_owner == first_owner
 
         puts JSON.pretty_generate({
           route: route,

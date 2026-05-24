@@ -68,7 +68,7 @@ impl MockOidcConfig {
     fn from_env() -> Result<Self> {
         let client_id = required_env("MOCKOIDC_CLIENT_ID")?;
         let client_secret = required_env("MOCKOIDC_CLIENT_SECRET")?;
-        let addr = required_env("MOCKOIDC_ADDR")?;
+        let addr = required_env_with_message("MOCKOIDC_ADDR", "MOCKOIDC_PORT not defined")?;
         let port = required_env("MOCKOIDC_PORT")?
             .parse::<u16>()
             .context("parsing MOCKOIDC_PORT")?;
@@ -93,9 +93,13 @@ impl MockOidcConfig {
 }
 
 fn required_env(name: &str) -> Result<String> {
+    required_env_with_message(name, &format!("{name} not defined"))
+}
+
+fn required_env_with_message(name: &str, message: &str) -> Result<String> {
     let value = env::var(name).unwrap_or_default();
     if value.is_empty() {
-        bail!("{name} not defined");
+        bail!("{message}");
     }
     Ok(value)
 }

@@ -540,7 +540,10 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             GenerateCmd::PrivateKey => print_private_key(connect.fmt().map_err(MainError::Admin)?)
                 .map_err(MainError::Other),
         },
-        Commands::Mockoidc => mockoidc::run().await.map_err(MainError::Other),
+        Commands::Mockoidc => mockoidc::run()
+            .await
+            .context("running mock OIDC server")
+            .map_err(MainError::Other),
         Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
         Commands::Version => {
             print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)

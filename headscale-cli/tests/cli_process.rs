@@ -37,6 +37,15 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_CLI_INSECURE",
 ];
 
+const MOCKOIDC_ENV: &[&str] = &[
+    "MOCKOIDC_CLIENT_ID",
+    "MOCKOIDC_CLIENT_SECRET",
+    "MOCKOIDC_ADDR",
+    "MOCKOIDC_PORT",
+    "MOCKOIDC_USERS",
+    "MOCKOIDC_ACCESS_TTL",
+];
+
 fn headscale_clean_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
     for key in CLEAN_ENV {
@@ -72,6 +81,22 @@ fn headscale_in(args: &[&str], cwd: &Path, home: &Path) -> Output {
         .env_remove("HEADSCALE_CONFIG")
         .output()
         .expect("run headscale binary")
+}
+
+fn headscale_in_with_mockoidc_env(
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    mockoidc_env: &[(&str, &str)],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
+    command.args(args).current_dir(cwd).env("HOME", home);
+    command.env_remove("HEADSCALE_CONFIG");
+    for key in MOCKOIDC_ENV {
+        command.env_remove(key);
+    }
+    command.envs(mockoidc_env.iter().copied());
+    command.output().expect("run headscale binary")
 }
 
 fn stdout(output: &Output) -> String {
@@ -663,14 +688,70 @@ fn mockoidc_help_and_missing_env_do_not_load_config() {
     assert!(help.status.success(), "stderr: {}", stderr(&help));
     assert!(stdout(&help).contains("mock OIDC server"));
 
-    let missing_env = headscale_in(&["mockoidc"], cwd.path(), home.path());
-    assert!(!missing_env.status.success());
-    let err = stderr(&missing_env);
-    assert!(
-        err.contains("MOCKOIDC_CLIENT_ID not defined"),
-        "stderr: {err}"
+    let missing_client_id =
+        headscale_in_with_mockoidc_env(&["mockoidc"], cwd.path(), home.path(), &[]);
+    assert_process_stderr_snapshot(
+        &missing_client_id,
+        1,
+        include_str!("snapshots/mockoidc_missing_client_id.stderr"),
+        "mockoidc missing client id",
     );
-    assert!(!err.contains("Failed to load config"), "stderr: {err}");
+    assert!(
+        !stderr(&missing_client_id).contains("Failed to load config"),
+        "stderr: {}",
+        stderr(&missing_client_id)
+    );
+
+    let missing_addr = headscale_in_with_mockoidc_env(
+        &["mockoidc"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("MOCKOIDC_CLIENT_ID", "client"),
+            ("MOCKOIDC_CLIENT_SECRET", "secret"),
+        ],
+    );
+    assert_process_stderr_snapshot(
+        &missing_addr,
+        1,
+        include_str!("snapshots/mockoidc_missing_addr.stderr"),
+        "mockoidc missing addr",
+    );
+
+    let missing_port = headscale_in_with_mockoidc_env(
+        &["mockoidc"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("MOCKOIDC_CLIENT_ID", "client"),
+            ("MOCKOIDC_CLIENT_SECRET", "secret"),
+            ("MOCKOIDC_ADDR", "127.0.0.1"),
+        ],
+    );
+    assert_process_stderr_snapshot(
+        &missing_port,
+        1,
+        include_str!("snapshots/mockoidc_missing_port.stderr"),
+        "mockoidc missing port",
+    );
+
+    let missing_users = headscale_in_with_mockoidc_env(
+        &["mockoidc"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("MOCKOIDC_CLIENT_ID", "client"),
+            ("MOCKOIDC_CLIENT_SECRET", "secret"),
+            ("MOCKOIDC_ADDR", "127.0.0.1"),
+            ("MOCKOIDC_PORT", "0"),
+        ],
+    );
+    assert_process_stderr_snapshot(
+        &missing_users,
+        1,
+        include_str!("snapshots/mockoidc_missing_users.stderr"),
+        "mockoidc missing users",
+    );
 }
 
 #[test]

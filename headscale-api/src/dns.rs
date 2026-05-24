@@ -49,7 +49,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -61,6 +61,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Notify;
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
+
+const NEXTDNS_DOH_PREFIX: &str = "https://dns.nextdns.io";
+const NEXTDNS_ATTR_PREFIX: &str = "nextdns:";
+const NEXTDNS_ATTR_NO_DEVICE_INFO: &str = "nextdns:no-device-info";
 
 type ResolverAddrs = Vec<String>;
 type ResolverObjects = Vec<DnsResolver>;
@@ -442,6 +446,20 @@ pub struct MachineDnsRecord {
     pub node_id: u64,
 }
 
+/// Requester-specific DNS rendering inputs.
+///
+/// Headscale-go v0.29 applies policy `nodeAttrs` to the requester
+/// before placing `DNSConfig` in its `MapResponse`: `nextdns:<profile>`
+/// rewrites NextDNS DoH resolver profile paths, and
+/// `nextdns:no-device-info` suppresses the metadata query string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DnsRequester {
+    pub hostname: String,
+    pub os: String,
+    pub primary_ip: Option<String>,
+    pub node_attrs: Vec<String>,
+}
+
 /// Runtime store. Cheap to clone (every field is an `Arc`).
 ///
 /// The store owns:
@@ -569,6 +587,22 @@ impl DnsStore {
         let extra = self.extra_records();
         build_dns_config(&spec, machines, extra.as_slice())
     }
+
+    /// Build the wire-shape [`DnsConfig`] for a specific MapResponse
+    /// requester. When `requester` is present, NextDNS resolver URLs
+    /// are rewritten and annotated using the same nodeAttrs-driven
+    /// rules as upstream headscale-go v0.29.
+    pub fn build_for_requester(
+        &self,
+        machines: &[MachineDnsRecord],
+        requester: Option<&DnsRequester>,
+    ) -> DnsConfig {
+        let mut config = self.build(machines);
+        if let Some(requester) = requester {
+            apply_nextdns_requester_config(&mut config, requester);
+        }
+        config
+    }
 }
 
 /// Notify handle returned by [`DnsStore::notify_handle`].
@@ -673,6 +707,195 @@ pub fn try_build_dns_config(
 ) -> Result<DnsConfig, DnsConfigError> {
     spec.validate()?;
     Ok(build_dns_config(spec, machines, extra))
+}
+
+pub fn apply_nextdns_requester_config(config: &mut DnsConfig, requester: &DnsRequester) {
+    if let Some(profile) = nextdns_profile_from_attrs(&requester.node_attrs) {
+        apply_nextdns_profile(&mut config.resolvers, &profile);
+        apply_nextdns_profile(&mut config.fallback_resolvers, &profile);
+        for resolvers in config.routes.values_mut() {
+            apply_nextdns_profile(resolvers, &profile);
+        }
+    }
+
+    if requester
+        .node_attrs
+        .iter()
+        .any(|attr| attr == NEXTDNS_ATTR_NO_DEVICE_INFO)
+    {
+        return;
+    }
+
+    add_nextdns_metadata(&mut config.resolvers, requester);
+    add_nextdns_metadata(&mut config.fallback_resolvers, requester);
+    for resolvers in config.routes.values_mut() {
+        add_nextdns_metadata(resolvers, requester);
+    }
+}
+
+fn nextdns_profile_from_attrs(attrs: &[String]) -> Option<String> {
+    let mut candidates = attrs
+        .iter()
+        .filter_map(|attr| {
+            let profile = attr.strip_prefix(NEXTDNS_ATTR_PREFIX)?;
+            if profile.is_empty()
+                || attr == NEXTDNS_ATTR_NO_DEVICE_INFO
+                || !valid_nextdns_profile(profile)
+            {
+                return None;
+            }
+            Some(profile.to_string())
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+fn valid_nextdns_profile(profile: &str) -> bool {
+    !profile.is_empty()
+        && profile.len() <= 64
+        && profile
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn is_nextdns_doh_addr(addr: &str) -> bool {
+    addr == NEXTDNS_DOH_PREFIX
+        || addr
+            .strip_prefix(NEXTDNS_DOH_PREFIX)
+            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('?'))
+}
+
+fn apply_nextdns_profile(resolvers: &mut [DnsResolver], profile: &str) {
+    for resolver in resolvers {
+        if is_nextdns_doh_addr(&resolver.addr) {
+            resolver.addr = format!("{NEXTDNS_DOH_PREFIX}/{profile}");
+        }
+    }
+}
+
+fn add_nextdns_metadata(resolvers: &mut [DnsResolver], requester: &DnsRequester) {
+    for resolver in resolvers {
+        if is_nextdns_doh_addr(&resolver.addr) {
+            resolver.addr = add_nextdns_metadata_to_addr(&resolver.addr, requester);
+        }
+    }
+}
+
+fn add_nextdns_metadata_to_addr(addr: &str, requester: &DnsRequester) -> String {
+    let (without_fragment, fragment) = split_once(addr, '#');
+    let (base, query) = split_once(without_fragment, '?');
+    let mut params = parse_query(query.unwrap_or_default());
+    params.insert("device_name".to_string(), vec![requester.hostname.clone()]);
+    params.insert("device_model".to_string(), vec![requester.os.clone()]);
+    if let Some(ip) = requester.primary_ip.as_ref() {
+        params.insert("device_ip".to_string(), vec![ip.clone()]);
+    }
+
+    let query = encode_query(&params);
+    let mut out = if query.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{query}")
+    };
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
+}
+
+fn split_once(input: &str, delimiter: char) -> (&str, Option<&str>) {
+    input
+        .split_once(delimiter)
+        .map_or((input, None), |(left, right)| (left, Some(right)))
+}
+
+fn parse_query(query: &str) -> BTreeMap<String, Vec<String>> {
+    let mut params = BTreeMap::new();
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        let (key, value) = split_once(part, '=');
+        params
+            .entry(percent_decode_query(key))
+            .or_insert_with(Vec::new)
+            .push(percent_decode_query(value.unwrap_or_default()));
+    }
+    params
+}
+
+fn percent_decode_query(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_value(bytes[i + 1]);
+                let lo = hex_value(bytes[i + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn encode_query(params: &BTreeMap<String, Vec<String>>) -> String {
+    params
+        .iter()
+        .flat_map(|(key, values)| {
+            values.iter().map(move |value| {
+                format!(
+                    "{}={}",
+                    percent_encode_query(key),
+                    percent_encode_query(value)
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_encode_query(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 fn resolver_from_addr(s: &str) -> DnsResolver {
@@ -987,6 +1210,15 @@ mod tests {
         }
     }
 
+    fn nextdns_requester(attrs: &[&str]) -> DnsRequester {
+        DnsRequester {
+            hostname: "node1".into(),
+            os: "linux".into(),
+            primary_ip: Some("100.64.0.1".into()),
+            node_attrs: attrs.iter().map(|attr| (*attr).to_string()).collect(),
+        }
+    }
+
     #[test]
     fn default_spec_matches_headscale_go_dns_defaults() {
         let s = DnsConfigSpec::default();
@@ -1060,6 +1292,81 @@ mod tests {
             !cfg.extra_records
                 .iter()
                 .any(|r| r.name.starts_with("peer-"))
+        );
+    }
+
+    #[test]
+    fn nextdns_metadata_is_added_for_requester() {
+        let spec = DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: vec!["https://dns.nextdns.io/abc?existing=1&existing=2".into()],
+            ..DnsConfigSpec::default()
+        };
+        let store = DnsStore::from_spec(spec);
+        let cfg = store.build_for_requester(&[], Some(&nextdns_requester(&[])));
+
+        assert_eq!(
+            cfg.resolvers[0].addr,
+            "https://dns.nextdns.io/abc?device_ip=100.64.0.1&device_model=linux&device_name=node1&existing=1&existing=2"
+        );
+    }
+
+    #[test]
+    fn nextdns_profile_rewrites_all_resolver_sets_and_can_suppress_metadata() {
+        let mut restricted = HashMap::new();
+        restricted.insert(
+            "corp.example".to_string(),
+            vec!["https://dns.nextdns.io/split".to_string()],
+        );
+        let spec = DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: vec!["https://dns.nextdns.io/global".into()],
+            fallback_nameservers: vec!["https://dns.nextdns.io/fallback".into()],
+            restricted_nameservers: restricted,
+            ..DnsConfigSpec::default()
+        };
+        let store = DnsStore::from_spec(spec);
+        let requester = nextdns_requester(&[
+            "nextdns:z-profile",
+            "nextdns:a-profile",
+            "nextdns:no-device-info",
+        ]);
+        let cfg = store.build_for_requester(&[], Some(&requester));
+
+        assert_eq!(cfg.resolvers[0].addr, "https://dns.nextdns.io/a-profile");
+        assert_eq!(
+            cfg.fallback_resolvers[0].addr,
+            "https://dns.nextdns.io/a-profile"
+        );
+        assert_eq!(
+            cfg.routes["corp.example"][0].addr,
+            "https://dns.nextdns.io/a-profile"
+        );
+    }
+
+    #[test]
+    fn nextdns_invalid_profiles_and_non_nextdns_resolvers_are_ignored() {
+        let spec = DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: vec![
+                "https://dns.nextdns.io/global".into(),
+                "https://dns.nextdns.io.attacker.example/global".into(),
+            ],
+            ..DnsConfigSpec::default()
+        };
+        let store = DnsStore::from_spec(spec);
+        let requester = nextdns_requester(&["nextdns:bad/profile"]);
+        let cfg = store.build_for_requester(&[], Some(&requester));
+
+        assert!(cfg.resolvers[0].addr.starts_with(
+            "https://dns.nextdns.io/global?device_ip=100.64.0.1&device_model=linux&device_name=node1"
+        ));
+        assert_eq!(
+            cfg.resolvers[1].addr,
+            "https://dns.nextdns.io.attacker.example/global"
         );
     }
 

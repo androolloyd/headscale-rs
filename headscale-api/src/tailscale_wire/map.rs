@@ -68,7 +68,7 @@ use super::wire::{
 };
 use super::{MachineRecord, MapResponseDebugStore, MapResponseDebugType, WireState};
 
-use crate::dns::{DnsStore, MachineDnsRecord};
+use crate::dns::{DnsRequester, DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
 
 const MAP_NODE_NOT_FOUND_ERROR: &str = "node not found";
@@ -147,7 +147,12 @@ fn record_mapresponse_debug(
 /// build and the streaming `rebuild_map_chunk` use the same code path
 /// — drift here would mean an ExtraRecords hot-reload only lands on
 /// one of the two emission sites.
-fn build_dns_for_snapshot(dns: &DnsStore, snapshot: &HashMap<String, MachineRecord>) -> DnsConfig {
+fn build_dns_for_snapshot(
+    dns: &DnsStore,
+    policy: &PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+) -> DnsConfig {
     let machines: Vec<MachineDnsRecord> = snapshot
         .iter()
         .map(|(node_hex, rec)| MachineDnsRecord {
@@ -157,7 +162,23 @@ fn build_dns_for_snapshot(dns: &DnsStore, snapshot: &HashMap<String, MachineReco
             node_id: rec.stable_node_id_for_key(node_hex),
         })
         .collect();
-    dns.build(&machines)
+    let requester = snapshot.get(self_node_key).map(|rec| {
+        let primary_ip = rec.primary_addr_string();
+        let view = NodeView {
+            addr: primary_ip.as_deref(),
+            user: Some(&rec.user),
+            tags: &rec.forced_tags,
+        };
+        let node_attrs = policy.node_attrs_for(&view);
+        let host_info = rec.host_info_for_node();
+        DnsRequester {
+            hostname: rec.hostname.clone(),
+            os: host_info.os,
+            primary_ip,
+            node_attrs,
+        }
+    });
+    dns.build_for_requester(&machines, requester.as_ref())
 }
 
 fn exit_routes_for_snapshot(
@@ -1018,7 +1039,7 @@ async fn map_inner(
         taildrop_enabled,
     );
 
-    let dns_config = build_dns_for_snapshot(&state.dns, &snapshot);
+    let dns_config = build_dns_for_snapshot(&state.dns, &state.policy, &snapshot, &node_key_hex);
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, &node_key_hex, allowed_peer_ids.as_ref());
     let resp = MapResponse {
@@ -1652,7 +1673,7 @@ fn rebuild_map_chunk(
         cap_version,
         taildrop_enabled,
     );
-    let dns_config = build_dns_for_snapshot(dns, &snapshot);
+    let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
     let mr = MapResponse {
@@ -2856,6 +2877,105 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers[0].name, "peer-b.headscale.test");
         assert_eq!(mr.domain, "headscale.test");
+    }
+
+    #[tokio::test]
+    async fn map_response_applies_nextdns_profile_per_requester() {
+        let (state, _dir) = fixture();
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: vec!["https://dns.nextdns.io/global".into()],
+            ..crate::dns::DnsConfigSpec::default()
+        });
+
+        let client_key = "2c".repeat(32);
+        let mut client = policy_record(
+            &client_key,
+            "client-node",
+            22,
+            "alice@example.com",
+            vec!["tag:client".into()],
+        );
+        client.replace_host_info(HostInfo {
+            hostname: "client-node".into(),
+            os: "linux".into(),
+            ..HostInfo::default()
+        });
+        state.machines.upsert(client_key.clone(), client);
+
+        let server_key = "2d".repeat(32);
+        let mut server = policy_record(
+            &server_key,
+            "server-node",
+            23,
+            "alice@example.com",
+            vec!["tag:server".into()],
+        );
+        server.replace_host_info(HostInfo {
+            hostname: "server-node".into(),
+            os: "darwin".into(),
+            ..HostInfo::default()
+        });
+        state.machines.upsert(server_key.clone(), server);
+
+        let raw_policy = r#"
+            version = 1
+
+            [tag_owners]
+            "tag:client" = ["alice@example.com"]
+            "tag:server" = ["alice@example.com"]
+
+            [[node_attrs]]
+            target = ["tag:client"]
+            attr = ["nextdns:client-profile"]
+
+            [[node_attrs]]
+            target = ["tag:server"]
+            attr = ["nextdns:server-profile", "nextdns:no-device-info"]
+        "#;
+        let doc = crate::policy::PolicyDoc::from_toml(raw_policy).unwrap();
+        state.policy.set(doc, raw_policy.to_string());
+
+        let app = router(state);
+        let client_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client_resp.status(), StatusCode::OK);
+        let client_raw = to_bytes(client_resp.into_body(), 32 * 1024).await.unwrap();
+        let client_map: MapResponse = serde_json::from_slice(&client_raw).unwrap();
+        assert_eq!(
+            client_map.dns_config.unwrap().resolvers[0].addr,
+            "https://dns.nextdns.io/client-profile?device_ip=100.64.0.22&device_model=linux&device_name=client-node"
+        );
+
+        let server_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{server_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(server_resp.status(), StatusCode::OK);
+        let server_raw = to_bytes(server_resp.into_body(), 32 * 1024).await.unwrap();
+        let server_map: MapResponse = serde_json::from_slice(&server_raw).unwrap();
+        assert_eq!(
+            server_map.dns_config.unwrap().resolvers[0].addr,
+            "https://dns.nextdns.io/server-profile"
+        );
     }
 
     #[tokio::test]

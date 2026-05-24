@@ -667,7 +667,7 @@ mod tests {
 
     use headscale_api::admin::{
         InMemoryPreauthAdmin, NoopApiKeyAdmin, PersistentApiKeyAdmin, PersistentPreauthAdmin,
-        UserRegistry, WireMachineAdmin,
+        PersistentUserAdmin, UserRegistry, WireMachineAdmin,
     };
     use headscale_api::grpc::upstream::HeadscaleAdminService;
     use headscale_api::policy::PolicyStore;
@@ -843,7 +843,7 @@ mod tests {
         let socket = dir.path().join("headscale.sock");
         let db = headscale_db::Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
-        let users = Arc::new(UserRegistry::new());
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
         let machines = Arc::new(MachineRegistry::new());
         let service = HeadscaleAdminService::with_user_admin(
             users.clone(),

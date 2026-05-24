@@ -431,8 +431,7 @@ fn map_destroy_err(e: sqlx::Error) -> DbError {
 pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<PreauthKeyRow>> {
     let storage_user_id = match resolve_storage_user_id(pool, user_id).await {
         Ok(Some(user_id)) => user_id,
-        Ok(None) => return Ok(Vec::new()),
-        Err(DbError::Constraint(_)) => return Ok(Vec::new()),
+        Ok(None) | Err(DbError::Constraint(_)) => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
     let query = preauth_key_select("WHERE user_id = ? ORDER BY created_at DESC, id DESC");

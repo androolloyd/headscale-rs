@@ -337,6 +337,11 @@ pub mod upstream {
             self
         }
 
+        #[cfg(test)]
+        pub(crate) fn policy_for_test(&self) -> &PolicyStore {
+            &self.policy
+        }
+
         pub async fn load_policy_from_persistence(&self) -> Result<bool, Status> {
             let Some(policy_persistence) = &self.policy_persistence else {
                 return Ok(false);
@@ -1808,7 +1813,7 @@ mod upstream_tests {
         RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
         SetTagsRequest,
     };
-    use crate::policy::{PolicyStore, parse_hujson_policy};
+    use crate::policy::{PeerMapNode, PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
         AllocError, IpAllocator, MachineRegistry, RegistrationCache, RegistrationWaitOutcome,
@@ -1973,6 +1978,84 @@ mod upstream_tests {
         let mut machine = fixture_machine(id, user, name);
         machine.available_routes = routes;
         machine
+    }
+
+    fn route_via_policy(alice_via: &str, bob_via: &str) -> String {
+        format!(
+            r#"{{
+              "tagOwners": {{
+                "tag:router-a": ["router@"],
+                "tag:router-b": ["router@"]
+              }},
+              "grants": [
+                {{
+                  "src": ["alice@"],
+                  "dst": ["10.77.0.0/24"],
+                  "ip": ["*"],
+                  "via": ["{alice_via}"]
+                }},
+                {{
+                  "src": ["bob@"],
+                  "dst": ["10.77.0.0/24"],
+                  "ip": ["*"],
+                  "via": ["{bob_via}"]
+                }}
+              ]
+            }}"#
+        )
+    }
+
+    struct RouteViaNodeSpec {
+        node_key: String,
+        machine_key: String,
+        user: String,
+        hostname: String,
+        ipv4: Ipv4Addr,
+        tags: Vec<String>,
+        routes: Vec<String>,
+    }
+
+    fn insert_route_via_node(machines: &MachineRegistry, spec: RouteViaNodeSpec) -> PeerMapNode {
+        let mut rec = MachineRecord::new_at(
+            Utc::now(),
+            spec.node_key.clone(),
+            spec.machine_key,
+            spec.user.clone(),
+            spec.hostname,
+            spec.ipv4,
+            false,
+        );
+        rec.available_routes.clone_from(&spec.routes);
+        rec.approved_routes.clone_from(&spec.routes);
+        rec.forced_tags.clone_from(&spec.tags);
+        machines.upsert(spec.node_key.clone(), rec);
+
+        PeerMapNode {
+            id: stable_id_from_key(&spec.node_key),
+            addr: spec.ipv4.to_string(),
+            user: Some(spec.user),
+            tags: spec.tags,
+            routes: spec.routes,
+        }
+    }
+
+    fn assert_via_routes(
+        policy: &PolicyStore,
+        nodes: &[PeerMapNode],
+        viewer_key: &str,
+        peer_key: &str,
+        include: &[String],
+        exclude: &[String],
+    ) {
+        let got = policy
+            .via_routes_for_peer(
+                nodes,
+                stable_id_from_key(viewer_key),
+                stable_id_from_key(peer_key),
+            )
+            .expect("policy is loaded");
+        assert_eq!(got.include.as_slice(), include);
+        assert_eq!(got.exclude.as_slice(), exclude);
     }
 
     #[tokio::test]
@@ -4282,6 +4365,133 @@ mod upstream_tests {
         assert_eq!(got.policy, raw);
         let rec = machines.get(&node_key).expect("node remains registered");
         assert_eq!(rec.approved_routes, vec!["10.88.1.0/24"]);
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_reload_from_file_recomputes_grants_via_route_steering() {
+        let (service, machines) = admin_service_with_machines().await;
+        let route = "10.77.0.0/24".to_string();
+        let router_a = "a1".repeat(32);
+        let router_b = "b2".repeat(32);
+        let alice = "c3".repeat(32);
+        let bob = "d4".repeat(32);
+        let nodes = vec![
+            insert_route_via_node(
+                &machines,
+                RouteViaNodeSpec {
+                    node_key: router_a.clone(),
+                    machine_key: "a2".repeat(32),
+                    user: "router".into(),
+                    hostname: "router-a".into(),
+                    ipv4: Ipv4Addr::new(100, 64, 0, 21),
+                    tags: vec!["tag:router-a".into()],
+                    routes: vec![route.clone()],
+                },
+            ),
+            insert_route_via_node(
+                &machines,
+                RouteViaNodeSpec {
+                    node_key: router_b.clone(),
+                    machine_key: "b3".repeat(32),
+                    user: "router".into(),
+                    hostname: "router-b".into(),
+                    ipv4: Ipv4Addr::new(100, 64, 0, 22),
+                    tags: vec!["tag:router-b".into()],
+                    routes: vec![route.clone()],
+                },
+            ),
+            insert_route_via_node(
+                &machines,
+                RouteViaNodeSpec {
+                    node_key: alice.clone(),
+                    machine_key: "c4".repeat(32),
+                    user: "alice".into(),
+                    hostname: "alice".into(),
+                    ipv4: Ipv4Addr::new(100, 64, 0, 23),
+                    tags: Vec::new(),
+                    routes: Vec::new(),
+                },
+            ),
+            insert_route_via_node(
+                &machines,
+                RouteViaNodeSpec {
+                    node_key: bob.clone(),
+                    machine_key: "d5".repeat(32),
+                    user: "bob".into(),
+                    hostname: "bob".into(),
+                    ipv4: Ipv4Addr::new(100, 64, 0, 24),
+                    tags: Vec::new(),
+                    routes: Vec::new(),
+                },
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl.hujson");
+        fs::write(&path, route_via_policy("tag:router-a", "tag:router-b")).unwrap();
+        let service = service.with_policy_file(path.clone());
+
+        assert!(service.reload_policy_from_config().await.unwrap());
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &alice,
+            &router_a,
+            std::slice::from_ref(&route),
+            &[],
+        );
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &alice,
+            &router_b,
+            &[],
+            std::slice::from_ref(&route),
+        );
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &bob,
+            &router_a,
+            &[],
+            std::slice::from_ref(&route),
+        );
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &bob,
+            &router_b,
+            std::slice::from_ref(&route),
+            &[],
+        );
+
+        fs::write(&path, route_via_policy("tag:router-b", "tag:router-b")).unwrap();
+
+        assert!(service.reload_policy_from_config().await.unwrap());
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &alice,
+            &router_a,
+            &[],
+            std::slice::from_ref(&route),
+        );
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &alice,
+            &router_b,
+            std::slice::from_ref(&route),
+            &[],
+        );
+        assert_via_routes(
+            service.policy_for_test(),
+            &nodes,
+            &bob,
+            &router_b,
+            std::slice::from_ref(&route),
+            &[],
+        );
     }
 
     #[tokio::test]

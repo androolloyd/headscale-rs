@@ -61,6 +61,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Notify;
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
+use ipnet::{Ipv4Net, Ipv6Net};
 
 const NEXTDNS_DOH_PREFIX: &str = "https://dns.nextdns.io";
 const NEXTDNS_ATTR_PREFIX: &str = "nextdns:";
@@ -398,6 +399,8 @@ impl From<LooseDnsRecord> for DnsRecord {
 pub enum DnsConfigError {
     MissingBaseDomainForMagicDns,
     MissingGlobalNameserversForOverride,
+    InvalidMagicDnsIpv4Prefix,
+    InvalidMagicDnsIpv6Prefix,
 }
 
 impl std::fmt::Display for DnsConfigError {
@@ -409,6 +412,12 @@ impl std::fmt::Display for DnsConfigError {
             Self::MissingGlobalNameserversForOverride => f.write_str(
                 "dns.nameservers.global must be set when dns.override_local_dns is true",
             ),
+            Self::InvalidMagicDnsIpv4Prefix => {
+                f.write_str("server.mesh_cidr is not a valid IPv4 prefix")
+            }
+            Self::InvalidMagicDnsIpv6Prefix => {
+                f.write_str("server.mesh_cidr_v6 is not a valid IPv6 prefix")
+            }
         }
     }
 }
@@ -460,6 +469,16 @@ pub struct DnsRequester {
     pub node_attrs: Vec<String>,
 }
 
+/// Configured tailnet prefixes used to generate MagicDNS reverse-DNS
+/// route roots. These become empty-resolver entries in
+/// `DNSConfig.Routes`, matching headscale-go's "resolve this through
+/// MagicDNS" representation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MagicDnsReversePrefixes {
+    pub ipv4: Option<Ipv4Net>,
+    pub ipv6: Option<Ipv6Net>,
+}
+
 /// Runtime store. Cheap to clone (every field is an `Arc`).
 ///
 /// The store owns:
@@ -480,6 +499,7 @@ pub struct DnsStore {
 struct Inner {
     spec: RwLock<Arc<DnsConfigSpec>>,
     extra_records: RwLock<Arc<Vec<DnsRecord>>>,
+    magic_dns_reverse_prefixes: RwLock<MagicDnsReversePrefixes>,
     /// Wakes parked `/map` long-pollers on extra-records edits.
     notify: Notify,
 }
@@ -522,6 +542,7 @@ impl DnsStore {
             inner: Arc::new(Inner {
                 spec: RwLock::new(Arc::new(spec)),
                 extra_records: RwLock::new(extra_records),
+                magic_dns_reverse_prefixes: RwLock::new(MagicDnsReversePrefixes::default()),
                 notify: Notify::new(),
             }),
         }
@@ -553,6 +574,39 @@ impl DnsStore {
         self.inner.extra_records.read().clone()
     }
 
+    /// Replace the configured tailnet prefixes used for MagicDNS
+    /// reverse-DNS route roots. Wakes map streams because `Routes`
+    /// changes in subsequent `DNSConfig` payloads.
+    pub fn set_magic_dns_reverse_prefixes(&self, prefixes: MagicDnsReversePrefixes) {
+        *self.inner.magic_dns_reverse_prefixes.write() = prefixes;
+        self.inner.notify.notify_waiters();
+    }
+
+    /// Parse and set MagicDNS reverse-DNS prefixes from server config
+    /// strings.
+    pub fn set_magic_dns_reverse_prefixes_from_str(
+        &self,
+        ipv4: Option<&str>,
+        ipv6: Option<&str>,
+    ) -> Result<(), DnsConfigError> {
+        let ipv4 = ipv4
+            .filter(|value| !value.trim().is_empty())
+            .map(str::parse::<Ipv4Net>)
+            .transpose()
+            .map_err(|_| DnsConfigError::InvalidMagicDnsIpv4Prefix)?;
+        let ipv6 = ipv6
+            .filter(|value| !value.trim().is_empty())
+            .map(str::parse::<Ipv6Net>)
+            .transpose()
+            .map_err(|_| DnsConfigError::InvalidMagicDnsIpv6Prefix)?;
+        self.set_magic_dns_reverse_prefixes(MagicDnsReversePrefixes { ipv4, ipv6 });
+        Ok(())
+    }
+
+    pub fn magic_dns_reverse_prefixes(&self) -> MagicDnsReversePrefixes {
+        self.inner.magic_dns_reverse_prefixes.read().clone()
+    }
+
     /// Replace the extra-records list. Wakes every parked `/map`
     /// long-poller (so the next chunk carries the new entries). Used
     /// by both the synchronous test path and the file-watcher.
@@ -582,10 +636,11 @@ impl DnsStore {
     ///
     /// Pure function modulo the snapshots — no I/O. Called on every
     /// `MapResponse` rebuild.
-    pub fn build(&self, machines: &[MachineDnsRecord]) -> DnsConfig {
+    pub fn build(&self, _machines: &[MachineDnsRecord]) -> DnsConfig {
         let spec = self.spec();
         let extra = self.extra_records();
-        build_dns_config(&spec, machines, extra.as_slice())
+        let reverse_prefixes = self.magic_dns_reverse_prefixes();
+        build_dns_config_with_reverse_prefixes(&spec, extra.as_slice(), &reverse_prefixes)
     }
 
     /// Build the wire-shape [`DnsConfig`] for a specific MapResponse
@@ -648,11 +703,24 @@ pub fn build_dns_config(
     _machines: &[MachineDnsRecord],
     extra: &[DnsRecord],
 ) -> DnsConfig {
+    build_dns_config_with_reverse_prefixes(spec, extra, &MagicDnsReversePrefixes::default())
+}
+
+fn build_dns_config_with_reverse_prefixes(
+    spec: &DnsConfigSpec,
+    extra: &[DnsRecord],
+    reverse_prefixes: &MagicDnsReversePrefixes,
+) -> DnsConfig {
     let base_domain = normalise_domain(&spec.base_domain);
     let base_domain_set = !base_domain.is_empty();
     let magic_dns_enabled = spec.magic_dns && base_domain_set;
     let global_resolvers = effective_global_resolvers(spec);
-    let routes = effective_split_resolvers(spec);
+    let mut routes = effective_split_resolvers(spec);
+    if magic_dns_enabled {
+        for route in magic_dns_reverse_route_domains(reverse_prefixes) {
+            routes.entry(route).or_default();
+        }
+    }
     let mut fallback_resolvers = Vec::new();
     if !spec.override_local_dns {
         fallback_resolvers.extend(global_resolvers.iter().cloned());
@@ -697,6 +765,80 @@ pub fn build_dns_config(
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
         temp_corp_issue_13969: String::new(),
         authoritative_suffixes: authoritative,
+    }
+}
+
+pub fn magic_dns_reverse_route_domains(prefixes: &MagicDnsReversePrefixes) -> Vec<String> {
+    let mut domains = Vec::new();
+    if let Some(prefix) = prefixes.ipv4 {
+        domains.extend(ipv4_reverse_route_domains(prefix));
+    }
+    if let Some(prefix) = prefixes.ipv6 {
+        domains.extend(ipv6_reverse_route_domains(prefix));
+    }
+    domains
+}
+
+fn ipv4_reverse_route_domains(prefix: Ipv4Net) -> Vec<String> {
+    let octets = prefix.network().octets();
+    let prefix_len = prefix.prefix_len();
+    if prefix_len >= 32 {
+        return vec![format!(
+            "{}.{}.{}.{}.in-addr.arpa",
+            octets[3], octets[2], octets[1], octets[0]
+        )];
+    }
+
+    let last_octet = usize::from(prefix_len / 8);
+    let wildcard_bits = 8 - (prefix_len % 8);
+    let min = u16::from(octets[last_octet]);
+    let max = min + (1u16 << wildcard_bits) - 1;
+    let base = octets[..last_octet]
+        .iter()
+        .rev()
+        .map(u8::to_string)
+        .chain(std::iter::once("in-addr.arpa".to_string()))
+        .collect::<Vec<_>>()
+        .join(".");
+
+    (min..=max).map(|octet| format!("{octet}.{base}")).collect()
+}
+
+fn ipv6_reverse_route_domains(prefix: Ipv6Net) -> Vec<String> {
+    let prefix_len = prefix.prefix_len();
+    let mut expanded = String::with_capacity(32);
+    for byte in prefix.network().octets() {
+        use std::fmt::Write as _;
+        write!(&mut expanded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    let constant_nibbles = usize::from(prefix_len / 4);
+    let constant = expanded
+        .as_bytes()
+        .iter()
+        .take(constant_nibbles)
+        .rev()
+        .map(|byte| char::from(*byte).to_string())
+        .collect::<Vec<_>>();
+
+    let domain_for = |variable: Option<String>| {
+        let mut labels = Vec::new();
+        if let Some(variable) = variable {
+            labels.push(variable);
+        }
+        labels.extend(constant.clone());
+        labels.push("ip6".to_string());
+        labels.push("arpa".to_string());
+        labels.join(".")
+    };
+
+    let remainder = prefix_len % 4;
+    if remainder == 0 {
+        vec![domain_for(None)]
+    } else {
+        let count = 1u8 << remainder;
+        (0..count)
+            .map(|nibble| domain_for(Some(format!("{nibble:x}"))))
+            .collect()
     }
 }
 
@@ -1088,7 +1230,9 @@ pub fn normalise_hostname(input: &str) -> String {
 
 /// Parse an extra-records JSON file. The file is a top-level array of
 /// `{name, type, value}` records — same shape upstream
-/// `juanfont/headscale` accepts. Empty file ⇒ empty record list.
+/// `juanfont/headscale` accepts. Empty file ⇒ empty record list for
+/// startup validation; hot reload treats empty reads as transient and
+/// keeps the previous record set.
 ///
 /// The file format intentionally accepts both `type` (canonical) and
 /// `Type` (PascalCase) as the type-field key, because operators tend
@@ -1126,7 +1270,7 @@ pub fn spawn_extra_records_watcher(
         // Best-effort: load the file once at start so the initial
         // `/map` response carries the operator's records without
         // waiting one poll-interval.
-        if let Some(mtime) = load_and_apply(&store, &path).await {
+        if let Some(mtime) = load_and_apply(&store, &path, true).await {
             last_mtime = Some(mtime);
         }
         loop {
@@ -1134,7 +1278,7 @@ pub fn spawn_extra_records_watcher(
             match tokio::fs::metadata(&path).await {
                 Ok(meta) => match meta.modified() {
                     Ok(m) if Some(m) != last_mtime => {
-                        if let Some(new) = load_and_apply(&store, &path).await {
+                        if let Some(new) = load_and_apply(&store, &path, false).await {
                             last_mtime = Some(new);
                         }
                     }
@@ -1155,7 +1299,7 @@ pub fn spawn_extra_records_watcher(
     })
 }
 
-async fn load_and_apply(store: &DnsStore, path: &Path) -> Option<SystemTime> {
+async fn load_and_apply(store: &DnsStore, path: &Path, apply_empty: bool) -> Option<SystemTime> {
     let bytes = match tokio::fs::read(path).await {
         Ok(b) => b,
         Err(e) => {
@@ -1165,6 +1309,13 @@ async fn load_and_apply(store: &DnsStore, path: &Path) -> Option<SystemTime> {
     };
     let meta = tokio::fs::metadata(path).await.ok()?;
     let mtime = meta.modified().ok()?;
+    if !apply_empty && bytes.iter().all(u8::is_ascii_whitespace) {
+        tracing::warn!(
+            ?path,
+            "extra-records reload read empty file; keeping previous set"
+        );
+        return Some(mtime);
+    }
     match parse_extra_records(&bytes) {
         Ok(records) => {
             store.set_extra_records(records);
@@ -1544,6 +1695,63 @@ mod tests {
     }
 
     #[test]
+    fn magic_dns_reverse_routes_are_added_for_configured_prefixes() {
+        let mut restricted = HashMap::new();
+        restricted.insert("corp.internal".to_string(), vec!["10.0.0.53".to_string()]);
+        let store = DnsStore::from_spec(DnsConfigSpec {
+            restricted_nameservers: restricted,
+            ..magic_spec()
+        });
+        store
+            .set_magic_dns_reverse_prefixes_from_str(
+                Some("100.64.0.0/10"),
+                Some("fd7a:115c:a1e0::/48"),
+            )
+            .unwrap();
+
+        let cfg = store.build(&[]);
+
+        assert_eq!(cfg.routes["corp.internal"][0].addr, "10.0.0.53");
+        assert!(cfg.routes["64.100.in-addr.arpa"].is_empty());
+        assert!(cfg.routes["100.100.in-addr.arpa"].is_empty());
+        assert!(cfg.routes["127.100.in-addr.arpa"].is_empty());
+        assert!(cfg.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"].is_empty());
+    }
+
+    #[test]
+    fn magic_dns_reverse_routes_follow_upstream_prefix_generation() {
+        let v4 = "172.16.0.0/16".parse().unwrap();
+        let v6 = "fd7a:115c:a1e0::/50".parse().unwrap();
+        let domains = magic_dns_reverse_route_domains(&MagicDnsReversePrefixes {
+            ipv4: Some(v4),
+            ipv6: Some(v6),
+        });
+
+        assert!(domains.contains(&"0.16.172.in-addr.arpa".to_string()));
+        assert!(domains.contains(&"255.16.172.in-addr.arpa".to_string()));
+        assert!(domains.contains(&"0.0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa".to_string()));
+        assert!(domains.contains(&"1.0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa".to_string()));
+        assert!(domains.contains(&"2.0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa".to_string()));
+        assert!(domains.contains(&"3.0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa".to_string()));
+    }
+
+    #[test]
+    fn magic_dns_reverse_routes_require_proxied_magic_dns() {
+        let store = DnsStore::from_spec(DnsConfigSpec {
+            magic_dns: false,
+            ..magic_spec()
+        });
+        store
+            .set_magic_dns_reverse_prefixes_from_str(Some("100.64.0.0/10"), None)
+            .unwrap();
+
+        let cfg = store.build(&[]);
+
+        assert!(cfg.routes.is_empty());
+        assert!(!cfg.proxied);
+    }
+
+    #[test]
     fn authoritative_suffixes_default_empty_for_headscale_go_wire_parity() {
         let mut restricted = HashMap::new();
         restricted.insert("corp.internal".to_string(), vec!["10.0.0.1".to_string()]);
@@ -1860,6 +2068,35 @@ mod tests {
             .await
             .expect("wake within 2s")
             .expect("join ok");
+    }
+
+    #[tokio::test]
+    async fn extra_records_reload_empty_file_keeps_previous_but_json_empty_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extra-records.json");
+        let store = DnsStore::from_spec(magic_spec());
+        std::fs::write(
+            &path,
+            br#"[{"name":"ops.headscale.test","type":"A","value":"100.64.0.50"}]"#,
+        )
+        .unwrap();
+
+        load_and_apply(&store, &path, true)
+            .await
+            .expect("initial load");
+        assert_eq!(store.extra_records().len(), 1);
+
+        std::fs::write(&path, b"  \n\t ").unwrap();
+        load_and_apply(&store, &path, false)
+            .await
+            .expect("empty reload advances mtime");
+        assert_eq!(store.extra_records().len(), 1);
+
+        std::fs::write(&path, b"[]").unwrap();
+        load_and_apply(&store, &path, false)
+            .await
+            .expect("json empty reload");
+        assert!(store.extra_records().is_empty());
     }
 
     #[test]

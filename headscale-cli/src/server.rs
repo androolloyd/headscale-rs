@@ -244,8 +244,12 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let derp_map = derp_map_from_runtime_config(cfg.derp.as_ref(), embedded_derp_runtime.config())
         .await
         .context("load DERP runtime config")?;
-    let (dns_store, dns_extra_records_path) =
-        dns_store_from_config(cfg.dns.clone()).context("load DNS runtime config")?;
+    let (dns_store, dns_extra_records_path) = dns_store_from_config(
+        cfg.dns.clone(),
+        Some(&cfg.mesh_cidr),
+        cfg.mesh_cidr_v6.as_deref(),
+    )
+    .context("load DNS runtime config")?;
     let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
     let runtime = build_persistent_wire_runtime_with_dns_and_policy(
         db.pool(),
@@ -370,7 +374,11 @@ struct PersistentWireRuntime {
     admin_service: HeadscaleAdminService,
 }
 
-fn dns_store_from_config(spec: Option<DnsConfigSpec>) -> Result<(Arc<DnsStore>, Option<PathBuf>)> {
+fn dns_store_from_config(
+    spec: Option<DnsConfigSpec>,
+    mesh_cidr: Option<&str>,
+    mesh_cidr_v6: Option<&str>,
+) -> Result<(Arc<DnsStore>, Option<PathBuf>)> {
     let Some(spec) = spec else {
         return Ok((Arc::new(DnsStore::new()), None));
     };
@@ -379,6 +387,9 @@ fn dns_store_from_config(spec: Option<DnsConfigSpec>) -> Result<(Arc<DnsStore>, 
         .clone()
         .filter(|path| !path.as_os_str().is_empty());
     let store = DnsStore::try_from_spec(spec).context("invalid [dns] config")?;
+    store
+        .set_magic_dns_reverse_prefixes_from_str(mesh_cidr, mesh_cidr_v6)
+        .context("invalid MagicDNS reverse-DNS prefixes")?;
     if let Some(path) = &extra_records_path {
         let meta = std::fs::metadata(path)
             .with_context(|| format!("stat dns.extra_records_path {}", path.display()))?;
@@ -2213,11 +2224,34 @@ regions:
 
     #[test]
     fn dns_store_from_config_validates_magic_dns_base_domain() {
-        let err = dns_store_from_config(Some(DnsConfigSpec::default())).unwrap_err();
+        let err =
+            dns_store_from_config(Some(DnsConfigSpec::default()), Some("100.64.0.0/10"), None)
+                .unwrap_err();
         assert!(format!("{err:#}").contains("dns.base_domain must be set"));
-        let (store, path) = dns_store_from_config(None).unwrap();
+        let (store, path) = dns_store_from_config(None, Some("100.64.0.0/10"), None).unwrap();
         assert!(path.is_none());
         assert_eq!(serde_json::to_string(&store.build(&[])).unwrap(), "{}");
+    }
+
+    #[test]
+    fn dns_store_from_config_adds_magicdns_reverse_routes_from_prefixes() {
+        let (store, path) = dns_store_from_config(
+            Some(DnsConfigSpec {
+                base_domain: "tail.example.org".to_string(),
+                override_local_dns: false,
+                ..DnsConfigSpec::default()
+            }),
+            Some("100.64.0.0/10"),
+            Some("fd7a:115c:a1e0::/48"),
+        )
+        .unwrap();
+
+        let dns = store.build(&[]);
+
+        assert!(path.is_none());
+        assert!(dns.routes["64.100.in-addr.arpa"].is_empty());
+        assert!(dns.routes["127.100.in-addr.arpa"].is_empty());
+        assert!(dns.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"].is_empty());
     }
 
     #[test]
@@ -2230,12 +2264,16 @@ regions:
         )
         .unwrap();
 
-        let (store, path) = dns_store_from_config(Some(DnsConfigSpec {
-            magic_dns: false,
-            override_local_dns: false,
-            extra_records_path: Some(records_path.clone()),
-            ..DnsConfigSpec::default()
-        }))
+        let (store, path) = dns_store_from_config(
+            Some(DnsConfigSpec {
+                magic_dns: false,
+                override_local_dns: false,
+                extra_records_path: Some(records_path.clone()),
+                ..DnsConfigSpec::default()
+            }),
+            Some("100.64.0.0/10"),
+            None,
+        )
         .unwrap();
 
         assert_eq!(path.as_deref(), Some(records_path.as_path()));
@@ -2249,33 +2287,45 @@ regions:
         let records_path = dir.path().join("extra-records.json");
         std::fs::write(&records_path, "{not-json").unwrap();
 
-        let err = dns_store_from_config(Some(DnsConfigSpec {
-            magic_dns: false,
-            override_local_dns: false,
-            extra_records_path: Some(records_path),
-            ..DnsConfigSpec::default()
-        }))
+        let err = dns_store_from_config(
+            Some(DnsConfigSpec {
+                magic_dns: false,
+                override_local_dns: false,
+                extra_records_path: Some(records_path),
+                ..DnsConfigSpec::default()
+            }),
+            Some("100.64.0.0/10"),
+            None,
+        )
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("parse dns.extra_records_path"));
 
         let missing = dir.path().join("missing.json");
-        let err = dns_store_from_config(Some(DnsConfigSpec {
-            magic_dns: false,
-            override_local_dns: false,
-            extra_records_path: Some(missing),
-            ..DnsConfigSpec::default()
-        }))
+        let err = dns_store_from_config(
+            Some(DnsConfigSpec {
+                magic_dns: false,
+                override_local_dns: false,
+                extra_records_path: Some(missing),
+                ..DnsConfigSpec::default()
+            }),
+            Some("100.64.0.0/10"),
+            None,
+        )
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("stat dns.extra_records_path"));
 
-        let err = dns_store_from_config(Some(DnsConfigSpec {
-            magic_dns: false,
-            override_local_dns: false,
-            extra_records_path: Some(dir.path().to_path_buf()),
-            ..DnsConfigSpec::default()
-        }))
+        let err = dns_store_from_config(
+            Some(DnsConfigSpec {
+                magic_dns: false,
+                override_local_dns: false,
+                extra_records_path: Some(dir.path().to_path_buf()),
+                ..DnsConfigSpec::default()
+            }),
+            Some("100.64.0.0/10"),
+            None,
+        )
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("is a directory"));
@@ -2398,7 +2448,8 @@ regions:
             }],
             ..DnsConfigSpec::default()
         };
-        let (dns_store, extra_records_path) = dns_store_from_config(Some(dns_spec)).unwrap();
+        let (dns_store, extra_records_path) =
+            dns_store_from_config(Some(dns_spec), Some("100.64.0.0/10"), None).unwrap();
         assert!(extra_records_path.is_none());
         let runtime = build_persistent_wire_runtime_with_dns(
             db.pool(),

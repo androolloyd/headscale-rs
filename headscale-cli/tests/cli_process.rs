@@ -1163,6 +1163,18 @@ node:
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+node:
+  routes:
+    ha:
+      probe_timeout: 10s
+"#,
+        include_str!("snapshots/configtest_invalid_node_route_ha_default_interval.stderr"),
+        "configtest invalid node route HA timing against default interval",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
 trusted_proxies:
   - "0.0.0.0/0"
 "#,

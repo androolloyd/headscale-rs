@@ -16,6 +16,8 @@ const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
 const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
 const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
+const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
+const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1031,16 +1033,25 @@ impl CliConfig {
         let Some(node) = &self.node else {
             return Ok(());
         };
-        let Some(interval) = node.routes.ha.probe_interval else {
+        if node.routes.ha.probe_interval.is_none() && node.routes.ha.probe_timeout.is_none() {
             return Ok(());
-        };
+        }
+        let interval = node
+            .routes
+            .ha
+            .probe_interval
+            .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS);
         if interval == 0 {
             return Ok(());
         }
         if interval < 2 {
             bail!("node.routes.ha.probe_interval ({interval}s) must be >= 2s");
         }
-        let timeout = node.routes.ha.probe_timeout.unwrap_or(5);
+        let timeout = node
+            .routes
+            .ha
+            .probe_timeout
+            .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS);
         if timeout < 1 {
             bail!("node.routes.ha.probe_timeout ({timeout}s) must be >= 1s");
         }
@@ -2013,6 +2024,37 @@ node:
         let err = config.validate_for_configtest().unwrap_err();
 
         assert!(format!("{err:#}").contains("node.routes.ha.probe_timeout"));
+    }
+
+    #[test]
+    fn configtest_rejects_timeout_only_node_route_ha_timing_against_defaults() {
+        for (timeout, expected) in [
+            ("0s", "node.routes.ha.probe_timeout (0s) must be >= 1s"),
+            (
+                "10s",
+                "node.routes.ha.probe_timeout (10s) must be less than node.routes.ha.probe_interval (10s)",
+            ),
+        ] {
+            let source = format!(
+                r#"
+server_url: "https://headscale.example"
+
+node:
+  routes:
+    ha:
+      probe_timeout: {timeout}
+"#
+            );
+
+            let config = CliConfig::parse(&source, ConfigFormat::Yaml).unwrap();
+            let err = config.validate_for_configtest().unwrap_err();
+            let message = format!("{err:#}");
+
+            assert!(
+                message.contains(expected),
+                "expected {expected:?} in {message:?}"
+            );
+        }
     }
 
     #[test]

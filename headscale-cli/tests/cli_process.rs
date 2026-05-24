@@ -1,6 +1,37 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use headscale_api::admin::{
+    PersistentApiKeyAdmin, PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
+};
+use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
+use headscale_api::policy::PolicyStore;
+use headscale_api::tailscale_wire::MachineRegistry;
+use tokio::net::UnixListener;
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::transport::Server;
+
+const CLEAN_ENV: &[&str] = &[
+    "HEADSCALE_CONFIG",
+    "HEADSCALE_LOG",
+    "HEADSCALE_URL",
+    "HEADSCALE_ADMIN_TOKEN",
+    "HEADSCALE_CLI_ADDRESS",
+    "HEADSCALE_CLI_API_KEY",
+    "HEADSCALE_UNIX_SOCKET",
+    "HEADSCALE_CLI_INSECURE",
+];
+
+fn headscale_clean_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
+    for key in CLEAN_ENV {
+        command.env_remove(key);
+    }
+    command
+}
 
 fn headscale(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_headscale"))
@@ -10,20 +41,14 @@ fn headscale(args: &[&str]) -> Output {
 }
 
 fn headscale_clean(args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
+    let mut command = headscale_clean_command();
     command.args(args);
-    for key in [
-        "HEADSCALE_CONFIG",
-        "HEADSCALE_LOG",
-        "HEADSCALE_URL",
-        "HEADSCALE_ADMIN_TOKEN",
-        "HEADSCALE_CLI_ADDRESS",
-        "HEADSCALE_CLI_API_KEY",
-        "HEADSCALE_UNIX_SOCKET",
-        "HEADSCALE_CLI_INSECURE",
-    ] {
-        command.env_remove(key);
-    }
+    command.output().expect("run headscale binary")
+}
+
+fn headscale_with_config(config: &Path, args: &[&str]) -> Output {
+    let mut command = headscale_clean_command();
+    command.arg("--config").arg(config).args(args);
     command.output().expect("run headscale binary")
 }
 
@@ -84,6 +109,110 @@ fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
         trim_line_end_spaces(expected),
         "stderr snapshot for {args:?}"
     );
+}
+
+async fn wait_for_headscale_status(config: &Path, args: &[&str], expected_status: i32) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = headscale_with_config(config, args);
+        if output.status.code() == Some(expected_status) {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {args:?} to exit {expected_status}; last status {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            stdout(&output),
+            stderr(&output)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn spawn_process_grpc_service(
+    database_health_fails: bool,
+) -> (
+    tempfile::TempDir,
+    headscale_db::Database,
+    std::path::PathBuf,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("headscale.sock");
+    let db = headscale_db::Database::in_memory().await.unwrap();
+    db.migrate().await.unwrap();
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let machines = Arc::new(MachineRegistry::new());
+    let service = HeadscaleAdminService::with_user_admin(
+        users.clone(),
+        Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+        Arc::new(PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users)),
+        PolicyStore::new(),
+        Arc::new(WireMachineAdmin::new(machines)),
+    );
+    let service = if database_health_fails {
+        service.with_database_health(Arc::new(FailingDatabaseHealth))
+    } else {
+        service.with_database_pool(db.pool().clone())
+    };
+    let listener = UnixListener::bind(&socket).unwrap();
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(service.into_service_server())
+            .serve_with_incoming(UnixListenerStream::new(listener))
+            .await
+    });
+
+    (dir, db, socket, handle)
+}
+
+struct FailingDatabaseHealth;
+
+#[async_trait::async_trait]
+impl DatabaseHealthCheck for FailingDatabaseHealth {
+    async fn ping(&self) -> Result<(), String> {
+        Err("forced offline".to_string())
+    }
+}
+
+fn write_unix_socket_config(dir: &Path, socket: &Path) -> std::path::PathBuf {
+    let config = dir.join("config.yaml");
+    let socket = socket
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    fs::write(&config, format!("unix_socket: \"{socket}\"\n")).unwrap();
+    config
+}
+
+fn normalize_users_list_stdout(text: &str) -> String {
+    let mut normalized = String::new();
+    for line in text.lines() {
+        let mut line = line.to_string();
+        if line.starts_with("1   ") && line.len() >= 19 {
+            let timestamp_start = line.len() - 19;
+            line.replace_range(timestamp_start.., "0000-00-00 00:00:00");
+        }
+        normalized.push_str(&line);
+        normalized.push('\n');
+    }
+    normalized
+}
+
+fn display_prefix(secret: &str, token_prefix: &str) -> String {
+    let rest = secret
+        .strip_prefix(token_prefix)
+        .unwrap_or_else(|| panic!("{secret:?} missing {token_prefix} prefix"));
+    assert!(
+        rest.len() >= 12,
+        "{secret:?} shorter than expected display prefix"
+    );
+    format!("{token_prefix}{}-***", &rest[..12])
+}
+
+fn json_output(output: &Output) -> serde_json::Value {
+    assert!(output.status.success(), "stderr: {}", stderr(output));
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -888,6 +1017,341 @@ fn implemented_admin_local_errors_match_snapshots() {
         3,
         include_str!("snapshots/grpc_remote_connection_failure.stderr"),
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_local_grpc_cli_success_outputs_match_snapshots() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let health_json = headscale_with_config(&config, &["-o", "json", "health"]);
+    let health_json = json_output(&health_json);
+    assert_eq!(health_json["database_connectivity"].as_bool(), Some(true));
+
+    let create_user = headscale_with_config(
+        &config,
+        &[
+            "users",
+            "create",
+            "alice",
+            "--display-name",
+            "Alice Example",
+            "--email",
+            "alice@example.com",
+        ],
+    );
+    assert!(
+        create_user.status.success(),
+        "stderr: {}",
+        stderr(&create_user)
+    );
+    assert_eq!(stdout(&create_user), "User created\n");
+    assert_eq!(stderr(&create_user), "");
+
+    let list_users = headscale_with_config(&config, &["users", "list"]);
+    assert!(
+        list_users.status.success(),
+        "stderr: {}",
+        stderr(&list_users)
+    );
+    assert_eq!(
+        trim_line_end_spaces(&normalize_users_list_stdout(&stdout(&list_users))),
+        concat!(
+            "ID  Name           Username  Email              Created\n",
+            "-------------------------------------------------------------------\n",
+            "1   Alice Example  alice     alice@example.com  0000-00-00 00:00:00\n",
+        )
+    );
+    assert_eq!(stderr(&list_users), "");
+
+    let create_preauth = headscale_with_config(
+        &config,
+        &[
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--reusable",
+            "--ephemeral",
+            "--expiration",
+            "1h",
+        ],
+    );
+    assert!(
+        create_preauth.status.success(),
+        "stderr: {}",
+        stderr(&create_preauth)
+    );
+    let preauth_stdout = stdout(&create_preauth);
+    assert!(preauth_stdout.starts_with("Minted preauth key for user 'alice':\n"));
+    let preauth_key = preauth_stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("hskey-auth-"))
+        .map(|rest| format!("hskey-auth-{rest}"))
+        .expect("preauth key in stdout");
+    let preauth_prefix = display_prefix(&preauth_key, "hskey-auth-");
+    assert!(preauth_stdout.contains("  reusable:   true\n"));
+    assert!(preauth_stdout.contains("  ephemeral:  true\n"));
+    assert_eq!(stderr(&create_preauth), "");
+
+    let list_preauth = headscale_with_config(&config, &["preauthkeys", "list"]);
+    assert!(
+        list_preauth.status.success(),
+        "stderr: {}",
+        stderr(&list_preauth)
+    );
+    let list_preauth_stdout = stdout(&list_preauth);
+    assert!(list_preauth_stdout.contains("PREFIX"));
+    assert!(list_preauth_stdout.contains(&preauth_prefix));
+    assert!(list_preauth_stdout.contains("alice"));
+    assert!(list_preauth_stdout.contains("true"));
+    assert_eq!(stderr(&list_preauth), "");
+
+    let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
+    let preauth_id = json_output(&preauth_json)[0]["id"].as_u64().unwrap();
+    let preauth_id = preauth_id.to_string();
+    let expire_preauth =
+        headscale_with_config(&config, &["preauthkeys", "expire", "--id", &preauth_id]);
+    assert!(
+        expire_preauth.status.success(),
+        "stderr: {}",
+        stderr(&expire_preauth)
+    );
+    assert_eq!(stdout(&expire_preauth), "Key expired\n");
+    assert_eq!(stderr(&expire_preauth), "");
+    let delete_preauth =
+        headscale_with_config(&config, &["preauthkeys", "delete", "--id", &preauth_id]);
+    assert!(
+        delete_preauth.status.success(),
+        "stderr: {}",
+        stderr(&delete_preauth)
+    );
+    assert_eq!(stdout(&delete_preauth), "Key deleted\n");
+    assert_eq!(stderr(&delete_preauth), "");
+    let empty_preauth = headscale_with_config(&config, &["preauthkeys", "list"]);
+    assert!(
+        empty_preauth.status.success(),
+        "stderr: {}",
+        stderr(&empty_preauth)
+    );
+    assert_eq!(stdout(&empty_preauth), "No preauth keys.\n");
+    assert_eq!(stderr(&empty_preauth), "");
+
+    let create_api_key =
+        headscale_with_config(&config, &["apikeys", "create", "--expiration", "1h"]);
+    assert!(
+        create_api_key.status.success(),
+        "stderr: {}",
+        stderr(&create_api_key)
+    );
+    let api_key = stdout(&create_api_key).trim().to_string();
+    assert!(api_key.starts_with("hskey-api-"));
+    let api_prefix = display_prefix(&api_key, "hskey-api-");
+    assert_eq!(stderr(&create_api_key), "");
+
+    let list_api_keys = headscale_with_config(&config, &["apikeys", "list"]);
+    assert!(
+        list_api_keys.status.success(),
+        "stderr: {}",
+        stderr(&list_api_keys)
+    );
+    let list_api_stdout = stdout(&list_api_keys);
+    assert!(list_api_stdout.contains("PREFIX"));
+    assert!(list_api_stdout.contains(&api_prefix));
+    assert_eq!(stderr(&list_api_keys), "");
+
+    let api_json = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
+    let api_id = json_output(&api_json)[0]["id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let expire_api_key = headscale_with_config(&config, &["apikeys", "expire", "--id", &api_id]);
+    assert!(
+        expire_api_key.status.success(),
+        "stderr: {}",
+        stderr(&expire_api_key)
+    );
+    assert_eq!(stdout(&expire_api_key), "Key expired\n");
+    assert_eq!(stderr(&expire_api_key), "");
+    let delete_api_key = headscale_with_config(&config, &["apikeys", "delete", "--id", &api_id]);
+    assert!(
+        delete_api_key.status.success(),
+        "stderr: {}",
+        stderr(&delete_api_key)
+    );
+    assert_eq!(stdout(&delete_api_key), "Key deleted\n");
+    assert_eq!(stderr(&delete_api_key), "");
+    let empty_api_keys = headscale_with_config(&config, &["apikeys", "list"]);
+    assert!(
+        empty_api_keys.status.success(),
+        "stderr: {}",
+        stderr(&empty_api_keys)
+    );
+    assert_eq!(stdout(&empty_api_keys), "No API keys.\n");
+    assert_eq!(stderr(&empty_api_keys), "");
+
+    let auth_register_id = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    let debug_create = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            auth_register_id,
+            "--name",
+            "auth-node",
+        ],
+    );
+    assert!(
+        debug_create.status.success(),
+        "stderr: {}",
+        stderr(&debug_create)
+    );
+    assert_eq!(stdout(&debug_create), "Node created\n");
+    assert_eq!(stderr(&debug_create), "");
+    let auth_id = format!("hskey-authreq-{auth_register_id}");
+    let auth_register = headscale_with_config(
+        &config,
+        &["auth", "register", "--user", "alice", "--auth-id", &auth_id],
+    );
+    assert!(
+        auth_register.status.success(),
+        "stderr: {}",
+        stderr(&auth_register)
+    );
+    assert_eq!(stdout(&auth_register), "Node auth-node registered\n");
+    assert_eq!(stderr(&auth_register), "");
+
+    let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+    let node_id = json_output(&nodes_json)[0]["id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let delete_node = headscale_with_config(
+        &config,
+        &["--force", "nodes", "delete", "--identifier", &node_id],
+    );
+    assert!(
+        delete_node.status.success(),
+        "stderr: {}",
+        stderr(&delete_node)
+    );
+    assert_eq!(stdout(&delete_node), "Node deleted\n");
+    assert_eq!(stderr(&delete_node), "");
+    let empty_nodes = headscale_with_config(&config, &["nodes", "list"]);
+    assert!(
+        empty_nodes.status.success(),
+        "stderr: {}",
+        stderr(&empty_nodes)
+    );
+    assert_eq!(stdout(&empty_nodes), "No nodes registered.\n");
+    assert_eq!(stderr(&empty_nodes), "");
+
+    let approve_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    let approve_pending = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            approve_id,
+            "--name",
+            "approve-node",
+        ],
+    );
+    assert!(
+        approve_pending.status.success(),
+        "stderr: {}",
+        stderr(&approve_pending)
+    );
+    let approve = headscale_with_config(&config, &["auth", "approve", "--auth-id", approve_id]);
+    assert!(approve.status.success(), "stderr: {}", stderr(&approve));
+    assert_eq!(stdout(&approve), "Auth request approved\n");
+    assert_eq!(stderr(&approve), "");
+
+    let reject_id = "cccccccccccccccccccccccc";
+    let reject_pending = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            reject_id,
+            "--name",
+            "reject-node",
+        ],
+    );
+    assert!(
+        reject_pending.status.success(),
+        "stderr: {}",
+        stderr(&reject_pending)
+    );
+    let reject_auth_id = format!("hskey-authreq-{reject_id}");
+    let reject = headscale_with_config(&config, &["auth", "reject", "--auth-id", &reject_auth_id]);
+    assert!(reject.status.success(), "stderr: {}", stderr(&reject));
+    assert_eq!(stdout(&reject), "Auth request rejected\n");
+    assert_eq!(stderr(&reject), "");
+
+    let rename_user = headscale_with_config(
+        &config,
+        &[
+            "users",
+            "rename",
+            "--identifier",
+            "1",
+            "--new-name",
+            "alice-renamed",
+        ],
+    );
+    assert!(
+        rename_user.status.success(),
+        "stderr: {}",
+        stderr(&rename_user)
+    );
+    assert_eq!(stdout(&rename_user), "User renamed\n");
+    assert_eq!(stderr(&rename_user), "");
+    let destroy_user = headscale_with_config(
+        &config,
+        &["--force", "users", "destroy", "--identifier", "1"],
+    );
+    assert!(
+        destroy_user.status.success(),
+        "stderr: {}",
+        stderr(&destroy_user)
+    );
+    assert_eq!(stdout(&destroy_user), "User destroyed\n");
+    assert_eq!(stderr(&destroy_user), "");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_local_grpc_health_failure_matches_process_stderr() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(true).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let output = wait_for_headscale_status(&config, &["health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_live_health_failure.stderr")
+    );
+
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[test]

@@ -36,8 +36,8 @@ use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, DerpMap, DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig,
-    MachineRegistry, PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
-    WireState, serve, spawn_node_expiry_waker, spawn_route_health_probe,
+    MachineRegistry, MapResponseDebugStore, PingTracker, RegistrationCache, RuntimeConfigSnapshot,
+    ServerNoiseKey, WireState, serve, spawn_node_expiry_waker, spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -520,6 +520,7 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         runtime_config,
         registration_cache,
         pings: Arc::new(PingTracker::new()),
+        mapresponse_debug: Arc::new(MapResponseDebugStore::from_env()),
     };
 
     Ok(PersistentWireRuntime {

@@ -1284,12 +1284,22 @@ pub async fn handle_debug_nodestore(
     }
 }
 
-pub async fn handle_debug_mapresponses() -> Response {
-    // headscale-go returns this exact body when
-    // HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH is unset. headscale-rs does
-    // not yet implement map-response dump files, so expose the same
-    // disabled state instead of leaving the endpoint missing.
-    (StatusCode::OK, MAPRESPONSES_DEBUG_DISABLED_BODY).into_response()
+pub async fn handle_debug_mapresponses(State(state): State<WireState>) -> Response {
+    let responses = match state.mapresponse_debug.read() {
+        Ok(Some(responses)) => responses,
+        Ok(None) => return (StatusCode::OK, MAPRESPONSES_DEBUG_DISABLED_BODY).into_response(),
+        Err(err) => return http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+
+    match serde_json::to_string_pretty(&responses) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 pub async fn handle_debug_batcher(State(state): State<WireState>, headers: HeaderMap) -> Response {
@@ -3018,6 +3028,7 @@ mod tests {
             runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
+            mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, dir)
     }
@@ -4833,6 +4844,50 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], MAPRESPONSES_DEBUG_DISABLED_BODY.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn debug_mapresponses_reads_enabled_dump_directory() {
+        let (mut state, _dir) = fixture_state();
+        let dump_dir = tempdir().unwrap();
+        let store = Arc::new(crate::tailscale_wire::MapResponseDebugStore::with_path(
+            dump_dir.path(),
+        ));
+        let response = crate::tailscale_wire::wire::MapResponse {
+            domain: "tailnet.test".into(),
+            keep_alive: false,
+            ..crate::tailscale_wire::wire::MapResponse::default()
+        };
+        store
+            .record(
+                42,
+                crate::tailscale_wire::MapResponseDebugType::Full,
+                &response,
+            )
+            .unwrap();
+        state.mapresponse_debug = store;
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/mapresponses")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: BTreeMap<String, Vec<crate::tailscale_wire::wire::MapResponse>> =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["42"][0].domain, "tailnet.test");
     }
 
     #[tokio::test]

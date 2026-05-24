@@ -1041,6 +1041,7 @@ mod tests {
             runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
+            mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, redeemer, dir)
     }

@@ -2606,6 +2606,7 @@ mod upstream_tests {
             runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: registration_cache.clone(),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
+            mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         let app = machine_router(state.clone());
         let node_key_hex = "77".repeat(32);

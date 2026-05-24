@@ -202,6 +202,9 @@ fn wire_state() -> (WireState, TempDir) {
         runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: Arc::new(RegistrationCache::new()),
         pings: Arc::new(headscale_api::tailscale_wire::PingTracker::new()),
+        mapresponse_debug: Arc::new(
+            headscale_api::tailscale_wire::MapResponseDebugStore::disabled(),
+        ),
     };
     (state, dir)
 }

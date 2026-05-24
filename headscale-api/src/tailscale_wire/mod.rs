@@ -33,7 +33,10 @@
 //! history) for the rationale behind each wire choice.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::fs;
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicBool, Ordering},
@@ -63,6 +66,8 @@ use self::wire::stable_id_from_key;
 pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60);
 /// Headscale-go default cleanup tick for the registration cache.
 pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
+/// Upstream debug knob that enables on-disk MapResponse dumps.
+pub const MAPRESPONSE_DEBUG_DUMP_ENV: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH";
 const PING_ID_LENGTH: usize = 16;
 const PING_ID_URLSAFE: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -96,6 +101,170 @@ pub use wire::{
 // sweep without reaching into the module path.
 pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
 pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MapResponseDebugType {
+    Full,
+    SelfNode,
+    Change,
+    Policy,
+}
+
+impl MapResponseDebugType {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::SelfNode => "self",
+            Self::Change => "change",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+/// Optional headscale-go compatible MapResponse debug dump store.
+///
+/// When enabled, responses are written under
+/// `HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH/<node-id>/<timestamp>-<type>.json`
+/// and `/debug/mapresponses` reads the directory back as a node-id keyed JSON
+/// map, matching upstream's operator endpoint.
+#[derive(Clone, Debug, Default)]
+pub struct MapResponseDebugStore {
+    root: Option<Arc<PathBuf>>,
+}
+
+impl MapResponseDebugStore {
+    pub fn disabled() -> Self {
+        Self { root: None }
+    }
+
+    pub fn from_env() -> Self {
+        std::env::var_os(MAPRESPONSE_DEBUG_DUMP_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map_or_else(Self::disabled, Self::with_path)
+    }
+
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(Arc::new(path.into())),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.root.is_some()
+    }
+
+    pub fn record(
+        &self,
+        node_id: u64,
+        debug_type: MapResponseDebugType,
+        response: &wire::MapResponse,
+    ) -> io::Result<Option<PathBuf>> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(None);
+        };
+
+        let node_dir = root.join(node_id.to_string());
+        fs::create_dir_all(&node_dir)?;
+        set_mapresponse_debug_permissions(&node_dir)?;
+
+        let body = serde_json::to_vec_pretty(response)
+            .map_err(|err| io::Error::other(format!("encode MapResponse JSON: {err}")))?;
+        let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%S.%f");
+        let path = node_dir.join(format!("{timestamp}-{}.json", debug_type.as_str()));
+        fs::write(&path, body)?;
+        set_mapresponse_debug_permissions(&path)?;
+
+        Ok(Some(path))
+    }
+
+    pub fn read(&self) -> io::Result<Option<BTreeMap<u64, Vec<wire::MapResponse>>>> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(None);
+        };
+
+        read_mapresponses_from_directory(root).map(Some)
+    }
+}
+
+fn read_mapresponses_from_directory(
+    root: &Path,
+) -> io::Result<BTreeMap<u64, Vec<wire::MapResponse>>> {
+    let mut responses = BTreeMap::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let Ok(file_type) = entry.file_type() else {
+            tracing::error!(path = %entry.path().display(), "stat mapresponse debug entry");
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            tracing::error!(path = %entry.path().display(), "mapresponse debug node directory is not UTF-8");
+            continue;
+        };
+        let Ok(node_id) = name.parse::<u64>() else {
+            tracing::error!(node = %name, "parsing mapresponse debug node id");
+            continue;
+        };
+
+        let mut files = match fs::read_dir(entry.path()) {
+            Ok(files) => files.filter_map(Result::ok).collect::<Vec<_>>(),
+            Err(err) => {
+                tracing::error!(error = %err, path = %entry.path().display(), "reading mapresponse debug node directory");
+                continue;
+            }
+        };
+        files.sort_by_key(fs::DirEntry::file_name);
+
+        for file in files {
+            let Ok(file_type) = file.file_type() else {
+                tracing::error!(path = %file.path().display(), "stat mapresponse debug file");
+                continue;
+            };
+            if file_type.is_dir()
+                || file.path().extension().and_then(|ext| ext.to_str()) != Some("json")
+            {
+                continue;
+            }
+
+            let body = match fs::read(file.path()) {
+                Ok(body) => body,
+                Err(err) => {
+                    tracing::error!(error = %err, path = %file.path().display(), "reading mapresponse debug file");
+                    continue;
+                }
+            };
+            let response = match serde_json::from_slice::<wire::MapResponse>(&body) {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::error!(error = %err, path = %file.path().display(), "unmarshalling mapresponse debug file");
+                    continue;
+                }
+            };
+            responses
+                .entry(node_id)
+                .or_insert_with(Vec::new)
+                .push(response);
+        }
+    }
+
+    Ok(responses)
+}
+
+#[cfg(unix)]
+fn set_mapresponse_debug_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn set_mapresponse_debug_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Runtime DERP map store.
 ///
@@ -439,6 +608,9 @@ pub struct WireState {
     /// Correlates outbound `MapResponse.PingRequest` callbacks with
     /// public `HEAD /machine/ping-response?id=...` responses.
     pub pings: Arc<PingTracker>,
+    /// Optional headscale-go compatible on-disk MapResponse dumps read by
+    /// `/debug/mapresponses`.
+    pub mapresponse_debug: Arc<MapResponseDebugStore>,
 }
 
 impl WireState {
@@ -2409,6 +2581,7 @@ mod registry_tests {
             runtime_config: Arc::new(RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(RegistrationCache::new()),
             pings: Arc::new(PingTracker::new()),
+            mapresponse_debug: Arc::new(MapResponseDebugStore::disabled()),
         }
     }
 

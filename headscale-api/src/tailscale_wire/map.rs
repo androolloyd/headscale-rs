@@ -66,7 +66,7 @@ use super::wire::{
     is_supported_capability_version, stable_id_from_key, strip_key_prefix,
     unsupported_client_error,
 };
-use super::{MachineRecord, WireState};
+use super::{MachineRecord, MapResponseDebugStore, MapResponseDebugType, WireState};
 
 use crate::dns::{DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
@@ -121,6 +121,23 @@ impl MapFrameCompression {
             Self::Zstd => zstd::bulk::compress(bytes, 3)
                 .map_err(|e| std::io::Error::other(format!("zstd encode: {e}"))),
         }
+    }
+}
+
+fn record_mapresponse_debug(
+    store: &MapResponseDebugStore,
+    node_id: u64,
+    debug_type: MapResponseDebugType,
+    response: &MapResponse,
+) {
+    if let Err(err) = store.record(node_id, debug_type, response) {
+        tracing::error!(
+            target: "tailscale_wire::map",
+            error = %err,
+            node_id,
+            debug_type = debug_type.as_str(),
+            "writing MapResponse debug dump"
+        );
     }
 }
 
@@ -1031,6 +1048,12 @@ async fn map_inner(
         keep_alive: false,
         ..MapResponse::default()
     };
+    record_mapresponse_debug(
+        &state.mapresponse_debug,
+        self_node_id,
+        MapResponseDebugType::Full,
+        &resp,
+    );
     if req.stream {
         // Stream:true — emit length-prefixed MapResponse JSON chunks,
         // zstd-compressed only when the request negotiated it. See
@@ -1088,6 +1111,7 @@ async fn map_inner(
         let dns_for_stream = state.dns.clone();
         let pings = state.pings.clone();
         let ping_rx = state.pings.subscribe();
+        let mapresponse_debug = state.mapresponse_debug.clone();
         let connection_guard = stream_connection_guard.expect("stream guard created above");
         let stream = futures_util::stream::unfold(
             (
@@ -1101,6 +1125,7 @@ async fn map_inner(
                 dns_for_stream,
                 pings,
                 ping_rx,
+                mapresponse_debug,
                 initial_self_node,
                 initial_peer_state,
                 initial_peer_ids,
@@ -1120,6 +1145,7 @@ async fn map_inner(
                 dns,
                 pings,
                 mut ping_rx,
+                mapresponse_debug,
                 last_self_node,
                 last_peer_state,
                 initial_peer_ids,
@@ -1142,6 +1168,7 @@ async fn map_inner(
                             dns,
                             pings,
                             ping_rx,
+                            mapresponse_debug,
                             last_self_node,
                             last_peer_state,
                             initial_peer_ids,
@@ -1155,7 +1182,12 @@ async fn map_inner(
                 let self_node_id = stable_id_from_key(&self_node_key);
                 if let Some(request) = pings.pop_next_for_node(self_node_id) {
                     return Some((
-                        Ok::<_, std::io::Error>(build_ping_request_chunk(request, compression)),
+                        Ok::<_, std::io::Error>(build_ping_request_chunk(
+                            request,
+                            compression,
+                            &mapresponse_debug,
+                            self_node_id,
+                        )),
                         (
                             None,
                             machines,
@@ -1167,6 +1199,7 @@ async fn map_inner(
                             dns,
                             pings,
                             ping_rx,
+                            mapresponse_debug,
                             last_self_node,
                             last_peer_state,
                             initial_peer_ids,
@@ -1205,7 +1238,19 @@ async fn map_inner(
                         if res.is_err() {
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else {
-                            rebuild_peer_delta_chunk(&machines, &policy, &self_node_key, &dns, cap_version, taildrop_enabled, compression, last_self_node.as_ref(), &last_peer_state, &initial_peer_ids)
+                            rebuild_peer_delta_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                compression,
+                                last_self_node.as_ref(),
+                                &last_peer_state,
+                                &initial_peer_ids,
+                                &mapresponse_debug,
+                            )
                         }
                     }
                     () = &mut policy_changed => {
@@ -1213,7 +1258,19 @@ async fn map_inner(
                         // poller wakes and emits a refreshed
                         // MapResponse with the new packet_filter.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "policy"),
+                            rebuild_map_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &machines_derp_map,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                compression,
+                                "policy",
+                                &mapresponse_debug,
+                                MapResponseDebugType::Policy,
+                            ),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
@@ -1223,7 +1280,19 @@ async fn map_inner(
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
                         (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "config"),
+                            rebuild_map_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &machines_derp_map,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                compression,
+                                "config",
+                                &mapresponse_debug,
+                                MapResponseDebugType::Change,
+                            ),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
@@ -1236,7 +1305,19 @@ async fn map_inner(
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else {
                             (
-                            rebuild_map_chunk(&machines, &policy, &self_node_key, &machines_derp_map, &dns, cap_version, taildrop_enabled, compression, "config"),
+                            rebuild_map_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &machines_derp_map,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                compression,
+                                "config",
+                                &mapresponse_debug,
+                                MapResponseDebugType::Change,
+                            ),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                         )
@@ -1247,7 +1328,12 @@ async fn map_inner(
                             (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                         } else if let Some(request) = pings.pop_next_for_node(self_node_id) {
                             (
-                                build_ping_request_chunk(request, compression),
+                                build_ping_request_chunk(
+                                    request,
+                                    compression,
+                                    &mapresponse_debug,
+                                    self_node_id,
+                                ),
                                 last_peer_state,
                                 last_self_node,
                             )
@@ -1278,6 +1364,7 @@ async fn map_inner(
                         dns,
                         pings,
                         ping_rx,
+                        mapresponse_debug,
                         next_self_node,
                         next_peer_state,
                         initial_peer_ids,
@@ -1369,6 +1456,7 @@ fn rebuild_peer_delta_chunk(
     last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
+    mapresponse_debug: &MapResponseDebugStore,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
     if machines.get(self_node_key).is_none() {
         return (
@@ -1465,6 +1553,12 @@ fn rebuild_peer_delta_chunk(
         keep_alive: false,
         ..MapResponse::default()
     };
+    record_mapresponse_debug(
+        mapresponse_debug,
+        self_node_id,
+        MapResponseDebugType::Change,
+        &mr,
+    );
     (
         build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
         current_peer_state,
@@ -1472,12 +1566,23 @@ fn rebuild_peer_delta_chunk(
     )
 }
 
-fn build_ping_request_chunk(request: PingRequest, compression: MapFrameCompression) -> Vec<u8> {
+fn build_ping_request_chunk(
+    request: PingRequest,
+    compression: MapFrameCompression,
+    mapresponse_debug: &MapResponseDebugStore,
+    node_id: u64,
+) -> Vec<u8> {
     let mr = MapResponse {
         ping_request: Some(request),
         keep_alive: false,
         ..MapResponse::default()
     };
+    record_mapresponse_debug(
+        mapresponse_debug,
+        node_id,
+        MapResponseDebugType::Change,
+        &mr,
+    );
     build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
 }
 
@@ -1497,6 +1602,8 @@ fn rebuild_map_chunk(
     taildrop_enabled: bool,
     compression: MapFrameCompression,
     response_type: &str,
+    mapresponse_debug: &MapResponseDebugStore,
+    debug_type: MapResponseDebugType,
 ) -> Vec<u8> {
     if machines.get(self_node_key).is_none() {
         return build_keepalive_chunk(compression);
@@ -1559,6 +1666,7 @@ fn rebuild_map_chunk(
         keep_alive: false,
         ..MapResponse::default()
     };
+    record_mapresponse_debug(mapresponse_debug, self_node_id, debug_type, &mr);
     build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
 }
 
@@ -1604,7 +1712,7 @@ async fn wait_for_change(notify: Arc<tokio::sync::Notify>) {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        DerpMapStore, MachineRecord, MachineRegistry, WireState,
+        DerpMapStore, MachineRecord, MachineRegistry, MapResponseDebugStore, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
         router as public_router,
@@ -1613,6 +1721,7 @@ mod tests {
     };
     use axum::body::to_bytes;
     use futures_util::FutureExt;
+    use std::fs;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1650,6 +1759,7 @@ mod tests {
             runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
             registration_cache: Arc::new(crate::tailscale_wire::RegistrationCache::new()),
             pings: Arc::new(crate::tailscale_wire::PingTracker::new()),
+            mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, dir)
     }
@@ -1784,6 +1894,45 @@ mod tests {
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_response_writes_headscale_go_debug_dump_when_enabled() {
+        let (mut state, _dir) = fixture();
+        let dump_dir = tempdir().unwrap();
+        let store = Arc::new(MapResponseDebugStore::with_path(dump_dir.path()));
+        state.mapresponse_debug = store.clone();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let node_id = stable_id_from_key(&a);
+        let files = fs::read_dir(dump_dir.path().join(node_id.to_string()))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("-full.json"));
+        let responses = store.read().unwrap().unwrap();
+        assert_eq!(responses[&node_id][0].peers[0].name, "peer-b");
     }
 
     #[tokio::test]

@@ -111,6 +111,9 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: Arc::new(headscale_api::tailscale_wire::RegistrationCache::new()),
         pings: Arc::new(headscale_api::tailscale_wire::PingTracker::new()),
+        mapresponse_debug: Arc::new(
+            headscale_api::tailscale_wire::MapResponseDebugStore::disabled(),
+        ),
     };
     // tempdir held only inside this fn; the wire layer never reads
     // from it after construction, so leaking is fine for the test.

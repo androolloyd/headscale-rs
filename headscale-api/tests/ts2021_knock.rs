@@ -73,6 +73,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         runtime_config: Arc::new(tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: Arc::new(tailscale_wire::RegistrationCache::new()),
         pings: Arc::new(tailscale_wire::PingTracker::new()),
+        mapresponse_debug: Arc::new(tailscale_wire::MapResponseDebugStore::disabled()),
     };
     (state, dir)
 }

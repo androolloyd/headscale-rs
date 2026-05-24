@@ -252,12 +252,10 @@ async fn register_inner(
                     return Json(register_response_for_record(&record)).into_response();
                 }
                 RegistrationWaitOutcome::ApprovedWithoutNode
+                | RegistrationWaitOutcome::Rejected(_)
                 | RegistrationWaitOutcome::Expired
                 | RegistrationWaitOutcome::Missing => {
                     return register_interactive(state, node_key_hex, machine_key_hex, body).await;
-                }
-                RegistrationWaitOutcome::Rejected(reason) => {
-                    return register_error_response(reason);
                 }
             }
         }
@@ -2653,6 +2651,82 @@ mod tests {
         assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
         assert!(pending.expiry.is_none());
         assert!(pending.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn rejected_followup_restarts_web_registration_like_headscale_go() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        let app = router(state.clone());
+        let node_key_hex = "ce".repeat(32);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "rejected-followup" },
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let first: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let first_auth_id = first
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .unwrap();
+        let first_registration_id = first_auth_id.strip_prefix(AUTH_ID_PREFIX).unwrap();
+        assert!(
+            state
+                .registration_cache
+                .reject(first_registration_id, "auth request rejected")
+        );
+
+        let followup_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": first.auth_url,
+            "Hostinfo": { "Hostname": "rejected-followup" },
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&followup_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let refreshed: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!refreshed.machine_authorized);
+        assert!(refreshed.error.is_empty());
+        let refreshed_auth_id = refreshed
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .unwrap();
+        assert_ne!(refreshed_auth_id, first_auth_id);
+        let refreshed_registration_id = refreshed_auth_id.strip_prefix(AUTH_ID_PREFIX).unwrap();
+        assert!(
+            state
+                .registration_cache
+                .get(refreshed_registration_id)
+                .is_some()
+        );
     }
 
     #[tokio::test]

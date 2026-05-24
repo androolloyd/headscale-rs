@@ -563,7 +563,7 @@ pub mod upstream {
             &self,
             body: RegisterNodeRequest,
         ) -> Result<RegisterNodeResponse, Status> {
-            validate_registration_id(&body.key)?;
+            let registration_id = registration_cache_key_from_register_key(&body.key)?;
             let user = self
                 .users
                 .get(&body.user)
@@ -572,7 +572,7 @@ pub mod upstream {
                 .ok_or_else(|| Status::not_found("user not found"))?;
             let pending = self
                 .registration_cache
-                .get(&body.key)
+                .get(&registration_id)
                 .ok_or_else(|| Status::not_found("registration not found"))?;
             let mut record = wire_record_to_machine_admin(pending.clone());
             record.user = user.name;
@@ -598,7 +598,8 @@ pub mod upstream {
                     registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
                 }
             }
-            self.registration_cache.complete(&body.key, wire_record);
+            self.registration_cache
+                .complete(&registration_id, wire_record);
             Ok(RegisterNodeResponse {
                 node: Some(machine_to_node(&node, &self.users).await?),
             })
@@ -797,7 +798,7 @@ pub mod upstream {
         ) -> Result<Response<DebugCreateNodeResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            validate_registration_id(&body.key)?;
+            let registration_id = registration_cache_key_from_register_key(&body.key)?;
             let user = self
                 .users
                 .get(&body.user)
@@ -810,7 +811,7 @@ pub mod upstream {
                 .debug_machine_record(&user.name, &body.name, routes)
                 .await;
             self.registration_cache
-                .insert(body.key, machine_admin_to_wire_record(&record));
+                .insert(registration_id, machine_admin_to_wire_record(&record));
             Ok(Response::new(DebugCreateNodeResponse {
                 node: Some(machine_to_node(&record, &self.users).await?),
             }))
@@ -1624,6 +1625,14 @@ pub mod upstream {
         }
     }
 
+    fn registration_cache_key_from_register_key(key: &str) -> Result<String, Status> {
+        if key.starts_with(UPSTREAM_AUTH_ID_PREFIX) {
+            return auth_id_cache_key(key);
+        }
+        validate_registration_id(key)?;
+        Ok(key.to_string())
+    }
+
     fn random_key_hex() -> String {
         let mut raw = [0u8; 32];
         rand_core::OsRng.fill_bytes(&mut raw);
@@ -2255,6 +2264,7 @@ mod upstream_tests {
     async fn upstream_node_grpc_debug_create_then_register() {
         let (service, _machines) = admin_service_with_machines().await;
         const REGISTRATION_ID: &str = "abcdefghijklmnopqrstuvwx";
+        const AUTH_ID: &str = "hskey-authreq-abcdefghijklmnopqrstuvwx";
         assert_eq!(REGISTRATION_ID.len(), 24);
 
         service
@@ -2270,7 +2280,7 @@ mod upstream_tests {
         let debug_node = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: AUTH_ID.into(),
                 name: "debug-router".into(),
                 routes: vec!["10.0.0.0/24".into()],
             }))
@@ -2300,7 +2310,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: AUTH_ID.into(),
             }))
             .await
             .unwrap()
@@ -2324,7 +2334,7 @@ mod upstream_tests {
         let err = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: AUTH_ID.into(),
             }))
             .await
             .unwrap_err();
@@ -2677,7 +2687,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: registration_id.into(),
+                key: auth_id.into(),
             }))
             .await
             .unwrap()

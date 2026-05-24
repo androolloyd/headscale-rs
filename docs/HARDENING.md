@@ -22,6 +22,8 @@ cargo fmt --manifest-path headscale-core/fuzz/Cargo.toml --all -- --check
 cargo fmt --manifest-path tools/parity/headscale-rs/Cargo.toml --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo clippy -p headscale-api --features admin,full --tests -- -D warnings
+cargo test -p headscale-api --features admin,full --test grpc_gateway_e2e
 for manifest in \
   headscale-core/Cargo.toml \
   headscale-identity/Cargo.toml \

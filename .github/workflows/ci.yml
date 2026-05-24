@@ -4,7 +4,7 @@
 # honor-system. Modeled on the octra repo's ci.yml (the canonical CI
 # template across the three sibling repos: octra, octra-foundry,
 # headscale-rs). Three jobs: fmt, clippy (default + wire-only), test
-# (workspace + wire-only).
+# (workspace + wire-only + admin/full gateway).
 #
 # The wire-only pass exercises `headscale-api --no-default-features`,
 # which is the surface `octravpn-mesh` consumes (tailscale_wire/* with
@@ -71,6 +71,9 @@ jobs:
       # Admin is intentionally opt-in, so keep its route/tests surface
       # covered explicitly instead of relying on default feature tests.
       - run: cargo clippy -p headscale-api --no-default-features --features admin --tests -- -D warnings
+      # grpc-gateway e2e tests need both the default full control-plane
+      # surface and opt-in admin/database stores.
+      - run: cargo clippy -p headscale-api --features admin,full --tests -- -D warnings
       # These crates are intentionally excluded from root workspace
       # membership but are still part of the repo's security surface.
       - name: cargo clippy excluded crates
@@ -113,6 +116,9 @@ jobs:
       - run: cargo test -p headscale-api --no-default-features --lib
       # Admin-only test run — admin is not a default feature.
       - run: cargo test -p headscale-api --no-default-features --features admin --lib
+      # Feature-gated grpc-gateway parity e2e tests compile out unless
+      # both admin and full are enabled.
+      - run: cargo test -p headscale-api --features admin,full --test grpc_gateway_e2e
       - run: cargo check --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml
 
   fuzz:

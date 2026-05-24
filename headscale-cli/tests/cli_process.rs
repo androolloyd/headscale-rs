@@ -726,6 +726,14 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     let policy = policy_path.to_str().unwrap();
     let bypass = "--bypass-grpc-and-access-database-directly";
 
+    let empty_get = headscale_clean(&["--config", config, "--force", "policy", "get", bypass]);
+    assert_eq!(empty_get.status.code(), Some(6));
+    assert_eq!(stdout(&empty_get), "");
+    assert_eq!(
+        stderr(&empty_get),
+        include_str!("snapshots/policy_direct_db_missing.stderr")
+    );
+
     let set = headscale_clean(&[
         "--config", config, "--force", "-o", "json", "policy", "set", "--file", policy, bypass,
     ]);
@@ -734,6 +742,13 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     assert_eq!(set_json["applied"], true);
     assert_eq!(set_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
 
+    let set_text = headscale_clean(&[
+        "--config", config, "--force", "policy", "set", "--file", policy, bypass,
+    ]);
+    assert!(set_text.status.success(), "stderr: {}", stderr(&set_text));
+    assert_eq!(stdout(&set_text), "Policy applied: true\n");
+    assert_eq!(stderr(&set_text), "");
+
     let get = headscale_clean(&[
         "--config", config, "--force", "-o", "json", "policy", "get", bypass,
     ]);
@@ -741,15 +756,20 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     let get_json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
     assert_eq!(get_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
 
+    let get_text = headscale_clean(&["--config", config, "--force", "policy", "get", bypass]);
+    assert!(get_text.status.success(), "stderr: {}", stderr(&get_text));
+    assert_eq!(stdout(&get_text), "{\n  // preserved\n  \"acls\": []\n}\n");
+    assert_eq!(stderr(&get_text), "");
+
     let check = headscale_clean(&[
         "--config", config, "--force", "policy", "check", "--file", policy, bypass,
     ]);
     assert!(check.status.success(), "stderr: {}", stderr(&check));
-    assert!(
-        stdout(&check).contains("validates OK"),
-        "stdout: {}",
-        stdout(&check)
+    assert_eq!(
+        stdout(&check),
+        format!("Policy at {} validates OK.\n", policy_path.display())
     );
+    assert_eq!(stderr(&check), "");
 }
 
 #[test]
@@ -850,6 +870,23 @@ fn implemented_admin_local_errors_match_snapshots() {
         ],
         6,
         include_str!("snapshots/nodes_register_legacy_http_error.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--address", "http://127.0.0.1:9", "users", "list"],
+        6,
+        include_str!("snapshots/grpc_remote_missing_api_key.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--address",
+            "http://127.0.0.1:9",
+            "--api-key",
+            "test",
+            "users",
+            "list",
+        ],
+        3,
+        include_str!("snapshots/grpc_remote_connection_failure.stderr"),
     );
 }
 

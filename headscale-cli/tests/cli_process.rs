@@ -2475,6 +2475,22 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
     );
 
+    let bad_policy_path = config_dir.path().join("bad-policy.hujson");
+    fs::write(&bad_policy_path, r#"{"unknown":true}"#).unwrap();
+    let bad_policy_path = bad_policy_path.to_string_lossy().to_string();
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "json", "policy", "set", "--file", &bad_policy_path],
+        6,
+        include_str!("snapshots/grpc_live_policy_set_invalid_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-ojson-line", "policy", "check", "--file", &bad_policy_path],
+        6,
+        include_str!("snapshots/grpc_live_policy_check_invalid_json_line.stderr"),
+    );
+
     handle.abort();
     let _ = handle.await;
 }

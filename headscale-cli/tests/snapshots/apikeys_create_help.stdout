@@ -1,0 +1,10 @@
+Mint a fresh API key. The full secret is only shown once
+
+Usage: headscale apikeys create [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>          config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -e, --expiration <EXPIRATION>  Duration the key is valid (e.g. `30m`, `24h`, `90d`) [default: 90d]
+  -o, --output <OUTPUT>          Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force                    Disable prompts and forces the execution
+  -h, --help                     Print help

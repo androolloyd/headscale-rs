@@ -1,0 +1,15 @@
+Creates a new user
+
+Usage: headscale users create [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+
+Options:
+  -c, --config <CONFIG>              config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -d, --display-name <DISPLAY_NAME>  Display name
+  -e, --email <EMAIL>                Email address
+  -p, --picture-url <PICTURE_URL>    Profile picture URL
+  -o, --output <OUTPUT>              Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force                        Disable prompts and forces the execution
+  -h, --help                         Print help

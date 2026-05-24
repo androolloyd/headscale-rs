@@ -1,0 +1,10 @@
+Backfill missing node IP addresses
+
+Usage: headscale nodes backfillips [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+      --confirm          Confirm the backfill operation. The global --force flag also confirms
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

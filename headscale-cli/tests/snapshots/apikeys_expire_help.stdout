@@ -1,0 +1,11 @@
+Expire an API key by visible prefix or numeric ID
+
+Usage: headscale apikeys expire [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -p, --prefix <PREFIX>  API key display prefix, e.g. `hskey-api-abcdefghijkl-***`
+  -i, --id <ID>          API key numeric ID
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

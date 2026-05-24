@@ -1,0 +1,15 @@
+Replace the node's forced-tags list. Empty list clears the override; tags are matched by exact string against the policy
+
+Usage: headscale nodes tag [OPTIONS] [ID] [TAGS]...
+
+Arguments:
+  [ID]       Node identifier (ID). Positional form is kept for legacy compatibility
+  [TAGS]...  Legacy positional comma-separated tag list
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -i, --identifier <ID>  Node identifier (ID)
+  -t, --tags <TAGS>      Comma-separated tag list, e.g. `tag:prod,tag:web`
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

@@ -1,0 +1,10 @@
+List nodes
+
+Usage: headscale nodes list [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -u, --user <USER>
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

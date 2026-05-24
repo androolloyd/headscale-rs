@@ -410,16 +410,60 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 #[test]
 fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
+        &["users", "create", "--help"],
+        include_str!("snapshots/users_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["users", "list", "--help"],
         include_str!("snapshots/users_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["users", "rename", "--help"],
+        include_str!("snapshots/users_rename_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["users", "destroy", "--help"],
+        include_str!("snapshots/users_destroy_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "list", "--help"],
+        include_str!("snapshots/nodes_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "register", "--help"],
+        include_str!("snapshots/nodes_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "expire", "--help"],
+        include_str!("snapshots/nodes_expire_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "rename", "--help"],
+        include_str!("snapshots/nodes_rename_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "tag", "--help"],
+        include_str!("snapshots/nodes_tag_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["preauthkeys", "create", "--help"],
+        include_str!("snapshots/preauthkeys_create_help.stdout"),
     );
     assert_stdout_snapshot(
         &["nodes", "approve-routes", "--help"],
         include_str!("snapshots/nodes_approve_routes_help.stdout"),
     );
     assert_stdout_snapshot(
-        &["preauthkeys", "create", "--help"],
-        include_str!("snapshots/preauthkeys_create_help.stdout"),
+        &["nodes", "delete", "--help"],
+        include_str!("snapshots/nodes_delete_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "backfillips", "--help"],
+        include_str!("snapshots/nodes_backfillips_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["preauthkeys", "list", "--help"],
+        include_str!("snapshots/preauthkeys_list_help.stdout"),
     );
     assert_stdout_snapshot(
         &["preauthkeys", "expire", "--help"],
@@ -430,8 +474,28 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/preauthkeys_delete_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["apikeys", "create", "--help"],
+        include_str!("snapshots/apikeys_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["apikeys", "list", "--help"],
+        include_str!("snapshots/apikeys_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["apikeys", "expire", "--help"],
+        include_str!("snapshots/apikeys_expire_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["apikeys", "delete", "--help"],
         include_str!("snapshots/apikeys_delete_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["policy", "get", "--help"],
+        include_str!("snapshots/policy_get_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["policy", "set", "--help"],
+        include_str!("snapshots/policy_set_help.stdout"),
     );
     assert_stdout_snapshot(
         &["policy", "check", "--help"],

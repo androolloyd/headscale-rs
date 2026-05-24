@@ -1,0 +1,13 @@
+Delete a node
+
+Usage: headscale nodes delete [OPTIONS] [ID]
+
+Arguments:
+  [ID]  Node identifier (ID). Positional form is kept for legacy compatibility
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -i, --identifier <ID>  Node identifier (ID)
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

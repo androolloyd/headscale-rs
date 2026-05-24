@@ -1,0 +1,14 @@
+Renames a node in your network
+
+Usage: headscale nodes rename [OPTIONS] <NEW_NAME_OR_ID> [HOSTNAME]
+
+Arguments:
+  <NEW_NAME_OR_ID>  New hostname in upstream form, or node ID in legacy positional form
+  [HOSTNAME]        New hostname when using the legacy `rename ID HOSTNAME` form
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -i, --identifier <ID>  Node identifier (ID)
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

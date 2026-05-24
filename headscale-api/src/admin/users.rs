@@ -346,6 +346,31 @@ impl PersistentUserAdmin {
             other => UserRegistryError::Store(other.to_string()),
         }
     }
+
+    async fn get_by_username(&self, name: &str) -> Result<Option<UserRecord>, UserRegistryError> {
+        match headscale_db::users::get_by_name(&self.pool, name).await {
+            Ok(row) => return Ok(Some(Self::row_to_record(row))),
+            Err(headscale_db::DbError::NotFound(_)) => {}
+            Err(e) => return Err(Self::map_optional_error(e, name)),
+        }
+
+        let rows = headscale_db::users::list(&self.pool)
+            .await
+            .map_err(|e| UserRegistryError::Store(e.to_string()))?;
+        let matches = rows
+            .into_iter()
+            .filter(|row| row.username() == name)
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(Self::row_to_record(
+                matches.into_iter().next().expect("len checked"),
+            ))),
+            n => Err(UserRegistryError::Store(format!(
+                "expected exactly one user, found {n}"
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -413,10 +438,11 @@ impl UserAdmin for PersistentUserAdmin {
     }
 
     async fn delete(&self, name: &str) -> Result<(), UserRegistryError> {
-        let row = headscale_db::users::get_by_name(&self.pool, name)
-            .await
-            .map_err(|e| Self::map_optional_error(e, name))?;
-        self.delete_by_id(i64_to_u64(row.id)).await
+        let user = self
+            .get_by_username(name)
+            .await?
+            .ok_or_else(|| UserRegistryError::Missing(name.to_string()))?;
+        self.delete_by_id(user.id).await
     }
 
     async fn delete_by_id(&self, id: u64) -> Result<(), UserRegistryError> {
@@ -427,11 +453,7 @@ impl UserAdmin for PersistentUserAdmin {
     }
 
     async fn get(&self, name: &str) -> Result<Option<UserRecord>, UserRegistryError> {
-        match headscale_db::users::get_by_name(&self.pool, name).await {
-            Ok(row) => Ok(Some(Self::row_to_record(row))),
-            Err(headscale_db::DbError::NotFound(_)) => Ok(None),
-            Err(e) => Err(Self::map_optional_error(e, name)),
-        }
+        self.get_by_username(name).await
     }
 
     async fn get_by_id(&self, id: u64) -> Result<Option<UserRecord>, UserRegistryError> {
@@ -462,9 +484,24 @@ impl UserAdmin for PersistentUserAdmin {
     }
 
     async fn touch(&self, name: &str) -> Result<(), UserRegistryError> {
-        headscale_db::users::touch_by_name(&self.pool, name)
-            .await
-            .map_err(|e| UserRegistryError::Store(e.to_string()))
+        let Some(user) = self.get_by_username(name).await? else {
+            return Ok(());
+        };
+        let db_id = u64_to_i64(user.id)?;
+        let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
+        sqlx::query(
+            "
+            UPDATE users
+            SET updated_at = datetime(?, 'unixepoch')
+            WHERE id = ? AND deleted_at IS NULL
+            ",
+        )
+        .bind(now)
+        .bind(db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| UserRegistryError::Store(e.to_string()))
+        .map(|_| ())
     }
 }
 
@@ -638,6 +675,43 @@ mod tests {
         assert_eq!(listed[0].provider_id, "https://issuer/sub");
         assert_eq!(listed[0].created_at, 10);
         assert_eq!(listed[0].last_activity, 11);
+    }
+
+    #[tokio::test]
+    async fn persistent_user_admin_resolves_oidc_username_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("headscale.db");
+        let db = headscale_db::Database::new(&format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        let users = PersistentUserAdmin::new(db.pool().clone());
+
+        let created = crate::oidc::OidcUserStore::create_or_update_oidc_user(
+            &users,
+            crate::oidc::OidcUserProfile {
+                name: String::new(),
+                display_name: "Alice OIDC".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: "https://issuer.example/alice".into(),
+                provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.name, "alice@example.com");
+        let by_username = users.get("alice@example.com").await.unwrap().unwrap();
+        assert_eq!(by_username.id, created.id);
+        assert_eq!(by_username.provider, crate::oidc::REGISTER_METHOD_OIDC);
+
+        users.touch("alice@example.com").await.unwrap();
+        let touched = users.get_by_id(created.id).await.unwrap().unwrap();
+        assert!(touched.last_activity >= by_username.last_activity);
+
+        users.delete("alice@example.com").await.unwrap();
+        assert!(users.get_by_id(created.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

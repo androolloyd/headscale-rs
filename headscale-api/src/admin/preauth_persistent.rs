@@ -346,7 +346,9 @@ mod tests {
     async fn store() -> PersistentPreauthAdmin {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
-        PersistentPreauthAdmin::new_for_test(db.pool().clone())
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users)
     }
 
     fn alice_req() -> PreauthMintRequest {
@@ -387,7 +389,7 @@ mod tests {
         let s = store().await;
         let k = s.mint(alice_req()).await.unwrap();
         let row = s.try_use(&k.key).await.unwrap();
-        assert_eq!(row.user_id, "alice");
+        assert_eq!(row.user_id, "1");
         assert!(row.used_at.is_some());
     }
 

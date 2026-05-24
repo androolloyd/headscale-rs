@@ -6,6 +6,7 @@
 //! Migrated groups default to the local Unix socket; unmigrated groups still
 //! use the legacy `/api/v1/*` GUI surface.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -252,6 +253,7 @@ enum CompletionShell {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let skip_config_load = raw_args_skip_config_load(std::env::args_os().skip(1));
     let cli = Cli::parse();
 
     // Initialize logging
@@ -265,7 +267,7 @@ async fn main() -> ExitCode {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    match dispatch(cli).await {
+    match dispatch(cli, skip_config_load).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(MainError::Admin(e)) => {
             eprintln!("error: {e}");
@@ -298,11 +300,7 @@ impl From<anyhow::Error> for MainError {
     }
 }
 
-async fn dispatch(cli: Cli) -> Result<(), MainError> {
-    let skip_config_load = matches!(
-        cli.command,
-        Commands::Version | Commands::Completion { .. } | Commands::Mockoidc
-    );
+async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
     let config = if skip_config_load {
         None
     } else if let Some(config_path) = &cli.config {
@@ -560,6 +558,18 @@ fn non_empty_clone(value: Option<&String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty()).cloned()
 }
 
+fn raw_args_skip_config_load<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let first = args.into_iter().next();
+    matches!(
+        first.as_ref().and_then(|arg| arg.as_ref().to_str()),
+        Some("version" | "mockoidc" | "completion")
+    )
+}
+
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
     config.validate_for_configtest()?;
@@ -567,14 +577,32 @@ fn configtest(config: Option<&CliConfig>) -> Result<()> {
 }
 
 fn generate_completion(shell: &CompletionShell) {
-    let _no_descriptions = shell.no_descriptions();
     let mut command = Cli::command();
+    command.build();
+    if shell.no_descriptions() {
+        command = strip_completion_descriptions(command);
+    }
     clap_complete::generate(
         shell.clap_shell(),
         &mut command,
         "headscale",
         &mut std::io::stdout(),
     );
+}
+
+fn strip_completion_descriptions(command: clap::Command) -> clap::Command {
+    command
+        .about(None::<&'static str>)
+        .long_about(None::<&'static str>)
+        .before_help(None::<&'static str>)
+        .before_long_help(None::<&'static str>)
+        .after_help(None::<&'static str>)
+        .after_long_help(None::<&'static str>)
+        .mut_args(|arg| {
+            arg.help(None::<&'static str>)
+                .long_help(None::<&'static str>)
+        })
+        .mut_subcommands(strip_completion_descriptions)
 }
 
 impl CompletionShell {
@@ -1080,6 +1108,19 @@ mod tests {
                 shell: CompletionShell::Powershell { .. }
             }
         ));
+    }
+
+    #[test]
+    fn raw_first_arg_controls_config_skip_like_upstream_cobra() {
+        assert!(raw_args_skip_config_load(["version"]));
+        assert!(raw_args_skip_config_load(["mockoidc"]));
+        assert!(raw_args_skip_config_load(["completion", "bash"]));
+        assert!(!raw_args_skip_config_load([
+            "--config",
+            "missing.yaml",
+            "version"
+        ]));
+        assert!(!raw_args_skip_config_load(["-o", "json", "version"]));
     }
 
     #[test]

@@ -3887,6 +3887,62 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_preauth_grpc_creates_for_oidc_username_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("headscale.db");
+        let db = headscale_db::Database::new(&format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("open sqlite db");
+        db.migrate().await.expect("migrate");
+        let users = PersistentUserAdmin::new(db.pool().clone());
+        let oidc_user = crate::oidc::OidcUserStore::create_or_update_oidc_user(
+            &users,
+            crate::oidc::OidcUserProfile {
+                name: String::new(),
+                display_name: "Alice OIDC".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: "https://issuer.example/preauth-user".into(),
+                provider: crate::oidc::REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let service = admin_service_with_persistent_machines_for_pool(db.pool().clone());
+
+        let created = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: oidc_user.id,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("created preauth key");
+
+        let user = created.user.expect("created key has user");
+        assert_eq!(user.id, oidc_user.id);
+        assert_eq!(user.name, "alice@example.com");
+        assert_eq!(user.provider, crate::oidc::REGISTER_METHOD_OIDC);
+
+        let listed = service
+            .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.pre_auth_keys.len(), 1);
+        assert_eq!(listed.pre_auth_keys[0].id, created.id);
+        assert_eq!(
+            listed.pre_auth_keys[0].user.as_ref().unwrap().name,
+            "alice@example.com"
+        );
+    }
+
+    #[tokio::test]
     async fn upstream_preauth_grpc_validates_user_id_and_tags() {
         let service = admin_service().await;
 

@@ -200,6 +200,40 @@ fn completion_bash_does_not_load_config() {
 }
 
 #[test]
+fn completion_no_descriptions_strips_zsh_help_text() {
+    let output = headscale_clean(&["completion", "zsh"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let with_descriptions = stdout(&output);
+    assert!(with_descriptions.contains("--config=[config file"));
+
+    let output = headscale_clean(&["completion", "zsh", "--no-descriptions"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let without_descriptions = stdout(&output);
+    assert!(without_descriptions.contains("#compdef headscale"));
+    assert!(without_descriptions.contains("--config=[]:CONFIG:_files"));
+    assert!(!without_descriptions.contains("--config=[config file"));
+}
+
+#[test]
+fn leading_config_flag_on_version_loads_config_like_upstream_cobra() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let missing = cwd.path().join("missing.yaml");
+    let output = headscale_in(
+        &["--config", missing.to_str().unwrap(), "version"],
+        cwd.path(),
+        home.path(),
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("Failed to load config file"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn configtest_loads_default_config_from_current_directory() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -319,6 +353,26 @@ fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["debug", "create-node", "--help"],
         include_str!("snapshots/debug_create_node_help.stdout"),
+    );
+}
+
+#[test]
+fn operator_top_level_command_help_matches_snapshots() {
+    assert_stdout_snapshot(
+        &["health", "--help"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["version", "--help"],
+        include_str!("snapshots/version_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["configtest", "--help"],
+        include_str!("snapshots/configtest_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["dumpConfig", "--help"],
+        include_str!("snapshots/dump_config_help.stdout"),
     );
 }
 

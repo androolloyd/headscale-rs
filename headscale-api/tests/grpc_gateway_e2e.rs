@@ -618,6 +618,12 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             message_fragment: r#"parsing field "id": strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
         },
         Case {
+            name: "query percent encoding",
+            method: Method::GET,
+            uri: "/api/v1/user?name=%ZZ",
+            message_fragment: r#"invalid URL escape "%ZZ""#,
+        },
+        Case {
             name: "duplicate uint64 query field",
             method: Method::GET,
             uri: "/api/v1/user?id=1&id=2",

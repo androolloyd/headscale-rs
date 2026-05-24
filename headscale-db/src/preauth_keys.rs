@@ -221,7 +221,8 @@ pub async fn create_with_cost(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
-    if params.user_id.trim().is_empty() && params.tags.is_empty() {
+    let storage_user_id = resolve_storage_user_id(pool, &params.user_id).await?;
+    if storage_user_id.is_none() && params.tags.is_empty() {
         return Err(DbError::General(
             "user_id must be non-empty unless tags are provided".into(),
         ));
@@ -240,7 +241,7 @@ pub async fn create_with_cost(
             NULL,
             ?,
             ?,
-            NULLIF(?, ''),
+            ?,
             ?,
             ?,
             false,
@@ -253,7 +254,7 @@ pub async fn create_with_cost(
     )
     .bind(&prefix)
     .bind(hash.as_bytes())
-    .bind(&params.user_id)
+    .bind(storage_user_id)
     .bind(params.reusable)
     .bind(params.ephemeral)
     .bind(&tags_json)
@@ -261,24 +262,45 @@ pub async fn create_with_cost(
     .bind(params.expiration)
     .bind(created_at)
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(map_create_err)?;
 
     Ok(Created {
         plaintext,
-        row: PreauthKeyRow {
-            id,
-            key: None,
-            prefix: Some(prefix),
-            key_hash: hash,
-            user_id: params.user_id,
-            reusable: params.reusable,
-            ephemeral: params.ephemeral,
-            tags: tags_json,
-            expiration: params.expiration,
-            created_at,
-            used_at: None,
-        },
+        row: get_by_id(pool, id).await?,
     })
+}
+
+async fn resolve_storage_user_id(pool: &SqlitePool, user_id: &str) -> Result<Option<i64>> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(id) = user_id.parse::<i64>() {
+        match crate::users::get_by_id(pool, id).await {
+            Ok(user) => return Ok(Some(user.id)),
+            Err(DbError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    match crate::users::get_by_name(pool, user_id).await {
+        Ok(user) => Ok(Some(user.id)),
+        Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
+            "preauth key user {user_id:?} does not exist"
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
+fn map_create_err(e: sqlx::Error) -> DbError {
+    match &e {
+        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+            DbError::Constraint("preauth key user_id references missing user".into())
+        }
+        _ => DbError::from(e),
+    }
 }
 
 /// Look up a row by id (used by tests + the admin "show" path).
@@ -407,9 +429,15 @@ fn map_destroy_err(e: sqlx::Error) -> DbError {
 
 /// List all keys belonging to `user_id`, newest first.
 pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<PreauthKeyRow>> {
+    let storage_user_id = match resolve_storage_user_id(pool, user_id).await {
+        Ok(Some(user_id)) => user_id,
+        Ok(None) => return Ok(Vec::new()),
+        Err(DbError::Constraint(_)) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
     let query = preauth_key_select("WHERE user_id = ? ORDER BY created_at DESC, id DESC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
-        .bind(user_id)
+        .bind(storage_user_id)
         .fetch_all(pool)
         .await?;
     Ok(rows)
@@ -512,7 +540,25 @@ mod tests {
     async fn fresh_db() -> Database {
         let db = Database::in_memory().await.expect("open in-memory");
         db.migrate().await.expect("migrate");
+        seed_user(&db, "alice").await;
+        seed_user(&db, "bob").await;
         db
+    }
+
+    async fn seed_user(db: &Database, name: &str) -> users::UserRow {
+        users::create(
+            db.pool(),
+            users::CreateParams {
+                name: name.into(),
+                display_name: name.into(),
+                email: format!("{name}@example.com"),
+                provider_identifier: None,
+                provider: headscale_nodes::REGISTER_METHOD_CLI.into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap()
     }
 
     fn alice() -> CreateParams {
@@ -535,7 +581,7 @@ mod tests {
         let db = fresh_db().await;
         let c = create_for_test(db.pool(), alice()).await.unwrap();
         assert!(c.plaintext.starts_with(TOKEN_PREFIX));
-        assert_eq!(c.row.user_id, "alice");
+        assert_eq!(c.row.user_id, "1");
         assert!(!c.row.reusable);
         assert!(c.row.used_at.is_none());
         let again = get_by_id(db.pool(), c.row.id).await.unwrap();
@@ -565,9 +611,8 @@ mod tests {
         assert_eq!(created_at, c.row.created_at);
     }
 
-    /// Go: TestCannotCreateForNonExistantUser (we don't yet enforce
-    /// FK to a users table, but we DO reject empty user IDs — same
-    /// surface "invalid user" rejection).
+    /// Go: TestCannotCreateForNonExistantUser. Empty user IDs are
+    /// rejected unless tags make the key userless.
     #[tokio::test]
     async fn create_rejects_empty_user() {
         let db = fresh_db().await;
@@ -575,6 +620,15 @@ mod tests {
         p.user_id = String::new();
         let e = create_for_test(db.pool(), p).await.unwrap_err();
         assert!(matches!(e, DbError::General(_)));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_missing_user() {
+        let db = fresh_db().await;
+        let mut p = alice();
+        p.user_id = "missing".into();
+        let e = create_for_test(db.pool(), p).await.unwrap_err();
+        assert!(matches!(e, DbError::Constraint(_)));
     }
 
     /// Go: TestKeyHasCorrectUserAssociated
@@ -589,8 +643,8 @@ mod tests {
         let b_keys = list_by_user(db.pool(), "bob").await.unwrap();
         assert_eq!(a_keys.len(), 1);
         assert_eq!(b_keys.len(), 1);
-        assert_eq!(a_keys[0].user_id, "alice");
-        assert_eq!(b_keys[0].user_id, "bob");
+        assert_eq!(a_keys[0].user_id, "1");
+        assert_eq!(b_keys[0].user_id, "2");
     }
 
     /// Go: TestGetPreAuthKey + TestGetPreAuthKeys
@@ -615,7 +669,7 @@ mod tests {
             ",
         )
         .bind(key)
-        .bind("alice")
+        .bind(1_i64)
         .bind(r#"["tag:legacy"]"#)
         .bind(now)
         .execute(db.pool())
@@ -624,7 +678,7 @@ mod tests {
 
         let row = get_by_token(db.pool(), key).await.unwrap();
         assert_eq!(row.key.as_deref(), Some(key));
-        assert_eq!(row.user_id, "alice");
+        assert_eq!(row.user_id, "1");
         assert_eq!(row.tag_list(), vec!["tag:legacy".to_string()]);
         assert_eq!(row.created_at, now);
     }
@@ -958,6 +1012,7 @@ mod tests {
         let plaintext = {
             let db = Database::new(&url).await.unwrap();
             db.migrate().await.unwrap();
+            seed_user(&db, "alice").await;
             let mut p = alice();
             p.tags = vec!["tag:router".into()];
             let created = create_for_test(db.pool(), p).await.unwrap();
@@ -968,7 +1023,7 @@ mod tests {
         let reopened = Database::new(&url).await.unwrap();
         reopened.migrate().await.unwrap();
         let row = get_by_token(reopened.pool(), &plaintext).await.unwrap();
-        assert_eq!(row.user_id, "alice");
+        assert_eq!(row.user_id, "1");
         assert_eq!(row.tag_list(), vec!["tag:router".to_string()]);
     }
 

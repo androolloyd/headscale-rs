@@ -32,7 +32,7 @@
 //! See the upstream OctraVPN module's decision log (preserved in git
 //! history) for the rationale behind each wire choice.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{
     Arc, Weak,
@@ -634,9 +634,10 @@ impl RouteHealthProbeHandle {
 /// Start periodic route-candidate health probes.
 ///
 /// Candidates are online, non-expired nodes that currently advertise and
-/// are approved for at least one subnet route. Exit routes are excluded
-/// from this probe path because they do not participate in primary-route
-/// election.
+/// are approved for at least one HA subnet route. Exit routes and
+/// singleton subnet routers are excluded from this probe path because
+/// upstream only sends route-health pings when 2+ nodes serve the same
+/// prefix.
 pub fn spawn_route_health_probe(
     state: WireState,
     probe_interval: Duration,
@@ -673,20 +674,27 @@ pub(crate) fn route_health_probe_candidates(machines: &MachineRegistry) -> Vec<u
     let snapshot = machines.snapshot();
     let online_states = machines.online_states();
     let now = Utc::now();
-    let mut candidates = snapshot
-        .iter()
-        .filter_map(|(node_key, rec)| {
-            let node_id = stable_id_from_key(node_key);
-            if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false) {
-                return None;
-            }
-            (!active_primary_routes(&rec.available_routes, &rec.approved_routes).is_empty())
-                .then_some(node_id)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_unstable();
-    candidates.dedup();
-    candidates
+    let mut nodes_by_route: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+
+    for (node_key, rec) in snapshot.iter() {
+        let node_id = stable_id_from_key(node_key);
+        if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false) {
+            continue;
+        }
+
+        for route in active_primary_routes(&rec.available_routes, &rec.approved_routes) {
+            nodes_by_route.entry(route).or_default().insert(node_id);
+        }
+    }
+
+    let mut candidates = BTreeSet::new();
+    for node_ids in nodes_by_route.into_values() {
+        if node_ids.len() > 1 {
+            candidates.extend(node_ids);
+        }
+    }
+
+    candidates.into_iter().collect()
 }
 
 async fn probe_route_candidate(
@@ -3252,33 +3260,53 @@ mod registry_tests {
     }
 
     #[test]
-    fn route_health_probe_candidates_require_online_active_subnet_routes() {
+    fn route_health_probe_candidates_require_online_active_ha_subnet_routes() {
         let state = test_state();
-        let route = "10.0.0.0/24";
-        let active = "route-health-active";
+        let singleton_route = "10.99.0.0/24";
+        let ha_route = "10.0.0.0/24";
+        let singleton = "route-health-singleton";
+        let ha_a = "route-health-ha-a";
+        let ha_b = "route-health-ha-b";
         let offline = "route-health-offline";
         let exit_only = "route-health-exit";
         let unapproved = "route-health-unapproved";
 
+        state.machines.upsert(
+            singleton.to_string(),
+            route_record(singleton, 10, singleton_route),
+        );
         state
             .machines
-            .upsert(active.to_string(), route_record(active, 10, route));
+            .upsert(ha_a.to_string(), route_record(ha_a, 11, ha_route));
         state
             .machines
-            .upsert(offline.to_string(), route_record(offline, 11, route));
+            .upsert(ha_b.to_string(), route_record(ha_b, 12, ha_route));
+        state
+            .machines
+            .upsert(offline.to_string(), route_record(offline, 13, ha_route));
 
-        let mut exit = route_record(exit_only, 12, "0.0.0.0/0");
+        let mut exit = route_record(exit_only, 14, "0.0.0.0/0");
         exit.available_routes = vec!["0.0.0.0/0".into(), "::/0".into()];
         exit.approved_routes = exit.available_routes.clone();
         state.machines.upsert(exit_only.to_string(), exit);
 
-        let mut advertised = route_record(unapproved, 13, route);
+        let mut advertised = route_record(unapproved, 15, ha_route);
         advertised.approved_routes.clear();
         state.machines.upsert(unapproved.to_string(), advertised);
 
-        let _active_guard = MachineRegistry::track_stream_connection_with_grace(
+        let _singleton_guard = MachineRegistry::track_stream_connection_with_grace(
             state.machines.clone(),
-            stable_id_from_key(active),
+            stable_id_from_key(singleton),
+            Duration::ZERO,
+        );
+        let _ha_a_guard = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(ha_a),
+            Duration::ZERO,
+        );
+        let _ha_b_guard = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(ha_b),
             Duration::ZERO,
         );
         let _exit_guard = MachineRegistry::track_stream_connection_with_grace(
@@ -3292,10 +3320,9 @@ mod registry_tests {
             Duration::ZERO,
         );
 
-        assert_eq!(
-            route_health_probe_candidates(&state.machines),
-            vec![stable_id_from_key(active)]
-        );
+        let mut expected = vec![stable_id_from_key(ha_a), stable_id_from_key(ha_b)];
+        expected.sort_unstable();
+        assert_eq!(route_health_probe_candidates(&state.machines), expected);
     }
 
     #[tokio::test(start_paused = true)]

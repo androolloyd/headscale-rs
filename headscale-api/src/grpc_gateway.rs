@@ -960,6 +960,7 @@ fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String
     let Some(query) = query.filter(|query| !query.is_empty()) else {
         return Ok(BTreeMap::new());
     };
+    validate_query_percent_escapes(query)?;
     let pairs: Vec<(String, String)> =
         serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
     let mut values = BTreeMap::<String, Vec<String>>::new();
@@ -973,6 +974,30 @@ fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String
         }
     }
     Ok(values)
+}
+
+fn validate_query_percent_escapes(query: &str) -> Result<(), Status> {
+    let bytes = query.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+
+        if i + 2 >= bytes.len()
+            || !bytes[i + 1].is_ascii_hexdigit()
+            || !bytes[i + 2].is_ascii_hexdigit()
+        {
+            let escape_end = (i + 3).min(bytes.len());
+            let escape = String::from_utf8_lossy(&bytes[i..escape_end]);
+            return Err(Status::invalid_argument(format!(
+                "invalid URL escape {escape:?}"
+            )));
+        }
+        i += 3;
+    }
+    Ok(())
 }
 
 fn split_bracket_query_key(key: &str) -> Option<(String, String)> {

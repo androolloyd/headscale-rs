@@ -29,7 +29,8 @@ use axum::{
     response::Response,
 };
 use headscale_api::admin::{
-    AdminState, PersistentPreauthAdmin, UserRegistry, WireMachineAdmin, router,
+    AdminState, PersistentPreauthAdmin, PersistentUserAdmin, UserAdmin, UserRegistry,
+    WireMachineAdmin, router,
 };
 use headscale_api::policy::PolicyStore;
 use headscale_api::tailscale_wire::MachineRegistry;
@@ -41,7 +42,12 @@ const BEARER: &str = "preauth-e2e-bearer";
 async fn fixture() -> (Router, PersistentPreauthAdmin) {
     let db = Database::in_memory().await.expect("open db");
     db.migrate().await.expect("migrate");
-    let store = PersistentPreauthAdmin::new_for_test(db.pool().clone());
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    users.create("alice").await.expect("seed alice user");
+    users.create("bob").await.expect("seed bob user");
+    users.create("carol").await.expect("seed carol user");
+    let store =
+        PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone());
     let reg = Arc::new(MachineRegistry::new());
     let state = AdminState::builder()
         .bearer_token(BEARER)
@@ -188,7 +194,7 @@ async fn try_use_via_store_after_admin_mint() {
     // Direct call into the store — mirrors what the wire layer's
     // `PreauthRedeemer` adapter does at register-time.
     let row = store.try_use(&key).await.expect("redeem");
-    assert_eq!(row.user_id, "alice");
+    assert_eq!(row.user_id, "1");
     assert!(row.used_at.is_some(), "single-use must stamp used_at");
 }
 

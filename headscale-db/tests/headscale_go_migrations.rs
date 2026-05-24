@@ -8,6 +8,8 @@ use tempfile::TempDir;
 
 const LEGACY_ROUTES_MIGRATION: &str =
     include_str!("../migrations/20260522000010_migrate_legacy_routes.sql");
+const PREAUTH_USER_FK_MIGRATION: &str =
+    include_str!("../migrations/20260523000012_preauth_user_fk.sql");
 const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
 const HEADSCALE_GO_V0260_EMPTY_FIXTURE: &str =
@@ -220,6 +222,10 @@ async fn sqlite_table_exists(db: &Database, table: &str) -> bool {
     .expect("query sqlite schema");
 
     count > 0
+}
+
+fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
 }
 
 async fn user_id(db: &Database) -> i64 {
@@ -826,7 +832,7 @@ async fn rejects_unversioned_go_history_before_v028_schema_marker() {
 }
 
 #[tokio::test]
-async fn destroy_user_removes_target_users_preauth_keys() {
+async fn user_node_and_preauth_foreign_keys_match_headscale_go_delete_semantics() {
     let db = Database::in_memory().await.expect("open db");
     db.migrate().await.expect("migrate");
 
@@ -840,37 +846,200 @@ async fn destroy_user_removes_target_users_preauth_keys() {
     .await
     .expect("query pre_auth_keys foreign keys");
     assert!(
-        !preauth_user_fks
+        preauth_user_fks
             .iter()
             .any(|(from, table, to, on_delete)| from == "user_id"
                 && table == "users"
                 && to == "id"
                 && on_delete.eq_ignore_ascii_case("SET NULL")),
-        "headscale-go v0.28.0 has pre_auth_keys.user_id -> users(id) ON DELETE SET NULL; \
-         this is still a known gap while the DB crate accepts string user labels"
+        "pre_auth_keys.user_id should match headscale-go's users(id) ON DELETE SET NULL FK"
     );
 
-    sqlx::query(
+    let node_fks: Vec<(String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT "from", "table", "to", on_delete
+        FROM pragma_foreign_key_list('nodes')
+        "#,
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("query nodes foreign keys");
+    assert!(
+        node_fks
+            .iter()
+            .any(|(from, table, to, on_delete)| from == "user_id"
+                && table == "users"
+                && to == "id"
+                && on_delete.eq_ignore_ascii_case("CASCADE")),
+        "nodes.user_id should match headscale-go's users(id) ON DELETE CASCADE FK"
+    );
+    assert!(
+        node_fks
+            .iter()
+            .any(|(from, table, to, on_delete)| from == "auth_key_id"
+                && table == "pre_auth_keys"
+                && to == "id"
+                && on_delete.eq_ignore_ascii_case("NO ACTION")),
+        "nodes.auth_key_id should match headscale-go's pre_auth_keys(id) NO ACTION FK"
+    );
+
+    let missing_user_err = sqlx::query(
         "
         INSERT INTO pre_auth_keys
             (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
         VALUES
-            ('legacy-string-user-key', NULL, NULL, 'legacy-string-user', false, false, false, '[]', NULL, datetime('now'))
+            ('missing-user-key', NULL, NULL, 999, false, false, false, '[]', NULL, datetime('now'))
         ",
     )
     .execute(db.pool())
     .await
-    .expect("current schema accepts string user labels");
-    let string_user_type: String =
-        sqlx::query_scalar("SELECT typeof(user_id) FROM pre_auth_keys WHERE key = ?")
-            .bind("legacy-string-user-key")
+    .expect_err("preauth keys must reference an existing user");
+    assert!(is_foreign_key_violation(&missing_user_err));
+
+    let missing_auth_key_err = sqlx::query(
+        "
+        INSERT INTO nodes
+            (machine_key, node_key, disco_key, endpoints, host_info, hostname, given_name,
+             user_id, register_method, tags, auth_key_id, approved_routes, created_at, updated_at)
+        VALUES
+            ('mkey:missing-auth', 'nodekey:missing-auth', 'discokey:missing-auth', '[]', '{}',
+             'missing-auth', 'missing-auth', NULL, 'authkey', '[]', 999, '[]',
+             datetime('now'), datetime('now'))
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect_err("nodes must reference an existing auth key");
+    assert!(is_foreign_key_violation(&missing_auth_key_err));
+
+    let user_id = user_id(&db).await;
+    let auth_key_id = preauth_key_id(&db, user_id).await;
+    let node = node_with_route(&db, user_id, auth_key_id).await;
+
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .expect("raw user delete applies DB FK actions");
+
+    let preauth_user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM pre_auth_keys WHERE id = ?")
+            .bind(auth_key_id)
             .fetch_one(db.pool())
             .await
-            .expect("query string user storage type");
-    assert_eq!(
-        string_user_type, "text",
-        "a strict upstream FK migration would reject this current compatibility path"
-    );
+            .expect("query preauth key after raw user delete");
+    assert_eq!(preauth_user_id, None);
+    assert!(matches!(
+        headscale_nodes::get_by_id(db.pool(), node.id)
+            .await
+            .unwrap_err(),
+        DbError::NotFound(_)
+    ));
+}
+
+#[tokio::test]
+async fn preauth_user_fk_migration_preserves_legacy_string_user_labels_when_name_exists() {
+    let db = Database::in_memory().await.expect("open db");
+    sqlx::raw_sql(
+        "
+        CREATE TABLE users(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            name text,
+            display_name text,
+            email text,
+            provider_identifier text,
+            provider text,
+            profile_pic_url text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO users (id, name, display_name, email, provider, profile_pic_url, created_at, updated_at)
+            VALUES (1, 'alice', 'Alice', 'alice@example.com', 'cli', '', datetime('now'), datetime('now'));
+
+        CREATE TABLE pre_auth_keys(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            key text,
+            prefix text,
+            hash blob,
+            user_id integer,
+            reusable numeric,
+            ephemeral numeric DEFAULT false,
+            used numeric DEFAULT false,
+            tags text,
+            expiration datetime,
+            created_at datetime
+        );
+        INSERT INTO pre_auth_keys
+            (id, key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+        VALUES
+            (1, 'legacy-name-key', NULL, NULL, 'alice', false, false, false, '[]', NULL, datetime('now')),
+            (2, 'legacy-missing-key', NULL, NULL, 'missing', false, false, false, '[]', NULL, datetime('now'));
+
+        CREATE TABLE nodes(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            machine_key text,
+            node_key text,
+            disco_key text,
+            endpoints text,
+            host_info text,
+            ipv4 text,
+            ipv6 text,
+            hostname text,
+            given_name text,
+            user_id integer,
+            register_method text,
+            tags text,
+            auth_key_id integer,
+            expiry datetime,
+            last_seen datetime,
+            approved_routes text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO nodes
+            (id, machine_key, node_key, disco_key, endpoints, host_info, hostname, given_name,
+             user_id, register_method, tags, auth_key_id, approved_routes, created_at, updated_at)
+        VALUES
+            (1, 'mkey:legacy', 'nodekey:legacy', 'discokey:legacy', '[]', '{}',
+             'legacy', 'legacy', 'alice', 'authkey', '[]', 1, '[]', datetime('now'), datetime('now'));
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed pre-FK schema");
+
+    sqlx::raw_sql(PREAUTH_USER_FK_MIGRATION)
+        .execute(db.pool())
+        .await
+        .expect("run preauth user FK migration");
+
+    let preserved: (Option<i64>, String) =
+        sqlx::query_as("SELECT user_id, typeof(user_id) FROM pre_auth_keys WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("query preserved preauth");
+    assert_eq!(preserved, (Some(1), "integer".to_string()));
+
+    let missing: Option<i64> = sqlx::query_scalar("SELECT user_id FROM pre_auth_keys WHERE id = 2")
+        .fetch_one(db.pool())
+        .await
+        .expect("query missing-user preauth");
+    assert_eq!(missing, None);
+
+    let node_fk: (Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT user_id, auth_key_id FROM nodes WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("query migrated node");
+    assert_eq!(node_fk, (Some(1), Some(1)));
+}
+
+#[tokio::test]
+async fn destroy_user_removes_target_users_preauth_keys() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
 
     let user_id = user_id(&db).await;
     let auth_key_id = preauth_key_id(&db, user_id).await;

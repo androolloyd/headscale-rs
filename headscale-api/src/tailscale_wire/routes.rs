@@ -224,7 +224,8 @@ impl PrimaryRouteState {
         for (route, nodes) in &available_by_route {
             if let Some(current) = self.primaries.get(route)
                 && nodes.contains(current)
-                && !self.unhealthy.contains(current)
+                && (!self.unhealthy.contains(current)
+                    || nodes.iter().all(|node_id| self.unhealthy.contains(node_id)))
             {
                 continue;
             }
@@ -232,6 +233,7 @@ impl PrimaryRouteState {
             let new_primary = nodes
                 .iter()
                 .find(|node_id| !self.unhealthy.contains(node_id))
+                .or_else(|| self.primaries.get(route).filter(|current| nodes.contains(current)))
                 .or_else(|| nodes.first());
             if let Some(new_primary) = new_primary {
                 self.primaries.insert(route.clone(), *new_primary);
@@ -707,18 +709,18 @@ mod tests {
     }
 
     #[test]
-    fn all_unhealthy_candidates_fall_back_to_first_degraded_primary() {
+    fn all_unhealthy_candidates_retain_last_known_primary() {
         let mut state = PrimaryRouteState::new();
         assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
         assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
         assert!(state.set_node_health(1, false));
         assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
 
-        assert!(state.set_node_health(2, false));
+        assert!(!state.set_node_health(2, false));
 
-        assert_eq!(state.primary_routes(1), p(&["10.0.0.0/24"]));
-        assert_eq!(state.primary_routes(2), Vec::<String>::new());
-        assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 1)]));
+        assert_eq!(state.primary_routes(1), Vec::<String>::new());
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+        assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 2)]));
         assert_eq!(unhealthy(&state), vec![1, 2]);
     }
 

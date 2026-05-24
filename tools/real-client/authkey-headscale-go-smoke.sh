@@ -2537,7 +2537,7 @@ fi
 
 if [[ -n "${expected_route_health_all_unhealthy_route}" ]]; then
   echo "::group::assert route-health all-unhealthy fallback"
-  cp "${work_dir}/nodes.json" "${work_dir}/nodes-before-route-health-all-unhealthy.json"
+  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes-before-route-health-all-unhealthy.json"
   route_health_all_selection="$(
     ruby -rjson -e '
       route = ARGV.fetch(1)

@@ -25,6 +25,7 @@ route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
+route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
@@ -78,12 +79,28 @@ case "${route_health_mixed_exit_restart}" in
     exit 2
     ;;
 esac
+case "${route_health_all_unhealthy_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_all_unhealthy_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_all_unhealthy_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY must be true or false, got ${route_health_all_unhealthy_restart}" >&2
+    exit 2
+    ;;
+esac
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
   exit 2
 fi
 if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
+  exit 2
+fi
+if ((route_health_all_unhealthy_restart_flag && ! route_health_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
   exit 2
 fi
 if ((route_health_restart_flag)); then
@@ -1289,6 +1306,73 @@ assert_route_health_failover_after_restart() {
   echo "::endgroup::"
 }
 
+assert_route_health_all_unhealthy_after_restart() {
+  local before_path="${work_dir}/route-health-peer-before-all-unhealthy.json"
+  local first_unhealthy_path="${work_dir}/route-health-peer-after-first-unhealthy.json"
+  local all_unhealthy_path="${work_dir}/route-health-peer-after-all-unhealthy.json"
+  local owner_path="${work_dir}/route-health-peer-before-all-unhealthy.owner"
+  local route_health_primary_name
+  local route_health_standby_name
+  local paused=()
+
+  echo "::group::assert route-health all-unhealthy fallback after restart"
+  wait_for "observer sees initial route-health owner before all-unhealthy" \
+    "route_health_peer_owner_from_netmap '${observer_name}' '${route}' '${before_path}' '${owner_path}'" || {
+      cat "${before_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${before_path}"
+  route_health_primary_name="$(cat "${owner_path}")"
+  case "${route_health_primary_name}" in
+    "${router_name}") route_health_standby_name="${router_b_name}" ;;
+    "${router_b_name}") route_health_standby_name="${router_name}" ;;
+    *)
+      echo "route-health primary ${route_health_primary_name} is not ${router_name} or ${router_b_name}" >&2
+      dump_debug
+      return 1
+      ;;
+  esac
+
+  docker pause "${route_health_primary_name}" >/dev/null
+  paused+=("${route_health_primary_name}")
+  if ! wait_for "observer sees route-health first-unhealthy failover owner" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${first_unhealthy_path}'"; then
+    for client_name in "${paused[@]}"; do
+      docker unpause "${client_name}" >/dev/null 2>&1 || true
+    done
+    cat "${first_unhealthy_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${first_unhealthy_path}"
+
+  docker pause "${route_health_standby_name}" >/dev/null
+  paused+=("${route_health_standby_name}")
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  if ! wait_for "observer keeps last-known route-health owner when all candidates unhealthy" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${all_unhealthy_path}'"; then
+    for client_name in "${paused[@]}"; do
+      docker unpause "${client_name}" >/dev/null 2>&1 || true
+    done
+    cat "${all_unhealthy_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${all_unhealthy_path}"
+
+  for client_name in "${paused[@]}"; do
+    docker unpause "${client_name}" >/dev/null
+  done
+  for client_name in "${paused[@]}"; do
+    if ! wait_for "tailscale logged-in netmap after all-unhealthy route-health ${client_name}" "tailscale_logged_in '${client_name}'"; then
+      dump_debug
+      return 1
+    fi
+  done
+  echo "::endgroup::"
+}
+
 peer_netmap_route_owner_matches() {
   local source_name="$1"
   local peer_name="$2"
@@ -1554,8 +1638,12 @@ elif ((route_health_restart_flag)); then
   fi
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
   wait_for_route_health_primary "after-restart"
-  assert_route_health_peer_failover_after_restart
-  if ((route_health_mixed_exit_restart_flag)); then
+  if ((route_health_all_unhealthy_restart_flag)); then
+    assert_route_health_all_unhealthy_after_restart
+  else
+    assert_route_health_peer_failover_after_restart
+  fi
+  if ((route_health_mixed_exit_restart_flag && ! route_health_all_unhealthy_restart_flag)); then
     wait_for_route_health_primary "after-failover"
   fi
 else

@@ -128,6 +128,23 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["help", "users", "create"],
         include_str!("snapshots/users_create_help.stdout"),
     );
+    assert_stdout_snapshot(&["node", "-h"], include_str!("snapshots/nodes_help.stdout"));
+    assert_stdout_snapshot(
+        &["help", "nodes", "routes"],
+        include_str!("snapshots/nodes_list_routes_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "logout", "-h"],
+        include_str!("snapshots/nodes_expire_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "node", "t"],
+        include_str!("snapshots/nodes_tag_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "del", "--help"],
+        include_str!("snapshots/nodes_delete_help.stdout"),
+    );
 }
 
 #[test]
@@ -462,8 +479,16 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/users_destroy_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["nodes", "--help"],
+        include_str!("snapshots/nodes_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["nodes", "list", "--help"],
         include_str!("snapshots/nodes_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["nodes", "list-routes", "--help"],
+        include_str!("snapshots/nodes_list_routes_help.stdout"),
     );
     assert_stdout_snapshot(
         &["nodes", "register", "--help"],

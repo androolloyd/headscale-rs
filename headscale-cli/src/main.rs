@@ -618,6 +618,38 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["users", "destroy", "-h" | "--help"] | ["help", "users", "destroy"] => {
             Some(UPSTREAM_USERS_DESTROY_HELP)
         }
+        ["nodes" | "node", "-h" | "--help"] | ["help", "nodes" | "node"] => {
+            Some(UPSTREAM_NODES_HELP)
+        }
+        ["nodes" | "node", "list" | "ls" | "show", "-h" | "--help"]
+        | ["help", "nodes" | "node", "list" | "ls" | "show"] => Some(UPSTREAM_NODES_LIST_HELP),
+        [
+            "nodes" | "node",
+            "list-routes" | "lsr" | "routes",
+            "-h" | "--help",
+        ]
+        | ["help", "nodes" | "node", "list-routes" | "lsr" | "routes"] => {
+            Some(UPSTREAM_NODES_LIST_ROUTES_HELP)
+        }
+        [
+            "nodes" | "node",
+            "expire" | "logout" | "exp" | "e",
+            "-h" | "--help",
+        ]
+        | ["help", "nodes" | "node", "expire" | "logout" | "exp" | "e"] => {
+            Some(UPSTREAM_NODES_EXPIRE_HELP)
+        }
+        ["nodes" | "node", "rename", "-h" | "--help"] | ["help", "nodes" | "node", "rename"] => {
+            Some(UPSTREAM_NODES_RENAME_HELP)
+        }
+        ["nodes" | "node", "tag" | "tags" | "t", "-h" | "--help"]
+        | ["help", "nodes" | "node", "tag" | "tags" | "t"] => Some(UPSTREAM_NODES_TAG_HELP),
+        ["nodes" | "node", "approve-routes", "-h" | "--help"]
+        | ["help", "nodes" | "node", "approve-routes"] => Some(UPSTREAM_NODES_APPROVE_ROUTES_HELP),
+        ["nodes" | "node", "delete" | "del", "-h" | "--help"]
+        | ["help", "nodes" | "node", "delete" | "del"] => Some(UPSTREAM_NODES_DELETE_HELP),
+        ["nodes" | "node", "backfillips", "-h" | "--help"]
+        | ["help", "nodes" | "node", "backfillips"] => Some(UPSTREAM_NODES_BACKFILLIPS_HELP),
         _ => None,
     }
 }
@@ -951,6 +983,186 @@ Flags:
   -h, --help             help for destroy
   -i, --identifier int   User identifier (ID) (default -1)
   -n, --name string      Username
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_HELP: &str = r#"Manage the nodes of Headscale
+
+Usage:
+  headscale nodes [command]
+
+Aliases:
+  nodes, node
+
+Available Commands:
+  approve-routes Manage the approved routes of a node
+  backfillips    Backfill IPs missing from nodes
+  delete         Delete a node
+  expire         Expire (log out) a node in your network
+  list           List nodes
+  list-routes    List routes available on nodes
+  rename         Renames a node in your network
+  tag            Manage the tags of a node
+
+Flags:
+  -h, --help   help for nodes
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale nodes [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_NODES_LIST_HELP: &str = r"List nodes
+
+Usage:
+  headscale nodes list [flags]
+
+Aliases:
+  list, ls, show
+
+Flags:
+  -h, --help          help for list
+  -u, --user string   Filter by user
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_LIST_ROUTES_HELP: &str = r"List routes available on nodes
+
+Usage:
+  headscale nodes list-routes [flags]
+
+Aliases:
+  list-routes, lsr, routes
+
+Flags:
+  -h, --help              help for list-routes
+  -i, --identifier uint   Node identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_EXPIRE_HELP: &str = r"Expiring a node will keep the node in the database and force it to reauthenticate.
+
+Use --disable to disable key expiry (node will never expire).
+
+Usage:
+  headscale nodes expire [flags]
+
+Aliases:
+  expire, logout, exp, e
+
+Flags:
+  -d, --disable           Disable key expiry (node will never expire)
+  -e, --expiry string     Set expire to (RFC3339 format, e.g. 2025-08-27T10:00:00Z), or leave empty to expire immediately.
+  -h, --help              help for expire
+  -i, --identifier uint   Node identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_RENAME_HELP: &str = r"Renames a node in your network
+
+Usage:
+  headscale nodes rename NEW_NAME [flags]
+
+Flags:
+  -h, --help              help for rename
+  -i, --identifier uint   Node identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_TAG_HELP: &str = r"Manage the tags of a node
+
+Usage:
+  headscale nodes tag [flags]
+
+Aliases:
+  tag, tags, t
+
+Flags:
+  -h, --help              help for tag
+  -i, --identifier uint   Node identifier (ID)
+  -t, --tags strings      List of tags to add to the node
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_APPROVE_ROUTES_HELP: &str = r#"Manage the approved routes of a node
+
+Usage:
+  headscale nodes approve-routes [flags]
+
+Flags:
+  -h, --help              help for approve-routes
+  -i, --identifier uint   Node identifier (ID)
+  -r, --routes strings    List of routes that will be approved (comma-separated, e.g. "10.0.0.0/8,192.168.0.0/24" or empty string to remove all approved routes)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+"#;
+
+const UPSTREAM_NODES_DELETE_HELP: &str = r"Delete a node
+
+Usage:
+  headscale nodes delete [flags]
+
+Aliases:
+  delete, del
+
+Flags:
+  -h, --help              help for delete
+  -i, --identifier uint   Node identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_NODES_BACKFILLIPS_HELP: &str = r"
+Backfill IPs can be used to add/remove IPs from nodes
+based on the current configuration of Headscale.
+
+If there are nodes that does not have IPv4 or IPv6
+even if prefixes for both are configured in the config,
+this command can be used to assign IPs of the sort to
+all nodes that are missing.
+
+If you remove IPv4 or IPv6 prefixes from the config,
+it can be run to remove the IPs that should no longer
+be assigned to nodes.
+
+Usage:
+  headscale nodes backfillips [flags]
+
+Flags:
+  -h, --help   help for backfillips
 
 Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
@@ -1538,7 +1750,30 @@ mod tests {
             upstream_exact_help(&["help", "users", "create"]),
             Some(UPSTREAM_USERS_CREATE_HELP)
         );
-        assert_eq!(upstream_exact_help(&["nodes", "--help"]), None);
+        assert_eq!(
+            upstream_exact_help(&["nodes", "--help"]),
+            Some(UPSTREAM_NODES_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["node", "-h"]),
+            Some(UPSTREAM_NODES_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "nodes", "routes"]),
+            Some(UPSTREAM_NODES_LIST_ROUTES_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["nodes", "logout", "-h"]),
+            Some(UPSTREAM_NODES_EXPIRE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "node", "t"]),
+            Some(UPSTREAM_NODES_TAG_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["nodes", "del", "--help"]),
+            Some(UPSTREAM_NODES_DELETE_HELP)
+        );
         assert_eq!(upstream_exact_help(&["--help", "nodes"]), None);
     }
 

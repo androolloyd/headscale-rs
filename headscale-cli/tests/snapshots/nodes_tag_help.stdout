@@ -1,15 +1,17 @@
-Replace the node's forced-tags list. Empty list clears the override; tags are matched by exact string against the policy
+Manage the tags of a node
 
-Usage: headscale nodes tag [OPTIONS] [ID] [TAGS]...
+Usage:
+  headscale nodes tag [flags]
 
-Arguments:
-  [ID]       Node identifier (ID). Positional form is kept for legacy compatibility
-  [TAGS]...  Legacy positional comma-separated tag list
+Aliases:
+  tag, tags, t
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -i, --identifier <ID>  Node identifier (ID)
-  -t, --tags <TAGS>      Comma-separated tag list, e.g. `tag:prod,tag:web`
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+  -h, --help              help for tag
+  -i, --identifier uint   Node identifier (ID)
+  -t, --tags strings      List of tags to add to the node
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

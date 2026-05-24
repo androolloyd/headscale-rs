@@ -1,0 +1,27 @@
+Manage the nodes of Headscale
+
+Usage:
+  headscale nodes [command]
+
+Aliases:
+  nodes, node
+
+Available Commands:
+  approve-routes Manage the approved routes of a node
+  backfillips    Backfill IPs missing from nodes
+  delete         Delete a node
+  expire         Expire (log out) a node in your network
+  list           List nodes
+  list-routes    List routes available on nodes
+  rename         Renames a node in your network
+  tag            Manage the tags of a node
+
+Flags:
+  -h, --help   help for nodes
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale nodes [command] --help" for more information about a command.

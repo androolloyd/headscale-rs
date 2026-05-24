@@ -1,10 +1,23 @@
-Backfill missing node IP addresses
 
-Usage: headscale nodes backfillips [OPTIONS]
+Backfill IPs can be used to add/remove IPs from nodes
+based on the current configuration of Headscale.
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-      --confirm          Confirm the backfill operation. The global --force flag also confirms
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+If there are nodes that does not have IPv4 or IPv6
+even if prefixes for both are configured in the config,
+this command can be used to assign IPs of the sort to
+all nodes that are missing.
+
+If you remove IPv4 or IPv6 prefixes from the config,
+it can be run to remove the IPs that should no longer
+be assigned to nodes.
+
+Usage:
+  headscale nodes backfillips [flags]
+
+Flags:
+  -h, --help   help for backfillips
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

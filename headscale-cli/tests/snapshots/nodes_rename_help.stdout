@@ -1,13 +1,13 @@
 Renames a node in your network
 
-Usage: headscale nodes rename [OPTIONS] <NEW_NAME>
+Usage:
+  headscale nodes rename NEW_NAME [flags]
 
-Arguments:
-  <NEW_NAME>  New hostname
+Flags:
+  -h, --help              help for rename
+  -i, --identifier uint   Node identifier (ID)
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -i, --identifier <ID>  Node identifier (ID)
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

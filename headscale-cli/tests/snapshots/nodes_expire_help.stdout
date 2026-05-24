@@ -1,15 +1,20 @@
-Mark a node expired. Without `--at`, expires immediately (forces re-register on the node's next /map). With `--at`, schedules expiry for the supplied ISO-8601 timestamp. With `--disable`, clears key expiry so the node never expires
+Expiring a node will keep the node in the database and force it to reauthenticate.
 
-Usage: headscale nodes expire [OPTIONS] [ID]
+Use --disable to disable key expiry (node will never expire).
 
-Arguments:
-  [ID]  Node identifier (ID). Positional form is kept for legacy compatibility
+Usage:
+  headscale nodes expire [flags]
 
-Options:
-  -c, --config <CONFIG>   config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -i, --identifier <ID>   Node identifier (ID)
-  -e, --expiry <RFC3339>  ISO-8601 timestamp to schedule expiry at. Defaults to "now"
-  -d, --disable           Disable key expiry for this node
-  -o, --output <OUTPUT>   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force             Disable prompts and forces the execution
-  -h, --help              Print help
+Aliases:
+  expire, logout, exp, e
+
+Flags:
+  -d, --disable           Disable key expiry (node will never expire)
+  -e, --expiry string     Set expire to (RFC3339 format, e.g. 2025-08-27T10:00:00Z), or leave empty to expire immediately.
+  -h, --help              help for expire
+  -i, --identifier uint   Node identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

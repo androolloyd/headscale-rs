@@ -12,6 +12,9 @@ use super::client::AdminClient;
 use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured, print_table};
 
+#[derive(Debug, Serialize)]
+struct EmptyResponse {}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     client: &AdminClient,
@@ -33,17 +36,7 @@ pub async fn create(
     if fmt.is_structured() {
         print_structured(fmt, &key)?;
     } else {
-        // Mint flow is the one path that intentionally splashes
-        // the full secret — the operator hands it to the device
-        // and never sees it again.
-        println!("Minted preauth key for user '{}':", key.user);
-        println!("  {}", key.key);
-        println!("  expires_at: {}", key.expires_at);
-        println!("  reusable:   {}", key.reusable);
-        println!("  ephemeral:  {}", key.ephemeral);
-        if !key.tags.is_empty() {
-            println!("  tags:       {}", key.tags.join(","));
-        }
+        println!("{}", key.key);
     }
     Ok(())
 }
@@ -72,14 +65,7 @@ pub async fn create_grpc(
     if fmt.is_structured() {
         print_structured(fmt, &key)?;
     } else {
-        println!("Minted preauth key for user '{}':", key.user);
-        println!("  {}", key.key);
-        println!("  expires_at: {}", key.expires_at_display);
-        println!("  reusable:   {}", key.reusable);
-        println!("  ephemeral:  {}", key.ephemeral);
-        if !key.tags.is_empty() {
-            println!("  tags:       {}", key.tags.join(","));
-        }
+        println!("{}", key.key);
     }
     Ok(())
 }
@@ -157,14 +143,8 @@ pub async fn delete_grpc(
 }
 
 fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
-    #[derive(Serialize)]
-    struct ResultOutput<'a> {
-        #[serde(rename = "Result")]
-        result: &'a str,
-    }
-
     if fmt.is_structured() {
-        print_structured(fmt, &ResultOutput { result: message })
+        print_structured(fmt, &EmptyResponse {})
     } else {
         println!("{message}");
         Ok(())
@@ -173,34 +153,46 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
 
 fn render_keys(keys: &[PreauthAdminKey]) {
     if keys.is_empty() {
-        println!("No preauth keys.");
+        print_table(
+            &[
+                "ID",
+                "Key/Prefix",
+                "Reusable",
+                "Ephemeral",
+                "Used",
+                "Expiration",
+                "Created",
+                "Owner",
+            ],
+            &[],
+        );
         return;
     }
     let rows: Vec<Vec<String>> = keys
         .iter()
         .map(|k| {
             vec![
-                short_prefix(&k.key),
-                k.user.clone(),
+                k.id.to_string(),
+                k.key.clone(),
                 k.reusable.to_string(),
                 k.ephemeral.to_string(),
-                k.expires_at.to_string(),
-                if k.tags.is_empty() {
-                    "-".into()
-                } else {
-                    k.tags.join(",")
-                },
+                (k.redemptions > 0).to_string(),
+                timestamp_display_u64(k.expires_at),
+                timestamp_display_u64(k.created_at),
+                owner_display(&k.user, &k.tags),
             ]
         })
         .collect();
     print_table(
         &[
-            "PREFIX",
-            "USER",
-            "REUSABLE",
-            "EPHEMERAL",
-            "EXPIRES_AT",
-            "TAGS",
+            "ID",
+            "Key/Prefix",
+            "Reusable",
+            "Ephemeral",
+            "Used",
+            "Expiration",
+            "Created",
+            "Owner",
         ],
         &rows,
     );
@@ -208,34 +200,46 @@ fn render_keys(keys: &[PreauthAdminKey]) {
 
 fn render_grpc_keys(keys: &[PreauthOutput]) {
     if keys.is_empty() {
-        println!("No preauth keys.");
+        print_table(
+            &[
+                "ID",
+                "Key/Prefix",
+                "Reusable",
+                "Ephemeral",
+                "Used",
+                "Expiration",
+                "Created",
+                "Owner",
+            ],
+            &[],
+        );
         return;
     }
     let rows: Vec<Vec<String>> = keys
         .iter()
         .map(|k| {
             vec![
-                short_prefix(&k.key),
-                k.user.clone(),
+                k.id.to_string(),
+                k.key.clone(),
                 k.reusable.to_string(),
                 k.ephemeral.to_string(),
+                k.used.to_string(),
                 k.expires_at_display.clone(),
-                if k.tags.is_empty() {
-                    "-".into()
-                } else {
-                    k.tags.join(",")
-                },
+                k.created_at_display.clone(),
+                owner_display(&k.user, &k.tags),
             ]
         })
         .collect();
     print_table(
         &[
-            "PREFIX",
-            "USER",
-            "REUSABLE",
-            "EPHEMERAL",
-            "EXPIRES_AT",
-            "TAGS",
+            "ID",
+            "Key/Prefix",
+            "Reusable",
+            "Ephemeral",
+            "Used",
+            "Expiration",
+            "Created",
+            "Owner",
         ],
         &rows,
     );
@@ -259,7 +263,43 @@ fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+fn timestamp_display_proto(ts: Option<&prost_types::Timestamp>) -> String {
+    ts.map_or_else(
+        || "-".into(),
+        |ts| {
+            let nanos = u32::try_from(ts.nanos).ok();
+            nanos
+                .and_then(|nanos| DateTime::<Utc>::from_timestamp(ts.seconds, nanos))
+                .map_or_else(
+                    || "-".into(),
+                    |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                )
+        },
+    )
+}
+
+fn timestamp_display_u64(ts: u64) -> String {
+    if ts >= i64::MAX as u64 {
+        return "-".into();
+    }
+    DateTime::<Utc>::from_timestamp(ts as i64, 0).map_or_else(
+        || "-".into(),
+        |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
+}
+
+fn owner_display(user: &str, tags: &[String]) -> String {
+    if !tags.is_empty() {
+        tags.join("\n")
+    } else if !user.is_empty() {
+        user.to_string()
+    } else {
+        "-".into()
+    }
+}
+
 /// Show the upstream display prefix for modern pre-auth keys.
+#[cfg(test)]
 fn short_prefix(key: &str) -> String {
     const TOKEN_PREFIX: &str = "hskey-auth-";
     const TOKEN_PREFIX_LEN: usize = 12;
@@ -286,6 +326,8 @@ struct PreauthOutput {
     expires_at: Option<String>,
     #[serde(skip)]
     expires_at_display: String,
+    #[serde(skip)]
+    created_at_display: String,
 }
 
 impl PreauthOutput {
@@ -308,7 +350,8 @@ impl From<GrpcPreAuthKey> for PreauthOutput {
             used: key.used,
             tags: key.acl_tags,
             created_at: timestamp_rfc3339(key.created_at.as_ref()),
-            expires_at_display: expires_at.clone().unwrap_or_else(|| "-".into()),
+            created_at_display: timestamp_display_proto(key.created_at.as_ref()),
+            expires_at_display: timestamp_display_proto(key.expiration.as_ref()),
             expires_at,
         }
     }

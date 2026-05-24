@@ -4,7 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use headscale_api::admin::{ApiKeyAdminKey, ApiKeyCreated, ApiKeyMintRequest};
 use headscale_api::generated::ApiKey as GrpcApiKey;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,9 @@ use super::client::AdminClient;
 use super::duration::parse_duration_secs;
 use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured, print_table};
+
+#[derive(Debug, Serialize)]
+struct EmptyResponse {}
 
 #[derive(Debug, Deserialize)]
 struct ApiKeyListResponse {
@@ -43,7 +46,7 @@ pub async fn create(
         )
         .await?;
     if fmt.is_structured() {
-        print_structured(fmt, &key)?;
+        print_structured(fmt, &key.api_key)?;
     } else {
         println!("{}", key.api_key);
     }
@@ -59,7 +62,7 @@ pub async fn create_grpc(
         .create_api_key(Some(expiration_unix(expiration)?))
         .await?;
     if fmt.is_structured() {
-        print_structured(fmt, &ApiKeyCreated { api_key })?;
+        print_structured(fmt, &api_key)?;
     } else {
         println!("{api_key}");
     }
@@ -106,11 +109,11 @@ pub async fn expire_grpc(
     client: &mut GrpcAdminClient,
     prefix: Option<&str>,
     id: Option<u64>,
+    fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let body = identify(prefix, id)?;
     client.expire_api_key(body.prefix, body.id).await?;
-    println!("Key expired");
-    Ok(())
+    print_result(fmt, "Key expired")
 }
 
 pub async fn delete(
@@ -128,11 +131,20 @@ pub async fn delete_grpc(
     client: &mut GrpcAdminClient,
     prefix: Option<&str>,
     id: Option<u64>,
+    fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let body = identify(prefix, id)?;
     client.delete_api_key(body.prefix, body.id).await?;
-    println!("Key deleted");
-    Ok(())
+    print_result(fmt, "Key deleted")
+}
+
+fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
+    if fmt.is_structured() {
+        print_structured(fmt, &EmptyResponse {})
+    } else {
+        println!("{message}");
+        Ok(())
+    }
 }
 
 fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<'_>, AdminError> {
@@ -158,7 +170,7 @@ fn expiration_unix(expiration: &str) -> Result<i64, AdminError> {
 
 fn render_keys(keys: &[ApiKeyAdminKey]) {
     if keys.is_empty() {
-        println!("No API keys.");
+        print_table(&["ID", "Prefix", "Expiration", "Created"], &[]);
         return;
     }
     let rows: Vec<Vec<String>> = keys
@@ -168,16 +180,16 @@ fn render_keys(keys: &[ApiKeyAdminKey]) {
                 k.id.to_string(),
                 k.prefix.clone(),
                 format_optional_unix(k.expiration),
-                k.created_at.to_string(),
+                timestamp_display_i64(k.created_at),
             ]
         })
         .collect();
-    print_table(&["ID", "PREFIX", "EXPIRATION", "CREATED_AT"], &rows);
+    print_table(&["ID", "Prefix", "Expiration", "Created"], &rows);
 }
 
 fn render_grpc_keys(keys: &[ApiKeyOutput]) {
     if keys.is_empty() {
-        println!("No API keys.");
+        print_table(&["ID", "Prefix", "Expiration", "Created"], &[]);
         return;
     }
     let rows: Vec<Vec<String>> = keys
@@ -188,25 +200,36 @@ fn render_grpc_keys(keys: &[ApiKeyOutput]) {
                 k.prefix.clone(),
                 k.expiration_display.clone(),
                 k.created_display.clone(),
-                k.last_seen_display.clone(),
             ]
         })
         .collect();
-    print_table(
-        &["ID", "PREFIX", "EXPIRATION", "CREATED_AT", "LAST_SEEN"],
-        &rows,
-    );
+    print_table(&["ID", "Prefix", "Expiration", "Created"], &rows);
 }
 
 fn format_optional_unix(v: Option<i64>) -> String {
-    v.map_or_else(|| "-".into(), |ts| ts.to_string())
+    v.map_or_else(|| "-".into(), timestamp_display_i64)
 }
 
-fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
-    let ts = ts?;
-    let nanos = u32::try_from(ts.nanos).ok()?;
-    DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
-        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+fn timestamp_display_i64(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0).map_or_else(
+        || "-".into(),
+        |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
+}
+
+fn timestamp_display_proto(ts: Option<&prost_types::Timestamp>) -> String {
+    ts.map_or_else(
+        || "-".into(),
+        |ts| {
+            let nanos = u32::try_from(ts.nanos).ok();
+            nanos
+                .and_then(|nanos| DateTime::<Utc>::from_timestamp(ts.seconds, nanos))
+                .map_or_else(
+                    || "-".into(),
+                    |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                )
+        },
+    )
 }
 
 fn now_unix() -> i64 {
@@ -220,33 +243,54 @@ struct ApiKeyOutput {
     id: u64,
     prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    expiration: Option<String>,
+    expiration: Option<TimestampOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
+    created_at: Option<TimestampOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_seen: Option<String>,
+    last_seen: Option<TimestampOutput>,
     #[serde(skip)]
     expiration_display: String,
     #[serde(skip)]
     created_display: String,
-    #[serde(skip)]
-    last_seen_display: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TimestampOutput {
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    seconds: i64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    nanos: i32,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+impl From<prost_types::Timestamp> for TimestampOutput {
+    fn from(ts: prost_types::Timestamp) -> Self {
+        Self {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        }
+    }
 }
 
 impl From<GrpcApiKey> for ApiKeyOutput {
     fn from(key: GrpcApiKey) -> Self {
-        let expiration = timestamp_rfc3339(key.expiration.as_ref());
-        let created_at = timestamp_rfc3339(key.created_at.as_ref());
-        let last_seen = timestamp_rfc3339(key.last_seen.as_ref());
+        let expiration_display = timestamp_display_proto(key.expiration.as_ref());
+        let created_display = timestamp_display_proto(key.created_at.as_ref());
         Self {
             id: key.id,
             prefix: key.prefix,
-            expiration_display: expiration.clone().unwrap_or_else(|| "-".into()),
-            created_display: created_at.clone().unwrap_or_else(|| "-".into()),
-            last_seen_display: last_seen.clone().unwrap_or_else(|| "-".into()),
-            expiration,
-            created_at,
-            last_seen,
+            expiration: key.expiration.map(TimestampOutput::from),
+            created_at: key.created_at.map(TimestampOutput::from),
+            last_seen: key.last_seen.map(TimestampOutput::from),
+            expiration_display,
+            created_display,
         }
     }
 }
@@ -264,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn grpc_api_key_output_formats_timestamps_as_rfc3339() {
+    fn grpc_api_key_output_keeps_proto_timestamps_for_structured_output() {
         let out = ApiKeyOutput::from(GrpcApiKey {
             id: 7,
             prefix: "hskey-api-abcdefghijkl-***".into(),
@@ -279,9 +323,14 @@ mod tests {
             last_seen: None,
         });
         assert_eq!(out.id, 7);
-        assert_eq!(out.expiration.as_deref(), Some("2024-01-01T00:00:00Z"));
-        assert_eq!(out.created_at.as_deref(), Some("2024-01-01T00:01:00Z"));
-        assert_eq!(out.last_seen, None);
-        assert_eq!(out.last_seen_display, "-");
+        assert_eq!(
+            out.expiration.as_ref().map(|ts| ts.seconds),
+            Some(1_704_067_200)
+        );
+        assert_eq!(
+            out.created_at.as_ref().map(|ts| ts.seconds),
+            Some(1_704_067_260)
+        );
+        assert!(out.last_seen.is_none());
     }
 }

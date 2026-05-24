@@ -815,10 +815,10 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
         }
         ApiKeysCmd::List => apikeys::list_grpc(&mut client, fmt).await,
         ApiKeysCmd::Expire { prefix, id } => {
-            apikeys::expire_grpc(&mut client, prefix.as_deref(), *id).await
+            apikeys::expire_grpc(&mut client, prefix.as_deref(), *id, fmt).await
         }
         ApiKeysCmd::Delete { prefix, id } => {
-            apikeys::delete_grpc(&mut client, prefix.as_deref(), *id).await
+            apikeys::delete_grpc(&mut client, prefix.as_deref(), *id, fmt).await
         }
     }
 }

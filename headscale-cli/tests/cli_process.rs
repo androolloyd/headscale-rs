@@ -1218,16 +1218,8 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&create_preauth)
     );
-    let preauth_stdout = stdout(&create_preauth);
-    assert!(preauth_stdout.starts_with("Minted preauth key for user 'alice':\n"));
-    let preauth_key = preauth_stdout
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("hskey-auth-"))
-        .map(|rest| format!("hskey-auth-{rest}"))
-        .expect("preauth key in stdout");
-    let preauth_prefix = display_prefix(&preauth_key, "hskey-auth-");
-    assert!(preauth_stdout.contains("  reusable:   true\n"));
-    assert!(preauth_stdout.contains("  ephemeral:  true\n"));
+    let preauth_key = stdout(&create_preauth).trim().to_string();
+    assert!(preauth_key.starts_with("hskey-auth-"));
     assert_eq!(stderr(&create_preauth), "");
 
     let list_preauth = headscale_with_config(&config, &["preauthkeys", "list"]);
@@ -1237,8 +1229,14 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&list_preauth)
     );
     let list_preauth_stdout = stdout(&list_preauth);
-    assert!(list_preauth_stdout.contains("PREFIX"));
-    assert!(list_preauth_stdout.contains(&preauth_prefix));
+    assert!(list_preauth_stdout.contains("ID  Key/Prefix"));
+    assert!(list_preauth_stdout.contains("Reusable"));
+    assert!(list_preauth_stdout.contains("Ephemeral"));
+    assert!(list_preauth_stdout.contains("Used"));
+    assert!(list_preauth_stdout.contains("Expiration"));
+    assert!(list_preauth_stdout.contains("Created"));
+    assert!(list_preauth_stdout.contains("Owner"));
+    assert!(list_preauth_stdout.contains(&preauth_key));
     assert!(list_preauth_stdout.contains("alice"));
     assert!(list_preauth_stdout.contains("true"));
     assert_eq!(stderr(&list_preauth), "");
@@ -1270,7 +1268,8 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&empty_preauth)
     );
-    assert_eq!(stdout(&empty_preauth), "No preauth keys.\n");
+    assert!(stdout(&empty_preauth).starts_with("ID  Key/Prefix"));
+    assert!(!stdout(&empty_preauth).contains("No preauth keys."));
     assert_eq!(stderr(&empty_preauth), "");
 
     let create_api_key =
@@ -1292,7 +1291,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&list_api_keys)
     );
     let list_api_stdout = stdout(&list_api_keys);
-    assert!(list_api_stdout.contains("PREFIX"));
+    assert!(list_api_stdout.contains("ID  Prefix"));
+    assert!(list_api_stdout.contains("Expiration"));
+    assert!(list_api_stdout.contains("Created"));
+    assert!(!list_api_stdout.contains("LAST_SEEN"));
     assert!(list_api_stdout.contains(&api_prefix));
     assert_eq!(stderr(&list_api_keys), "");
 
@@ -1323,8 +1325,54 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&empty_api_keys)
     );
-    assert_eq!(stdout(&empty_api_keys), "No API keys.\n");
+    assert!(stdout(&empty_api_keys).starts_with("ID  Prefix"));
+    assert!(!stdout(&empty_api_keys).contains("No API keys."));
     assert_eq!(stderr(&empty_api_keys), "");
+
+    let create_api_key_json = headscale_with_config(
+        &config,
+        &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+    );
+    let api_key_json = json_output(&create_api_key_json)
+        .as_str()
+        .expect("API-key create JSON is the secret string")
+        .to_string();
+    assert!(api_key_json.starts_with("hskey-api-"));
+    let api_json_prefix = display_prefix(&api_key_json, "hskey-api-");
+    assert_eq!(stderr(&create_api_key_json), "");
+
+    let list_api_keys_json = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
+    let listed_api_keys = json_output(&list_api_keys_json);
+    assert_eq!(listed_api_keys.as_array().unwrap().len(), 1);
+    let listed_api_key = &listed_api_keys[0];
+    assert_eq!(
+        listed_api_key["prefix"].as_str(),
+        Some(api_json_prefix.as_str())
+    );
+    assert!(listed_api_key["expiration"]["seconds"].as_i64().is_some());
+    assert!(listed_api_key["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_api_key.get("last_seen").is_none());
+    let api_json_id = listed_api_key["id"].as_u64().unwrap().to_string();
+
+    let expire_api_key_json = headscale_with_config(
+        &config,
+        &["-o", "json", "apikeys", "expire", "--id", &api_json_id],
+    );
+    assert_eq!(
+        json_output(&expire_api_key_json).as_object().unwrap().len(),
+        0
+    );
+    assert_eq!(stderr(&expire_api_key_json), "");
+
+    let delete_api_key_json = headscale_with_config(
+        &config,
+        &["-o", "json", "apikeys", "delete", "--id", &api_json_id],
+    );
+    assert_eq!(
+        json_output(&delete_api_key_json).as_object().unwrap().len(),
+        0
+    );
+    assert_eq!(stderr(&delete_api_key_json), "");
 
     let auth_register_id = "aaaaaaaaaaaaaaaaaaaaaaaa";
     let debug_create = headscale_with_config(

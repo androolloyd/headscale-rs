@@ -2928,10 +2928,6 @@ fn debug_statsviz_html() -> &'static str {
 }
 
 fn registration_id_from_register_path(segment: &str) -> Option<&str> {
-    if segment.len() == REGISTRATION_ID_LENGTH {
-        return Some(segment);
-    }
-
     let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
     (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
@@ -3268,6 +3264,24 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("text/plain; charset=utf-8")
         );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"invalid registration id\n");
+    }
+
+    #[tokio::test]
+    async fn web_register_rejects_raw_registration_id_like_current_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/register/3oYCOZYA2zZmGB4PQ7aHBaMi")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"invalid registration id\n");
     }
@@ -4044,7 +4058,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/register/3oYCOZYA2zZmGB4PQ7aHBaMi")
+                    .uri("/register/hskey-authreq-3oYCOZYA2zZmGB4PQ7aHBaMi")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

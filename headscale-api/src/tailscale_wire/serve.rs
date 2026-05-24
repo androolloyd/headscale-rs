@@ -588,7 +588,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(format!("/register/{}", "a".repeat(24)))
+                    .uri(format!("/register/hskey-authreq-{}", "a".repeat(24)))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

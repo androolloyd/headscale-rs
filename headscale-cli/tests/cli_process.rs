@@ -2636,6 +2636,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&delete_api_key_yaml), "");
 
     let auth_register_id = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    let auth_id = format!("hskey-authreq-{auth_register_id}");
     let debug_create = headscale_with_config(
         &config,
         &[
@@ -2644,7 +2645,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            auth_register_id,
+            &auth_id,
             "--name",
             "auth-node",
         ],
@@ -2656,7 +2657,6 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stdout(&debug_create), "Node created\n");
     assert_eq!(stderr(&debug_create), "");
-    let auth_id = format!("hskey-authreq-{auth_register_id}");
     let auth_register = headscale_with_config(
         &config,
         &["auth", "register", "--user", "alice", "--auth-id", &auth_id],
@@ -2789,6 +2789,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&empty_nodes), "");
 
     let nodes_register_id = "cccccccccccccccccccccccc";
+    let nodes_register_auth_id = format!("hskey-authreq-{nodes_register_id}");
     let nodes_register_pending = headscale_with_config(
         &config,
         &[
@@ -2797,7 +2798,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            nodes_register_id,
+            &nodes_register_auth_id,
             "--name",
             "nodes-register-node",
         ],
@@ -2818,7 +2819,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            nodes_register_id,
+            &nodes_register_auth_id,
         ],
     );
     assert!(
@@ -2836,6 +2837,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
 
     let approve_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    let approve_auth_id = format!("hskey-authreq-{approve_id}");
     let approve_pending = headscale_with_config(
         &config,
         &[
@@ -2844,7 +2846,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            approve_id,
+            &approve_auth_id,
             "--name",
             "approve-node",
         ],
@@ -2854,7 +2856,6 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&approve_pending)
     );
-    let approve_auth_id = format!("hskey-authreq-{approve_id}");
     let approve =
         headscale_with_config(&config, &["auth", "approve", "--auth-id", &approve_auth_id]);
     assert!(approve.status.success(), "stderr: {}", stderr(&approve));
@@ -2862,6 +2863,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&approve), "");
 
     let approve_json_id = "eeeeeeeeeeeeeeeeeeeeeeee";
+    let approve_json_auth_id = format!("hskey-authreq-{approve_json_id}");
     let approve_json_pending = headscale_with_config(
         &config,
         &[
@@ -2870,7 +2872,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            approve_json_id,
+            &approve_json_auth_id,
             "--name",
             "approve-json-node",
         ],
@@ -2880,7 +2882,6 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&approve_json_pending)
     );
-    let approve_json_auth_id = format!("hskey-authreq-{approve_json_id}");
     let approve_json = headscale_with_config(
         &config,
         &[
@@ -2901,6 +2902,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&approve_json), "");
 
     let reject_id = "cccccccccccccccccccccccc";
+    let reject_auth_id = format!("hskey-authreq-{reject_id}");
     let reject_pending = headscale_with_config(
         &config,
         &[
@@ -2909,7 +2911,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            reject_id,
+            &reject_auth_id,
             "--name",
             "reject-node",
         ],
@@ -2919,13 +2921,13 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&reject_pending)
     );
-    let reject_auth_id = format!("hskey-authreq-{reject_id}");
     let reject = headscale_with_config(&config, &["auth", "reject", "--auth-id", &reject_auth_id]);
     assert!(reject.status.success(), "stderr: {}", stderr(&reject));
     assert_eq!(stdout(&reject), "Auth request rejected\n");
     assert_eq!(stderr(&reject), "");
 
     let reject_json_line_id = "ffffffffffffffffffffffff";
+    let reject_json_line_auth_id = format!("hskey-authreq-{reject_json_line_id}");
     let reject_json_line_pending = headscale_with_config(
         &config,
         &[
@@ -2934,7 +2936,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            reject_json_line_id,
+            &reject_json_line_auth_id,
             "--name",
             "reject-json-line-node",
         ],
@@ -2944,7 +2946,6 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&reject_json_line_pending)
     );
-    let reject_json_line_auth_id = format!("hskey-authreq-{reject_json_line_id}");
     let reject_json_line = headscale_with_config(
         &config,
         &[
@@ -3024,6 +3025,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
     assert_eq!(stderr(&create_user), "");
 
     let registration_id = "dddddddddddddddddddddddd";
+    let auth_id = format!("hskey-authreq-{registration_id}");
     let debug_create = headscale_with_config(
         &config,
         &[
@@ -3032,7 +3034,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
             "--user",
             "alice",
             "--key",
-            registration_id,
+            &auth_id,
             "--name",
             "route-node",
             "--route",
@@ -3047,7 +3049,6 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
     assert_eq!(stdout(&debug_create), "Node created\n");
     assert_eq!(stderr(&debug_create), "");
 
-    let auth_id = format!("hskey-authreq-{registration_id}");
     let auth_register = headscale_with_config(
         &config,
         &["auth", "register", "--user", "alice", "--auth-id", &auth_id],

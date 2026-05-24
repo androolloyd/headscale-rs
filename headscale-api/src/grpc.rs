@@ -911,11 +911,11 @@ pub mod upstream {
         ) -> Result<Response<AuthRegisterResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let key = auth_id_cache_key(&body.auth_id)?;
+            auth_id_cache_key(&body.auth_id)?;
             let response = self
                 .register_node_body(RegisterNodeRequest {
                     user: body.user,
-                    key,
+                    key: body.auth_id,
                 })
                 .await?;
             Ok(Response::new(AuthRegisterResponse {
@@ -1601,15 +1601,6 @@ pub mod upstream {
     const REGISTRATION_ID_LENGTH: usize = 24;
     const UPSTREAM_AUTH_ID_PREFIX: &str = "hskey-authreq-";
 
-    fn validate_registration_id(id: &str) -> Result<(), Status> {
-        if id.len() != REGISTRATION_ID_LENGTH {
-            return Err(Status::invalid_argument(format!(
-                "registration ID must be {REGISTRATION_ID_LENGTH} characters long"
-            )));
-        }
-        Ok(())
-    }
-
     fn auth_id_cache_key(id: &str) -> Result<String, Status> {
         match id.strip_prefix(UPSTREAM_AUTH_ID_PREFIX) {
             Some(rest) if rest.len() == REGISTRATION_ID_LENGTH => Ok(rest.to_string()),
@@ -1626,11 +1617,7 @@ pub mod upstream {
     }
 
     fn registration_cache_key_from_register_key(key: &str) -> Result<String, Status> {
-        if key.starts_with(UPSTREAM_AUTH_ID_PREFIX) {
-            return auth_id_cache_key(key);
-        }
-        validate_registration_id(key)?;
-        Ok(key.to_string())
+        auth_id_cache_key(key)
     }
 
     fn random_key_hex() -> String {
@@ -2347,6 +2334,7 @@ mod upstream_tests {
         let service = service.with_ip_allocator(Arc::new(FixedDebugAllocator));
         const REGISTRATION_ID: &str = "debugallocatorabcdefghij";
         assert_eq!(REGISTRATION_ID.len(), 24);
+        let auth_id = format!("hskey-authreq-{REGISTRATION_ID}");
 
         service
             .create_user(Request::new(CreateUserRequest {
@@ -2361,7 +2349,7 @@ mod upstream_tests {
         let debug_node = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: auth_id.clone(),
                 name: "debug-router".into(),
                 routes: Vec::new(),
             }))
@@ -2375,7 +2363,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: auth_id,
             }))
             .await
             .unwrap()
@@ -2395,6 +2383,7 @@ mod upstream_tests {
         let service = service.with_ip_allocator(Arc::new(Ipv6OnlyDebugAllocator));
         const REGISTRATION_ID: &str = "debugv6onlyabcdefghijklm";
         assert_eq!(REGISTRATION_ID.len(), 24);
+        let auth_id = format!("hskey-authreq-{REGISTRATION_ID}");
 
         service
             .create_user(Request::new(CreateUserRequest {
@@ -2409,7 +2398,7 @@ mod upstream_tests {
         let debug_node = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: auth_id.clone(),
                 name: "debug-v6".into(),
                 routes: Vec::new(),
             }))
@@ -2423,7 +2412,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: auth_id,
             }))
             .await
             .unwrap()
@@ -2452,7 +2441,7 @@ mod upstream_tests {
         let debug_node = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
                 name: "auth-debug".into(),
                 routes: vec!["10.42.0.0/24".into()],
             }))
@@ -2740,7 +2729,7 @@ mod upstream_tests {
         let pending = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
                 name: "debug-router".into(),
                 routes: vec!["10.0.0.0/24".into()],
             }))
@@ -2754,7 +2743,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
             }))
             .await
             .unwrap()
@@ -2878,7 +2867,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: first_id,
+                key: format!("hskey-authreq-{first_id}"),
             }))
             .await
             .unwrap()
@@ -2906,7 +2895,7 @@ mod upstream_tests {
         let reauth = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: second_id,
+                key: format!("hskey-authreq-{second_id}"),
             }))
             .await
             .unwrap()
@@ -3017,7 +3006,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: registration_id,
+                key: format!("hskey-authreq-{registration_id}"),
             }))
             .await
             .unwrap()
@@ -3166,7 +3155,7 @@ mod upstream_tests {
         service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
                 name: "exit-router".into(),
                 routes: vec!["0.0.0.0/0".into(), "::/0".into()],
             }))
@@ -3176,7 +3165,7 @@ mod upstream_tests {
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: REGISTRATION_ID.into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
             }))
             .await
             .unwrap()
@@ -3486,13 +3475,26 @@ mod upstream_tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         let err = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: "abcdefghijklmnopqrstuvwx".into(),
+                name: "debug".into(),
+                routes: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("auth ID has invalid prefix"));
+
+        let err = service
             .register_node(Request::new(RegisterNodeRequest {
                 user: "alice".into(),
                 key: "abcdefghijklmnopqrstuvwx".into(),
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("auth ID has invalid prefix"));
     }
 
     #[test]

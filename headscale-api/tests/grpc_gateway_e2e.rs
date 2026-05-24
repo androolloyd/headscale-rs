@@ -1512,7 +1512,7 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
             "/api/v1/debug/node",
             Some(&token),
             Body::from(format!(
-                r#"{{"user":"node-user","key":"{registration_key}","name":"debug-router","routes":["10.10.0.0/24"]}}"#
+                r#"{{"user":"node-user","key":"hskey-authreq-{registration_key}","name":"debug-router","routes":["10.10.0.0/24"]}}"#
             )),
         ))
         .await
@@ -1554,7 +1554,7 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .clone()
         .oneshot(req(
             Method::POST,
-            &format!("/api/v1/node/register?user=node-user&key={registration_key}"),
+            &format!("/api/v1/node/register?user=node-user&key=hskey-authreq-{registration_key}"),
             Some(&token),
             Body::from(r#"{"ignored":true}"#),
         ))
@@ -1777,7 +1777,7 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
                 "/api/v1/debug/node",
                 Some(&token),
                 Body::from(format!(
-                    r#"{{"user":"auth-user","key":"{key}","name":"{name}","routes":[]}}"#
+                    r#"{{"user":"auth-user","key":"hskey-authreq-{key}","name":"{name}","routes":[]}}"#
                 )),
             ))
             .await
@@ -1864,7 +1864,7 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
             "/api/v1/debug/node",
             Some(&token),
             Body::from(format!(
-                r#"{{"user":"exit-user","key":"{registration_key}","name":"exit-node","routes":["0.0.0.0/0","::/0"]}}"#
+                r#"{{"user":"exit-user","key":"hskey-authreq-{registration_key}","name":"exit-node","routes":["0.0.0.0/0","::/0"]}}"#
             )),
         ))
         .await
@@ -1883,7 +1883,7 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .clone()
         .oneshot(req(
             Method::POST,
-            &format!("/api/v1/node/register?user=exit-user&key={registration_key}"),
+            &format!("/api/v1/node/register?user=exit-user&key=hskey-authreq-{registration_key}"),
             Some(&token),
             Body::from(r"{}"),
         ))
@@ -1956,7 +1956,7 @@ async fn grpc_gateway_node_approve_routes_persists_go_nodes_approved_routes() {
             "/api/v1/debug/node",
             Some(&token),
             Body::from(format!(
-                r#"{{"user":"persist-user","key":"{registration_key}","name":"persist-exit","routes":["0.0.0.0/0","::/0"]}}"#
+                r#"{{"user":"persist-user","key":"hskey-authreq-{registration_key}","name":"persist-exit","routes":["0.0.0.0/0","::/0"]}}"#
             )),
         ))
         .await
@@ -1967,7 +1967,9 @@ async fn grpc_gateway_node_approve_routes_persists_go_nodes_approved_routes() {
         .clone()
         .oneshot(req(
             Method::POST,
-            &format!("/api/v1/node/register?user=persist-user&key={registration_key}"),
+            &format!(
+                "/api/v1/node/register?user=persist-user&key=hskey-authreq-{registration_key}"
+            ),
             Some(&token),
             Body::from(r"{}"),
         ))

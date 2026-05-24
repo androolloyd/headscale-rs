@@ -3430,7 +3430,7 @@ database:
             .admin_service
             .register_node(TonicRequest::new(RegisterNodeRequest {
                 user: "alice".into(),
-                key: interactive_registration_id,
+                key: format!("hskey-authreq-{interactive_registration_id}"),
             }))
             .await
             .unwrap()

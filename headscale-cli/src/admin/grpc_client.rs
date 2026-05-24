@@ -946,22 +946,15 @@ mod tests {
             .unwrap();
         client.create_user("alice", "", "", "").await.unwrap();
         let registration_id = "abcdefghijklmnopqrstuvwx";
+        let auth_id = format!("hskey-authreq-{registration_id}");
         let pending = client
-            .debug_create_node(
-                "alice",
-                registration_id,
-                "node-one",
-                vec!["10.10.0.0/24".into()],
-            )
+            .debug_create_node("alice", &auth_id, "node-one", vec!["10.10.0.0/24".into()])
             .await
             .unwrap();
         assert_eq!(pending.name, "node-one");
         assert_eq!(pending.available_routes, vec!["10.10.0.0/24".to_string()]);
 
-        let registered = client
-            .register_node("alice", registration_id)
-            .await
-            .unwrap();
+        let registered = client.register_node("alice", &auth_id).await.unwrap();
         assert_eq!(registered.name, "node-one");
         assert_eq!(registered.user.as_ref().unwrap().name, "alice");
         assert_eq!(
@@ -971,7 +964,12 @@ mod tests {
 
         let auth_registration_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
         client
-            .debug_create_node("alice", auth_registration_id, "auth-node", Vec::new())
+            .debug_create_node(
+                "alice",
+                &format!("hskey-authreq-{auth_registration_id}"),
+                "auth-node",
+                Vec::new(),
+            )
             .await
             .unwrap();
         let auth_registered = client
@@ -982,7 +980,12 @@ mod tests {
 
         let approve_id = "cccccccccccccccccccccccc";
         client
-            .debug_create_node("alice", approve_id, "approve-node", Vec::new())
+            .debug_create_node(
+                "alice",
+                &format!("hskey-authreq-{approve_id}"),
+                "approve-node",
+                Vec::new(),
+            )
             .await
             .unwrap();
         client
@@ -992,7 +995,12 @@ mod tests {
 
         let reject_id = "dddddddddddddddddddddddd";
         client
-            .debug_create_node("alice", reject_id, "reject-node", Vec::new())
+            .debug_create_node(
+                "alice",
+                &format!("hskey-authreq-{reject_id}"),
+                "reject-node",
+                Vec::new(),
+            )
             .await
             .unwrap();
         client

@@ -900,10 +900,6 @@ fn registration_id_from_followup(followup: &str) -> Result<String, &'static str>
 }
 
 fn registration_id_from_register_path(segment: &str) -> Option<&str> {
-    if segment.len() == REGISTRATION_ID_LENGTH {
-        return Some(segment);
-    }
-
     let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
     (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
@@ -1329,10 +1325,7 @@ mod tests {
                 .unwrap(),
             id
         );
-        assert_eq!(
-            registration_id_from_followup(&format!("/register/{id}")).unwrap(),
-            id
-        );
+        assert!(registration_id_from_followup(&format!("/register/{id}")).is_err());
         assert!(registration_id_from_followup("/register/short").is_err());
         assert!(registration_id_from_followup("https://headscale.example/oidc/callback").is_err());
     }

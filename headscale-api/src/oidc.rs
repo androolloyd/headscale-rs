@@ -223,10 +223,6 @@ impl OidcAuthRuntime {
 }
 
 fn registration_id_from_register_path(segment: &str) -> Option<&str> {
-    if segment.len() == REGISTRATION_ID_LENGTH {
-        return Some(segment);
-    }
-
     let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
     (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
@@ -2064,7 +2060,9 @@ mod tests {
             enabled: true,
             method: OidcPkceMethod::S256,
         }));
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
 
         assert!(
             start
@@ -2127,12 +2125,29 @@ mod tests {
     }
 
     #[test]
+    fn oidc_registration_start_requires_prefixed_auth_id() {
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()));
+        let auth_id = format!("hskey-authreq-{}", "r".repeat(24));
+        let start = runtime.begin_registration(&auth_id).unwrap();
+
+        let cached = runtime.registration(&start.state).unwrap();
+        assert_eq!(cached.registration_id, "r".repeat(24));
+        assert!(cached.registration);
+        assert_eq!(
+            runtime.begin_registration(&"r".repeat(24)).unwrap_err(),
+            OidcRuntimeError::InvalidRegistrationId
+        );
+    }
+
+    #[test]
     fn oidc_auth_start_uses_plain_pkce_when_configured() {
         let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig {
             enabled: true,
             method: OidcPkceMethod::Plain,
         }));
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         let cached = runtime.registration(&start.state).unwrap();
 
         assert_eq!(
@@ -2148,7 +2163,8 @@ mod tests {
     #[tokio::test]
     async fn oidc_register_handler_sets_state_nonce_cookies_and_redirects() {
         let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()));
-        let response = handle_register(runtime.clone(), "r".repeat(24)).await;
+        let response =
+            handle_register(runtime.clone(), format!("hskey-authreq-{}", "r".repeat(24))).await;
 
         assert_eq!(response.status(), StatusCode::FOUND);
         let location = response
@@ -2232,7 +2248,9 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
@@ -2267,7 +2285,9 @@ mod tests {
         config.token_endpoint = format!("{base_url}/token");
         config.jwks_uri = format!("{base_url}/jwks");
         let runtime = OidcAuthRuntime::new(config);
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         let verifier = runtime
             .registration(&start.state)
             .unwrap()
@@ -2331,7 +2351,9 @@ mod tests {
         config.token_endpoint = format!("{base_url}/token");
         config.jwks_uri = format!("{base_url}/jwks");
         let runtime = OidcAuthRuntime::new(config);
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2367,7 +2389,9 @@ mod tests {
         config.token_endpoint = format!("{base_url}/token");
         config.jwks_uri = format!("{base_url}/jwks");
         let runtime = OidcAuthRuntime::new(config);
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -2410,7 +2434,9 @@ mod tests {
             ..OidcPolicyConfig::default()
         };
         let runtime = OidcAuthRuntime::new(config);
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2460,7 +2486,9 @@ mod tests {
         };
         let store = Arc::new(MockOidcUserStore::default());
         let runtime = OidcAuthRuntime::new(config).with_user_store(store.clone());
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2518,7 +2546,9 @@ mod tests {
             fail: true,
             ..MockOidcUserStore::default()
         }));
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2566,7 +2596,9 @@ mod tests {
         config.policy.use_expiry_from_token = true;
         let registrations = Arc::new(MockOidcRegistrationHandler::default());
         let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2689,7 +2721,9 @@ mod tests {
         config.policy.use_expiry_from_token = false;
         let registrations = Arc::new(MockOidcRegistrationHandler::default());
         let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2739,7 +2773,9 @@ mod tests {
                 ..MockOidcRegistrationHandler::default()
             },
         ));
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();
@@ -2789,7 +2825,9 @@ mod tests {
             ..OidcPolicyConfig::default()
         };
         let runtime = OidcAuthRuntime::new(config);
-        let start = runtime.begin_registration(&"r".repeat(24)).unwrap();
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
         *token.write() = signed_id_token(&start.nonce);
 
         let mut headers = HeaderMap::new();

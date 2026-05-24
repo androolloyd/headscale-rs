@@ -13,7 +13,7 @@
 //! It builds on the two public items below:
 //!
 //!   * [`AdminCmd`] — a clap `Subcommand` enum that bundles every
-//!     admin verb (`users`, `nodes`, `preauthkeys`, `apikeys`, `policy`,
+//!     admin verb (`users`, `nodes`, `preauthkeys`, `auth`, `apikeys`, `policy`,
 //!     `tailnet`, `debug`). Drop it into your top-level `clap::Parser` derive
 //!     with `#[command(subcommand)]` and the same `users list /
 //!     nodes show / preauthkeys create …` tree appears verbatim.
@@ -33,8 +33,8 @@ pub mod admin;
 use clap::Subcommand;
 
 pub use admin::{
-    AdminClient, AdminError, ApiKeysCmd, ConnectArgs, DebugCmd, ExitCode, NodesCmd, OutputFormat,
-    PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
+    AdminClient, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, ExitCode, NodesCmd,
+    OutputFormat, PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
 /// The full set of admin verbs exposed by the standalone `headscale`
@@ -71,6 +71,11 @@ pub enum AdminCmd {
     Preauthkeys {
         #[command(subcommand)]
         action: PreauthKeysCmd,
+    },
+    /// Manage node authentication and approval.
+    Auth {
+        #[command(subcommand)]
+        action: AuthCmd,
     },
     /// Manage API keys.
     #[command(alias = "apikey", alias = "api")]
@@ -118,6 +123,7 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
         AdminCmd::Users { action } => admin::run_users(&connect, &action).await,
         AdminCmd::Nodes { action } => admin::run_nodes(&connect, &action).await,
         AdminCmd::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action).await,
+        AdminCmd::Auth { action } => admin::run_auth(&connect, &action).await,
         AdminCmd::Apikeys { action } => admin::run_apikeys(&connect, &action).await,
         AdminCmd::Policy { action } => admin::run_policy(&connect, &action).await,
         AdminCmd::Tailnet { action } => admin::run_tailnet(&connect, &action).await,
@@ -198,6 +204,36 @@ mod tests {
             parsed.cmd,
             AdminCmd::Apikeys {
                 action: ApiKeysCmd::Create { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn embedded_admin_accepts_auth_from_upstream() {
+        let parsed = AdminHarness::try_parse_from([
+            "headscale",
+            "auth",
+            "register",
+            "--user",
+            "alice",
+            "--auth-id",
+            "hskey-authreq-abcdefghijklmnopqrstuvwx",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Auth {
+                action: AuthCmd::Register { .. }
+            }
+        ));
+
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "auth", "approve", "--auth-id", "id"])
+                .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Auth {
+                action: AuthCmd::Approve { .. }
             }
         ));
     }

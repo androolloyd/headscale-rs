@@ -763,6 +763,69 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             body: r#"{"expiration":{"seconds":4102444800}}"#,
             message_fragment: "unexpected token { for timestamp field expiration",
         },
+        Case {
+            name: "string bool body field",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"reusable":"true"}"#,
+            message_fragment: r#"invalid value for bool field reusable: "true""#,
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_repeated_string_body_failures_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "non-array node tags field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/tags",
+            body: r#"{"tags":"tag:server"}"#,
+            message_fragment: r#"unexpected token "tag:server""#,
+        },
+        Case {
+            name: "numeric node tags element",
+            method: Method::POST,
+            uri: "/api/v1/node/1/tags",
+            body: r#"{"tags":[1]}"#,
+            message_fragment: "invalid value for string field tags: 1",
+        },
+        Case {
+            name: "null route element",
+            method: Method::POST,
+            uri: "/api/v1/debug/node",
+            body: r#"{"user":"alice","key":"abcdefghijklmnopqrstuvwx","routes":[null]}"#,
+            message_fragment: "invalid value for string field routes: null",
+        },
+        Case {
+            name: "object preauth acl tags field",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"aclTags":{}}"#,
+            message_fragment: "unexpected token {",
+        },
     ] {
         let resp = app
             .clone()

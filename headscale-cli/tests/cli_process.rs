@@ -866,6 +866,44 @@ fn generate_missing_or_unknown_subcommand_matches_upstream_help() {
 }
 
 #[test]
+fn utility_fallback_flags_match_upstream_help_snapshots() {
+    for args in [
+        &["completion", "--bad"][..],
+        &["completion", "bad", "--bad"][..],
+    ] {
+        assert_stdout_snapshot(args, include_str!("snapshots/completion_help.stdout"));
+    }
+
+    for args in [
+        &["generate", "--bad"][..],
+        &["gen", "--bad"][..],
+        &["generate", "bad", "--bad"][..],
+        &["gen", "bad", "--bad"][..],
+    ] {
+        assert_stdout_snapshot(args, include_str!("snapshots/generate_help.stdout"));
+    }
+}
+
+#[test]
+fn utility_unknown_flags_match_upstream_stderr_snapshots() {
+    assert_stderr_snapshot(
+        &["version", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "bash", "--bad"],
+        1,
+        include_str!("snapshots/utility_completion_bash_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "private-key", "--bad"],
+        1,
+        include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
+    );
+}
+
+#[test]
 fn utility_extra_args_match_upstream_unknown_command_errors() {
     for args in [
         &["version", "bad"][..],
@@ -890,7 +928,10 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
         assert_eq!(
             stderr(&output),
-            format!("Error: unknown command \"{}\" for \"headscale\"\n", args.join(" ")),
+            format!(
+                "Error: unknown command \"{}\" for \"headscale\"\n",
+                args.join(" ")
+            ),
             "stderr snapshot for {args:?}"
         );
     }

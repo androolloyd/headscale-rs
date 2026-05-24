@@ -688,6 +688,21 @@ tools/real-client/route-health-mixed-exit-restart-smoke.sh
 tools/real-client/route-health-mixed-exit-restart-headscale-go-smoke.sh
 ```
 
+The mixed-exit all-unhealthy variants combine the exit-only separation case
+with the degraded-primary fallback case: after proving failover between the
+two subnet routers, every subnet route candidate is paused while the exit-only
+node remains available, and the route must retain the last known subnet primary
+instead of moving to the exit node or disappearing:
+
+```sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-reload-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-restart-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
+```
+
 The headscale-go wrapper also defaults to the audited current-head commit
 because pinned v0.28 does not expose `node.routes.ha`.
 

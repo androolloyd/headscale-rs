@@ -233,7 +233,11 @@ impl PrimaryRouteState {
             let new_primary = nodes
                 .iter()
                 .find(|node_id| !self.unhealthy.contains(node_id))
-                .or_else(|| self.primaries.get(route).filter(|current| nodes.contains(current)))
+                .or_else(|| {
+                    self.primaries
+                        .get(route)
+                        .filter(|current| nodes.contains(current))
+                })
                 .or_else(|| nodes.first());
             if let Some(new_primary) = new_primary {
                 self.primaries.insert(route.clone(), *new_primary);

@@ -837,11 +837,11 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             true
         }
         ["dumpConfig" | "mockoidc", tail @ ..] if !tail.is_empty() && !tail_is_help(tail) => true,
-        ["completion", "bash" | "fish" | "powershell" | "zsh", tail @ ..]
-            if !tail.is_empty() && !completion_tail_is_supported(tail) =>
-        {
-            true
-        }
+        [
+            "completion",
+            "bash" | "fish" | "powershell" | "zsh",
+            tail @ ..,
+        ] if !tail.is_empty() && !completion_tail_is_supported(tail) => true,
         ["generate" | "gen", "private-key", tail @ ..]
             if !tail.is_empty() && !tail_is_help(tail) =>
         {
@@ -851,8 +851,12 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         _ => false,
     };
 
-    command_is_unknown
-        .then(|| format!("Error: unknown command \"{}\" for \"headscale\"\n", parts.join(" ")))
+    command_is_unknown.then(|| {
+        format!(
+            "Error: unknown command \"{}\" for \"headscale\"\n",
+            parts.join(" ")
+        )
+    })
 }
 
 fn tail_is_help(tail: &[&str]) -> bool {

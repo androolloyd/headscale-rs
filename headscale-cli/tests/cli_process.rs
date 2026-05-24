@@ -752,6 +752,43 @@ fn mockoidc_help_and_missing_env_do_not_load_config() {
         include_str!("snapshots/mockoidc_missing_users.stderr"),
         "mockoidc missing users",
     );
+
+    let missing_users_before_invalid_port = headscale_in_with_mockoidc_env(
+        &["mockoidc"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("MOCKOIDC_CLIENT_ID", "client"),
+            ("MOCKOIDC_CLIENT_SECRET", "secret"),
+            ("MOCKOIDC_ADDR", "127.0.0.1"),
+            ("MOCKOIDC_PORT", "bad"),
+        ],
+    );
+    assert_process_stderr_snapshot(
+        &missing_users_before_invalid_port,
+        1,
+        include_str!("snapshots/mockoidc_missing_users.stderr"),
+        "mockoidc missing users before invalid port",
+    );
+
+    let invalid_port = headscale_in_with_mockoidc_env(
+        &["mockoidc"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("MOCKOIDC_CLIENT_ID", "client"),
+            ("MOCKOIDC_CLIENT_SECRET", "secret"),
+            ("MOCKOIDC_ADDR", "127.0.0.1"),
+            ("MOCKOIDC_PORT", "bad"),
+            ("MOCKOIDC_USERS", "[]"),
+        ],
+    );
+    assert_process_stderr_snapshot(
+        &invalid_port,
+        1,
+        include_str!("snapshots/mockoidc_invalid_port.stderr"),
+        "mockoidc invalid port",
+    );
 }
 
 #[test]

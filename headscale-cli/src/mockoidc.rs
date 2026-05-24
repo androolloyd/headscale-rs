@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
+use std::num::IntErrorKind;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -57,7 +58,7 @@ impl AppState {
 #[derive(Clone)]
 struct MockOidcConfig {
     addr: String,
-    port: u16,
+    port: i64,
     client_id: String,
     client_secret: String,
     access_ttl: Duration,
@@ -69,9 +70,7 @@ impl MockOidcConfig {
         let client_id = required_env("MOCKOIDC_CLIENT_ID")?;
         let client_secret = required_env("MOCKOIDC_CLIENT_SECRET")?;
         let addr = required_env_with_message("MOCKOIDC_ADDR", "MOCKOIDC_PORT not defined")?;
-        let port = required_env("MOCKOIDC_PORT")?
-            .parse::<u16>()
-            .context("parsing MOCKOIDC_PORT")?;
+        let port = required_env("MOCKOIDC_PORT")?;
         let access_ttl = match env::var("MOCKOIDC_ACCESS_TTL") {
             Ok(value) if !value.trim().is_empty() => parse_go_duration(&value)?,
             _ => DEFAULT_ACCESS_TTL,
@@ -80,6 +79,7 @@ impl MockOidcConfig {
         let users = serde_json::from_str::<Vec<MockUser>>(&users)
             .context("unmarshalling users")?
             .into();
+        let port = parse_go_atoi(&port)?;
 
         Ok(Self {
             addr,
@@ -102,6 +102,19 @@ fn required_env_with_message(name: &str, message: &str) -> Result<String> {
         bail!("{message}");
     }
     Ok(value)
+}
+
+fn parse_go_atoi(value: &str) -> Result<i64> {
+    match value.parse::<i64>() {
+        Ok(port) => Ok(port),
+        Err(err) => {
+            let reason = match err.kind() {
+                IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => "value out of range",
+                _ => "invalid syntax",
+            };
+            bail!("strconv.Atoi: parsing {value:?}: {reason}");
+        }
+    }
 }
 
 fn router(state: AppState) -> Router {

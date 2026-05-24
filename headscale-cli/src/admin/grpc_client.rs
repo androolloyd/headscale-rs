@@ -985,7 +985,10 @@ mod tests {
             .debug_create_node("alice", approve_id, "approve-node", Vec::new())
             .await
             .unwrap();
-        client.auth_approve(approve_id).await.unwrap();
+        client
+            .auth_approve(&format!("hskey-authreq-{approve_id}"))
+            .await
+            .unwrap();
 
         let reject_id = "dddddddddddddddddddddddd";
         client

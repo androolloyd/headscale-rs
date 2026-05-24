@@ -1452,10 +1452,10 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             name: "auth approve no pending session",
             method: Method::POST,
             uri: "/api/v1/auth/approve",
-            body: r#"{"authId":"aaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            body: r#"{"authId":"hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa"}"#,
             expected_http_status: 404,
             expected_grpc_code: 5,
-            expected_message: "no pending auth session for auth_id aaaaaaaaaaaaaaaaaaaaaaaa",
+            expected_message: "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
         },
         Case {
             name: "auth reject invalid prefixed auth id",
@@ -1464,7 +1464,7 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: r#"{"authId":"hskey-authreq-short"}"#,
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: r#"invalid auth_id: expected 24 characters after "hskey-authreq-", got 5"#,
+            expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 19",
         },
     ] {
         let resp = app
@@ -1821,7 +1821,7 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
             Method::POST,
             "/api/v1/auth/reject",
             Some(&token),
-            Body::from(format!(r#"{{"auth_id":"{reject_key}"}}"#)),
+            Body::from(format!(r#"{{"auth_id":"hskey-authreq-{reject_key}"}}"#)),
         ))
         .await
         .unwrap();
@@ -1833,7 +1833,7 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
             Method::POST,
             "/api/v1/auth/reject",
             Some(&token),
-            Body::from(format!(r#"{{"authId":"{reject_key}"}}"#)),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{reject_key}"}}"#)),
         ))
         .await
         .unwrap();

@@ -1610,20 +1610,16 @@ pub mod upstream {
     }
 
     fn auth_id_cache_key(id: &str) -> Result<String, Status> {
-        if id.len() == REGISTRATION_ID_LENGTH {
-            return Ok(id.to_string());
-        }
-
         match id.strip_prefix(UPSTREAM_AUTH_ID_PREFIX) {
             Some(rest) if rest.len() == REGISTRATION_ID_LENGTH => Ok(rest.to_string()),
             Some(rest) => Err(Status::invalid_argument(format!(
-                "invalid auth_id: expected {REGISTRATION_ID_LENGTH} characters after \
-                 {UPSTREAM_AUTH_ID_PREFIX:?}, got {}",
-                rest.len()
+                "invalid auth_id: auth ID has invalid length: expected {}, got {}",
+                UPSTREAM_AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH,
+                UPSTREAM_AUTH_ID_PREFIX.len() + rest.len()
             ))),
             None => Err(Status::invalid_argument(format!(
-                "invalid auth_id: expected a {REGISTRATION_ID_LENGTH}-character registration ID \
-                 or an auth ID prefixed with {UPSTREAM_AUTH_ID_PREFIX:?}"
+                "invalid auth_id: auth ID has invalid prefix: expected prefix \
+                 {UPSTREAM_AUTH_ID_PREFIX:?}"
             ))),
         }
     }
@@ -2534,7 +2530,9 @@ mod upstream_tests {
         };
         tokio::task::yield_now().await;
         service
-            .auth_reject(Request::new(AuthRejectRequest { auth_id: reject_id }))
+            .auth_reject(Request::new(AuthRejectRequest {
+                auth_id: format!("hskey-authreq-{reject_id}"),
+            }))
             .await
             .unwrap();
         match reject_wait.await.unwrap() {
@@ -2550,8 +2548,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        assert!(err.message().contains("no pending auth session"));
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("auth ID has invalid prefix"));
     }
 
     #[tokio::test]
@@ -2637,10 +2635,14 @@ mod upstream_tests {
         let pending_response: crate::tailscale_wire::RegisterResponse =
             serde_json::from_slice(&raw).unwrap();
         assert!(!pending_response.machine_authorized);
-        let registration_id = pending_response
+        let auth_id = pending_response
             .auth_url
             .strip_prefix("https://headscale.example/register/")
             .expect("web AuthURL prefix");
+        let registration_id = auth_id
+            .strip_prefix("hskey-authreq-")
+            .expect("AuthURL uses current-upstream auth ID prefix");
+        assert_eq!(auth_id.len(), "hskey-authreq-".len() + 24);
         assert_eq!(registration_id.len(), 24);
         assert_eq!(registration_cache.len(), 1);
 

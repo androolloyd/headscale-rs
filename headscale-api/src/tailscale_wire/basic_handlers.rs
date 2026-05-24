@@ -27,7 +27,9 @@ use super::{
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
+const AUTH_ID_PREFIX: &str = "hskey-authreq-";
 const REGISTRATION_ID_LENGTH: usize = 24;
+const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const MAPRESPONSES_DEBUG_DISABLED_BODY: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH not set";
 const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const VERIFY_BODY_LIMIT: usize = 4 * 1024;
@@ -150,14 +152,14 @@ pub async fn handle_swagger_api_v1() -> Response {
 }
 
 pub async fn handle_web_register(Path(registration_id): Path<String>) -> Response {
-    if registration_id.len() != REGISTRATION_ID_LENGTH {
+    let Some(registration_id) = registration_id_from_register_path(&registration_id) else {
         return http_error(StatusCode::BAD_REQUEST, "invalid registration id");
-    }
+    };
 
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        register_web_html(&registration_id),
+        register_web_html(registration_id),
     )
         .into_response()
 }
@@ -2906,10 +2908,19 @@ fn debug_statsviz_html() -> &'static str {
 </html>"#
 }
 
+fn registration_id_from_register_path(segment: &str) -> Option<&str> {
+    if segment.len() == REGISTRATION_ID_LENGTH {
+        return Some(segment);
+    }
+
+    let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
+    (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
+}
+
 fn register_web_html(registration_id: &str) -> String {
-    let escaped_registration_id = html_escape(registration_id);
+    let escaped_auth_id = html_escape(&format!("hskey-authreq-{registration_id}"));
     format!(
-        r#"<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" href="/favicon.ico"><title>Registration - Headscale</title></head><body translate="no"><main><h1>Machine registration</h1><p>Run the command below in the headscale server to add this machine to your network:</p><pre><code>headscale nodes register --key {escaped_registration_id} --user USERNAME</code></pre><footer>Powered by <a href="https://github.com/juanfont/headscale" rel="noreferrer noopener" target="_blank">Headscale</a></footer></main></body></html>"#
+        r#"<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" href="/favicon.ico"><title>Node registration - Headscale</title></head><body translate="no"><main><h1>Node registration</h1><p>Run the command below in the headscale server to add this node to your network:</p><pre><code>headscale auth register --auth-id {escaped_auth_id} --user USERNAME</code></pre><footer>Powered by <a href="https://github.com/juanfont/headscale" rel="noreferrer noopener" target="_blank">Headscale</a></footer></main></body></html>"#
     )
 }
 
@@ -3166,13 +3177,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_register_renders_headscale_go_cli_instruction() {
+    async fn web_register_renders_current_headscale_go_cli_instruction() {
         let (state, _dir) = fixture_state();
         let registration_id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
+        let auth_id = format!("hskey-authreq-{registration_id}");
         let resp = router(state)
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/register/{registration_id}"))
+                    .uri(format!("/register/{auth_id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3190,16 +3202,17 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
 
         assert!(
-            body.contains("<title>Registration - Headscale</title>"),
+            body.contains("<title>Node registration - Headscale</title>"),
             "{body}"
         );
-        assert!(body.contains("<h1>Machine registration</h1>"), "{body}");
+        assert!(body.contains("<h1>Node registration</h1>"), "{body}");
         assert!(
             body.contains(&format!(
-                "headscale nodes register --key {registration_id} --user USERNAME"
+                "headscale auth register --auth-id {auth_id} --user USERNAME"
             )),
             "{body}"
         );
+        assert!(!body.contains("hskey-authreq-hskey-authreq-"), "{body}");
     }
 
     #[tokio::test]
@@ -3787,7 +3800,20 @@ mod tests {
         assert_eq!(parsed["info"]["title"], "headscale/v1/headscale.proto");
         assert!(parsed["paths"].get("/api/v1/node").is_some());
         assert!(parsed["paths"].get("/api/v1/preauthkey").is_some());
+        assert!(parsed["paths"].get("/api/v1/auth/register").is_some());
+        assert!(parsed["paths"].get("/api/v1/auth/approve").is_some());
+        assert!(parsed["paths"].get("/api/v1/auth/reject").is_some());
         assert!(parsed["definitions"].get("v1Node").is_some());
+        assert!(parsed["definitions"].get("v1AuthRegisterRequest").is_some());
+        assert!(
+            parsed["definitions"]
+                .get("v1AuthRegisterResponse")
+                .is_some()
+        );
+        assert!(parsed["definitions"].get("v1AuthApproveRequest").is_some());
+        assert!(parsed["definitions"].get("v1AuthApproveResponse").is_some());
+        assert!(parsed["definitions"].get("v1AuthRejectRequest").is_some());
+        assert!(parsed["definitions"].get("v1AuthRejectResponse").is_some());
     }
 
     #[tokio::test]

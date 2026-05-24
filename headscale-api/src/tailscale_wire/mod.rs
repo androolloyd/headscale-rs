@@ -3916,7 +3916,7 @@ pub fn router(state: WireState) -> Router {
 /// Build the combined wire router with the OIDC auth provider mounted.
 ///
 /// This mirrors headscale-go's routing switch: when OIDC is configured,
-/// `/register/{registration_id}` starts the OIDC auth-code flow instead
+/// `/register/{auth_id}` starts the OIDC auth-code flow instead
 /// of rendering the CLI registration instruction page, and
 /// `/oidc/callback` is present on the public control listener.
 pub fn router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRuntime) -> Router {

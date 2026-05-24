@@ -48,18 +48,15 @@ pub async fn reject_grpc(
 
 fn print_result(
     fmt: OutputFormat,
-    status: &'static str,
-    auth_id: &str,
+    _status: &'static str,
+    _auth_id: &str,
     message: &str,
 ) -> Result<(), AdminError> {
     #[derive(Serialize)]
-    struct AuthResult<'a> {
-        status: &'static str,
-        auth_id: &'a str,
-    }
+    struct EmptyResponse {}
 
     if fmt.is_structured() {
-        print_structured(fmt, &AuthResult { status, auth_id })
+        print_structured(fmt, &EmptyResponse {})
     } else {
         println!("{message}");
         Ok(())

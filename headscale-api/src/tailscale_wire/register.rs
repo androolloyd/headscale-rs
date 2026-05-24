@@ -84,7 +84,9 @@ use super::wire::{
 use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
+const AUTH_ID_PREFIX: &str = "hskey-authreq-";
 const REGISTRATION_ID_LENGTH: usize = 24;
+const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH: &str =
     "node exists with a different machine key";
 const REGISTER_LOGOUT_MACHINE_KEY_MISMATCH: &str = "node exist with different machine key";
@@ -871,11 +873,12 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
 }
 
 fn auth_url_for_registration(state: &WireState, registration_id: &str) -> String {
+    let auth_id = format!("{AUTH_ID_PREFIX}{registration_id}");
     match state.public_control_url.as_deref() {
         Some(url) if !url.is_empty() => {
-            format!("{}/register/{registration_id}", url.trim_end_matches('/'))
+            format!("{}/register/{auth_id}", url.trim_end_matches('/'))
         }
-        _ => format!("/register/{registration_id}"),
+        _ => format!("/register/{auth_id}"),
     }
 }
 
@@ -889,11 +892,22 @@ fn registration_id_from_followup(followup: &str) -> Result<String, &'static str>
         return Err("invalid followup URL");
     };
 
-    if registration_id.contains('/') || registration_id.len() != REGISTRATION_ID_LENGTH {
+    if registration_id.contains('/') {
         return Err("invalid registration ID");
     }
 
-    Ok(registration_id.to_string())
+    registration_id_from_register_path(registration_id)
+        .map(str::to_owned)
+        .ok_or("invalid registration ID")
+}
+
+fn registration_id_from_register_path(segment: &str) -> Option<&str> {
+    if segment.len() == REGISTRATION_ID_LENGTH {
+        return Some(segment);
+    }
+
+    let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
+    (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
 
 fn new_registration_id() -> String {
@@ -1202,12 +1216,13 @@ mod tests {
         let oidc = oidc_runtime();
         let app = router_with_oidc(state, oidc.clone());
         let registration_id = "a".repeat(24);
+        let auth_id = format!("{AUTH_ID_PREFIX}{registration_id}");
 
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(format!("/register/{registration_id}"))
+                    .uri(format!("/register/{auth_id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -1270,13 +1285,18 @@ mod tests {
     #[test]
     fn followup_registration_id_parses_relative_and_absolute_urls() {
         let id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
+        let auth_id = format!("{AUTH_ID_PREFIX}{id}");
         assert_eq!(
-            registration_id_from_followup(&format!("/register/{id}")).unwrap(),
+            registration_id_from_followup(&format!("/register/{auth_id}")).unwrap(),
             id
         );
         assert_eq!(
-            registration_id_from_followup(&format!("https://headscale.example/register/{id}"))
+            registration_id_from_followup(&format!("https://headscale.example/register/{auth_id}"))
                 .unwrap(),
+            id
+        );
+        assert_eq!(
+            registration_id_from_followup(&format!("/register/{id}")).unwrap(),
             id
         );
         assert!(registration_id_from_followup("/register/short").is_err());
@@ -2248,10 +2268,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        let registration_id = rr
+        let auth_id = rr
             .auth_url
             .strip_prefix("https://headscale.example/register/")
             .unwrap();
+        let registration_id = auth_id
+            .strip_prefix(AUTH_ID_PREFIX)
+            .expect("AuthURL uses current-upstream auth ID prefix");
         let pending = state.registration_cache.get(registration_id).unwrap();
         assert_eq!(pending.machine_key_hex, machine_key_hex);
     }
@@ -2575,10 +2598,14 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(!rr.machine_authorized);
-        let registration_id = rr
+        let auth_id = rr
             .auth_url
             .strip_prefix("https://headscale.example/register/")
             .expect("configured web registration AuthURL");
+        let registration_id = auth_id
+            .strip_prefix(AUTH_ID_PREFIX)
+            .expect("AuthURL uses current-upstream auth ID prefix");
+        assert_eq!(auth_id.len(), AUTH_ID_LENGTH);
         assert_eq!(registration_id.len(), 24);
         assert!(state.machines.get(&node_key_hex).is_none());
         let pending = state
@@ -2620,10 +2647,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        let registration_id = rr
+        let auth_id = rr
             .auth_url
             .strip_prefix("https://headscale.example/register/")
             .expect("configured web registration AuthURL");
+        let registration_id = auth_id
+            .strip_prefix(AUTH_ID_PREFIX)
+            .expect("AuthURL uses current-upstream auth ID prefix");
         let pending = state.registration_cache.get(registration_id).unwrap();
         let expiry = pending.expiry.expect("node.expiry default applied");
 

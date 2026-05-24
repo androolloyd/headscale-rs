@@ -1820,13 +1820,16 @@ mod tests {
     }
 
     fn registration_id_from_auth_url(auth_url: &str) -> String {
-        auth_url
+        let auth_id = auth_url
             .split_once('?')
             .map_or(auth_url, |(path, _)| path)
             .trim_end_matches('/')
             .rsplit('/')
             .next()
-            .expect("auth URL includes registration id")
+            .expect("auth URL includes registration id");
+        auth_id
+            .strip_prefix("hskey-authreq-")
+            .unwrap_or(auth_id)
             .to_string()
     }
 

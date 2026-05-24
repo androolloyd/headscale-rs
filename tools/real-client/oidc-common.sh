@@ -157,7 +157,7 @@ write_registration_id() {
   ruby -rjson -e '
     status = JSON.parse(STDIN.read)
     url = status["AuthURL"].to_s
-    match = url.match(%r{/register/([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    match = url.match(%r{/register/(?:hskey-authreq-)?([A-Za-z0-9_-]{24})(?:\z|[?#])})
     exit 1 unless match
     File.write(ARGV.fetch(0), match[1])
   ' "${output_path}" <<<"${status_json}"

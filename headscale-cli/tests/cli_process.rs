@@ -2798,10 +2798,51 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&approve_pending)
     );
-    let approve = headscale_with_config(&config, &["auth", "approve", "--auth-id", approve_id]);
+    let approve_auth_id = format!("hskey-authreq-{approve_id}");
+    let approve =
+        headscale_with_config(&config, &["auth", "approve", "--auth-id", &approve_auth_id]);
     assert!(approve.status.success(), "stderr: {}", stderr(&approve));
     assert_eq!(stdout(&approve), "Auth request approved\n");
     assert_eq!(stderr(&approve), "");
+
+    let approve_json_id = "eeeeeeeeeeeeeeeeeeeeeeee";
+    let approve_json_pending = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            approve_json_id,
+            "--name",
+            "approve-json-node",
+        ],
+    );
+    assert!(
+        approve_json_pending.status.success(),
+        "stderr: {}",
+        stderr(&approve_json_pending)
+    );
+    let approve_json_auth_id = format!("hskey-authreq-{approve_json_id}");
+    let approve_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "auth",
+            "approve",
+            "--auth-id",
+            &approve_json_auth_id,
+        ],
+    );
+    assert!(
+        approve_json.status.success(),
+        "stderr: {}",
+        stderr(&approve_json)
+    );
+    assert_eq!(json_output(&approve_json).as_object().unwrap().len(), 0);
+    assert_eq!(stderr(&approve_json), "");
 
     let reject_id = "cccccccccccccccccccccccc";
     let reject_pending = headscale_with_config(
@@ -2827,6 +2868,51 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(reject.status.success(), "stderr: {}", stderr(&reject));
     assert_eq!(stdout(&reject), "Auth request rejected\n");
     assert_eq!(stderr(&reject), "");
+
+    let reject_json_line_id = "ffffffffffffffffffffffff";
+    let reject_json_line_pending = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            reject_json_line_id,
+            "--name",
+            "reject-json-line-node",
+        ],
+    );
+    assert!(
+        reject_json_line_pending.status.success(),
+        "stderr: {}",
+        stderr(&reject_json_line_pending)
+    );
+    let reject_json_line_auth_id = format!("hskey-authreq-{reject_json_line_id}");
+    let reject_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "auth",
+            "reject",
+            "--auth-id",
+            &reject_json_line_auth_id,
+        ],
+    );
+    assert!(
+        reject_json_line.status.success(),
+        "stderr: {}",
+        stderr(&reject_json_line)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&reject_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&reject_json_line), "");
 
     let rename_user = headscale_with_config(
         &config,
@@ -3029,7 +3115,12 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     );
     assert_config_stderr_snapshot(
         &config,
-        &["auth", "approve", "--auth-id", "dddddddddddddddddddddddd"],
+        &[
+            "auth",
+            "approve",
+            "--auth-id",
+            "hskey-authreq-dddddddddddddddddddddddd",
+        ],
         5,
         include_str!("snapshots/grpc_live_auth_missing.stderr"),
     );

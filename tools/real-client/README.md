@@ -233,9 +233,9 @@ Additional knobs:
 ## Web Registration Smoke
 
 The web-registration scenario starts a stock client without an auth key, waits
-for the `/register/{registration_id}` AuthURL, approves the pending registration
-through the Rust harness or upstream `headscale nodes register`, and waits for
-the same client to complete login:
+for the `/register/{auth_id}` AuthURL, extracts the raw 24-byte registration
+key needed by the Rust harness or pinned-v0.28 `headscale nodes register`, and
+waits for the same client to complete login:
 
 ```sh
 tools/real-client/web-register-smoke.sh

@@ -53,7 +53,11 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
             .auth_url
             .starts_with("https://headscale.example/register/")
     );
-    let registration_id = initial.auth_url.rsplit('/').next().unwrap();
+    let auth_id = initial.auth_url.rsplit('/').next().unwrap();
+    let registration_id = auth_id
+        .strip_prefix("hskey-authreq-")
+        .expect("AuthURL uses current-upstream auth ID prefix");
+    assert_eq!(auth_id.len(), "hskey-authreq-".len() + 24);
     assert_eq!(registration_id.len(), 24);
     assert!(state.registration_cache.get(registration_id).is_some());
 
@@ -62,7 +66,7 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri(format!("/register/{registration_id}"))
+                .uri(format!("/register/{auth_id}"))
                 .body(Body::empty())
                 .unwrap(),
         )

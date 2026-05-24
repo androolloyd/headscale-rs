@@ -641,8 +641,25 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
-        ["completion", "-h" | "--help"] | ["help", "completion"] => Some(UPSTREAM_COMPLETION_HELP),
-        ["generate", "-h" | "--help"] | ["help", "generate"] => Some(UPSTREAM_GENERATE_HELP),
+        ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
+            Some(UPSTREAM_COMPLETION_HELP)
+        }
+        ["completion", shell, ..]
+            if !matches!(
+                *shell,
+                "bash" | "fish" | "powershell" | "zsh" | "-h" | "--help"
+            ) =>
+        {
+            Some(UPSTREAM_COMPLETION_HELP)
+        }
+        ["generate", "-h" | "--help"] | ["help", "generate"] | ["generate" | "gen"] => {
+            Some(UPSTREAM_GENERATE_HELP)
+        }
+        ["generate" | "gen", subcommand, ..]
+            if !matches!(*subcommand, "private-key" | "-h" | "--help") =>
+        {
+            Some(UPSTREAM_GENERATE_HELP)
+        }
         ["generate", "private-key", "-h" | "--help"] | ["help", "generate", "private-key"] => {
             Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
         }

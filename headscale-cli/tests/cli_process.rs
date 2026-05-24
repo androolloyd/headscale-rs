@@ -833,6 +833,39 @@ fn completion_bash_does_not_load_config() {
 }
 
 #[test]
+fn completion_missing_or_unknown_shell_matches_upstream_help() {
+    for args in [&["completion"][..], &["completion", "bad"][..]] {
+        let output = headscale_clean(args);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        assert_eq!(
+            trim_line_end_spaces(&stdout(&output)),
+            trim_line_end_spaces(include_str!("snapshots/completion_help.stdout")),
+            "stdout snapshot for {args:?}"
+        );
+        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+    }
+}
+
+#[test]
+fn generate_missing_or_unknown_subcommand_matches_upstream_help() {
+    for args in [
+        &["generate"][..],
+        &["gen"][..],
+        &["generate", "bad"][..],
+        &["gen", "bad"][..],
+    ] {
+        let output = headscale_clean(args);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        assert_eq!(
+            trim_line_end_spaces(&stdout(&output)),
+            trim_line_end_spaces(include_str!("snapshots/generate_help.stdout")),
+            "stdout snapshot for {args:?}"
+        );
+        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+    }
+}
+
+#[test]
 fn completion_no_descriptions_strips_zsh_help_text() {
     let output = headscale_clean(&["completion", "zsh"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

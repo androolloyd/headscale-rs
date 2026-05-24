@@ -608,7 +608,7 @@ pub mod upstream {
     fn bearer_token(metadata: &MetadataMap) -> Result<&str, Status> {
         let value = metadata
             .get("authorization")
-            .ok_or_else(|| Status::unauthenticated("Authorization token is not supplied"))?;
+            .ok_or_else(|| Status::unauthenticated("authorization token not supplied"))?;
         let header = value
             .to_str()
             .map_err(|_| Status::unauthenticated("invalid authorization metadata"))?;
@@ -2189,7 +2189,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
-        assert_eq!(err.message(), "Authorization token is not supplied");
+        assert_eq!(err.message(), "authorization token not supplied");
 
         let mut malformed = Request::new(HealthRequest {});
         malformed

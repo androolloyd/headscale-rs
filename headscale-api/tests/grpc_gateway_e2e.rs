@@ -1,5 +1,7 @@
 //! grpc-gateway-compatible `/api/v1` route coverage.
 
+#![cfg(all(feature = "admin", feature = "full"))]
+
 use std::sync::Arc;
 
 use axum::{
@@ -222,6 +224,43 @@ async fn assert_status_json(
     assert_eq!(body["details"], serde_json::json!([]), "{context}: details");
 }
 
+async fn assert_status_json_exact(
+    resp: Response,
+    expected_http_status: u16,
+    expected_grpc_code: i64,
+    expected_message: &str,
+    context: &str,
+) {
+    assert_eq!(
+        resp.status().as_u16(),
+        expected_http_status,
+        "{context}: HTTP status"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "{context}: content-type"
+    );
+    let body = body_json(resp).await;
+    let object = body
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: status body was not a JSON object: {body}"));
+    assert_eq!(
+        object.len(),
+        3,
+        "{context}: status body should only contain code/message/details: {body}"
+    );
+    assert_eq!(
+        body["code"].as_i64(),
+        Some(expected_grpc_code),
+        "{context}: grpc code"
+    );
+    assert_eq!(body["message"], expected_message, "{context}: message");
+    assert_eq!(body["details"], serde_json::json!([]), "{context}: details");
+}
+
 async fn assert_plain_unauthorized(resp: Response) {
     assert_eq!(resp.status(), 401);
     assert_eq!(
@@ -394,7 +433,7 @@ async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
         ))
         .await
         .unwrap();
-    assert_status_json(resp, 404, 5, "Not Found", "unmatched route").await;
+    assert_status_json_exact(resp, 404, 5, "Not Found", "unmatched route").await;
 
     let resp = app
         .oneshot(req(
@@ -405,7 +444,7 @@ async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
         ))
         .await
         .unwrap();
-    assert_status_json(resp, 501, 12, "Method Not Allowed", "method mismatch").await;
+    assert_status_json_exact(resp, 501, 12, "Method Not Allowed", "method mismatch").await;
 }
 
 #[tokio::test]
@@ -421,10 +460,14 @@ async fn grpc_gateway_health_surfaces_database_ping_failure() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 500);
-    let body = body_json(resp).await;
-    assert_eq!(body["code"], 2);
-    assert_eq!(body["message"], "database ping failed: forced offline");
+    assert_status_json_exact(
+        resp,
+        500,
+        2,
+        "database ping failed: forced offline",
+        "health database failure",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1783,15 +1826,14 @@ async fn grpc_gateway_policy_missing_database_row_is_status_json() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 500);
-    let body = body_json(resp).await;
-    assert_eq!(body["code"], 2);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("acl policy not found")
-    );
+    assert_status_json_exact(
+        resp,
+        500,
+        2,
+        "loading ACL from database: acl policy not found",
+        "policy missing database row",
+    )
+    .await;
 }
 
 #[tokio::test]

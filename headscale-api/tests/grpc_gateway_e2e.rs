@@ -318,6 +318,34 @@ async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
             authorization: Some("Bearer "),
             body: "",
         },
+        Case {
+            name: "missing bearer on body path route before body and path parsers",
+            method: Method::POST,
+            uri: "/api/v1/node/not-a-number/tags",
+            authorization: None,
+            body: "null",
+        },
+        Case {
+            name: "invalid bearer on path query route before path and query parsers",
+            method: Method::POST,
+            uri: "/api/v1/node/not-a-number/expire?expiry.seconds=not-a-number",
+            authorization: Some("Bearer definitely-invalid"),
+            body: "",
+        },
+        Case {
+            name: "malformed authorization scheme before delete apikey query parser",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/prefix?id=not-a-number",
+            authorization: Some("Token definitely-invalid"),
+            body: "",
+        },
+        Case {
+            name: "missing bearer on policy route before body parser",
+            method: Method::PUT,
+            uri: "/api/v1/policy",
+            authorization: None,
+            body: "null",
+        },
     ] {
         let resp = app
             .clone()
@@ -467,6 +495,12 @@ async fn grpc_gateway_auth_runs_before_unmatched_api_routes() {
 
 #[tokio::test]
 async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+    }
+
     let (app, token) = fixture().await;
 
     let resp = app
@@ -481,16 +515,40 @@ async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
         .unwrap();
     assert_status_json_exact(resp, 404, 5, "Not Found", "unmatched route").await;
 
-    let resp = app
-        .oneshot(req(
-            Method::GET,
-            "/api/v1/user/1",
-            Some(&token),
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_status_json_exact(resp, 501, 12, "Method Not Allowed", "method mismatch").await;
+    for case in [
+        Case {
+            name: "user id method mismatch",
+            method: Method::GET,
+            uri: "/api/v1/user/1",
+        },
+        Case {
+            name: "health method mismatch",
+            method: Method::DELETE,
+            uri: "/api/v1/health",
+        },
+        Case {
+            name: "policy method mismatch",
+            method: Method::POST,
+            uri: "/api/v1/policy",
+        },
+        Case {
+            name: "node register method mismatch",
+            method: Method::GET,
+            uri: "/api/v1/node/register",
+        },
+        Case {
+            name: "apikey method mismatch",
+            method: Method::PUT,
+            uri: "/api/v1/apikey",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(case.method, case.uri, Some(&token), Body::empty()))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 501, 12, "Method Not Allowed", case.name).await;
+    }
 }
 
 #[tokio::test]
@@ -827,11 +885,90 @@ async fn grpc_gateway_remaining_parser_failures_are_status_json_exact() {
             body: "",
             expected_message: r#"type mismatch, parameter: old_id, error: strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
         },
+        Case {
+            name: "expire node path parameter preempts query parser",
+            method: Method::POST,
+            uri: "/api/v1/node/not-a-number/expire?expiry.seconds=not-a-number",
+            body: "",
+            expected_message: r#"type mismatch, parameter: node_id, error: strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
+        },
+        Case {
+            name: "delete api key duplicate id query field",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/prefix?id=1&id=2",
+            body: "",
+            expected_message: r#"too many values for field "id": 1, 2"#,
+        },
+        Case {
+            name: "empty bool query field",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed=",
+            body: "",
+            expected_message: r#"parsing field "confirmed": strconv.ParseBool: parsing "": invalid syntax"#,
+        },
+        Case {
+            name: "nested string query path on scalar",
+            method: Method::GET,
+            uri: "/api/v1/node?user.name=alice",
+            body: "",
+            expected_message: r#"invalid path: "user" is not a message"#,
+        },
     ] {
         let resp = app
             .clone()
             .oneshot(req(
                 case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_body_decoders_run_before_path_parsers_for_body_routes() {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+        body: &'static str,
+        expected_message: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "set tags whole-message null preempts node id path",
+            uri: "/api/v1/node/not-a-number/tags",
+            body: "null",
+            expected_message: "syntax error (line 1:1): unexpected token null",
+        },
+        Case {
+            name: "approve routes whole-message array preempts node id path",
+            uri: "/api/v1/node/not-a-number/approve_routes",
+            body: "[]",
+            expected_message: "syntax error (line 1:1): unexpected token [",
+        },
+        Case {
+            name: "set tags repeated field parser preempts node id path",
+            uri: "/api/v1/node/not-a-number/tags",
+            body: r#"{"tags":"tag:server"}"#,
+            expected_message: r#"syntax error (line 1:1): unexpected token "tag:server""#,
+        },
+        Case {
+            name: "approve routes repeated element parser preempts node id path",
+            uri: "/api/v1/node/not-a-number/approve_routes",
+            body: r#"{"routes":[null]}"#,
+            expected_message: "invalid value for string field routes: null",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
                 case.uri,
                 Some(&token),
                 Body::from(case.body),

@@ -253,8 +253,8 @@ enum CompletionShell {
 #[tokio::main]
 async fn main() -> ExitCode {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if raw_args_are_top_level_help(&raw_args) {
-        print!("{UPSTREAM_TOP_LEVEL_HELP}");
+    if let Some(help) = upstream_exact_help(&raw_args) {
+        print!("{help}");
         return ExitCode::SUCCESS;
     }
 
@@ -575,23 +575,42 @@ where
     )
 }
 
-fn raw_args_are_top_level_help<I, S>(args: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut args = args.into_iter();
-    let Some(first) = args.next() else {
-        return false;
-    };
-    if args.next().is_some() {
-        return false;
+fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        parts.push(arg.as_ref().to_str()?);
     }
-    matches!(first.as_ref().to_str(), Some("-h" | "--help" | "help"))
+
+    match parts.as_slice() {
+        ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
+        ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
+        ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
+        ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
+        ["completion", "-h" | "--help"] | ["help", "completion"] => Some(UPSTREAM_COMPLETION_HELP),
+        ["generate", "-h" | "--help"] | ["help", "generate"] => Some(UPSTREAM_GENERATE_HELP),
+        ["generate", "private-key", "-h" | "--help"] | ["help", "generate", "private-key"] => {
+            Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
+        }
+        ["debug", "-h" | "--help"] | ["help", "debug"] => Some(UPSTREAM_DEBUG_HELP),
+        ["debug", "create-node", "-h" | "--help"] | ["help", "debug", "create-node"] => {
+            Some(UPSTREAM_DEBUG_CREATE_NODE_HELP)
+        }
+        ["auth", "-h" | "--help"] | ["help", "auth"] => Some(UPSTREAM_AUTH_HELP),
+        ["auth", "register", "-h" | "--help"] | ["help", "auth", "register"] => {
+            Some(UPSTREAM_AUTH_REGISTER_HELP)
+        }
+        ["auth", "approve", "-h" | "--help"] | ["help", "auth", "approve"] => {
+            Some(UPSTREAM_AUTH_APPROVE_HELP)
+        }
+        ["auth", "reject", "-h" | "--help"] | ["help", "auth", "reject"] => {
+            Some(UPSTREAM_AUTH_REJECT_HELP)
+        }
+        _ => None,
+    }
 }
 
-// Current upstream headscale main (4483fd0) Cobra top-level help. Keep
-// this explicit because Clap's formatter cannot reproduce Cobra output exactly.
+// Current upstream headscale main (4483fd0) Cobra help. Keep these explicit
+// because Clap's formatter cannot reproduce Cobra output exactly.
 const UPSTREAM_TOP_LEVEL_HELP: &str = r#"
 headscale is an open source implementation of the Tailscale control server
 
@@ -625,6 +644,202 @@ Flags:
 
 Use "headscale [command] --help" for more information about a command.
 "#;
+
+const UPSTREAM_VERSION_HELP: &str = r"The version of headscale.
+
+Usage:
+  headscale version [flags]
+
+Flags:
+  -h, --help            help for version
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_HEALTH_HELP: &str = r"Check the health of the Headscale server. This command will return an exit code of 0 if the server is healthy, or 1 if it is not.
+
+Usage:
+  headscale health [flags]
+
+Flags:
+  -h, --help   help for health
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_CONFIGTEST_HELP: &str = r"Run a test of the configuration and exit.
+
+Usage:
+  headscale configtest [flags]
+
+Flags:
+  -h, --help   help for configtest
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_COMPLETION_HELP: &str = r#"Generate the autocompletion script for headscale for the specified shell.
+See each sub-command's help for details on how to use the generated script.
+
+Usage:
+  headscale completion [command]
+
+Available Commands:
+  bash        Generate the autocompletion script for bash
+  fish        Generate the autocompletion script for fish
+  powershell  Generate the autocompletion script for powershell
+  zsh         Generate the autocompletion script for zsh
+
+Flags:
+  -h, --help   help for completion
+
+Use "headscale completion [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_GENERATE_HELP: &str = r#"Generate commands
+
+Usage:
+  headscale generate [command]
+
+Aliases:
+  generate, gen
+
+Available Commands:
+  private-key Generate a private key for the headscale server
+
+Flags:
+  -h, --help   help for generate
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale generate [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_GENERATE_PRIVATE_KEY_HELP: &str = r"Generate a private key for the headscale server
+
+Usage:
+  headscale generate private-key [flags]
+
+Flags:
+  -h, --help   help for private-key
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_DEBUG_HELP: &str = r#"debug contains extra commands used for debugging and testing headscale
+
+Usage:
+  headscale debug [command]
+
+Available Commands:
+  create-node Create a node that can be registered with `auth register <>` command
+
+Flags:
+  -h, --help   help for debug
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale debug [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_DEBUG_CREATE_NODE_HELP: &str = r"Create a node that can be registered with `auth register <>` command
+
+Usage:
+  headscale debug create-node [flags]
+
+Flags:
+  -h, --help            help for create-node
+  -k, --key string      Key
+      --name string     Name
+  -r, --route strings   List (or repeated flags) of routes to advertise
+  -u, --user string     User
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_AUTH_HELP: &str = r#"Manage node authentication and approval
+
+Usage:
+  headscale auth [command]
+
+Available Commands:
+  approve     Approve a pending authentication request
+  register    Register a node to your network
+  reject      Reject a pending authentication request
+
+Flags:
+  -h, --help   help for auth
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale auth [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_AUTH_REGISTER_HELP: &str = r"Register a node to your network
+
+Usage:
+  headscale auth register [flags]
+
+Flags:
+      --auth-id string   Auth ID
+  -h, --help             help for register
+  -u, --user string      User
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_AUTH_APPROVE_HELP: &str = r"Approve a pending authentication request
+
+Usage:
+  headscale auth approve [flags]
+
+Flags:
+      --auth-id string   Auth ID
+  -h, --help             help for approve
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_AUTH_REJECT_HELP: &str = r"Reject a pending authentication request
+
+Usage:
+  headscale auth reject [flags]
+
+Flags:
+      --auth-id string   Auth ID
+  -h, --help             help for reject
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
 
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
@@ -1180,12 +1395,26 @@ mod tests {
     }
 
     #[test]
-    fn raw_top_level_help_matches_cobra_forms() {
-        assert!(raw_args_are_top_level_help(["--help"]));
-        assert!(raw_args_are_top_level_help(["-h"]));
-        assert!(raw_args_are_top_level_help(["help"]));
-        assert!(!raw_args_are_top_level_help(["nodes", "--help"]));
-        assert!(!raw_args_are_top_level_help(["--help", "nodes"]));
+    fn raw_exact_help_matches_cobra_forms() {
+        assert_eq!(
+            upstream_exact_help(&["--help"]),
+            Some(UPSTREAM_TOP_LEVEL_HELP)
+        );
+        assert_eq!(upstream_exact_help(&["-h"]), Some(UPSTREAM_TOP_LEVEL_HELP));
+        assert_eq!(
+            upstream_exact_help(&["help"]),
+            Some(UPSTREAM_TOP_LEVEL_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["version", "-h"]),
+            Some(UPSTREAM_VERSION_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "auth", "register"]),
+            Some(UPSTREAM_AUTH_REGISTER_HELP)
+        );
+        assert_eq!(upstream_exact_help(&["nodes", "--help"]), None);
+        assert_eq!(upstream_exact_help(&["--help", "nodes"]), None);
     }
 
     #[test]

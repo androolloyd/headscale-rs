@@ -1,13 +1,16 @@
-Create a node that can be registered with `nodes register`
+Create a node that can be registered with `auth register <>` command
 
-Usage: headscale debug create-node [OPTIONS] --key <KEY> --name <NAME>
+Usage:
+  headscale debug create-node [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -u, --user <USER>      User
-  -k, --key <KEY>        Registration key
-      --name <NAME>      Node name
-  -r, --route <ROUTES>   List (or repeated flags) of routes to advertise
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+  -h, --help            help for create-node
+  -k, --key string      Key
+      --name string     Name
+  -r, --route strings   List (or repeated flags) of routes to advertise
+  -u, --user string     User
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

@@ -106,6 +106,23 @@ fn top_level_help_matches_current_upstream_snapshot() {
 }
 
 #[test]
+fn exact_help_aliases_match_current_upstream_snapshots() {
+    assert_stdout_snapshot(
+        &["version", "-h"],
+        include_str!("snapshots/version_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "version"],
+        include_str!("snapshots/version_help.stdout"),
+    );
+    assert_stdout_snapshot(&["auth", "-h"], include_str!("snapshots/auth_help.stdout"));
+    assert_stdout_snapshot(
+        &["help", "auth", "register"],
+        include_str!("snapshots/auth_register_help.stdout"),
+    );
+}
+
+#[test]
 fn auth_and_preauth_delete_help_are_accepted() {
     let auth = headscale(&["auth", "--help"]);
     assert!(auth.status.success(), "stderr: {}", stderr(&auth));
@@ -557,6 +574,10 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["generate", "--help"],
+        include_str!("snapshots/generate_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["generate", "private-key", "--help"],
         include_str!("snapshots/generate_private_key_help.stdout"),
     );
@@ -567,6 +588,10 @@ fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["completion", "--help"],
         include_str!("snapshots/completion_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["debug", "--help"],
+        include_str!("snapshots/debug_help.stdout"),
     );
     assert_stdout_snapshot(
         &["completion", "zsh", "--help"],

@@ -1,9 +1,12 @@
-Check the health of the Headscale server
+Check the health of the Headscale server. This command will return an exit code of 0 if the server is healthy, or 1 if it is not.
 
-Usage: headscale health [OPTIONS]
+Usage:
+  headscale health [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+  -h, --help   help for health
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

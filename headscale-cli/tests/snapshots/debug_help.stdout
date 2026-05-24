@@ -1,0 +1,17 @@
+debug contains extra commands used for debugging and testing headscale
+
+Usage:
+  headscale debug [command]
+
+Available Commands:
+  create-node Create a node that can be registered with `auth register <>` command
+
+Flags:
+  -h, --help   help for debug
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale debug [command] --help" for more information about a command.

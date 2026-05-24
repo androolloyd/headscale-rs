@@ -3122,6 +3122,97 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn wire_oidc_auth_request_approves_owned_ssh_check() {
+        let state = test_state();
+        let mut src = mk_record(21);
+        src.node_key_hex = "ssh-src".into();
+        src.user_id = Some(7);
+        state.machines.upsert(src.node_key_hex.clone(), src.clone());
+        let mut dst = mk_record(22);
+        dst.node_key_hex = "ssh-dst".into();
+        state.machines.upsert(dst.node_key_hex.clone(), dst.clone());
+
+        let raw_auth_id = "a".repeat(24);
+        let binding = SshCheckBinding {
+            src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
+            dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+        };
+        state
+            .registration_cache
+            .insert_ssh_check(raw_auth_id.clone(), binding);
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        handler
+            .complete_oidc_auth_request(&raw_auth_id, &oidc_test_user())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.registration_cache.wait_for_auth(&raw_auth_id).await,
+            AuthWaitOutcome::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_auth_request_rejects_wrong_source_owner() {
+        let state = test_state();
+        let mut src = mk_record(23);
+        src.node_key_hex = "ssh-src-owner".into();
+        src.user_id = Some(99);
+        state.machines.upsert(src.node_key_hex.clone(), src.clone());
+        let dst = mk_record(24);
+        state.machines.upsert(dst.node_key_hex.clone(), dst.clone());
+
+        let raw_auth_id = "b".repeat(24);
+        state.registration_cache.insert_ssh_check(
+            raw_auth_id.clone(),
+            SshCheckBinding {
+                src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
+                dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+            },
+        );
+
+        let handler = WireOidcRegistrationHandler { state };
+        let err = handler
+            .complete_oidc_auth_request(&raw_auth_id, &oidc_test_user())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, crate::oidc::OidcAuthError::UserNotSourceOwner);
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_auth_request_rejects_tagged_source_node() {
+        let state = test_state();
+        let mut src = mk_record(25);
+        src.node_key_hex = "ssh-src-tagged".into();
+        src.user_id = Some(7);
+        src.forced_tags = vec!["tag:server".into()];
+        state.machines.upsert(src.node_key_hex.clone(), src.clone());
+        let dst = mk_record(26);
+        state.machines.upsert(dst.node_key_hex.clone(), dst.clone());
+
+        let raw_auth_id = "c".repeat(24);
+        state.registration_cache.insert_ssh_check(
+            raw_auth_id.clone(),
+            SshCheckBinding {
+                src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
+                dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+            },
+        );
+
+        let handler = WireOidcRegistrationHandler { state };
+        let err = handler
+            .complete_oidc_auth_request(&raw_auth_id, &oidc_test_user())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
+    }
+
+    #[tokio::test]
     async fn registration_cache_expiry_notifies_waiting_followups() {
         let cache =
             RegistrationCache::with_tuning(Duration::from_millis(10), Duration::from_millis(20));
@@ -4153,6 +4244,40 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             Err(crate::oidc::OidcRegistrationError::SessionExpired)
         }
     }
+
+    async fn complete_oidc_auth_request(
+        &self,
+        auth_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+    ) -> Result<(), crate::oidc::OidcAuthError> {
+        let Some(binding) = self.state.registration_cache.ssh_binding(auth_id) else {
+            if self.state.registration_cache.get(auth_id).is_some() {
+                return Err(crate::oidc::OidcAuthError::NotSshCheck);
+            }
+            return Err(crate::oidc::OidcAuthError::SessionExpired);
+        };
+
+        let snapshot = self.state.machines.snapshot();
+        let Some((_node_key, src_node)) = snapshot.iter().find(|(node_key, record)| {
+            record.stable_node_id_for_key(node_key) == binding.src_node_id
+        }) else {
+            return Err(crate::oidc::OidcAuthError::SourceNodeMissing);
+        };
+
+        if src_node.is_tagged() || src_node.user_id.is_none() {
+            return Err(crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
+        }
+
+        if src_node.user_id != Some(user.id) {
+            return Err(crate::oidc::OidcAuthError::UserNotSourceOwner);
+        }
+
+        if self.state.registration_cache.approve_without_node(auth_id) {
+            Ok(())
+        } else {
+            Err(crate::oidc::OidcAuthError::SessionExpired)
+        }
+    }
 }
 
 fn oidc_wire_user_name(user: &crate::oidc::OidcStoredUser) -> String {
@@ -4203,14 +4328,14 @@ fn control_router_with_optional_oidc_inner(
         .route(
             "/machine/ping-response",
             head(basic_handlers::handle_ping_response),
-        )
-        .route("/auth/:auth_id", get(basic_handlers::handle_web_auth));
+        );
 
     inner = if let Some(oidc) = oidc {
         let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {
             state: state.clone(),
         }));
         let register_oidc = oidc.clone();
+        let auth_oidc = oidc.clone();
         let callback_oidc = oidc;
         inner
             .route(
@@ -4218,6 +4343,13 @@ fn control_router_with_optional_oidc_inner(
                 get(move |axum::extract::Path(registration_id): axum::extract::Path<String>| {
                     let oidc = register_oidc.clone();
                     async move { crate::oidc::handle_register(oidc, registration_id).await }
+                }),
+            )
+            .route(
+                "/auth/:auth_id",
+                get(move |axum::extract::Path(auth_id): axum::extract::Path<String>| {
+                    let oidc = auth_oidc.clone();
+                    async move { crate::oidc::handle_auth(oidc, auth_id).await }
                 }),
             )
             .route(
@@ -4231,10 +4363,12 @@ fn control_router_with_optional_oidc_inner(
                 ),
             )
     } else {
-        inner.route(
-            "/register/:registration_id",
-            get(basic_handlers::handle_web_register),
-        )
+        inner
+            .route(
+                "/register/:registration_id",
+                get(basic_handlers::handle_web_register),
+            )
+            .route("/auth/:auth_id", get(basic_handlers::handle_web_auth))
     };
 
     let inner = inner

@@ -171,9 +171,25 @@ impl OidcAuthRuntime {
     }
 
     fn begin_registration(&self, registration_id: &str) -> Result<OidcAuthStart, OidcRuntimeError> {
-        let registration_id = registration_id_from_register_path(registration_id)
-            .ok_or(OidcRuntimeError::InvalidRegistrationId)?
-            .to_owned();
+        self.begin_auth_flow(registration_id, true)
+    }
+
+    fn begin_auth(&self, auth_id: &str) -> Result<OidcAuthStart, OidcRuntimeError> {
+        self.begin_auth_flow(auth_id, false)
+    }
+
+    fn begin_auth_flow(
+        &self,
+        auth_id: &str,
+        registration: bool,
+    ) -> Result<OidcAuthStart, OidcRuntimeError> {
+        let registration_id = if registration {
+            registration_id_from_register_path(auth_id)
+                .ok_or(OidcRuntimeError::InvalidRegistrationId)?
+        } else {
+            registration_id_from_auth_path(auth_id).ok_or(OidcRuntimeError::InvalidAuthId)?
+        }
+        .to_owned();
 
         let state = random_urlsafe(OIDC_CSRF_TOKEN_LEN);
         let nonce = random_urlsafe(OIDC_CSRF_TOKEN_LEN);
@@ -194,6 +210,7 @@ impl OidcAuthRuntime {
             OidcRegistrationInfo {
                 registration_id,
                 verifier,
+                registration,
             },
         );
 
@@ -214,10 +231,16 @@ fn registration_id_from_register_path(segment: &str) -> Option<&str> {
     (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
 
+fn registration_id_from_auth_path(segment: &str) -> Option<&str> {
+    let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
+    (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OidcRegistrationInfo {
     pub registration_id: String,
     pub verifier: Option<String>,
+    pub registration: bool,
 }
 
 #[derive(Debug)]
@@ -301,6 +324,8 @@ struct OidcAuthStart {
 pub enum OidcRuntimeError {
     #[error("invalid registration id")]
     InvalidRegistrationId,
+    #[error("invalid auth id")]
+    InvalidAuthId,
     #[error("missing code or state parameter")]
     MissingCodeOrState,
     #[error("state not found")]
@@ -635,6 +660,24 @@ pub enum OidcRegistrationError {
     Store(String),
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OidcAuthError {
+    #[error("login session expired, try again")]
+    SessionExpired,
+    #[error("auth session is not for SSH check")]
+    NotSshCheck,
+    #[error("src node no longer exists")]
+    SourceNodeMissing,
+    #[error("src node has no user owner")]
+    SourceNodeNoUserOwner,
+    #[error("OIDC user is not the owner of the SSH source node")]
+    UserNotSourceOwner,
+    #[error("OIDC auth request completion is not implemented")]
+    NotImplemented,
+    #[error("{0}")]
+    Store(String),
+}
+
 #[async_trait::async_trait]
 pub trait OidcRegistrationHandler: Send + Sync {
     async fn complete_oidc_registration(
@@ -643,6 +686,15 @@ pub trait OidcRegistrationHandler: Send + Sync {
         user: &OidcStoredUser,
         node_expiry: Option<DateTime<Utc>>,
     ) -> Result<OidcRegistrationResult, OidcRegistrationError>;
+
+    async fn complete_oidc_auth_request(
+        &self,
+        auth_id: &str,
+        user: &OidcStoredUser,
+    ) -> Result<(), OidcAuthError> {
+        let _ = (auth_id, user);
+        Err(OidcAuthError::NotImplemented)
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -780,6 +832,22 @@ pub async fn handle_register(runtime: OidcAuthRuntime, registration_id: String) 
     response
 }
 
+pub async fn handle_auth(runtime: OidcAuthRuntime, auth_id: String) -> Response {
+    let start = match runtime.begin_auth(&auth_id) {
+        Ok(start) => start,
+        Err(err) => return oidc_error_response(status_for_runtime_error(&err), err.to_string()),
+    };
+
+    let mut response = StatusCode::FOUND.into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&start.auth_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
+    append_cookie(response.headers_mut(), &csrf_cookie("state", &start.state));
+    append_cookie(response.headers_mut(), &csrf_cookie("nonce", &start.nonce));
+    response
+}
+
 pub async fn handle_callback(
     runtime: OidcAuthRuntime,
     headers: HeaderMap,
@@ -861,28 +929,40 @@ pub async fn handle_callback(
         };
 
         if let Some(registration_handler) = &runtime.registration_handler {
+            if registration.registration {
+                match registration_handler
+                    .complete_oidc_registration(&registration.registration_id, &user, node_expiry)
+                    .await
+                {
+                    Ok(result) => {
+                        return oidc_success_response(
+                            &user,
+                            if result.new_node {
+                                "Authenticated"
+                            } else {
+                                "Reauthenticated"
+                            },
+                        );
+                    }
+                    Err(OidcRegistrationError::SessionExpired) => {
+                        return oidc_error_response(
+                            StatusCode::GONE,
+                            "login session expired, try again".to_string(),
+                        );
+                    }
+                    Err(OidcRegistrationError::Store(err)) => {
+                        return oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
+                    }
+                }
+            }
+
             match registration_handler
-                .complete_oidc_registration(&registration.registration_id, &user, node_expiry)
+                .complete_oidc_auth_request(&registration.registration_id, &user)
                 .await
             {
-                Ok(result) => {
-                    return oidc_success_response(
-                        &user,
-                        if result.new_node {
-                            "Authenticated"
-                        } else {
-                            "Reauthenticated"
-                        },
-                    );
-                }
-                Err(OidcRegistrationError::SessionExpired) => {
-                    return oidc_error_response(
-                        StatusCode::GONE,
-                        "login session expired, try again".to_string(),
-                    );
-                }
-                Err(OidcRegistrationError::Store(err)) => {
-                    return oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
+                Ok(()) => return oidc_ssh_success_response(&user),
+                Err(err) => {
+                    return oidc_error_response(status_for_auth_error(&err), err.to_string());
                 }
             }
         }
@@ -1291,6 +1371,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
     match err {
         OidcRuntimeError::InvalidRegistrationId
+        | OidcRuntimeError::InvalidAuthId
         | OidcRuntimeError::MissingCodeOrState
         | OidcRuntimeError::StateCookieMissing
         | OidcRuntimeError::MissingIdToken
@@ -1302,6 +1383,18 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
         | OidcRuntimeError::NonceCookieMismatch => StatusCode::FORBIDDEN,
         OidcRuntimeError::RegistrationNotFound => StatusCode::NOT_FOUND,
         OidcRuntimeError::Authorization(_) => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn status_for_auth_error(err: &OidcAuthError) -> StatusCode {
+    match err {
+        OidcAuthError::SessionExpired | OidcAuthError::SourceNodeMissing => StatusCode::GONE,
+        OidcAuthError::NotSshCheck => StatusCode::BAD_REQUEST,
+        OidcAuthError::SourceNodeNoUserOwner | OidcAuthError::UserNotSourceOwner => {
+            StatusCode::FORBIDDEN
+        }
+        OidcAuthError::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+        OidcAuthError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -1325,10 +1418,28 @@ fn oidc_success_response(user: &OidcStoredUser, verb: &str) -> Response {
 }
 
 #[cfg(feature = "full")]
+fn oidc_ssh_success_response(user: &OidcStoredUser) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        oidc_ssh_success_html(&user_display_name(user)),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "full")]
 fn oidc_success_html(user: &str, verb: &str) -> String {
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale Authentication Succeeded</title></head><body><main><h1>Signed in successfully</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
         html_escape(verb),
+        html_escape(user)
+    )
+}
+
+#[cfg(feature = "full")]
+fn oidc_ssh_success_html(user: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale - SSH Session Authorized</title></head><body><main><h1>SSH session authorized</h1><p>Authorized as <strong>{}</strong>. You may return to your terminal.</p></main></body></html>",
         html_escape(user)
     )
 }
@@ -1548,10 +1659,12 @@ mod tests {
     }
 
     type OidcRegistrationCall = (String, OidcStoredUser, Option<DateTime<Utc>>);
+    type OidcAuthCall = (String, OidcStoredUser);
 
     #[derive(Debug, Default)]
     struct MockOidcRegistrationHandler {
         calls: RwLock<Vec<OidcRegistrationCall>>,
+        auth_calls: RwLock<Vec<OidcAuthCall>>,
         fail_expired: bool,
     }
 
@@ -1592,6 +1705,20 @@ mod tests {
                 .write()
                 .push((registration_id.to_string(), user.clone(), node_expiry));
             Ok(OidcRegistrationResult { new_node: true })
+        }
+
+        async fn complete_oidc_auth_request(
+            &self,
+            auth_id: &str,
+            user: &OidcStoredUser,
+        ) -> Result<(), OidcAuthError> {
+            if self.fail_expired {
+                return Err(OidcAuthError::SessionExpired);
+            }
+            self.auth_calls
+                .write()
+                .push((auth_id.to_string(), user.clone()));
+            Ok(())
         }
     }
 
@@ -1981,6 +2108,22 @@ mod tests {
         let cached = runtime.registration(&start.state).unwrap();
         assert_eq!(cached.registration_id, "r".repeat(24));
         assert!(cached.verifier.is_some());
+        assert!(cached.registration);
+    }
+
+    #[test]
+    fn oidc_auth_start_for_ssh_check_requires_prefixed_auth_id() {
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()));
+        let auth_id = format!("hskey-authreq-{}", "a".repeat(24));
+        let start = runtime.begin_auth(&auth_id).unwrap();
+
+        let cached = runtime.registration(&start.state).unwrap();
+        assert_eq!(cached.registration_id, "a".repeat(24));
+        assert!(!cached.registration);
+        assert_eq!(
+            runtime.begin_auth(&"a".repeat(24)).unwrap_err(),
+            OidcRuntimeError::InvalidAuthId
+        );
     }
 
     #[test]
@@ -2017,6 +2160,44 @@ mod tests {
             .to_string();
         let state = query_param(&location, "state").unwrap();
         assert!(runtime.registration(&state).is_some());
+
+        let cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(cookies.len(), 2);
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with(&cookie_name("state", &state)))
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.contains("Path=/oidc/callback"))
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_auth_handler_sets_state_nonce_cookies_and_redirects() {
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()));
+        let response =
+            handle_auth(runtime.clone(), format!("hskey-authreq-{}", "a".repeat(24))).await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let state = query_param(&location, "state").unwrap();
+        let cached = runtime.registration(&state).unwrap();
+        assert_eq!(cached.registration_id, "a".repeat(24));
+        assert!(!cached.registration);
 
         let cookies = response
             .headers()
@@ -2432,6 +2613,65 @@ mod tests {
             calls[0].2,
             Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap())
         );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_completes_ssh_auth_and_renders_ssh_success_page() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
+        let start = runtime
+            .begin_auth(&format!("hskey-authreq-{}", "s".repeat(24)))
+            .unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state.clone(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = response_body(response).await;
+        assert!(body.contains("Headscale - SSH Session Authorized"));
+        assert!(body.contains("SSH session authorized"));
+        assert!(body.contains("Authorized as"));
+        assert!(body.contains("You may return to your terminal"));
+
+        let calls = registrations.auth_calls.read();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "s".repeat(24));
+        assert_eq!(calls[0].1.email, "alice@example.com");
     }
 
     #[cfg(feature = "full")]

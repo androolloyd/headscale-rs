@@ -1248,10 +1248,9 @@ mod tests {
             .split_once("state=")
             .and_then(|(_, rest)| rest.split('&').next())
             .expect("auth URL includes state");
-        assert_eq!(
-            oidc.registration(state).unwrap().registration_id,
-            registration_id
-        );
+        let cached = oidc.registration(state).unwrap();
+        assert_eq!(cached.registration_id, registration_id);
+        assert!(cached.registration);
         assert_eq!(
             resp.headers()
                 .get_all(axum::http::header::SET_COOKIE)
@@ -1259,6 +1258,43 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn oidc_router_auth_starts_auth_code_flow() {
+        let (state, _redeemer, _dir) = fixture();
+        let oidc = oidc_runtime();
+        let app = router_with_oidc(state, oidc.clone());
+        let raw_auth_id = "s".repeat(24);
+        let auth_id = format!("{AUTH_ID_PREFIX}{raw_auth_id}");
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/auth/{auth_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.starts_with("https://issuer.example/oauth2/auth?"));
+        let state = location
+            .split_once("state=")
+            .and_then(|(_, rest)| rest.split('&').next())
+            .expect("auth URL includes state");
+        let cached = oidc.registration(state).unwrap();
+        assert_eq!(cached.registration_id, raw_auth_id);
+        assert!(!cached.registration);
     }
 
     #[test]

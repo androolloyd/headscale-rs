@@ -1395,6 +1395,7 @@ pub mod upstream {
                 .and_then(|ipv6| ipv6.parse().ok()),
             false,
         );
+        record.node_id = (machine.node_id != 0).then_some(machine.node_id);
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1413,6 +1414,7 @@ pub mod upstream {
         pending: &MachineRecord,
     ) -> MachineRecord {
         let mut record = pending.clone();
+        record.node_id = (machine.node_id != 0).then_some(machine.node_id);
         record.node_key_hex.clone_from(&machine.id);
         record.machine_key_hex.clone_from(&machine.machine_key_hex);
         record.user.clone_from(&machine.user);
@@ -1446,7 +1448,7 @@ pub mod upstream {
     fn wire_record_to_machine_admin(record: MachineRecord) -> MachineAdminRecord {
         let expired = record.is_expired_at(Utc::now());
         MachineAdminRecord {
-            node_id: 0,
+            node_id: record.node_id.unwrap_or_default(),
             id: record.node_key_hex,
             name: record.hostname,
             user: record.user,

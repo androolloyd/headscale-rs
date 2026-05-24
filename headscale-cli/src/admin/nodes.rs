@@ -999,4 +999,23 @@ mod tests {
         );
         assert!(!serving.contains_key("node-0"));
     }
+
+    #[test]
+    fn serving_routes_uses_persisted_node_id_when_present() {
+        let route = "10.0.0.0/24";
+        let mut higher = route_record("node-10", &[route], &[route]);
+        higher.node_id = 2;
+        let mut lower = route_record("node-0", &[route], &[route]);
+        lower.node_id = 1;
+
+        assert!(stable_id_from_key("node-10") < stable_id_from_key("node-0"));
+
+        let serving = serving_routes(&[higher, lower]);
+
+        assert_eq!(
+            serving.get("node-0").cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!serving.contains_key("node-10"));
+    }
 }

@@ -18,11 +18,13 @@ headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"
 route_b="${REAL_CLIENT_RESTART_ROUTE_B:-${REAL_CLIENT_ROUTE_B:-10.88.0.0/24}}"
+exit_routes="${REAL_CLIENT_RESTART_EXIT_ROUTES:-${REAL_CLIENT_EXIT_ROUTES:-0.0.0.0/0,::/0}}"
 initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
+route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
@@ -64,8 +66,24 @@ case "${route_health_restart}" in
     exit 2
     ;;
 esac
+case "${route_health_mixed_exit_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_mixed_exit_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_mixed_exit_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT must be true or false, got ${route_health_mixed_exit_restart}" >&2
+    exit 2
+    ;;
+esac
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
+  exit 2
+fi
+if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
   exit 2
 fi
 if ((route_health_restart_flag)); then
@@ -99,6 +117,7 @@ else
 fi
 router_b_name="${REAL_CLIENT_ROUTER_B_NAME:-${run_id}-router-b}"
 bob_name="${REAL_CLIENT_BOB_NAME:-${run_id}-bob}"
+exit_name="${REAL_CLIENT_EXIT_NAME:-${run_id}-exit}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 
 case "${work_root}" in
@@ -126,7 +145,7 @@ router_a_authkey=""
 router_b_authkey=""
 
 cleanup() {
-  docker rm -f "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" >/dev/null 2>&1 || true
+  docker rm -f "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" "${exit_name}" >/dev/null 2>&1 || true
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
@@ -195,7 +214,7 @@ wait_pid_with_timeout() {
 
 dump_debug() {
   headscale_cmd -o json nodes list 2>&1 || true
-  for client_name in "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"; do
+  for client_name in "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" "${exit_name}"; do
     docker exec "${client_name}" tailscale status 2>&1 || true
     docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2 || true
   done
@@ -658,6 +677,32 @@ login_router_with_authkey() {
   echo "::endgroup::"
 }
 
+login_exit_with_authkey() {
+  local client_name="${1:-${exit_name}}"
+  local key="${2:-${authkey}}"
+  echo "::group::tailscale up auth-key exit node ${client_name}"
+  up_status=0
+  docker exec "${client_name}" tailscale up \
+    "--login-server=${control_url}" \
+    "--hostname=${client_name}" \
+    --timeout=60s \
+    --accept-routes=false \
+    --accept-dns=false \
+    --advertise-exit-node \
+    "--authkey=${key}" \
+    >"${work_dir}/${client_name}.tailscale-up.stdout" \
+    2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
+    up_status="$?"
+  if ((up_status != 0)); then
+    echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
+  fi
+  wait_for "logged-in exit-node netmap ${client_name}" "tailscale_logged_in '${client_name}'" || {
+    dump_debug
+    return 1
+  }
+  echo "::endgroup::"
+}
+
 login_observer_with_web_registration() {
   local client_name="${1:-${observer_name}}"
   local user="${2:-alice}"
@@ -733,6 +778,16 @@ approve_router_routes() {
   echo "::group::approve router routes ${hostname}"
   headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${advertised_routes}" \
     >"${work_dir}/approved-routes-${router_id}.json"
+  echo "::endgroup::"
+}
+
+approve_exit_routes() {
+  local hostname="$1"
+  local router_id
+  router_id="$(load_node_id "${hostname}")"
+  echo "::group::approve exit routes ${hostname}"
+  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${exit_routes}" \
+    >"${work_dir}/approved-exit-routes-${router_id}.json"
   echo "::endgroup::"
 }
 
@@ -844,6 +899,9 @@ assert_route_health_persisted_nodes() {
     route = ARGV.fetch(1)
     router_a_name = ARGV.fetch(2)
     router_b_name = ARGV.fetch(3)
+    mixed_exit = ARGV.fetch(4) == "1"
+    exit_name = ARGV.fetch(5)
+    exit_routes = ARGV.fetch(6).split(",").map(&:to_s)
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
 
@@ -865,6 +923,18 @@ assert_route_health_persisted_nodes() {
       abort("expected router #{node_name(node).inspect} to be online, got #{online.inspect}") unless online == true
     end
 
+    def assert_exit_node(node, exit_routes, subnet_route)
+      available = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
+      approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+      exit_routes.each do |exit_route|
+        abort("expected exit node available route #{exit_route.inspect}, got #{available.inspect}") unless available.include?(exit_route)
+        abort("expected exit node approved route #{exit_route.inspect}, got #{approved.inspect}") unless approved.include?(exit_route)
+      end
+      abort("exit node unexpectedly advertises subnet route #{subnet_route.inspect}") if available.include?(subnet_route)
+      online = node.key?("online") ? node["online"] : node["Online"]
+      abort("expected exit node #{node_name(node).inspect} to be online, got #{online.inspect}") unless online == true
+    end
+
     def primary_routes(node)
       Array(
         node["subnetRoutes"] ||
@@ -878,17 +948,27 @@ assert_route_health_persisted_nodes() {
     router_b = find_node(nodes, router_b_name)
     assert_router(router_a, route)
     assert_router(router_b, route)
+    exit_node = nil
+    if mixed_exit
+      exit_node = find_node(nodes, exit_name)
+      assert_exit_node(exit_node, exit_routes, route)
+    end
 
     primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
     abort("expected exactly one primary route owner for #{route}, got #{primary_nodes.length} in #{nodes.inspect}") unless primary_nodes.length == 1
+    primary_name = node_name(primary_nodes.fetch(0)).to_s
+    unless [router_a_name, router_b_name].include?(primary_name)
+      abort("expected primary route owner for #{route} to be one of #{[router_a_name, router_b_name].inspect}, got #{primary_name.inspect}")
+    end
 
     puts JSON.pretty_generate({
       route: route,
       primary: primary_nodes.fetch(0),
       router_a: router_a,
       router_b: router_b,
+      exit_node: exit_node,
     })
-  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}"
+  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}" "${route_health_mixed_exit_restart_flag}" "${exit_name}" "${exit_routes}"
 }
 
 wait_for_route_health_primary() {
@@ -945,39 +1025,100 @@ wait_for_route_health_peer_owner_from_admin() {
   cat "${output_path}"
 }
 
+route_health_peer_owner_from_netmap() {
+  local source_name="$1"
+  local expected_route="$2"
+  local output_path="$3"
+  local owner_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${source_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected_route = ARGV.fetch(1)
+      router_a_name = ARGV.fetch(2)
+      router_b_name = ARGV.fetch(3)
+      owner_path = ARGV.fetch(4)
+      peers = Array(netmap["Peers"] || netmap["peers"])
+
+      def names_for(peer)
+        [
+          peer["HostName"],
+          peer["Name"],
+          peer["DNSName"],
+          peer["ComputedName"],
+          peer["Hostinfo"] && peer["Hostinfo"]["Hostname"],
+          peer["HostInfo"] && peer["HostInfo"]["Hostname"],
+        ].compact.map(&:to_s)
+      end
+
+      def route_fields(peer)
+        [
+          peer["AllowedIPs"],
+          peer["AllowedIps"],
+          peer["allowedIPs"],
+          peer["allowed_ips"],
+          peer["PrimaryRoutes"],
+          peer["primaryRoutes"],
+          peer["primary_routes"],
+          peer["SubnetRoutes"],
+          peer["subnetRoutes"],
+          peer["subnet_routes"],
+        ].compact.flatten.map(&:to_s)
+      end
+
+      def peer_matches_name?(peer, expected)
+        names_for(peer).any? do |name|
+          name == expected || name.split(".").first == expected || name.include?(expected)
+        end
+      end
+
+      candidate_peers = [router_a_name, router_b_name].map do |name|
+        peer = peers.find { |candidate| peer_matches_name?(candidate, name) }
+        peer && [name, peer]
+      end.compact
+      abort("expected both route-health routers in netmap, got #{candidate_peers.map(&:first).inspect} from #{peers.inspect}") unless candidate_peers.length == 2
+
+      owners = candidate_peers.select { |(_name, peer)| route_fields(peer).include?(expected_route) }
+      abort("expected one route-health router to own #{expected_route.inspect}, got #{owners.length} in #{candidate_peers.map { |name, peer| {name: name, names: names_for(peer), routes: route_fields(peer)} }.inspect}") unless owners.length == 1
+
+      owner_name, owner_peer = owners.fetch(0)
+      unexpected_owners = peers.reject { |peer| peer.equal?(owner_peer) }.select do |peer|
+        route_fields(peer).include?(expected_route)
+      end
+      unless unexpected_owners.empty?
+        details = unexpected_owners.map { |peer| {names: names_for(peer), routes: route_fields(peer)} }
+        abort("expected only #{owner_name.inspect} to own #{expected_route.inspect}, but found #{details.inspect}")
+      end
+
+      File.write(owner_path, "#{owner_name}\n")
+      puts JSON.pretty_generate({
+        source: netmap.dig("SelfNode", "HostName") || netmap.dig("SelfNode", "Name"),
+        owner: owner_name,
+        route: expected_route,
+        owner_names: names_for(owner_peer),
+        owner_routes: route_fields(owner_peer),
+      })
+    ' "${netmap_path}" "${expected_route}" "${router_name}" "${router_b_name}" "${owner_path}" >"${output_path}"
+}
+
 assert_route_health_peer_failover_after_restart() {
   local before_path="${work_dir}/route-health-peer-before-failover.json"
   local after_path="${work_dir}/route-health-peer-after-failover.json"
   local recovery_path="${work_dir}/route-health-peer-after-recovery.json"
   local primary_snapshot_path="${work_dir}/route-health-primary-before-peer-failover.json"
+  local owner_path="${work_dir}/route-health-peer-before-failover.owner"
   local route_health_primary_name route_health_standby_name
 
   echo "::group::assert route-health peer failover after restart"
   headscale_cmd -o json nodes list >"${primary_snapshot_path}"
-  route_health_primary_name="$(
-    ruby -rjson -e '
-      route = ARGV.fetch(1)
-      payload = JSON.parse(File.read(ARGV.fetch(0)))
-      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
-
-      def node_name(node)
-        node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
-      end
-
-      def primary_routes(node)
-        Array(
-          node["subnetRoutes"] ||
-          node["subnet_routes"] ||
-          node["primaryRoutes"] ||
-          node["primary_routes"]
-        ).map(&:to_s)
-      end
-
-      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
-      abort("expected exactly one current primary route owner for #{route}, got #{primary_nodes.length}") unless primary_nodes.length == 1
-      puts node_name(primary_nodes.fetch(0))
-    ' "${primary_snapshot_path}" "${route}"
-  )"
+  wait_for "observer sees initial route-health owner" \
+    "route_health_peer_owner_from_netmap '${observer_name}' '${route}' '${before_path}' '${owner_path}'" || {
+      cat "${before_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${before_path}"
+  route_health_primary_name="$(cat "${owner_path}")"
   case "${route_health_primary_name}" in
     "${router_name}") route_health_standby_name="${router_b_name}" ;;
     "${router_b_name}") route_health_standby_name="${router_name}" ;;
@@ -987,14 +1128,6 @@ assert_route_health_peer_failover_after_restart() {
       return 1
       ;;
   esac
-
-  wait_for "observer sees initial route-health owner" \
-    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_primary_name}' '${route}' '${before_path}'" || {
-      cat "${before_path}.err" >&2 || true
-      dump_debug
-      return 1
-    }
-  cat "${before_path}"
 
   docker pause "${route_health_primary_name}" >/dev/null
   if ! wait_for "observer sees route-health failover owner" \
@@ -1396,11 +1529,18 @@ elif ((route_health_restart_flag)); then
   create_user_and_key
   start_client "${router_name}"
   start_client "${router_b_name}"
+  if ((route_health_mixed_exit_restart_flag)); then
+    start_client "${exit_name}"
+  fi
   start_client "${observer_name}"
   login_router_with_authkey "${router_name}" "${authkey}"
   login_router_with_authkey "${router_b_name}" "${authkey}"
   approve_router_routes "${router_name}"
   approve_router_routes "${router_b_name}"
+  if ((route_health_mixed_exit_restart_flag)); then
+    login_exit_with_authkey "${exit_name}" "${authkey}"
+    approve_exit_routes "${exit_name}"
+  fi
   login_observer_with_web_registration "${observer_name}" alice
   wait_for_route_health_primary "before-restart"
   wait_for_route_health_peer_owner_from_admin "before-restart"
@@ -1409,9 +1549,15 @@ elif ((route_health_restart_flag)); then
   start_server
   wait_for "router-a reconnected after restart" "tailscale_logged_in '${router_name}'"
   wait_for "router-b reconnected after restart" "tailscale_logged_in '${router_b_name}'"
+  if ((route_health_mixed_exit_restart_flag)); then
+    wait_for "exit node reconnected after restart" "tailscale_logged_in '${exit_name}'"
+  fi
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
   wait_for_route_health_primary "after-restart"
   assert_route_health_peer_failover_after_restart
+  if ((route_health_mixed_exit_restart_flag)); then
+    wait_for_route_health_primary "after-failover"
+  fi
 else
   create_user_and_key
   start_client "${router_name}"

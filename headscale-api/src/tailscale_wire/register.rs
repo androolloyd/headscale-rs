@@ -79,8 +79,7 @@ use super::noise::NoisePeerMachineKey;
 use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
-    is_supported_capability_version, stable_id_from_key, strip_key_prefix,
-    unsupported_client_error,
+    is_supported_capability_version, strip_key_prefix, unsupported_client_error,
 };
 use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
@@ -415,6 +414,7 @@ async fn register_inner(
         None
     };
     let rec = MachineRecord {
+        node_id: None,
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
         user,
@@ -518,6 +518,7 @@ async fn register_interactive(
         None
     };
     let record = MachineRecord {
+        node_id: None,
         node_key_hex,
         machine_key_hex,
         user: String::new(),
@@ -917,7 +918,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
     } else {
         qualify(rec.hostname.clone(), domain)
     };
-    let id = stable_id_from_key(&rec.node_key_hex);
+    let id = rec.stable_node_id();
     let stable_id = format!("n{id}");
     // `User` mirrors upstream `tailcfg.Node.User`; tagged nodes use
     // headscale-go's synthetic TaggedDevices user instead of their

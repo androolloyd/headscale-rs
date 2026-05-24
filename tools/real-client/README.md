@@ -120,7 +120,11 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
 | Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
+| Routes | `route-health-primary-restart` | `route-health-primary-restart-smoke.sh` | `route-health-primary-restart-headscale-go-smoke.sh` | Current-head route-health primary owner survives server restart |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health last-known-primary retention when all candidates are unavailable |
+| Routes | `route-health-mixed-exit` | `route-health-mixed-exit-smoke.sh` | `route-health-mixed-exit-headscale-go-smoke.sh` | Current-head route-health ignores exit-only routes during HA failover |
+| Routes | `route-health-mixed-exit-reload` | `route-health-mixed-exit-reload-smoke.sh` | `route-health-mixed-exit-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves exit-node separation |
+| Routes | `route-health-mixed-exit-restart` | `route-health-mixed-exit-restart-smoke.sh` | `route-health-mixed-exit-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node separation survives server restart |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 
@@ -659,6 +663,21 @@ unavailable-candidate case:
 ```sh
 tools/real-client/route-health-all-unhealthy-smoke.sh
 tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
+```
+
+The mixed-exit route-health variants add an exit-only router next to the two
+subnet router candidates and assert HA primary/failover behavior continues to
+use only the subnet routers. The reload variant proves the same separation
+after policy expansion; the restart variant runs through a production server
+restart before asserting the exit-only routes remain separate from subnet HA:
+
+```sh
+tools/real-client/route-health-mixed-exit-smoke.sh
+tools/real-client/route-health-mixed-exit-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-reload-smoke.sh
+tools/real-client/route-health-mixed-exit-reload-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-restart-smoke.sh
+tools/real-client/route-health-mixed-exit-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper also defaults to the audited current-head commit

@@ -154,7 +154,7 @@ fn build_dns_for_snapshot(dns: &DnsStore, snapshot: &HashMap<String, MachineReco
             hostname: rec.hostname.clone(),
             ipv4: rec.ipv4,
             ipv6: rec.ipv6,
-            node_id: stable_id_from_key(node_hex),
+            node_id: rec.stable_node_id_for_key(node_hex),
         })
         .collect();
     dns.build(&machines)
@@ -206,7 +206,7 @@ fn peer_map_nodes_from_snapshot(
     snapshot
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             addr: rec.primary_addr_string().unwrap_or_default(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
@@ -222,13 +222,20 @@ fn packet_filter_nodes_from_snapshot(
     snapshot
         .iter()
         .map(|(node_key, rec)| PacketFilterNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
             routes: served_routes.get(node_key).cloned().unwrap_or_default(),
         })
         .collect()
+}
+
+fn node_id_for_key(snapshot: &HashMap<String, MachineRecord>, node_key: &str) -> u64 {
+    snapshot.get(node_key).map_or_else(
+        || stable_id_from_key(node_key),
+        |rec| rec.stable_node_id_for_key(node_key),
+    )
 }
 
 fn allowed_peer_ids_for_snapshot(
@@ -239,7 +246,7 @@ fn allowed_peer_ids_for_snapshot(
 ) -> Option<BTreeSet<u64>> {
     let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
     let peer_map = policy.build_peer_map(&nodes)?;
-    let self_id = stable_id_from_key(self_node_key);
+    let self_id = node_id_for_key(snapshot, self_node_key);
     Some(
         peer_map
             .get(&self_id)
@@ -250,9 +257,9 @@ fn allowed_peer_ids_for_snapshot(
     )
 }
 
-fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str) -> bool {
+fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str, rec: &MachineRecord) -> bool {
     match allowed_ids {
-        Some(ids) => ids.contains(&stable_id_from_key(node_key)),
+        Some(ids) => ids.contains(&rec.stable_node_id_for_key(node_key)),
         None => true,
     }
 }
@@ -274,8 +281,8 @@ fn select_routes_for_viewer(
     allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
 
     let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
-    let viewer_id = stable_id_from_key(self_node_key);
-    let peer_id = stable_id_from_key(peer_node_key);
+    let viewer_id = node_id_for_key(snapshot, self_node_key);
+    let peer_id = node_id_for_key(snapshot, peer_node_key);
     if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
         selected_primary.retain(|route| !via.exclude.contains(route));
         allowed_routes.retain(|route| !via.exclude.contains(route));
@@ -302,9 +309,9 @@ fn peer_ids_from_snapshot(
     self_node_key: &str,
 ) -> BTreeSet<u64> {
     snapshot
-        .keys()
-        .filter(|node_key| node_key.as_str() != self_node_key)
-        .map(|node_key| stable_id_from_key(node_key))
+        .iter()
+        .filter(|(node_key, _rec)| node_key.as_str() != self_node_key)
+        .map(|(node_key, rec)| rec.stable_node_id_for_key(node_key))
         .collect()
 }
 
@@ -528,7 +535,7 @@ fn visible_peer_map_nodes(
     let mut peers: Vec<MapNode> = snapshot
         .iter()
         .filter(|(node_key, _)| node_key.as_str() != self_node_key)
-        .filter(|(node_key, _)| peer_allowed(allowed_ids, node_key))
+        .filter(|(node_key, rec)| peer_allowed(allowed_ids, node_key, rec))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, tailnet_domain);
             apply_transient_lifecycle(&mut node, rec, online_states);
@@ -559,7 +566,7 @@ fn user_profiles_for_snapshot(
 ) -> Vec<UserProfile> {
     let mut profiles = BTreeMap::new();
     for (node_key, rec) in snapshot {
-        if node_key == self_node_key || peer_allowed(allowed_ids, node_key) {
+        if node_key == self_node_key || peer_allowed(allowed_ids, node_key, rec) {
             let profile = rec.tailscale_user_profile();
             profiles.entry(profile.id).or_insert(profile);
         }
@@ -701,7 +708,7 @@ fn ssh_policy_nodes_from_snapshot(
     snapshot
         .iter()
         .map(|(node_hex, rec)| SshPolicyNode {
-            id: stable_id_from_key(node_hex),
+            id: rec.stable_node_id_for_key(node_hex),
             user: if rec.user.is_empty() {
                 None
             } else {
@@ -719,7 +726,7 @@ fn ssh_policy_for_snapshot(
     self_node_key: &str,
 ) -> Option<super::wire::SshPolicy> {
     let nodes = ssh_policy_nodes_from_snapshot(snapshot);
-    policy.ssh_policy_for(&nodes, stable_id_from_key(self_node_key))
+    policy.ssh_policy_for(&nodes, node_id_for_key(snapshot, self_node_key))
 }
 
 #[derive(Serialize)]
@@ -964,7 +971,7 @@ async fn map_inner(
         }
     }
 
-    let self_node_id = stable_id_from_key(&node_key_hex);
+    let self_node_id = state.machines.stable_node_id_for_key(&node_key_hex);
     let stream_connection_guard = req.stream.then(|| {
         super::MachineRegistry::track_stream_connection(state.machines.clone(), self_node_id)
     });
@@ -1179,7 +1186,7 @@ async fn map_inner(
                         ),
                     ));
                 }
-                let self_node_id = stable_id_from_key(&self_node_key);
+                let self_node_id = machines.stable_node_id_for_key(&self_node_key);
                 if let Some(request) = pings.pop_next_for_node(self_node_id) {
                     return Some((
                         Ok::<_, std::io::Error>(build_ping_request_chunk(
@@ -1345,7 +1352,7 @@ async fn map_inner(
                         machines.record_mapresponse_sent_for_node(
                             "ok",
                             "keepalive",
-                            stable_id_from_key(&self_node_key),
+                            machines.stable_node_id_for_key(&self_node_key),
                         );
                         (build_keepalive_chunk(compression), last_peer_state, last_self_node)
                     }
@@ -1480,7 +1487,7 @@ fn rebuild_peer_delta_chunk(
         initial_peer_ids,
         last_peer_state,
     );
-    let self_node_id = stable_id_from_key(self_node_key);
+    let self_node_id = node_id_for_key(&snapshot, self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let current_self_node = self_map_node_from_snapshot(
         &snapshot,
@@ -1617,7 +1624,7 @@ fn rebuild_map_chunk(
     let served_routes = served_routes_for_snapshot(&snapshot);
     let allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
-    let self_node_id = stable_id_from_key(self_node_key);
+    let self_node_id = node_id_for_key(&snapshot, self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
         &snapshot,

@@ -313,7 +313,7 @@ impl WireMachineAdmin {
             last_seen
         };
         MachineAdminRecord {
-            node_id: 0,
+            node_id: rec.node_id.unwrap_or_default(),
             id: id.to_string(),
             name: rec.hostname.clone(),
             user: rec.user.clone(),
@@ -761,9 +761,7 @@ impl PersistentMachineAdmin {
             let record = registry.get(&node_key_hex)?;
             let online = registry
                 .online_states()
-                .get(&crate::tailscale_wire::wire::stable_id_from_key(
-                    &node_key_hex,
-                ))
+                .get(&record.stable_node_id())
                 .copied()
                 .unwrap_or(false);
             Some((online, record.last_seen.timestamp().max(0) as u64))
@@ -851,6 +849,7 @@ impl PersistentMachineAdmin {
             ipv6,
             false,
         );
+        record.node_id = u64::try_from(row.id).ok();
         record.replace_host_info(host_info_from_value(&host_info));
         record.os = os_from_host_info(&host_info);
         record.os_version = version_from_host_info(&host_info);
@@ -1289,7 +1288,7 @@ impl MachineAdmin for WireMachineAdmin {
             .map(|(k, rec)| {
                 let is_exp = expired.contains(k.as_str());
                 let online = online_states
-                    .get(&crate::tailscale_wire::wire::stable_id_from_key(k))
+                    .get(&rec.stable_node_id_for_key(k))
                     .copied()
                     .unwrap_or(false);
                 Self::render(k.as_str(), rec, is_exp, online)
@@ -1308,7 +1307,7 @@ impl MachineAdmin for WireMachineAdmin {
         let online = self
             .registry
             .online_states()
-            .get(&crate::tailscale_wire::wire::stable_id_from_key(id))
+            .get(&rec.stable_node_id_for_key(id))
             .copied()
             .unwrap_or(false);
         Some(Self::render(id, &rec, is_exp, online))
@@ -1374,6 +1373,7 @@ impl MachineAdmin for WireMachineAdmin {
             ipv6,
             false,
         );
+        rec.node_id = (record.node_id != 0).then_some(record.node_id);
         rec.expiry = expiry;
         rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
         rec.os = record.os.clone();
@@ -1577,6 +1577,7 @@ fn canonical_wire_record_for_auth_path(
         None => machine_admin_record_to_wire(record)?,
     };
     canonical.node_key_hex.clone_from(&record.id);
+    canonical.node_id = (record.node_id != 0).then_some(record.node_id);
     canonical
         .machine_key_hex
         .clone_from(&record.machine_key_hex);
@@ -1619,7 +1620,7 @@ fn create_params_for_wire_record(
 fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord {
     let expired = record.is_expired_at(Utc::now());
     MachineAdminRecord {
-        node_id: 0,
+        node_id: record.node_id.unwrap_or_default(),
         id: record.node_key_hex.clone(),
         name: record.hostname.clone(),
         user: record.user.clone(),
@@ -1663,6 +1664,7 @@ fn machine_admin_record_to_wire(
         ipv6,
         false,
     );
+    record.node_id = (machine.node_id != 0).then_some(machine.node_id);
     record.expiry = machine
         .expiry
         .map(|expiry| unix_timestamp_for_record(expiry, &machine.id, "expiry"))
@@ -2553,7 +2555,7 @@ mod tests {
 
         let guard = MachineRegistry::track_stream_connection_with_grace(
             registry.clone(),
-            crate::tailscale_wire::wire::stable_id_from_key(&created.id),
+            registry.stable_node_id_for_key(&created.id),
             std::time::Duration::ZERO,
         );
         let online = admin.get(&created.id).await.unwrap();

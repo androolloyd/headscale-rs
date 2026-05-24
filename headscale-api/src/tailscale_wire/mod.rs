@@ -849,7 +849,7 @@ pub(crate) fn route_health_probe_candidates(machines: &MachineRegistry) -> Vec<u
     let mut nodes_by_route: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
 
     for (node_key, rec) in snapshot.iter() {
-        let node_id = stable_id_from_key(node_key);
+        let node_id = rec.stable_node_id_for_key(node_key);
         if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false) {
             continue;
         }
@@ -1367,8 +1367,16 @@ impl MachineRegistry {
 
     fn ephemeral_node_key_by_id(&self, node_id: u64) -> Option<String> {
         self.snapshot().iter().find_map(|(node_key, rec)| {
-            (rec.ephemeral && stable_id_from_key(node_key) == node_id).then(|| node_key.clone())
+            (rec.ephemeral && rec.stable_node_id_for_key(node_key) == node_id)
+                .then(|| node_key.clone())
         })
+    }
+
+    pub(crate) fn stable_node_id_for_key(&self, node_key_hex: &str) -> u64 {
+        self.inner.read().get(node_key_hex).map_or_else(
+            || stable_id_from_key(node_key_hex),
+            |rec| rec.stable_node_id_for_key(node_key_hex),
+        )
     }
 
     /// Subscribe to the generation-counter wake channel. Each mutating
@@ -1480,7 +1488,8 @@ impl MachineRegistry {
         snapshot
             .keys()
             .filter_map(|node_key| {
-                let routes = primary_routes.primary_routes(stable_id_from_key(node_key));
+                let rec = snapshot.get(node_key)?;
+                let routes = primary_routes.primary_routes(rec.stable_node_id_for_key(node_key));
                 if routes.is_empty() {
                     None
                 } else {
@@ -1546,12 +1555,12 @@ impl MachineRegistry {
             snapshot
                 .iter()
                 .filter(|&(node_key, rec)| {
-                    let node_id = stable_id_from_key(node_key);
+                    let node_id = rec.stable_node_id_for_key(node_key);
                     !rec.is_expired_at(now) && online_states.get(&node_id).copied().unwrap_or(false)
                 })
                 .map(|(node_key, rec)| {
                     (
-                        stable_id_from_key(node_key),
+                        rec.stable_node_id_for_key(node_key),
                         active_primary_routes(&rec.available_routes, &rec.approved_routes),
                     )
                 }),
@@ -1684,7 +1693,7 @@ impl MachineRegistry {
         self.update_with_operation("update", |map| {
             if let Some((_node_key, rec)) = map
                 .iter_mut()
-                .find(|(node_key, _rec)| stable_id_from_key(node_key) == node_id)
+                .find(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
             {
                 rec.last_seen = now;
             }
@@ -1900,6 +1909,7 @@ impl MachineRegistry {
         rec: MachineRecord,
     ) {
         let key_changed = old_node_key_hex != new_node_key_hex;
+        let old_id = self.stable_node_id_for_key(old_node_key_hex);
         self.update_with_operation("replace_key", |map| {
             if key_changed {
                 map.remove(old_node_key_hex);
@@ -1907,7 +1917,6 @@ impl MachineRegistry {
             map.insert(new_node_key_hex, rec);
         });
         if key_changed {
-            let old_id = stable_id_from_key(old_node_key_hex);
             self.active_connections.write().remove(&old_id);
             self.online_states.write().remove(&old_id);
             self.connection_generations.write().remove(&old_id);
@@ -2071,10 +2080,10 @@ impl MachineRegistry {
     /// Remove a machine from the registry entirely. Mirrors
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
+        let node_id = self.stable_node_id_for_key(node_key_hex);
         let removed =
             self.update_with_operation("delete", |map| map.remove(node_key_hex).is_some());
         if removed {
-            let node_id = stable_id_from_key(node_key_hex);
             self.active_connections.write().remove(&node_id);
             self.online_states.write().remove(&node_id);
             self.connection_generations.write().remove(&node_id);
@@ -2128,7 +2137,7 @@ impl MachineRegistry {
     /// route approval. The register/map paths maintain
     /// `available_routes`; this method records operator approval.
     pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        let node_id = stable_id_from_key(node_key_hex);
+        let node_id = self.stable_node_id_for_key(node_key_hex);
         let mut clear_unhealthy = false;
         let changed = self.update_with(|map| match map.get_mut(node_key_hex) {
             Some(rec) => {
@@ -2176,23 +2185,23 @@ impl MachineRegistry {
         let start = Instant::now();
         let removed = {
             let mut g = self.inner.write();
-            let to_drop: Vec<String> = g
+            let to_drop: Vec<(String, u64)> = g
                 .iter()
                 .filter(|(node_key, rec)| {
-                    let node_id = stable_id_from_key(node_key);
+                    let node_id = rec.stable_node_id_for_key(node_key);
                     rec.ephemeral
                         && rec.last_seen < deadline
                         && active_connections.get(&node_id).copied().unwrap_or(0) == 0
                         && !online_states.get(&node_id).copied().unwrap_or(false)
                 })
-                .map(|(k, _)| k.clone())
+                .map(|(k, rec)| (k.clone(), rec.stable_node_id_for_key(k)))
                 .collect();
 
             if to_drop.is_empty() {
                 Vec::new()
             } else {
                 let mut next = (**g).clone();
-                for k in &to_drop {
+                for (k, _node_id) in &to_drop {
                     next.remove(k);
                 }
                 *g = Arc::new(next);
@@ -2200,7 +2209,7 @@ impl MachineRegistry {
             }
         };
         if removed.is_empty() {
-            return removed;
+            return Vec::new();
         }
 
         let elapsed = start.elapsed();
@@ -2211,13 +2220,15 @@ impl MachineRegistry {
         let mut active = self.active_connections.write();
         let mut online = self.online_states.write();
         let mut generations = self.connection_generations.write();
-        for node_key_hex in &removed {
-            let node_id = stable_id_from_key(node_key_hex);
-            active.remove(&node_id);
-            online.remove(&node_id);
-            generations.remove(&node_id);
+        for (_node_key_hex, node_id) in &removed {
+            active.remove(node_id);
+            online.remove(node_id);
+            generations.remove(node_id);
         }
         removed
+            .into_iter()
+            .map(|(node_key_hex, _node_id)| node_key_hex)
+            .collect()
     }
 }
 
@@ -2275,7 +2286,7 @@ impl EphemeralNodeGc {
             .filter(|(node_key, rec)| {
                 rec.ephemeral
                     && active
-                        .get(&stable_id_from_key(node_key))
+                        .get(&rec.stable_node_id_for_key(node_key))
                         .copied()
                         .unwrap_or(0)
                         == 0
@@ -2303,7 +2314,7 @@ impl EphemeralNodeGc {
             self.cancel(&node_key_hex);
             return;
         }
-        let node_id = stable_id_from_key(&node_key_hex);
+        let node_id = rec.stable_node_id_for_key(&node_key_hex);
         if machines
             .active_connections
             .read()
@@ -2352,7 +2363,10 @@ impl EphemeralNodeGc {
         let Some(machines) = self.machines.upgrade() else {
             return;
         };
-        let node_id = stable_id_from_key(&node_key_hex);
+        let Some(rec) = machines.get(&node_key_hex) else {
+            return;
+        };
+        let node_id = rec.stable_node_id_for_key(&node_key_hex);
         if machines
             .active_connections
             .read()
@@ -2363,9 +2377,8 @@ impl EphemeralNodeGc {
         {
             return;
         }
-        match machines.get(&node_key_hex) {
-            Some(rec) if rec.ephemeral => {}
-            _ => return,
+        if !rec.ephemeral {
+            return;
         }
 
         if let Some(store) = self
@@ -2501,6 +2514,7 @@ mod registry_tests {
     fn mk_record(host: u32) -> MachineRecord {
         let now = Utc::now();
         MachineRecord {
+            node_id: None,
             node_key_hex: format!("nodekey-{host:08x}"),
             machine_key_hex: format!("mkey-{host:08x}"),
             user: "alice".to_string(),
@@ -3606,6 +3620,31 @@ mod registry_tests {
             vec![route]
         );
         assert!(!primary.contains_key(&keys[1]));
+    }
+
+    #[test]
+    fn persisted_route_candidates_choose_lowest_persisted_node_id() {
+        let reg = Arc::new(MachineRegistry::new());
+        let keys = stable_sorted_keys(&["persisted-route-a", "persisted-route-b"]);
+        let route = "10.0.0.0/24";
+        let mut higher_db_id = route_record(&keys[0], 10, route);
+        higher_db_id.node_id = Some(2);
+        let mut lower_db_id = route_record(&keys[1], 11, route);
+        lower_db_id.node_id = Some(1);
+        reg.upsert(keys[0].clone(), higher_db_id);
+        reg.upsert(keys[1].clone(), lower_db_id);
+        let _guard_higher =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 2, Duration::ZERO);
+        let _guard_lower =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 1, Duration::ZERO);
+
+        let primary = reg.primary_routes_for_snapshot(&reg.snapshot());
+
+        assert_eq!(
+            primary.get(&keys[1]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!primary.contains_key(&keys[0]));
     }
 
     #[test]

@@ -95,6 +95,10 @@ fn tailscale_version_for_capability(version: u32) -> Option<&'static str> {
 /// abandoned devices.
 #[derive(Clone, Debug)]
 pub struct MachineRecord {
+    /// Upstream `nodes.id` when this record is backed by the
+    /// headscale-go-compatible database. In-memory embedders leave it
+    /// unset and fall back to a deterministic node-key-derived ID.
+    pub node_id: Option<u64>,
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
     /// path `/machine/{node_key}/map` carries the raw hex.
     pub node_key_hex: String,
@@ -193,6 +197,16 @@ pub struct MachineRecord {
 }
 
 impl MachineRecord {
+    pub fn stable_node_id(&self) -> u64 {
+        self.node_id
+            .unwrap_or_else(|| stable_id_from_key(&self.node_key_hex))
+    }
+
+    pub fn stable_node_id_for_key(&self, node_key_hex: &str) -> u64 {
+        self.node_id
+            .unwrap_or_else(|| stable_id_from_key(node_key_hex))
+    }
+
     pub fn address_strings(&self) -> Vec<String> {
         let mut addrs = Vec::new();
         if let Some(ipv4) = self.ipv4 {
@@ -303,6 +317,7 @@ impl MachineRecord {
         ephemeral: bool,
     ) -> Self {
         Self {
+            node_id: None,
             node_key_hex,
             machine_key_hex,
             user,

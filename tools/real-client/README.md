@@ -113,6 +113,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
+| Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
@@ -616,6 +617,16 @@ recovery probe and asserts sticky ownership remains with the failover router:
 ```sh
 tools/real-client/route-health-smoke.sh
 tools/real-client/route-health-headscale-go-smoke.sh
+```
+
+The route-health restart variant runs the production server with persistent
+SQLite and config-backed HA route probes, restarts the server, then pauses the
+current primary router and asserts post-restart route-health failover plus
+sticky recovery:
+
+```sh
+tools/real-client/route-health-restart-smoke.sh
+tools/real-client/route-health-restart-headscale-go-smoke.sh
 ```
 
 The all-unhealthy route-health variant pauses the current primary, waits for

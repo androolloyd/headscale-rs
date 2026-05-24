@@ -20,6 +20,9 @@ route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"
 initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
+route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
+route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
+route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
 run_id="hs-restart-${target}-$(date +%s)-$$"
 case "${route_via_restart}" in
@@ -34,11 +37,44 @@ case "${route_via_restart}" in
     exit 2
     ;;
 esac
-if ((route_via_restart_flag)); then
+case "${route_health_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_HEALTH must be true or false, got ${route_health_restart}" >&2
+    exit 2
+    ;;
+esac
+if ((route_via_restart_flag && route_health_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
+  exit 2
+fi
+if ((route_health_restart_flag)); then
+  if ! [[ "${route_health_probe_interval_secs}" =~ ^[0-9]+$ ]] || ((route_health_probe_interval_secs < 2)); then
+    echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS must be an integer >= 2, got ${route_health_probe_interval_secs}" >&2
+    exit 2
+  fi
+  if ! [[ "${route_health_probe_timeout_secs}" =~ ^[0-9]+$ ]] || ((route_health_probe_timeout_secs < 1)); then
+    echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be a positive integer, got ${route_health_probe_timeout_secs}" >&2
+    exit 2
+  fi
+  if ((route_health_probe_timeout_secs >= route_health_probe_interval_secs)); then
+    echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be less than REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS" >&2
+    exit 2
+  fi
+fi
+if ((route_via_restart_flag || route_health_restart_flag)); then
   router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router-a}"
-  observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-alice}"
 else
   router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router}"
+fi
+if ((route_via_restart_flag)); then
+  observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-alice}"
+else
   observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-observer}"
 fi
 router_b_name="${REAL_CLIENT_ROUTER_B_NAME:-${run_id}-router-b}"
@@ -235,6 +271,25 @@ write_policy() {
 EOF
     return
   fi
+  if ((route_health_restart_flag)); then
+    cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["*"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["*"],
+      "dst": ["${route}"],
+      "ip": ["*"]
+    }
+  ]
+}
+EOF
+    return
+  fi
   cat >"${work_dir}/policy.hujson" <<EOF
 {
   "tagOwners": {
@@ -340,6 +395,16 @@ policy:
 EOF
       ;;
   esac
+  if ((route_health_restart_flag)); then
+    cat >>"${config_path}" <<EOF
+
+node:
+  routes:
+    ha:
+      probe_interval: ${route_health_probe_interval_secs}s
+      probe_timeout: ${route_health_probe_timeout_secs}s
+EOF
+  fi
 }
 
 headscale_cmd() {
@@ -547,7 +612,7 @@ login_observer_with_web_registration() {
   fi
   local registration_id
   registration_id="$(cat "${registration_id_path}")"
-  headscale_cmd -o json nodes register --user "${user}" --key "${registration_id}" \
+  headscale_cmd -o json nodes register "--user=${user}" "--key=${registration_id}" \
     >"${work_dir}/${client_name}.registered.json"
 
   if ! wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}"; then
@@ -699,6 +764,326 @@ assert_route_via_persisted_nodes() {
       route: route,
     })
   ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
+}
+
+assert_route_health_persisted_nodes() {
+  local label="$1"
+  local nodes_path="${work_dir}/nodes-${label}.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    route = ARGV.fetch(1)
+    router_a_name = ARGV.fetch(2)
+    router_b_name = ARGV.fetch(3)
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    def find_node(nodes, name)
+      nodes.find { |node| node_name(node).to_s == name } ||
+        abort("missing node #{name.inspect} in #{nodes.inspect}")
+    end
+
+    def assert_router(node, route)
+      available = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
+      approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+      abort("expected router available route #{route.inspect}, got #{available.inspect}") unless available.include?(route)
+      abort("expected router approved route #{route.inspect}, got #{approved.inspect}") unless approved.include?(route)
+      online = node.key?("online") ? node["online"] : node["Online"]
+      abort("expected router #{node_name(node).inspect} to be online, got #{online.inspect}") unless online == true
+    end
+
+    def primary_routes(node)
+      Array(
+        node["subnetRoutes"] ||
+        node["subnet_routes"] ||
+        node["primaryRoutes"] ||
+        node["primary_routes"]
+      ).map(&:to_s)
+    end
+
+    router_a = find_node(nodes, router_a_name)
+    router_b = find_node(nodes, router_b_name)
+    assert_router(router_a, route)
+    assert_router(router_b, route)
+
+    primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+    abort("expected exactly one primary route owner for #{route}, got #{primary_nodes.length} in #{nodes.inspect}") unless primary_nodes.length == 1
+
+    puts JSON.pretty_generate({
+      route: route,
+      primary: primary_nodes.fetch(0),
+      router_a: router_a,
+      router_b: router_b,
+    })
+  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}"
+}
+
+wait_for_route_health_primary() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for "${label} route-health primary" \
+    "assert_route_health_persisted_nodes '${safe_label}' > '${work_dir}/route-health-primary-${safe_label}.json'" || {
+      dump_debug
+      return 1
+    }
+  cat "${work_dir}/route-health-primary-${safe_label}.json"
+}
+
+route_health_primary_name_from_nodes() {
+  local snapshot_path="$1"
+  headscale_cmd -o json nodes list >"${snapshot_path}"
+  ruby -rjson -e '
+    route = ARGV.fetch(1)
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    def primary_routes(node)
+      Array(
+        node["subnetRoutes"] ||
+        node["subnet_routes"] ||
+        node["primaryRoutes"] ||
+        node["primary_routes"]
+      ).map(&:to_s)
+    end
+
+    primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+    abort("expected exactly one current primary route owner for #{route}, got #{primary_nodes.length}") unless primary_nodes.length == 1
+    puts node_name(primary_nodes.fetch(0))
+  ' "${snapshot_path}" "${route}"
+}
+
+wait_for_route_health_peer_owner_from_admin() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  local snapshot_path="${work_dir}/route-health-primary-${safe_label}-peer-gate.json"
+  local output_path="${work_dir}/route-health-peer-${safe_label}.json"
+  local primary_name
+  primary_name="$(route_health_primary_name_from_nodes "${snapshot_path}")"
+  wait_for "${label} observer sees route-health owner" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${primary_name}' '${route}' '${output_path}'" || {
+      cat "${output_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${output_path}"
+}
+
+assert_route_health_peer_failover_after_restart() {
+  local before_path="${work_dir}/route-health-peer-before-failover.json"
+  local after_path="${work_dir}/route-health-peer-after-failover.json"
+  local recovery_path="${work_dir}/route-health-peer-after-recovery.json"
+  local primary_snapshot_path="${work_dir}/route-health-primary-before-peer-failover.json"
+  local route_health_primary_name route_health_standby_name
+
+  echo "::group::assert route-health peer failover after restart"
+  headscale_cmd -o json nodes list >"${primary_snapshot_path}"
+  route_health_primary_name="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(1)
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+      def node_name(node)
+        node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+      end
+
+      def primary_routes(node)
+        Array(
+          node["subnetRoutes"] ||
+          node["subnet_routes"] ||
+          node["primaryRoutes"] ||
+          node["primary_routes"]
+        ).map(&:to_s)
+      end
+
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort("expected exactly one current primary route owner for #{route}, got #{primary_nodes.length}") unless primary_nodes.length == 1
+      puts node_name(primary_nodes.fetch(0))
+    ' "${primary_snapshot_path}" "${route}"
+  )"
+  case "${route_health_primary_name}" in
+    "${router_name}") route_health_standby_name="${router_b_name}" ;;
+    "${router_b_name}") route_health_standby_name="${router_name}" ;;
+    *)
+      echo "route-health primary ${route_health_primary_name} is not ${router_name} or ${router_b_name}" >&2
+      dump_debug
+      return 1
+      ;;
+  esac
+
+  wait_for "observer sees initial route-health owner" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_primary_name}' '${route}' '${before_path}'" || {
+      cat "${before_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${before_path}"
+
+  docker pause "${route_health_primary_name}" >/dev/null
+  if ! wait_for "observer sees route-health failover owner" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${after_path}'"; then
+    docker unpause "${route_health_primary_name}" >/dev/null 2>&1 || true
+    cat "${after_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${after_path}"
+
+  docker unpause "${route_health_primary_name}" >/dev/null
+  if ! wait_for "tailscale logged-in netmap after route-health recovery ${route_health_primary_name}" "tailscale_logged_in '${route_health_primary_name}'"; then
+    dump_debug
+    return 1
+  fi
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  wait_for "observer keeps sticky route-health owner after recovery" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${recovery_path}'" || {
+      cat "${recovery_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${recovery_path}"
+  echo "::endgroup::"
+}
+
+assert_route_health_failover_after_restart() {
+  local before_path="${work_dir}/nodes-before-route-health-failover.json"
+  local after_path="${work_dir}/nodes-after-route-health-failover.json"
+  local recovery_path="${work_dir}/nodes-after-route-health-recovery.json"
+  local route_health_client_name
+
+  echo "::group::assert route-health primary failover after restart"
+  headscale_cmd -o json nodes list >"${before_path}"
+  route_health_client_name="$(
+    ruby -rjson -e '
+      route = ARGV.fetch(1)
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+      def node_name(node)
+        node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+      end
+
+      def primary_routes(node)
+        Array(
+          node["subnetRoutes"] ||
+          node["subnet_routes"] ||
+          node["primaryRoutes"] ||
+          node["primary_routes"]
+        ).map(&:to_s)
+      end
+
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort("expected exactly one primary node before route-health, got #{primary_nodes.length}") unless primary_nodes.length == 1
+      puts node_name(primary_nodes.fetch(0))
+    ' "${before_path}" "${route}"
+  )"
+
+  docker pause "${route_health_client_name}" >/dev/null
+  deadline=$((SECONDS + timeout_secs))
+  until
+    headscale_cmd -o json nodes list >"${after_path}" &&
+      ruby -rjson -e '
+        route = ARGV.fetch(2)
+        paused_client = ARGV.fetch(3)
+        router_a_name = ARGV.fetch(4)
+        router_b_name = ARGV.fetch(5)
+
+        def node_name(node)
+          node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+        end
+
+        def primary_routes(node)
+          Array(
+            node["subnetRoutes"] ||
+            node["subnet_routes"] ||
+            node["primaryRoutes"] ||
+            node["primary_routes"]
+          ).map(&:to_s)
+        end
+
+        before_payload = JSON.parse(File.read(ARGV.fetch(0)))
+        before_nodes = before_payload.is_a?(Array) ? before_payload : before_payload.fetch("nodes")
+        after_payload = JSON.parse(File.read(ARGV.fetch(1)))
+        after_nodes = after_payload.is_a?(Array) ? after_payload : after_payload.fetch("nodes")
+
+        before_primary = before_nodes.select { |node| primary_routes(node).include?(route) }
+        after_primary = after_nodes.select { |node| primary_routes(node).include?(route) }
+        abort("expected exactly one primary node before route-health, got #{before_primary.length}") unless before_primary.length == 1
+        abort("expected exactly one primary node after route-health, got #{after_primary.length}") unless after_primary.length == 1
+
+        before_owner = before_primary.fetch(0)
+        after_owner = after_primary.fetch(0)
+        before_id = Integer(before_owner.fetch("id"))
+        after_id = Integer(after_owner.fetch("id"))
+        abort("expected route-health primary owner to change, still #{after_id}") if after_id == before_id
+
+        remaining_ids = after_nodes
+          .select { |node| [router_a_name, router_b_name].include?(node_name(node).to_s) }
+          .reject { |node| node_name(node).to_s == paused_client }
+          .select do |node|
+            Array(node["availableRoutes"] || node["available_routes"]).include?(route) &&
+              Array(node["approvedRoutes"] || node["approved_routes"]).include?(route)
+          end
+          .map { |node| Integer(node.fetch("id")) }
+        abort("new primary owner #{after_id} not among remaining active routers #{remaining_ids.inspect}") unless remaining_ids.include?(after_id)
+
+        puts JSON.pretty_generate({
+          paused_client: paused_client,
+          before_owner: before_id,
+          after_owner: after_id,
+          nodes: after_nodes,
+        })
+      ' "${before_path}" "${after_path}" "${route}" "${route_health_client_name}" "${router_name}" "${router_b_name}" >"${work_dir}/route-health-failover.json"
+  do
+    if ((SECONDS >= deadline)); then
+      docker unpause "${route_health_client_name}" >/dev/null 2>&1 || true
+      echo "timed out waiting for route-health failover" >&2
+      dump_debug
+      return 1
+    fi
+    sleep 1
+  done
+  cat "${work_dir}/route-health-failover.json"
+
+  docker unpause "${route_health_client_name}" >/dev/null
+  if ! wait_for "tailscale logged-in netmap after route-health recovery ${route_health_client_name}" "tailscale_logged_in '${route_health_client_name}'"; then
+    dump_debug
+    return 1
+  fi
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  headscale_cmd -o json nodes list >"${recovery_path}"
+  ruby -rjson -e '
+    route = ARGV.fetch(2)
+
+    def primary_owner(path, route)
+      payload = JSON.parse(File.read(path))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+      primary = nodes.select do |node|
+        Array(
+          node["subnetRoutes"] ||
+          node["subnet_routes"] ||
+          node["primaryRoutes"] ||
+          node["primary_routes"]
+        ).map(&:to_s).include?(route)
+      end
+      abort("expected exactly one primary node for #{route}, got #{primary.length}") unless primary.length == 1
+      Integer(primary.fetch(0).fetch("id"))
+    end
+
+    failed_over_owner = primary_owner(ARGV.fetch(0), route)
+    recovered_owner = primary_owner(ARGV.fetch(1), route)
+    abort("route-health recovery stole #{route}: #{recovered_owner.inspect}, expected sticky #{failed_over_owner.inspect}") unless recovered_owner == failed_over_owner
+    puts JSON.pretty_generate({route: route, sticky_owner: recovered_owner})
+  ' "${after_path}" "${recovery_path}" "${route}" >"${work_dir}/route-health-recovery.json"
+  cat "${work_dir}/route-health-recovery.json"
+  echo "::endgroup::"
 }
 
 peer_netmap_route_owner_matches() {
@@ -915,6 +1300,26 @@ if ((route_via_restart_flag)); then
   wait_for "bob reconnected after restart" "tailscale_logged_in '${bob_name}'"
   assert_route_via_persisted_nodes "after-restart"
   wait_for_route_via_peer_maps "after restart"
+elif ((route_health_restart_flag)); then
+  create_user_and_key
+  start_client "${router_name}"
+  start_client "${router_b_name}"
+  start_client "${observer_name}"
+  login_router_with_authkey "${router_name}" "${authkey}"
+  login_router_with_authkey "${router_b_name}" "${authkey}"
+  approve_router_routes "${router_name}"
+  approve_router_routes "${router_b_name}"
+  login_observer_with_web_registration "${observer_name}" alice
+  wait_for_route_health_primary "before-restart"
+  wait_for_route_health_peer_owner_from_admin "before-restart"
+
+  stop_server
+  start_server
+  wait_for "router-a reconnected after restart" "tailscale_logged_in '${router_name}'"
+  wait_for "router-b reconnected after restart" "tailscale_logged_in '${router_b_name}'"
+  wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
+  wait_for_route_health_primary "after-restart"
+  assert_route_health_peer_failover_after_restart
 else
   create_user_and_key
   start_client "${router_name}"

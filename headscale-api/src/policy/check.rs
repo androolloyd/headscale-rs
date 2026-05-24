@@ -292,7 +292,7 @@ fn ssh_reachability(
         {
             continue;
         }
-        if !ssh_users_allow(&rule.users, user) {
+        if !ssh_users_allow(&rule.users, user, src.user.as_deref()) {
             continue;
         }
 
@@ -330,12 +330,23 @@ fn ssh_destination_matches(
         .any(|candidate| endpoint_matches_node(candidate, dst))
 }
 
-fn ssh_users_allow(users: &[String], user: &str) -> bool {
+fn ssh_users_allow(users: &[String], user: &str, src_user: Option<&str>) -> bool {
     if user.is_empty() {
         return false;
     }
-    if users.iter().any(|candidate| candidate == user) {
-        return true;
+    for candidate in users {
+        if let Some(domain) = canonical_localpart_domain(candidate) {
+            let Some(src_user) = src_user else {
+                continue;
+            };
+            if localpart_for_user(src_user, domain).as_deref() == Some(user) {
+                return true;
+            }
+            continue;
+        }
+        if candidate == user {
+            return true;
+        }
     }
     if users.iter().any(|candidate| candidate == "*") {
         return true;
@@ -348,6 +359,25 @@ fn ssh_users_allow(users: &[String], user: &str) -> bool {
         return true;
     }
     false
+}
+
+fn canonical_localpart_domain(user: &str) -> Option<&str> {
+    let pattern = user.strip_prefix("localpart:")?;
+    let (localpart, domain) = pattern.rsplit_once('@')?;
+    if localpart == "*" && !domain.is_empty() {
+        Some(domain)
+    } else {
+        None
+    }
+}
+
+fn localpart_for_user(user: &str, domain: &str) -> Option<String> {
+    let (localpart, candidate_domain) = user.rsplit_once('@')?;
+    if candidate_domain.eq_ignore_ascii_case(domain) {
+        Some(localpart.to_string())
+    } else {
+        None
+    }
 }
 
 fn endpoint_matches_endpoint(candidate: &Endpoint, expected: &Endpoint) -> bool {
@@ -678,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_tests_treat_localpart_like_users_as_literals() {
+    fn ssh_tests_apply_canonical_localpart_users_to_source_email() {
         let doc = parse_hujson_policy(
             r#"{
                 "tagOwners": {"tag:server": ["alice@example.com"]},
@@ -687,12 +717,12 @@ mod tests {
                         "action": "accept",
                         "src": ["autogroup:member"],
                         "dst": ["tag:server"],
-                        "users": ["localpart:*@example.com"]
+                        "users": ["localpart:*@EXAMPLE.COM"]
                     }
                 ],
                 "sshTests": [
-                    {"src": "alice@example.com", "dst": ["tag:server"], "accept": ["localpart:*@example.com"], "deny": ["alice"]},
-                    {"src": "bob@example.com", "dst": ["tag:server"], "accept": ["localpart:*@example.com"], "deny": ["bob"]},
+                    {"src": "alice@example.com", "dst": ["tag:server"], "accept": ["alice"], "deny": ["localpart:*@EXAMPLE.COM", "bob"]},
+                    {"src": "bob@example.com", "dst": ["tag:server"], "accept": ["bob"], "deny": ["alice"]},
                     {"src": "eve@other.example", "dst": ["tag:server"], "deny": ["eve"]}
                 ]
             }"#,

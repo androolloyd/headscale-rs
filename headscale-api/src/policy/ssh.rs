@@ -255,6 +255,11 @@ fn same_user_untagged_nodes<'a>(
 
 fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshUserRule> {
     let all_source_node_ids: BTreeSet<u64> = source_nodes.iter().map(|node| node.id).collect();
+    let localpart_domains = canonical_localpart_domains(users);
+    if !localpart_domains.is_empty() {
+        return ssh_user_rules_with_localparts(users, source_nodes, &localpart_domains);
+    }
+
     let mut out = BTreeMap::new();
     if users.iter().any(|user| user == "autogroup:nonroot") {
         out.insert("*".to_string(), "=".to_string());
@@ -279,6 +284,62 @@ fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshU
     }
 
     maps
+}
+
+fn ssh_user_rules_with_localparts(
+    users: &[String],
+    source_nodes: &[&SshPolicyNode],
+    localpart_domains: &[String],
+) -> Vec<SshUserRule> {
+    let mut base = BTreeMap::new();
+    if users.iter().any(|user| user == "autogroup:nonroot") {
+        base.insert("*".to_string(), "=".to_string());
+    }
+    if users.iter().any(|user| user == "root") {
+        base.insert("root".to_string(), "root".to_string());
+    } else {
+        base.insert("root".to_string(), String::new());
+    }
+    for user in users {
+        if user == "root"
+            || user == "autogroup:nonroot"
+            || canonical_localpart_domain(user).is_some()
+        {
+            continue;
+        }
+        base.insert(user.clone(), user.clone());
+    }
+
+    let mut groups: Vec<(Option<String>, BTreeSet<u64>)> = Vec::new();
+    for node in source_nodes {
+        let user = if is_untagged_user_owned(node) {
+            node.user.clone()
+        } else {
+            None
+        };
+        if let Some((_, ids)) = groups.iter_mut().find(|(candidate, _)| *candidate == user) {
+            ids.insert(node.id);
+        } else {
+            groups.push((user, BTreeSet::from([node.id])));
+        }
+    }
+
+    let mut rules = Vec::new();
+    for (user, source_node_ids) in groups {
+        rules.push(SshUserRule {
+            ssh_users: base.clone(),
+            source_node_ids: source_node_ids.clone(),
+        });
+        if let Some(user) = user.as_deref()
+            && let Some(localpart) = localpart_for_user(user, localpart_domains)
+        {
+            rules.push(SshUserRule {
+                ssh_users: BTreeMap::from([(localpart.clone(), localpart)]),
+                source_node_ids,
+            });
+        }
+    }
+    rules
 }
 
 fn ssh_action(action: &str, check_period: Option<&str>) -> SshAction {
@@ -343,6 +404,38 @@ fn parse_duration_nanos(input: &str) -> Option<i64> {
 
 fn user_matches(entry: &str, user: &str) -> bool {
     entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
+}
+
+fn canonical_localpart_domains(users: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for user in users {
+        if let Some(domain) = canonical_localpart_domain(user) {
+            push_unique_string(&mut out, domain.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+fn canonical_localpart_domain(user: &str) -> Option<&str> {
+    let pattern = user.strip_prefix("localpart:")?;
+    let (localpart, domain) = pattern.rsplit_once('@')?;
+    if localpart == "*" && !domain.is_empty() {
+        Some(domain)
+    } else {
+        None
+    }
+}
+
+fn localpart_for_user(user: &str, domains: &[String]) -> Option<String> {
+    let (localpart, domain) = user.rsplit_once('@')?;
+    if domains
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(domain))
+    {
+        Some(localpart.to_string())
+    } else {
+        None
+    }
 }
 
 fn is_untagged_user_owned(node: &SshPolicyNode) -> bool {
@@ -551,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn localpart_like_users_compile_as_literals_like_headscale_go_v0_28() {
+    fn canonical_localpart_users_compile_per_matching_source_user() {
         let doc = parse_hujson_policy(
             r#"{
               "tagOwners": {"tag:server": ["alice@example.com"]},
@@ -559,7 +652,7 @@ mod tests {
                 "action": "accept",
                 "src": ["autogroup:member"],
                 "dst": ["tag:server"],
-                "users": ["localpart:*@example.com"]
+                "users": ["localpart:*@EXAMPLE.COM", "ubuntu"]
               }]
             }"#,
         )
@@ -593,21 +686,28 @@ mod tests {
 
         let pol = compile_ssh_policy(&doc, &nodes, 4).unwrap();
 
-        assert_eq!(pol.rules.len(), 1);
-        assert_eq!(
-            principal_ips_for_rule(&pol.rules[0]),
-            vec!["100.64.0.1", "100.64.0.2", "100.64.0.3"]
+        assert_eq!(pol.rules.len(), 5);
+        assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.1"]);
+        assert_eq!(pol.rules[0].ssh_users["root"], "");
+        assert_eq!(pol.rules[0].ssh_users["ubuntu"], "ubuntu");
+        assert_eq!(pol.rules[1].ssh_users["alice"], "alice");
+        assert!(
+            !pol.rules[1]
+                .ssh_users
+                .contains_key("localpart:*@EXAMPLE.COM")
         );
-        assert_eq!(
-            pol.rules[0].ssh_users["localpart:*@example.com"],
-            "localpart:*@example.com"
-        );
-        assert!(!pol.rules[0].ssh_users.contains_key("alice"));
-        assert!(!pol.rules[0].ssh_users.contains_key("bob"));
+        assert_eq!(principal_ips_for_rule(&pol.rules[2]), vec!["100.64.0.2"]);
+        assert_eq!(pol.rules[2].ssh_users["root"], "");
+        assert_eq!(pol.rules[2].ssh_users["ubuntu"], "ubuntu");
+        assert_eq!(pol.rules[3].ssh_users["bob"], "bob");
+        assert_eq!(principal_ips_for_rule(&pol.rules[4]), vec!["100.64.0.3"]);
+        assert_eq!(pol.rules[4].ssh_users["root"], "");
+        assert_eq!(pol.rules[4].ssh_users["ubuntu"], "ubuntu");
+        assert!(!pol.rules[4].ssh_users.contains_key("eve"));
     }
 
     #[test]
-    fn localpart_like_users_stay_literal_for_autogroup_self() {
+    fn canonical_localpart_users_apply_to_autogroup_self() {
         let doc = parse_hujson_policy(
             r#"{
               "ssh": [{
@@ -649,25 +749,60 @@ mod tests {
         let alice_target = compile_ssh_policy(&doc, &nodes, 2).unwrap();
         let bob_target = compile_ssh_policy(&doc, &nodes, 4).unwrap();
 
-        assert_eq!(alice_target.rules.len(), 1);
+        assert_eq!(alice_target.rules.len(), 2);
         assert_eq!(
             principal_ips_for_rule(&alice_target.rules[0]),
             vec!["100.64.0.1", "100.64.0.2"]
         );
-        assert_eq!(
-            alice_target.rules[0].ssh_users["localpart:*@example.com"],
-            "localpart:*@example.com"
-        );
+        assert_eq!(alice_target.rules[0].ssh_users["root"], "");
+        assert_eq!(alice_target.rules[1].ssh_users["alice"], "alice");
 
-        assert_eq!(bob_target.rules.len(), 1);
+        assert_eq!(bob_target.rules.len(), 2);
         assert_eq!(
             principal_ips_for_rule(&bob_target.rules[0]),
             vec!["100.64.0.3", "100.64.0.4"]
         );
+        assert_eq!(bob_target.rules[0].ssh_users["root"], "");
+        assert_eq!(bob_target.rules[1].ssh_users["bob"], "bob");
+    }
+
+    #[test]
+    fn malformed_localpart_users_stay_literal() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:server": ["alice@example.com"]},
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@example.com"],
+                "dst": ["tag:server"],
+                "users": ["localpart:alice@example.com", "localpart:*@"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:server".into()],
+            },
+        ];
+
+        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(pol.rules.len(), 1);
         assert_eq!(
-            bob_target.rules[0].ssh_users["localpart:*@example.com"],
-            "localpart:*@example.com"
+            pol.rules[0].ssh_users["localpart:alice@example.com"],
+            "localpart:alice@example.com"
         );
+        assert_eq!(pol.rules[0].ssh_users["localpart:*@"], "localpart:*@");
     }
 
     #[test]

@@ -121,6 +121,27 @@ fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
     );
 }
 
+fn assert_process_stderr_snapshot(
+    output: &Output,
+    expected_status: i32,
+    expected: &str,
+    label: &str,
+) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "unexpected status for {label}; stdout: {}; stderr: {}",
+        stdout(output),
+        stderr(output)
+    );
+    assert_eq!(stdout(output), "", "stdout snapshot for {label}");
+    assert_eq!(
+        trim_line_end_spaces(&stderr(output)),
+        trim_line_end_spaces(expected),
+        "stderr snapshot for {label}"
+    );
+}
+
 async fn wait_for_headscale_status(config: &Path, args: &[&str], expected_status: i32) -> Output {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -639,10 +660,12 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert!(!output.status.success());
-    let err = stderr(&output);
-    assert!(err.contains("ACME TLS is not implemented"), "stderr: {err}");
-    assert!(err.contains("TLS-ALPN-01"), "stderr: {err}");
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_unsupported_acme.stderr"),
+        "configtest unsupported ACME",
+    );
 }
 
 #[test]
@@ -666,11 +689,11 @@ database:
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("headscale-rs server currently supports SQLite only"),
-        "stderr: {}",
-        stderr(&output)
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_unsupported_postgres.stderr"),
+        "configtest unsupported postgres",
     );
 }
 
@@ -702,11 +725,11 @@ database:
 
     let output = headscale_in(&["serve"], cwd.path(), home.path());
 
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("headscale-rs server currently supports SQLite only"),
-        "stderr: {}",
-        stderr(&output)
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/serve_unsupported_postgres.stderr"),
+        "serve unsupported postgres",
     );
     assert!(
         !db_path.exists(),
@@ -720,7 +743,7 @@ fn serve_rejects_unsupported_acme_before_state_startup() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let db_path = cwd.path().join("should-not-exist.sqlite");
-    let cache_dir = cwd.path().join("acme-cache");
+    let cache_dir = "/var/lib/headscale/acme-cache";
     fs::write(
         cwd.path().join("config.yaml"),
         format!(
@@ -742,31 +765,23 @@ tls_letsencrypt_listen: ":http"
 tls_letsencrypt_challenge_type: "HTTP-01"
 "#,
             db_path.display(),
-            cache_dir.display()
+            cache_dir
         ),
     )
     .unwrap();
 
     let output = headscale_in(&["serve"], cwd.path(), home.path());
 
-    assert!(!output.status.success());
-    let err = stderr(&output);
-    let cache_fragment = format!("cache_dir {}", cache_dir.display());
-    assert!(err.contains("ACME TLS is not implemented"), "stderr: {err}");
-    assert!(
-        err.contains("HTTP-01 challenge listener :http"),
-        "stderr: {err}"
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/serve_unsupported_acme.stderr"),
+        "serve unsupported ACME",
     );
-    assert!(err.contains(&cache_fragment), "stderr: {err}");
     assert!(
         !db_path.exists(),
         "unsupported ACME serve path should fail before opening SQLite at {}",
         db_path.display()
-    );
-    assert!(
-        !cache_dir.exists(),
-        "unsupported ACME serve path should fail before creating ACME cache at {}",
-        cache_dir.display()
     );
 }
 

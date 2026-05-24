@@ -335,6 +335,52 @@ async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_auth_route_auth_failures_are_plain_unauthorized_before_parsers() {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+        authorization: Option<&'static str>,
+        body: &'static str,
+    }
+
+    let (app, _token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "auth register missing bearer before malformed JSON",
+            uri: "/api/v1/auth/register",
+            authorization: None,
+            body: "{",
+        },
+        Case {
+            name: "auth approve malformed scheme before unknown body field",
+            uri: "/api/v1/auth/approve",
+            authorization: Some("Token definitely-invalid"),
+            body: r#"{"authId":"abc","unknown":true}"#,
+        },
+        Case {
+            name: "auth reject invalid bearer before auth id validation",
+            uri: "/api/v1/auth/reject",
+            authorization: Some("Bearer definitely-invalid"),
+            body: r#"{"authId":"short"}"#,
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                Method::POST,
+                case.uri,
+                case.authorization,
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "{}", case.name);
+        assert_plain_unauthorized(resp).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_health_missing_auth_returns_plain_unauthorized() {
     let (app, token) = fixture().await;
 
@@ -699,6 +745,104 @@ async fn grpc_gateway_body_unknown_and_duplicate_fields_are_status_json() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_remaining_parser_failures_are_status_json_exact() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        expected_message: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "auth register json and proto field aliases conflict",
+            method: Method::POST,
+            uri: "/api/v1/auth/register",
+            body: r#"{"user":"alice","authId":"a","auth_id":"b"}"#,
+            expected_message: r#"duplicate field "auth_id""#,
+        },
+        Case {
+            name: "auth reject numeric auth id",
+            method: Method::POST,
+            uri: "/api/v1/auth/reject",
+            body: r#"{"authId":42}"#,
+            expected_message: "invalid value for string field authId: 42",
+        },
+        Case {
+            name: "set policy numeric body field",
+            method: Method::PUT,
+            uri: "/api/v1/policy",
+            body: r#"{"policy":1}"#,
+            expected_message: "invalid value for string field policy: 1",
+        },
+        Case {
+            name: "expire api key null prefix body field",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            body: r#"{"prefix":null}"#,
+            expected_message: "invalid value for string field prefix: null",
+        },
+        Case {
+            name: "register node duplicate key query field",
+            method: Method::POST,
+            uri: "/api/v1/node/register?user=alice&key=one&key=two",
+            body: "",
+            expected_message: r#"too many values for field "key": one, two"#,
+        },
+        Case {
+            name: "register node nested key query path",
+            method: Method::POST,
+            uri: "/api/v1/node/register?key.foo=1",
+            body: "",
+            expected_message: r#"invalid path: "key" is not a message"#,
+        },
+        Case {
+            name: "delete api key invalid id query field",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/prefix?id=not-a-number",
+            body: "",
+            expected_message: r#"parsing field "id": strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
+        },
+        Case {
+            name: "timestamp nanos query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry.nanos=not-a-number",
+            body: "",
+            expected_message: r#"parsing field "nanos": strconv.ParseInt: parsing "not-a-number": invalid syntax"#,
+        },
+        Case {
+            name: "timestamp duplicate nanos query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry.nanos=1&expiry.nanos=2",
+            body: "",
+            expected_message: r#"too many values for field "nanos": 1, 2"#,
+        },
+        Case {
+            name: "rename user old id path parameter",
+            method: Method::POST,
+            uri: "/api/v1/user/not-a-number/rename/new-name",
+            body: "",
+            expected_message: r#"type mismatch, parameter: old_id, error: strconv.ParseUint: parsing "not-a-number": invalid syntax"#,
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_query_parser_failures_are_status_json() {
     struct Case {
         name: &'static str,
@@ -1057,6 +1201,154 @@ async fn grpc_gateway_path_uint64_accepts_go_base0_literals() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(body_json(resp).await, serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        expected_http_status: u16,
+        expected_grpc_code: i64,
+        expected_message: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"status-dupe"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for case in [
+        Case {
+            name: "create duplicate user",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            body: r#"{"name":"status-dupe"}"#,
+            expected_http_status: 409,
+            expected_grpc_code: 6,
+            expected_message: "status-dupe",
+        },
+        Case {
+            name: "delete missing user",
+            method: Method::DELETE,
+            uri: "/api/v1/user/404",
+            body: "",
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "404",
+        },
+        Case {
+            name: "create preauth key missing user",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"user":"404"}"#,
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "user not found",
+        },
+        Case {
+            name: "create preauth key invalid tag",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"aclTags":["tag:Bad"]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "tag should be lowercase",
+        },
+        Case {
+            name: "expire api key missing selector",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            body: "{}",
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "either prefix or id must be provided",
+        },
+        Case {
+            name: "delete api key conflicting selectors",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/prefix?id=1",
+            body: "",
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "only one of prefix or id can be provided",
+        },
+        Case {
+            name: "get missing node",
+            method: Method::GET,
+            uri: "/api/v1/node/404",
+            body: "",
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "node not found",
+        },
+        Case {
+            name: "set empty node tags",
+            method: Method::POST,
+            uri: "/api/v1/node/404/tags",
+            body: r#"{"tags":[]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "cannot remove all tags from a node - tagged nodes must have at least one tag",
+        },
+        Case {
+            name: "backfill node ips not confirmed",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed=false",
+            body: "",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "not confirmed, aborting",
+        },
+        Case {
+            name: "auth approve no pending session",
+            method: Method::POST,
+            uri: "/api/v1/auth/approve",
+            body: r#"{"authId":"aaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "no pending auth session for auth_id aaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        Case {
+            name: "auth reject invalid prefixed auth id",
+            method: Method::POST,
+            uri: "/api/v1/auth/reject",
+            body: r#"{"authId":"hskey-authreq-short"}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: r#"invalid auth_id: expected 24 characters after "hskey-authreq-", got 5"#,
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(
+            resp,
+            case.expected_http_status,
+            case.expected_grpc_code,
+            case.expected_message,
+            case.name,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

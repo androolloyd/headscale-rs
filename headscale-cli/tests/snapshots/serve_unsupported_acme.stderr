@@ -1,0 +1,1 @@
+Error: tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured HTTP-01 challenge listener :http would require ACME certificate issuance using acme_url https://acme-v02.api.letsencrypt.org/directory and cache_dir /var/lib/headscale/acme-cache. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.

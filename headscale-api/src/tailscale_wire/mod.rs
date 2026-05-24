@@ -73,6 +73,10 @@ const PING_ID_URLSAFE: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const REGISTER_METHOD_OIDC: i32 = 3;
 const STREAM_OFFLINE_GRACE: Duration = Duration::from_secs(10);
+/// Headscale-go batcher cleanup cadence for long-offline nodes.
+pub const BATCHER_OFFLINE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Headscale-go retains disconnected batcher entries for rapid reconnects.
+pub const BATCHER_OFFLINE_CLEANUP_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
 pub mod basic_handlers;
 pub mod be_transport;
@@ -1440,6 +1444,10 @@ pub struct MachineRegistry {
     /// Monotonic per-node stream generation used to suppress stale
     /// delayed-offline tasks after a rapid reconnect.
     connection_generations: RwLock<BTreeMap<u64, u64>>,
+    /// Timestamp captured when the final stream for a node disconnects.
+    /// Long-offline zero-count entries are cleaned on the upstream batcher
+    /// cadence to prevent unbounded debug/runtime state growth.
+    disconnected_at: RwLock<BTreeMap<u64, Instant>>,
     /// Per-node route-health session generation observed in the
     /// previous probe cycle. A timeout on a fresh or replaced session
     /// is deferred to match headscale-go's HA prober.
@@ -1527,6 +1535,7 @@ impl Default for MachineRegistry {
             active_connections: RwLock::new(BTreeMap::new()),
             online_states: RwLock::new(BTreeMap::new()),
             connection_generations: RwLock::new(BTreeMap::new()),
+            disconnected_at: RwLock::new(BTreeMap::new()),
             route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
@@ -1816,6 +1825,7 @@ impl MachineRegistry {
             let mut active = machines.active_connections.write();
             *active.entry(node_id).or_insert(0) += 1;
         }
+        machines.disconnected_at.write().remove(&node_id);
         {
             let mut generations = machines.connection_generations.write();
             let generation = generations
@@ -1888,6 +1898,7 @@ impl MachineRegistry {
         if !became_idle {
             return None;
         }
+        self.disconnected_at.write().insert(node_id, Instant::now());
         let mut generations = self.connection_generations.write();
         let generation = generations
             .get(&node_id)
@@ -1896,6 +1907,56 @@ impl MachineRegistry {
             .wrapping_add(1);
         generations.insert(node_id, generation);
         Some(generation)
+    }
+
+    /// Remove long-offline zero-count batcher entries without deleting nodes.
+    ///
+    /// Headscale-go keeps disconnected entries in the batcher for quick
+    /// reconnects, then evicts only the in-memory batcher state after the
+    /// node has stayed offline for [`BATCHER_OFFLINE_CLEANUP_THRESHOLD`].
+    /// This mirrors that behavior for `/debug/batcher` and volatile
+    /// stream-session bookkeeping.
+    pub fn cleanup_offline_connections(&self, threshold: Duration) -> Vec<u64> {
+        let now = Instant::now();
+        let candidates = self
+            .disconnected_at
+            .read()
+            .iter()
+            .filter_map(|(node_id, disconnected_at)| {
+                (now.saturating_duration_since(*disconnected_at) >= threshold).then_some(*node_id)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut active = self.active_connections.write();
+        let mut disconnected_at = self.disconnected_at.write();
+        let mut online = self.online_states.write();
+        let mut generations = self.connection_generations.write();
+        let mut route_health_sessions = self.route_health_stable_sessions.write();
+        let mut cleaned = Vec::new();
+
+        for node_id in candidates {
+            if active.get(&node_id).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            let Some(disconnected) = disconnected_at.get(&node_id).copied() else {
+                continue;
+            };
+            if now.saturating_duration_since(disconnected) < threshold {
+                continue;
+            }
+
+            active.remove(&node_id);
+            disconnected_at.remove(&node_id);
+            online.remove(&node_id);
+            generations.remove(&node_id);
+            route_health_sessions.remove(&node_id);
+            cleaned.push(node_id);
+        }
+
+        cleaned
     }
 
     fn schedule_stream_offline_if_idle(
@@ -2177,9 +2238,7 @@ impl MachineRegistry {
             map.insert(new_node_key_hex, rec);
         });
         if key_changed {
-            self.active_connections.write().remove(&old_id);
-            self.online_states.write().remove(&old_id);
-            self.connection_generations.write().remove(&old_id);
+            self.forget_batcher_connection_state(old_id);
             if let Some(gc) = self.ephemeral_gc() {
                 gc.cancel(old_node_key_hex);
             }
@@ -2344,9 +2403,7 @@ impl MachineRegistry {
         let removed =
             self.update_with_operation("delete", |map| map.remove(node_key_hex).is_some());
         if removed {
-            self.active_connections.write().remove(&node_id);
-            self.online_states.write().remove(&node_id);
-            self.connection_generations.write().remove(&node_id);
+            self.forget_batcher_connection_state(node_id);
             if let Some(gc) = self.ephemeral_gc() {
                 gc.cancel(node_key_hex);
             }
@@ -2480,15 +2537,27 @@ impl MachineRegistry {
         let mut active = self.active_connections.write();
         let mut online = self.online_states.write();
         let mut generations = self.connection_generations.write();
+        let mut disconnected_at = self.disconnected_at.write();
+        let mut route_health_sessions = self.route_health_stable_sessions.write();
         for (_node_key_hex, node_id) in &removed {
             active.remove(node_id);
             online.remove(node_id);
             generations.remove(node_id);
+            disconnected_at.remove(node_id);
+            route_health_sessions.remove(node_id);
         }
         removed
             .into_iter()
             .map(|(node_key_hex, _node_id)| node_key_hex)
             .collect()
+    }
+
+    fn forget_batcher_connection_state(&self, node_id: u64) {
+        self.active_connections.write().remove(&node_id);
+        self.online_states.write().remove(&node_id);
+        self.connection_generations.write().remove(&node_id);
+        self.disconnected_at.write().remove(&node_id);
+        self.route_health_stable_sessions.write().remove(&node_id);
     }
 }
 
@@ -2712,6 +2781,36 @@ pub fn spawn_ephemeral_gc(
                     target = "tailscale_wire::gc",
                     count = removed.len(),
                     "ephemeral GC removed nodes"
+                );
+            }
+        }
+    })
+}
+
+/// Spawn headscale-go's long-offline batcher-entry cleanup loop.
+///
+/// The first cleanup runs after `interval`, matching the Go batcher's
+/// ticker-driven cleanup rather than deleting entries immediately after a
+/// disconnect. Node records are not deleted; only volatile connection state
+/// used by `/debug/batcher`, online tracking, and route-health sessions is
+/// evicted.
+pub fn spawn_offline_connection_cleanup(
+    machines: Arc<MachineRegistry>,
+    interval: Duration,
+    threshold: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let cleaned = machines.cleanup_offline_connections(threshold);
+            if !cleaned.is_empty() {
+                tracing::info!(
+                    target = "tailscale_wire::batcher",
+                    count = cleaned.len(),
+                    nodes = ?cleaned,
+                    "cleaned long-offline batcher connection state"
                 );
             }
         }
@@ -3607,6 +3706,66 @@ mod registry_tests {
         assert!(reg.delete("nk-a"));
         assert!(!reg.active_connections().contains_key(&node_id));
         assert!(!reg.online_states().contains_key(&node_id));
+    }
+
+    #[test]
+    fn batcher_cleanup_offline_connections_keeps_recent_disconnect() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        let generation = reg.connection_generation(node_id).unwrap();
+        reg.mark_route_health_session_stable(node_id, generation);
+
+        drop(guard);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert!(reg.disconnected_at.read().contains_key(&node_id));
+
+        let cleaned = reg.cleanup_offline_connections(Duration::from_secs(60));
+        assert!(cleaned.is_empty());
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert!(reg.disconnected_at.read().contains_key(&node_id));
+        assert!(
+            reg.route_health_stable_sessions
+                .read()
+                .contains_key(&node_id)
+        );
+        assert!(reg.get("nk-a").is_some());
+    }
+
+    #[test]
+    fn batcher_cleanup_offline_connections_removes_stale_zero_count_entry() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        let generation = reg.connection_generation(node_id).unwrap();
+        reg.mark_route_health_session_stable(node_id, generation);
+
+        drop(guard);
+        let cleaned = reg.cleanup_offline_connections(Duration::ZERO);
+        assert_eq!(cleaned, vec![node_id]);
+        assert!(!reg.active_connections().contains_key(&node_id));
+        assert!(!reg.online_states().contains_key(&node_id));
+        assert!(reg.connection_generation(node_id).is_none());
+        assert!(!reg.disconnected_at.read().contains_key(&node_id));
+        assert!(
+            !reg.route_health_stable_sessions
+                .read()
+                .contains_key(&node_id)
+        );
+        assert!(reg.get("nk-a").is_some());
+        assert!(reg.cleanup_offline_connections(Duration::ZERO).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

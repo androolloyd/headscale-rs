@@ -28,8 +28,9 @@ use headscale_api::{
         MapResponseDebugStore, PingTracker, PreauthRedeemer, RedeemError, RedeemOk,
         RegistrationCache, ServerNoiseKey, WireState, derp_config,
         routes::{DebugRoutes, normalize_routes},
-        serve, spawn_route_health_probe,
+        serve, spawn_offline_connection_cleanup, spawn_route_health_probe,
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
+        BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD,
     },
 };
 use headscale_core::{config::EmbeddedDerpConfig, derp::EmbeddedDerpRuntime};
@@ -503,6 +504,11 @@ async fn main() -> Result<()> {
         state.clone(),
         Duration::from_secs(args.route_health_probe_interval_secs),
         Duration::from_secs(args.route_health_probe_timeout_secs),
+    );
+    let _offline_connection_cleanup = spawn_offline_connection_cleanup(
+        state.machines.clone(),
+        BATCHER_OFFLINE_CLEANUP_INTERVAL,
+        BATCHER_OFFLINE_CLEANUP_THRESHOLD,
     );
     let handle = serve::serve(state, cfg, extra_routes).await?;
     let tls_cert_path = handle

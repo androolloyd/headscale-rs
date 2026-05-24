@@ -35,9 +35,11 @@ use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
-    AllocError, DerpMap, DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig,
-    MachineRegistry, MapResponseDebugStore, PingTracker, RegistrationCache, RuntimeConfigSnapshot,
-    ServerNoiseKey, WireState, serve, spawn_node_expiry_waker, spawn_route_health_probe,
+    AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
+    DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
+    MapResponseDebugStore, PingTracker, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
+    WireState, serve, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
+    spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -280,6 +282,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         cfg.node_routes_ha_probe_interval,
         cfg.node_routes_ha_probe_timeout,
     );
+    let offline_connection_cleanup = spawn_offline_connection_cleanup(
+        runtime.state.machines.clone(),
+        BATCHER_OFFLINE_CLEANUP_INTERVAL,
+        BATCHER_OFFLINE_CLEANUP_THRESHOLD,
+    );
 
     let metrics_addr =
         optional_socket_addr(cfg.metrics_listen_addr.as_deref(), "metrics_listen_addr")?;
@@ -345,6 +352,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(handle) = route_health_probe {
         handle.abort();
     }
+    offline_connection_cleanup.abort();
     ephemeral_gc.abort();
     if let Some(handle) = dns_extra_records_watcher {
         handle.abort();

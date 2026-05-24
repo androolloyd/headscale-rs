@@ -5116,6 +5116,27 @@ mod tests {
         assert_eq!(parsed["total_nodes"], 1);
         assert_eq!(node["connected"], false);
         assert_eq!(node["active_connections"], 0);
+
+        assert_eq!(
+            state
+                .machines
+                .cleanup_offline_connections(std::time::Duration::ZERO),
+            vec![stable_id_from_key(node_key)]
+        );
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/batcher")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["total_nodes"], 0);
+        assert_eq!(parsed["connected_nodes"].as_object().unwrap().len(), 0);
     }
 
     #[tokio::test]

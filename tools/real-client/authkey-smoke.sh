@@ -13,11 +13,16 @@ expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_routes_by_client="${REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
+advertise_exit_node_by_client="${REAL_CLIENT_ADVERTISE_EXIT_NODE_BY_CLIENT:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
+expected_available_routes_by_client="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES_BY_CLIENT:-}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
+approve_routes_by_client="${REAL_CLIENT_APPROVE_ROUTES_BY_CLIENT:-}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
+expected_approved_routes_by_client="${REAL_CLIENT_EXPECT_APPROVED_ROUTES_BY_CLIENT:-${approve_routes_by_client}}"
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-${client_count}}"
 expected_primary_route="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE:-}"
+expected_primary_route_candidates="${REAL_CLIENT_EXPECT_PRIMARY_ROUTE_CANDIDATES:-${expected_machine_count}}"
 expected_primary_failover_route="${REAL_CLIENT_EXPECT_PRIMARY_FAILOVER_ROUTE:-}"
 expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
@@ -344,6 +349,66 @@ if [[ -n "${advertise_routes_by_client}" ]]; then
   advertise_routes_values=("${split_values[@]}")
 fi
 
+advertise_exit_node_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  advertise_exit_node_values+=("${advertise_exit_node}")
+done
+split_client_values "${advertise_exit_node_by_client}" "REAL_CLIENT_ADVERTISE_EXIT_NODE_BY_CLIENT"
+if [[ -n "${advertise_exit_node_by_client}" ]]; then
+  advertise_exit_node_values=("${split_values[@]}")
+fi
+for value in "${advertise_exit_node_values[@]}"; do
+  case "${value}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On | "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off) ;;
+    *)
+      echo "REAL_CLIENT_ADVERTISE_EXIT_NODE_BY_CLIENT values must be true or false, got ${value}" >&2
+      exit 2
+      ;;
+  esac
+done
+
+expected_available_routes_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  expected_available_routes_values+=("${expected_available_routes}")
+done
+split_client_values "${expected_available_routes_by_client}" "REAL_CLIENT_EXPECT_AVAILABLE_ROUTES_BY_CLIENT"
+if [[ -n "${expected_available_routes_by_client}" ]]; then
+  expected_available_routes_values=("${split_values[@]}")
+fi
+expected_available_routes_spec="$(IFS=';'; echo "${expected_available_routes_values[*]}")"
+expect_available_by_client=false
+if [[ -n "${expected_available_routes_by_client}" ]]; then
+  expect_available_by_client=true
+fi
+
+approve_routes_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  approve_routes_values+=("${approve_routes}")
+done
+split_client_values "${approve_routes_by_client}" "REAL_CLIENT_APPROVE_ROUTES_BY_CLIENT"
+if [[ -n "${approve_routes_by_client}" ]]; then
+  approve_routes_values=("${split_values[@]}")
+fi
+
+expected_approved_routes_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  expected_approved_routes_values+=("${expected_approved_routes}")
+done
+split_client_values "${expected_approved_routes_by_client}" "REAL_CLIENT_EXPECT_APPROVED_ROUTES_BY_CLIENT"
+if [[ -n "${expected_approved_routes_by_client}" ]]; then
+  expected_approved_routes_values=("${split_values[@]}")
+fi
+expected_approved_routes_spec="$(IFS=';'; echo "${expected_approved_routes_values[*]}")"
+expect_approved_by_client=false
+if [[ -n "${expected_approved_routes_by_client}" ]]; then
+  expect_approved_by_client=true
+fi
+
+if ! [[ "${expected_primary_route_candidates}" =~ ^[0-9]+$ ]] || ((expected_primary_route_candidates < 1)); then
+  echo "REAL_CLIENT_EXPECT_PRIMARY_ROUTE_CANDIDATES must be a positive integer, got ${expected_primary_route_candidates}" >&2
+  exit 2
+fi
+
 preauth_tags_values=()
 for ((idx = 0; idx < client_count; idx++)); do
   preauth_tags_values+=("${preauth_tags}")
@@ -443,6 +508,8 @@ else
     client_users+=("alice")
   done
 fi
+expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
+expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
 
 cleanup() {
   for client_name in "${client_names[@]}"; do
@@ -963,7 +1030,7 @@ harness_pid="$!"
 
 wait_for "harness health" \
   "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >/dev/null"
-test -s "${work_dir}/state/tls.crt"
+wait_for "harness TLS certificate" "test -s '${work_dir}/state/tls.crt'"
 echo "harness http=http://127.0.0.1:${http_port}"
 echo "harness login=https://host.docker.internal:${https_port}"
 echo "::endgroup::"
@@ -1082,7 +1149,7 @@ for idx in "${!client_names[@]}"; do
   if [[ "${login_mode}" == "web" && -n "${preauth_tags}" ]]; then
     up_args+=("--advertise-tags=${preauth_tags}")
   fi
-  case "${advertise_exit_node}" in
+  case "${advertise_exit_node_values[$idx]}" in
     1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
       up_args+=(--advertise-exit-node)
       ;;
@@ -1219,24 +1286,33 @@ if ((expect_register_failure)); then
   exit 0
 fi
 
-if [[ -n "${approve_routes}" ]]; then
+if [[ -n "${approve_routes}" || -n "${approve_routes_by_client}" ]]; then
   echo "::group::approve routes"
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-approve.json"
-  node_key="$(
+  approval_rows="$(
     ruby -rjson -e '
       machines = JSON.parse(File.read(ARGV.fetch(0)))
       expected = Integer(ARGV.fetch(1))
+      expected_names = ARGV.fetch(2).split(",")
+      routes_by_client = ARGV.fetch(3).split(";", -1)
       abort("expected #{expected} registered machines, got #{machines.length}") unless machines.length == expected
-      puts machines.map { |machine| machine.fetch("node_key") }
-    ' "${work_dir}/machines-before-approve.json" "${expected_machine_count}"
+      expected_names.each_with_index do |name, idx|
+        machine = machines.find { |candidate| candidate.fetch("hostname") == name }
+        abort("missing machine #{name.inspect} in #{machines.inspect}") unless machine
+        routes = routes_by_client.fetch(idx, "")
+        next if routes.empty?
+        puts [machine.fetch("node_key"), routes].join("\t")
+      end
+    ' "${work_dir}/machines-before-approve.json" "${expected_machine_count}" "${expected_client_names_csv}" "$(IFS=';'; echo "${approve_routes_values[*]}")"
   )"
-  routes_json="$(ruby -rjson -e 'puts JSON.generate({routes: ARGV.fetch(0).split(",").reject(&:empty?)})' "${approve_routes}")"
-  while IFS= read -r node_key; do
+  while IFS=$'\t' read -r node_key routes; do
+    [[ -z "${node_key}" ]] && continue
+    routes_json="$(ruby -rjson -e 'puts JSON.generate({routes: ARGV.fetch(0).split(",").reject(&:empty?)})' "${routes}")"
     curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/machines/${node_key}/routes" \
       -H 'content-type: application/json' \
       -d "${routes_json}" \
       >"${work_dir}/approved-routes-${node_key#nodekey:}.json"
-  done <<<"${node_key}"
+  done <<<"${approval_rows}"
   echo "::endgroup::"
 fi
 
@@ -1284,11 +1360,9 @@ if [[ -n "${expected_primary_route}" ]]; then
 else
   printf '{}\n' >"${work_dir}/debug-routes.json"
 fi
-expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
-expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
 ruby -rjson -e '
-  expected_routes = ARGV.fetch(1).split(",").reject(&:empty?).sort
-  expected_approved = ARGV.fetch(2).split(",").reject(&:empty?).sort
+  expected_routes_by_client = ARGV.fetch(1).split(";", -1).map { |routes| routes.split(",").reject(&:empty?).sort }
+  expected_approved_by_client = ARGV.fetch(2).split(";", -1).map { |routes| routes.split(",").reject(&:empty?).sort }
   expected_count = Integer(ARGV.fetch(3))
   expected_primary_route = ARGV.fetch(4)
   debug_routes_path = ARGV.fetch(5)
@@ -1298,7 +1372,12 @@ ruby -rjson -e '
   expected_names = ARGV.fetch(9).split(",")
   expected_users = ARGV.fetch(10).split(",")
   expected_families = ARGV.fetch(11)
+  expected_primary_candidates = Integer(ARGV.fetch(12))
+  assert_available = ARGV.fetch(13) == "true"
+  assert_approved = ARGV.fetch(14) == "true"
   expected_user_by_host = expected_names.zip(expected_users).to_h
+  expected_routes_by_host = expected_names.zip(expected_routes_by_client).to_h
+  expected_approved_by_host = expected_names.zip(expected_approved_by_client).to_h
 
   def assert_ip_families(label, ips, expected)
     has_v4 = ips.any? { |ip| ip.to_s.include?(".") }
@@ -1334,16 +1413,18 @@ ruby -rjson -e '
     }
     abort("expected user #{expected_user.inspect}, got #{machine["user"].inspect}") unless machine["user"] == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
+    expected_routes = expected_routes_by_host.fetch(machine["hostname"], [])
+    expected_approved = expected_approved_by_host.fetch(machine["hostname"], [])
     ips = Array(machine["addresses"])
     ips << machine["ipv4"] if ips.empty? && machine["ipv4"].to_s != ""
     ips << machine["ipv6"] if ips.empty? && machine["ipv6"].to_s != ""
     assert_ip_families("machine #{machine["hostname"]}", ips, expected_families)
     available_routes = Array(machine["available_routes"]).sort
-    unless expected_routes.empty? || available_routes == expected_routes
+    unless (!assert_available && expected_routes.empty?) || available_routes == expected_routes
       abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
     end
     approved_routes = Array(machine["approved_routes"]).sort
-    unless expected_approved.empty? || approved_routes == expected_approved
+    unless (!assert_approved && expected_approved.empty?) || approved_routes == expected_approved
       abort("expected approved routes #{expected_approved.inspect}, got #{approved_routes.inspect}")
     end
     forced_tags = Array(machine["forced_tags"]).sort
@@ -1363,7 +1444,7 @@ ruby -rjson -e '
     available_entries = debug_routes.fetch("available_routes").select do |_node_id, routes|
       Array(routes).include?(expected_primary_route)
     end
-    abort("expected #{expected_count} available primary-route candidates, got #{available_entries.length}") unless available_entries.length == expected_count
+    abort("expected #{expected_primary_candidates} available primary-route candidates, got #{available_entries.length}") unless available_entries.length == expected_primary_candidates
   end
 
   if expected_count == 1
@@ -1371,7 +1452,7 @@ ruby -rjson -e '
   else
     puts JSON.pretty_generate({machines: machines, debug_routes: debug_routes})
   end
-  ' "${work_dir}/machines.json" "${expected_available_routes}" "${expected_approved_routes}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}" "${expected_tailscale_ip_families}"
+  ' "${work_dir}/machines.json" "${expected_available_routes_spec}" "${expected_approved_routes_spec}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}" "${expected_tailscale_ip_families}" "${expected_primary_route_candidates}" "${expect_available_by_client}" "${expect_approved_by_client}"
 echo "::endgroup::"
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then

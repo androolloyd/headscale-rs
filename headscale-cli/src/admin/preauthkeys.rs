@@ -123,7 +123,9 @@ pub async fn expire_grpc(
 ) -> Result<(), AdminError> {
     let id = id.unwrap_or_default();
     if id == 0 {
-        return Err(AdminError::Local("missing --id parameter".into()));
+        return Err(AdminError::Usage(
+            "missing --id parameter: missing parameters".into(),
+        ));
     }
     client.expire_pre_auth_key(id).await?;
     print_result(fmt, "Key expired")
@@ -136,7 +138,9 @@ pub async fn delete_grpc(
 ) -> Result<(), AdminError> {
     let id = id.unwrap_or_default();
     if id == 0 {
-        return Err(AdminError::Local("missing --id parameter".into()));
+        return Err(AdminError::Usage(
+            "missing --id parameter: missing parameters".into(),
+        ));
     }
     client.delete_pre_auth_key(id).await?;
     print_result(fmt, "Key deleted")

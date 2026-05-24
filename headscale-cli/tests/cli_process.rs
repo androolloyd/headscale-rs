@@ -335,6 +335,11 @@ fn json_output(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn yaml_output(output: &Output) -> serde_yaml::Value {
+    assert!(output.status.success(), "stderr: {}", stderr(output));
+    serde_yaml::from_slice(&output.stdout).unwrap()
+}
+
 fn assert_status_command_failed(output: &Output) {
     assert_eq!(
         output.status.code(),
@@ -1048,17 +1053,17 @@ fn implemented_admin_clap_error_matches_snapshot() {
 fn implemented_admin_local_errors_match_snapshots() {
     assert_stderr_snapshot(
         &["preauthkeys", "expire"],
-        6,
+        1,
         include_str!("snapshots/preauthkeys_missing_id.stderr"),
     );
     assert_stderr_snapshot(
         &["preauthkeys", "delete"],
-        6,
+        1,
         include_str!("snapshots/preauthkeys_missing_id.stderr"),
     );
     assert_stderr_snapshot(
         &["--server", "http://127.0.0.1:9", "apikeys", "expire"],
-        6,
+        1,
         include_str!("snapshots/apikeys_missing_selector.stderr"),
     );
     assert_stderr_snapshot(
@@ -1072,7 +1077,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "--prefix",
             "hskey-api-abcdefghijkl-***",
         ],
-        6,
+        1,
         include_str!("snapshots/apikeys_conflicting_selector.stderr"),
     );
     assert_stderr_snapshot(
@@ -1153,19 +1158,19 @@ fn implemented_admin_local_errors_match_snapshots() {
 #[test]
 fn implemented_admin_errors_follow_output_format() {
     let json = headscale_clean(&["-o", "json", "preauthkeys", "expire"]);
-    assert_eq!(json.status.code(), Some(6));
+    assert_eq!(json.status.code(), Some(1));
     assert_eq!(stdout(&json), "");
     assert_eq!(
         stderr(&json),
-        "{\n\t\"error\": \"missing --id parameter\"\n}\n"
+        "{\n\t\"error\": \"missing --id parameter: missing parameters\"\n}\n"
     );
 
     let json_line = headscale_clean(&["-ojson-line", "preauthkeys", "delete"]);
-    assert_eq!(json_line.status.code(), Some(6));
+    assert_eq!(json_line.status.code(), Some(1));
     assert_eq!(stdout(&json_line), "");
     assert_eq!(
         stderr(&json_line),
-        "{\"error\":\"missing --id parameter\"}\n"
+        "{\"error\":\"missing --id parameter: missing parameters\"}\n"
     );
 
     let yaml = headscale_clean(&[
@@ -1176,11 +1181,11 @@ fn implemented_admin_errors_follow_output_format() {
         "apikeys",
         "expire",
     ]);
-    assert_eq!(yaml.status.code(), Some(6));
+    assert_eq!(yaml.status.code(), Some(1));
     assert_eq!(stdout(&yaml), "");
     assert_eq!(
         stderr(&yaml),
-        "error: either --id or --prefix must be provided\n\n"
+        "error: 'either --id or --prefix must be provided: missing parameters'\n\n"
     );
 
     let remote = headscale_clean(&[
@@ -1468,7 +1473,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert!(listed_api_key["expiration"]["seconds"].as_i64().is_some());
     assert!(listed_api_key["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_api_key.get("createdAt").is_none());
     assert!(listed_api_key.get("last_seen").is_none());
+    assert!(listed_api_key.get("lastSeen").is_none());
     let api_json_id = listed_api_key["id"].as_u64().unwrap().to_string();
 
     let expire_api_key_json = headscale_with_config(
@@ -1490,6 +1497,141 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         0
     );
     assert_eq!(stderr(&delete_api_key_json), "");
+
+    let create_api_key_json_line = headscale_with_config(
+        &config,
+        &["-ojson-line", "apikeys", "create", "--expiration", "1h"],
+    );
+    let api_key_json_line: String =
+        serde_json::from_slice(&create_api_key_json_line.stdout).unwrap();
+    assert!(api_key_json_line.starts_with("hskey-api-"));
+    assert!(!stdout(&create_api_key_json_line).contains('\t'));
+    assert_eq!(stderr(&create_api_key_json_line), "");
+    let api_json_line_prefix = display_prefix(&api_key_json_line, "hskey-api-");
+
+    let list_api_keys_json_line =
+        headscale_with_config(&config, &["-ojson-line", "apikeys", "list"]);
+    let listed_api_keys_json_line: serde_json::Value =
+        serde_json::from_slice(&list_api_keys_json_line.stdout).unwrap();
+    let listed_api_key_json_line = &listed_api_keys_json_line[0];
+    assert_eq!(
+        listed_api_key_json_line["prefix"].as_str(),
+        Some(api_json_line_prefix.as_str())
+    );
+    assert!(
+        listed_api_key_json_line["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(listed_api_key_json_line.get("createdAt").is_none());
+    assert_eq!(stderr(&list_api_keys_json_line), "");
+
+    let expire_api_key_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "apikeys",
+            "expire",
+            "--prefix",
+            &api_json_line_prefix,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&expire_api_key_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&expire_api_key_json_line), "");
+
+    let delete_api_key_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "apikeys",
+            "delete",
+            "--prefix",
+            &api_json_line_prefix,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&delete_api_key_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&delete_api_key_json_line), "");
+
+    let create_api_key_yaml = headscale_with_config(
+        &config,
+        &["-o", "yaml", "apikeys", "create", "--expiration", "1h"],
+    );
+    let api_key_yaml = yaml_output(&create_api_key_yaml)
+        .as_str()
+        .expect("API-key create YAML is the secret string")
+        .to_string();
+    assert!(api_key_yaml.starts_with("hskey-api-"));
+    assert_eq!(stderr(&create_api_key_yaml), "");
+    let api_yaml_prefix = display_prefix(&api_key_yaml, "hskey-api-");
+
+    let list_api_keys_yaml = headscale_with_config(&config, &["-o", "yaml", "apikeys", "list"]);
+    let listed_api_keys_yaml = yaml_output(&list_api_keys_yaml);
+    let listed_api_key_yaml = &listed_api_keys_yaml[0];
+    assert_eq!(
+        listed_api_key_yaml["prefix"].as_str(),
+        Some(api_yaml_prefix.as_str())
+    );
+    assert!(
+        listed_api_key_yaml["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(listed_api_key_yaml.get("createdAt").is_none());
+    assert_eq!(stderr(&list_api_keys_yaml), "");
+
+    let expire_api_key_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "apikeys",
+            "expire",
+            "--prefix",
+            &api_yaml_prefix,
+        ],
+    );
+    assert_eq!(
+        yaml_output(&expire_api_key_yaml)
+            .as_mapping()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&expire_api_key_yaml), "");
+
+    let delete_api_key_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "apikeys",
+            "delete",
+            "--prefix",
+            &api_yaml_prefix,
+        ],
+    );
+    assert_eq!(
+        yaml_output(&delete_api_key_yaml)
+            .as_mapping()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&delete_api_key_yaml), "");
 
     let auth_register_id = "aaaaaaaaaaaaaaaaaaaaaaaa";
     let debug_create = headscale_with_config(

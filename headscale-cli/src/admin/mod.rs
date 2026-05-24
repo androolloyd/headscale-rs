@@ -18,6 +18,7 @@
 //! | code | meaning                                     |
 //! |------|---------------------------------------------|
 //! | 0    | success                                     |
+//! | 1    | upstream command-handler usage/runtime error |
 //! | 2    | bad usage (clap already exits 2 on its own) |
 //! | 3    | connection failure (DNS / TCP / TLS)        |
 //! | 4    | auth failure (401 / 403)                    |
@@ -69,6 +70,9 @@ pub enum AdminError {
     /// JSON / response-decoding failure.
     #[error("response decode failed: {0}")]
     Decode(String),
+    /// Cobra-style runtime usage errors returned by upstream command handlers.
+    #[error("{0}")]
+    Usage(String),
     /// Failure that doesn't involve the server at all (file IO, local
     /// validation, etc.). Mapped to the same exit code as `Server`
     /// because it's an unhandleable operator-side failure.
@@ -81,6 +85,7 @@ pub enum AdminError {
 #[derive(Copy, Clone, Debug)]
 pub enum ExitCode {
     Success = 0,
+    Usage = 1,
     Connection = 3,
     Auth = 4,
     NotFound = 5,
@@ -93,6 +98,7 @@ impl AdminError {
             Self::Connection(_) => ExitCode::Connection,
             Self::Auth(_) => ExitCode::Auth,
             Self::NotFound(_) => ExitCode::NotFound,
+            Self::Usage(_) => ExitCode::Usage,
             Self::BadRequest { .. } | Self::Server { .. } | Self::Decode(_) | Self::Local(_) => {
                 ExitCode::Server
             }
@@ -725,7 +731,9 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             PreauthKeysCmd::Expire { id } => {
                 let id = id.unwrap_or_default();
                 if id == 0 {
-                    return Err(AdminError::Local("missing --id parameter".into()));
+                    return Err(AdminError::Usage(
+                        "missing --id parameter: missing parameters".into(),
+                    ));
                 }
                 preauthkeys::expire(&client, &id.to_string()).await
             }
@@ -738,7 +746,9 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
     match cmd {
         PreauthKeysCmd::Expire { id } | PreauthKeysCmd::Delete { id } => {
             if id.unwrap_or_default() == 0 {
-                return Err(AdminError::Local("missing --id parameter".into()));
+                return Err(AdminError::Usage(
+                    "missing --id parameter: missing parameters".into(),
+                ));
             }
         }
         _ => {}
@@ -1010,6 +1020,10 @@ mod tests {
         assert_eq!(
             AdminError::Decode("x".into()).exit_code() as i32,
             ExitCode::Server as i32
+        );
+        assert_eq!(
+            AdminError::Usage("x".into()).exit_code() as i32,
+            ExitCode::Usage as i32
         );
         assert_eq!(
             AdminError::Local("x".into()).exit_code() as i32,

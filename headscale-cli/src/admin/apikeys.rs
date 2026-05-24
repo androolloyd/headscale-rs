@@ -149,11 +149,11 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
 
 fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<'_>, AdminError> {
     match (prefix, id) {
-        (None, None) => Err(AdminError::Local(
-            "either --id or --prefix must be provided".into(),
+        (None, None) => Err(AdminError::Usage(
+            "either --id or --prefix must be provided: missing parameters".into(),
         )),
-        (Some(_), Some(_)) => Err(AdminError::Local(
-            "only one of --id or --prefix can be provided".into(),
+        (Some(_), Some(_)) => Err(AdminError::Usage(
+            "only one of --id or --prefix can be provided: missing parameters".into(),
         )),
         (prefix, id) => Ok(ApiKeyIdentifyBody { prefix, id }),
     }

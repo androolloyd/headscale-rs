@@ -89,6 +89,7 @@ with the same stock `tailscaled` image.
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
 | DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap |
 | DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records |
+| DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap |
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
@@ -384,6 +385,16 @@ the client-observed netmap:
 ```sh
 tools/real-client/extra-records-smoke.sh
 tools/real-client/extra-records-headscale-go-smoke.sh
+```
+
+The DNS hot-reload variant starts the production server with
+`dns.extra_records_path`, logs in a stock client, edits the JSON records file,
+and asserts that the client-observed netmap switches from the original A
+record to the updated AAAA record without restarting the server:
+
+```sh
+tools/real-client/dns-hot-reload-smoke.sh
+tools/real-client/dns-hot-reload-headscale-go-smoke.sh
 ```
 
 The disabled-DNS scenario starts two stock clients with MagicDNS off and

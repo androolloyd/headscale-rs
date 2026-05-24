@@ -82,6 +82,7 @@ smoke_ids=(
   magicdns-custom-domain
   extra-records
   dns-edge
+  dns-hot-reload
   magicdns-ipv6-only
   dns-disabled
   prefix-family-dual-stack
@@ -121,6 +122,7 @@ smoke_areas=(
   tags
   tags
   tags
+  dns
   dns
   dns
   dns
@@ -168,6 +170,7 @@ smoke_rust_scripts=(
   tools/real-client/magicdns-custom-domain-smoke.sh
   tools/real-client/extra-records-smoke.sh
   tools/real-client/dns-edge-smoke.sh
+  tools/real-client/dns-hot-reload-smoke.sh
   tools/real-client/magicdns-ipv6-only-smoke.sh
   tools/real-client/dns-disabled-smoke.sh
   tools/real-client/prefix-family-dual-stack-smoke.sh
@@ -211,6 +214,7 @@ smoke_go_scripts=(
   tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/extra-records-headscale-go-smoke.sh
   tools/real-client/dns-edge-headscale-go-smoke.sh
+  tools/real-client/dns-hot-reload-headscale-go-smoke.sh
   tools/real-client/magicdns-ipv6-only-headscale-go-smoke.sh
   tools/real-client/dns-disabled-headscale-go-smoke.sh
   tools/real-client/prefix-family-dual-stack-headscale-go-smoke.sh
@@ -254,6 +258,7 @@ smoke_assertions=(
   "custom DNS base domain"
   "extra DNS A record in client netmap"
   "split DNS routes plus AAAA/CNAME extra records"
+  "production extra-records file hot reload in client netmap"
   "MagicDNS with IPv6-only prefix-family allocation"
   "MagicDNS disabled fallback names"
   "Dual-stack prefix-family allocation"

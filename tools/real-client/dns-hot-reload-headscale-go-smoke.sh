@@ -4,10 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
-work_root="${REAL_CLIENT_WORKDIR:-target/real-client/dns-hot-reload-smoke}"
-run_id="hs-dns-hot-reload-$(date +%s)-$$"
+work_root="${REAL_CLIENT_WORKDIR:-target/real-client/dns-hot-reload-headscale-go-smoke}"
+run_id="hs-dns-hot-reload-go-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN:-tail.test}"
 
@@ -18,16 +19,15 @@ esac
 mkdir -p "${work_dir}"
 
 http_port=""
-https_port=""
+grpc_port=""
+metrics_port=""
 server_pid=""
 config_path="${work_dir}/config.yaml"
-db_path="${work_dir}/db.sqlite"
 socket_path="/tmp/${run_id}.sock"
 extra_records_path="${work_dir}/extra-records.json"
 control_url=""
 local_control_url=""
-tls_cert_path="${work_dir}/state/tls.crt"
-headscale_bin="${repo_root}/target/debug/headscale"
+headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 authkey=""
 
 cleanup() {
@@ -65,7 +65,7 @@ wait_for() {
 }
 
 headscale_cmd() {
-  "${headscale_bin}" --config "${config_path}" "$@"
+  "${headscale_bin}" -c "${config_path}" "$@"
 }
 
 dump_debug() {
@@ -83,50 +83,97 @@ write_records() {
 }
 
 write_config() {
+  cat >"${work_dir}/derp.yaml" <<EOF
+regions:
+  900:
+    regionid: 900
+    regioncode: smoke
+    regionname: Smoke Test
+    nodes:
+      - name: 900a
+        regionid: 900
+        hostname: derp.invalid
+        ipv4: 198.51.100.1
+        stunport: 0
+        stunonly: false
+        derpport: 443
+EOF
+
   cat >"${config_path}" <<EOF
-server:
-  server_url: ${control_url}
-  listen: 0.0.0.0:${http_port}
-  https_listen: 0.0.0.0:${https_port}
-  db_path: ${db_path}
-  state_dir: ${work_dir}/state
-  unix_socket: ${socket_path}
-  unix_socket_permission: "0700"
-  tls_hostname: host.docker.internal
+server_url: ${control_url}
+listen_addr: 0.0.0.0:${http_port}
+metrics_listen_addr: 127.0.0.1:${metrics_port}
+grpc_listen_addr: 127.0.0.1:${grpc_port}
+grpc_allow_insecure: true
+unix_socket: ${socket_path}
+unix_socket_permission: "0700"
+
+private_key_path: ${work_dir}/private.key
+noise:
+  private_key_path: ${work_dir}/noise_private.key
 
 prefixes:
   allocation: sequential
   v4: 100.64.0.0/10
 
+database:
+  type: sqlite
+  sqlite:
+    path: ${work_dir}/db.sqlite
+
 dns:
   magic_dns: true
-  base_domain: ${base_domain}
+  base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
     global: []
     split: {}
+  search_domains: []
   extra_records_path: ${extra_records_path}
+
+logtail:
+  enabled: false
+
+cli:
+  timeout: 5s
+
+log:
+  level: info
+  format: text
+
+derp:
+  server:
+    enabled: false
+  urls: []
+  paths:
+    - ${work_dir}/derp.yaml
+  auto_update_enabled: false
 EOF
+}
+
+install_headscale_go() {
+  echo "::group::build headscale-go ${headscale_go_version}"
+  if [[ -z "${HEADSCALE_GO_BIN:-}" ]]; then
+    GOBIN="${work_dir}/bin" go install "github.com/juanfont/headscale/cmd/headscale@${headscale_go_version}"
+  fi
+  "${headscale_bin}" version >"${work_dir}/headscale-version.txt"
+  cat "${work_dir}/headscale-version.txt"
+  echo "::endgroup::"
 }
 
 start_server() {
   write_config
   rm -f "${socket_path}"
-  mkdir -p "${work_dir}/state"
-  echo "::group::build headscale-rs CLI"
-  cargo build --quiet -p headscale-cli --bin headscale
-  echo "::endgroup::"
 
-  echo "::group::start headscale-rs server"
-  "${headscale_bin}" --config "${config_path}" server \
-    >"${work_dir}/headscale-rs.stdout" \
-    2>"${work_dir}/headscale-rs.stderr" &
+  echo "::group::start headscale-go"
+  "${headscale_bin}" -c "${config_path}" serve \
+    >"${work_dir}/headscale-go.stdout" \
+    2>"${work_dir}/headscale-go.stderr" &
   server_pid="$!"
-  wait_for "headscale-rs health" "curl -fsS '${local_control_url}/health' >/dev/null"
-  wait_for "headscale-rs TLS certificate" "test -s '${tls_cert_path}'"
-  wait_for "headscale-rs gRPC" "headscale_cmd health >/dev/null 2>&1"
-  echo "headscale-rs control=${local_control_url}"
-  echo "headscale-rs login=${control_url}"
+  wait_for "headscale-go health" "curl -fsS '${local_control_url}/health' >/dev/null"
+  wait_for "headscale-go gRPC" "headscale_cmd health >/dev/null 2>&1"
+  echo "headscale-go control=${local_control_url}"
+  echo "headscale-go login=${control_url}"
   echo "::endgroup::"
 }
 
@@ -137,7 +184,7 @@ create_user_and_key() {
   headscale_cmd -o json preauthkeys create \
     --user "${user_id}" \
     --reusable \
-    --expires-in 1h \
+    --expiration 1h \
     >"${work_dir}/preauth.json"
   authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
   echo "minted ${authkey%%-*}-..."
@@ -151,9 +198,8 @@ start_client() {
     --hostname "${client_name}" \
     --add-host host.docker.internal:host-gateway \
     --entrypoint /bin/sh \
-    -v "${tls_cert_path}:/usr/local/share/ca-certificates/headscale-control.crt:ro" \
     "${image}" \
-    -ceu 'update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
+    -ceu 'tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity' \
     >/dev/null
 
   wait_for "tailscaled local socket" \
@@ -196,7 +242,7 @@ assert_dns_netmap() {
       expected_value = ARGV.fetch(3)
       dns = netmap.fetch("DNS")
       cert_domains = Array(dns["CertDomains"])
-      abort("expected no CertDomains from control-plane HTTPS, got #{cert_domains.inspect}") unless cert_domains.empty?
+      abort("expected no CertDomains, got #{cert_domains.inspect}") unless cert_domains.empty?
       records = Array(dns["ExtraRecords"])
       abort("expected exactly one ExtraRecord, got #{records.inspect}") unless records.length == 1
       record = records.fetch(0)
@@ -210,17 +256,19 @@ assert_dns_netmap() {
     ' "${netmap_path}" "${expected_name}" "${expected_type}" "${expected_value}" >"${output_path}"
 }
 
-need cargo
 need curl
 need docker
+need go
 need ruby
 
 http_port="$(free_port)"
-https_port="$(free_port)"
-control_url="https://host.docker.internal:${https_port}"
+grpc_port="$(free_port)"
+metrics_port="$(free_port)"
+control_url="http://host.docker.internal:${http_port}"
 local_control_url="http://127.0.0.1:${http_port}"
 
 write_records "before.${base_domain}" "A" "100.64.0.50"
+install_headscale_go
 start_server
 create_user_and_key
 start_client
@@ -248,4 +296,4 @@ wait_for "hot-reloaded DNS extra record" \
 cat "${work_dir}/dns-after.json"
 echo "::endgroup::"
 
-echo "headscale-rs production DNS hot-reload real-client smoke passed"
+echo "headscale-go production DNS hot-reload real-client smoke passed"

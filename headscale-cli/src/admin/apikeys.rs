@@ -248,8 +248,10 @@ struct ApiKeyOutput {
     prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     expiration: Option<TimestampOutput>,
+    #[serde(rename = "createdAt")]
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<TimestampOutput>,
+    #[serde(rename = "lastSeen")]
     #[serde(skip_serializing_if = "Option::is_none")]
     last_seen: Option<TimestampOutput>,
     #[serde(skip)]
@@ -336,5 +338,32 @@ mod tests {
             Some(1_704_067_260)
         );
         assert!(out.last_seen.is_none());
+    }
+
+    #[test]
+    fn grpc_api_key_output_serializes_proto_json_field_names() {
+        let out = ApiKeyOutput::from(GrpcApiKey {
+            id: 7,
+            prefix: "hskey-api-abcdefghijkl-***".into(),
+            expiration: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_260,
+                nanos: 0,
+            }),
+            last_seen: Some(prost_types::Timestamp {
+                seconds: 1_704_067_320,
+                nanos: 0,
+            }),
+        });
+
+        let value = serde_json::to_value(&out).unwrap();
+
+        assert!(value.get("created_at").is_none());
+        assert!(value.get("last_seen").is_none());
+        assert_eq!(value["createdAt"]["seconds"], 1_704_067_260);
+        assert_eq!(value["lastSeen"]["seconds"], 1_704_067_320);
     }
 }

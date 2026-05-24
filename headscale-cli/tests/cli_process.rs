@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{Command, Output};
@@ -8,12 +9,13 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use headscale_api::admin::{
-    PersistentApiKeyAdmin, PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
+    PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentPreauthAdmin, PersistentUserAdmin,
+    WireMachineAdmin,
 };
 use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::policy::PolicyStore;
-use headscale_api::tailscale_wire::MachineRegistry;
 use headscale_api::tailscale_wire::tls::{self, SanConfig};
+use headscale_api::tailscale_wire::{AllocError, IpAllocator, MachineRegistry};
 use httpmock::prelude::*;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
@@ -102,6 +104,16 @@ fn assert_stdout_snapshot(args: &[&str], expected: &str) {
         "stdout snapshot for {args:?}"
     );
     assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+}
+
+fn assert_normalized_node_stdout_snapshot(output: &Output, expected: &str, label: &str) {
+    assert!(output.status.success(), "stderr: {}", stderr(output));
+    assert_eq!(
+        trim_line_end_spaces(&normalize_generated_node_stdout(&stdout(output))),
+        trim_line_end_spaces(expected),
+        "stdout snapshot for {label}"
+    );
+    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
 }
 
 fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
@@ -196,6 +208,39 @@ async fn spawn_process_grpc_service(
     } else {
         service.with_database_pool(db.pool().clone())
     };
+    let listener = UnixListener::bind(&socket).unwrap();
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(service.into_service_server())
+            .serve_with_incoming(UnixListenerStream::new(listener))
+            .await
+    });
+
+    (dir, db, socket, handle)
+}
+
+async fn spawn_process_grpc_service_with_persistent_machines() -> (
+    tempfile::TempDir,
+    headscale_db::Database,
+    std::path::PathBuf,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("headscale.sock");
+    let db = headscale_db::Database::in_memory().await.unwrap();
+    db.migrate().await.unwrap();
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let machines =
+        Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+    let service = HeadscaleAdminService::with_user_admin(
+        users.clone(),
+        Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+        Arc::new(PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users)),
+        PolicyStore::new(),
+        machines,
+    )
+    .with_database_pool(db.pool().clone())
+    .with_ip_allocator(Arc::new(FixedProcessIpAllocator));
     let listener = UnixListener::bind(&socket).unwrap();
     let handle = tokio::spawn(async move {
         Server::builder()
@@ -316,6 +361,14 @@ impl DatabaseHealthCheck for FailingDatabaseHealth {
     }
 }
 
+struct FixedProcessIpAllocator;
+
+impl IpAllocator for FixedProcessIpAllocator {
+    fn allocate(&self, _node_key_hex: &str) -> Result<Ipv4Addr, AllocError> {
+        Ok(Ipv4Addr::new(100, 64, 0, 42))
+    }
+}
+
 fn write_unix_socket_config(dir: &Path, socket: &Path) -> std::path::PathBuf {
     let config = dir.join("config.yaml");
     let socket = socket
@@ -348,6 +401,79 @@ fn normalize_users_list_stdout(text: &str) -> String {
         normalized.push('\n');
     }
     normalized
+}
+
+fn normalize_generated_node_stdout(text: &str) -> String {
+    let text = replace_short_key_bodies(text, "mkey:");
+    let text = replace_short_key_bodies(&text, "nodekey:");
+    replace_rfc3339_second_timestamps(&text)
+}
+
+fn replace_short_key_bodies(text: &str, prefix: &str) -> String {
+    let mut normalized = text.to_string();
+    let mut start = 0;
+    while let Some(relative) = normalized[start..].find(prefix) {
+        let body_start = start + relative + prefix.len();
+        if body_start + 12 > normalized.len() {
+            break;
+        }
+        let body_end = body_start + 12;
+        let has_hex_body = normalized[body_start..body_end]
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit());
+        let has_ellipsis = normalized[body_end..].starts_with("…");
+        if has_hex_body && has_ellipsis {
+            normalized.replace_range(body_start..body_end, "000000000000");
+            start = body_end + "…".len();
+        } else {
+            start = body_start;
+        }
+    }
+    normalized
+}
+
+fn replace_rfc3339_second_timestamps(text: &str) -> String {
+    const PLACEHOLDER: &str = "0000-00-00T00:00:00Z";
+    let mut normalized = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i + PLACEHOLDER.len() <= text.len() {
+        if is_rfc3339_second_timestamp_at(bytes, i) {
+            normalized.push_str(&text[last..i]);
+            normalized.push_str(PLACEHOLDER);
+            i += PLACEHOLDER.len();
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    normalized.push_str(&text[last..]);
+    normalized
+}
+
+fn is_rfc3339_second_timestamp_at(bytes: &[u8], i: usize) -> bool {
+    fn digit(bytes: &[u8], idx: usize) -> bool {
+        bytes.get(idx).is_some_and(u8::is_ascii_digit)
+    }
+
+    (0..4).all(|offset| digit(bytes, i + offset))
+        && bytes.get(i + 4) == Some(&b'-')
+        && digit(bytes, i + 5)
+        && digit(bytes, i + 6)
+        && bytes.get(i + 7) == Some(&b'-')
+        && digit(bytes, i + 8)
+        && digit(bytes, i + 9)
+        && bytes.get(i + 10) == Some(&b'T')
+        && digit(bytes, i + 11)
+        && digit(bytes, i + 12)
+        && bytes.get(i + 13) == Some(&b':')
+        && digit(bytes, i + 14)
+        && digit(bytes, i + 15)
+        && bytes.get(i + 16) == Some(&b':')
+        && digit(bytes, i + 17)
+        && digit(bytes, i + 18)
+        && bytes.get(i + 19) == Some(&b'Z')
 }
 
 fn display_prefix(secret: &str, token_prefix: &str) -> String {
@@ -1195,6 +1321,19 @@ fn implemented_admin_local_errors_match_snapshots() {
         3,
         include_str!("snapshots/grpc_remote_connection_failure.stderr"),
     );
+    assert_stderr_snapshot(
+        &[
+            "--output=json",
+            "--address",
+            "http://127.0.0.1:9",
+            "--api-key",
+            "test",
+            "users",
+            "list",
+        ],
+        3,
+        include_str!("snapshots/grpc_remote_connection_failure_json.stderr"),
+    );
 }
 
 #[test]
@@ -1988,8 +2127,8 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_json_prefix.as_str())
     );
     assert!(listed_api_key["expiration"]["seconds"].as_i64().is_some());
-    assert!(listed_api_key["created_at"]["seconds"].as_i64().is_some());
-    assert!(listed_api_key.get("createdAt").is_none());
+    assert!(listed_api_key["createdAt"]["seconds"].as_i64().is_some());
+    assert!(listed_api_key.get("created_at").is_none());
     assert!(listed_api_key.get("last_seen").is_none());
     assert!(listed_api_key.get("lastSeen").is_none());
     let api_json_id = listed_api_key["id"].as_u64().unwrap().to_string();
@@ -2035,11 +2174,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_json_line_prefix.as_str())
     );
     assert!(
-        listed_api_key_json_line["created_at"]["seconds"]
+        listed_api_key_json_line["createdAt"]["seconds"]
             .as_i64()
             .is_some()
     );
-    assert!(listed_api_key_json_line.get("createdAt").is_none());
+    assert!(listed_api_key_json_line.get("created_at").is_none());
     assert_eq!(stderr(&list_api_keys_json_line), "");
 
     let expire_api_key_json_line = headscale_with_config(
@@ -2102,11 +2241,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_yaml_prefix.as_str())
     );
     assert!(
-        listed_api_key_yaml["created_at"]["seconds"]
+        listed_api_key_yaml["createdAt"]["seconds"]
             .as_i64()
             .is_some()
     );
-    assert!(listed_api_key_yaml.get("createdAt").is_none());
+    assert!(listed_api_key_yaml.get("created_at").is_none());
     assert_eq!(stderr(&list_api_keys_yaml), "");
 
     let expire_api_key_yaml = headscale_with_config(
@@ -2386,6 +2525,109 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service_with_persistent_machines().await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+    assert!(
+        create_user.status.success(),
+        "stderr: {}",
+        stderr(&create_user)
+    );
+    assert_eq!(stdout(&create_user), "User created\n");
+    assert_eq!(stderr(&create_user), "");
+
+    let registration_id = "dddddddddddddddddddddddd";
+    let debug_create = headscale_with_config(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--key",
+            registration_id,
+            "--name",
+            "route-node",
+            "--route",
+            "10.10.0.0/24",
+        ],
+    );
+    assert!(
+        debug_create.status.success(),
+        "stderr: {}",
+        stderr(&debug_create)
+    );
+    assert_eq!(stdout(&debug_create), "Node created\n");
+    assert_eq!(stderr(&debug_create), "");
+
+    let auth_id = format!("hskey-authreq-{registration_id}");
+    let auth_register = headscale_with_config(
+        &config,
+        &["auth", "register", "--user", "alice", "--auth-id", &auth_id],
+    );
+    assert!(
+        auth_register.status.success(),
+        "stderr: {}",
+        stderr(&auth_register)
+    );
+    assert_eq!(stdout(&auth_register), "Node route-node registered\n");
+    assert_eq!(stderr(&auth_register), "");
+
+    let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+    let node_id = json_output(&nodes_json)[0]["id"].as_u64().unwrap();
+    assert_eq!(node_id, 1);
+    let node_id = node_id.to_string();
+
+    let nodes_list = headscale_with_config(&config, &["nodes", "list"]);
+    assert_normalized_node_stdout_snapshot(
+        &nodes_list,
+        include_str!("snapshots/nodes_list_success.stdout"),
+        "nodes list",
+    );
+
+    let routes_available = headscale_with_config(&config, &["nodes", "list-routes"]);
+    assert_normalized_node_stdout_snapshot(
+        &routes_available,
+        include_str!("snapshots/nodes_list_routes_available.stdout"),
+        "nodes list-routes with advertised route",
+    );
+
+    let approve_routes = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "approve-routes",
+            "--identifier",
+            &node_id,
+            "--routes",
+            "10.10.0.0/24",
+        ],
+    );
+    assert_normalized_node_stdout_snapshot(
+        &approve_routes,
+        include_str!("snapshots/nodes_approve_routes_success.stdout"),
+        "nodes approve-routes",
+    );
+
+    let routes_approved = headscale_with_config(&config, &["nodes", "list-routes"]);
+    assert_normalized_node_stdout_snapshot(
+        &routes_approved,
+        include_str!("snapshots/nodes_list_routes_success.stdout"),
+        "nodes list-routes with approved route",
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
     let config_dir = tempfile::tempdir().unwrap();
@@ -2534,6 +2776,14 @@ async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() 
     assert_eq!(
         stderr(&bad_auth),
         include_str!("snapshots/grpc_remote_auth_failure.stderr")
+    );
+
+    let bad_auth_json_line =
+        wait_for_headscale_status(&bad_config, &["-ojson-line", "health"], 4).await;
+    assert_eq!(stdout(&bad_auth_json_line), "");
+    assert_eq!(
+        stderr(&bad_auth_json_line),
+        include_str!("snapshots/grpc_remote_auth_failure_json_line.stderr")
     );
 
     handle.abort();

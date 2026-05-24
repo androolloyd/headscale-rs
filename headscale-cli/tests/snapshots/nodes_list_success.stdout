@@ -1,0 +1,3 @@
+ID  HOSTNAME    NAME        MACHINEKEY          NODEKEY                USER   TAGS  IP ADDRESSES  EPHEMERAL  LAST SEEN             EXPIRATION  CONNECTED  EXPIRED
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+1   route-node  route-node  mkey:000000000000…  nodekey:000000000000…  alice        100.64.0.42   false      0000-00-00T00:00:00Z  N/A         online     no

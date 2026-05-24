@@ -16,8 +16,12 @@ use axum::{
     routing::{any, delete, get, post},
 };
 use chrono::{SecondsFormat, TimeZone, Utc};
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
@@ -129,7 +133,17 @@ async fn create_user(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(
+        request,
+        &[
+            &["name"][..],
+            &["displayName", "display_name"],
+            &["email"],
+            &["pictureUrl", "picture_url"],
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -245,7 +259,18 @@ async fn create_preauth_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(
+        request,
+        &[
+            &["user"][..],
+            &["reusable"],
+            &["ephemeral"],
+            &["expiration"],
+            &["aclTags", "acl_tags"],
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -267,7 +292,7 @@ async fn expire_preauth_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["id"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -336,7 +361,7 @@ async fn create_api_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["expiration"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -359,7 +384,7 @@ async fn expire_api_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["prefix"][..], &["id"]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -431,10 +456,11 @@ async fn debug_create_node(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
-        Ok(value) => value,
-        Err(status) => return status_response(&status),
-    };
+    let value =
+        match read_json_value(request, &[&["user"][..], &["key"], &["name"], &["routes"]]).await {
+            Ok(value) => value,
+            Err(status) => return status_response(&status),
+        };
     let request = match debug_create_node_request(&value) {
         Ok(body) => tonic_request(&headers, body),
         Err(status) => return status_response(&status),
@@ -487,7 +513,7 @@ async fn auth_register(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["user"][..], &["authId", "auth_id"]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -520,7 +546,7 @@ async fn auth_approve(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["authId", "auth_id"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -543,7 +569,7 @@ async fn auth_reject(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["authId", "auth_id"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -628,7 +654,7 @@ async fn set_tags(
         Ok(id) => id,
         Err(status) => return status_response(&status),
     };
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["tags"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -659,7 +685,7 @@ async fn set_approved_routes(
         Ok(id) => id,
         Err(status) => return status_response(&status),
     };
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["routes"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -824,7 +850,7 @@ async fn set_policy(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["policy"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -853,7 +879,7 @@ async fn check_policy(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request).await {
+    let value = match read_json_value(request, &[&["policy"][..]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -901,7 +927,7 @@ fn authorization_metadata(headers: &HeaderMap) -> MetadataMap {
     metadata
 }
 
-async fn read_json_value(request: Request) -> Result<Value, Status> {
+async fn read_json_value(request: Request, allowed_fields: &[&[&str]]) -> Result<Value, Status> {
     let body = to_bytes(request.into_body(), BODY_LIMIT)
         .await
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -916,7 +942,71 @@ async fn read_json_value(request: Request) -> Result<Value, Status> {
             json_token(&value)
         )));
     }
+    ensure_unique_top_level_fields(&body)?;
+    ensure_known_fields(&value, allowed_fields)?;
     Ok(value)
+}
+
+fn ensure_unique_top_level_fields(body: &[u8]) -> Result<(), Status> {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.deserialize_map(UniqueObjectVisitor)
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    de.end()
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    Ok(())
+}
+
+struct UniqueObjectVisitor;
+
+impl<'de> Visitor<'de> for UniqueObjectVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object with unique fields")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = BTreeSet::<String>::new();
+        while let Some(key) = access.next_key::<String>()? {
+            if seen.contains(&key) {
+                return Err(de::Error::custom(format!("duplicate field {key:?}")));
+            }
+            seen.insert(key);
+            let _: Value = access.next_value()?;
+        }
+        Ok(())
+    }
+}
+
+fn ensure_known_fields(value: &Value, allowed_fields: &[&[&str]]) -> Result<(), Status> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+
+    for key in object.keys() {
+        if !allowed_fields
+            .iter()
+            .any(|aliases| aliases.contains(&key.as_str()))
+        {
+            return Err(Status::invalid_argument(format!("unknown field {key:?}")));
+        }
+    }
+
+    for aliases in allowed_fields {
+        let mut present = aliases.iter().filter(|alias| object.contains_key(**alias));
+        if present.next().is_some()
+            && let Some(duplicate) = present.next()
+        {
+            return Err(Status::invalid_argument(format!(
+                "duplicate field {duplicate:?}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_list_users_query(query: Option<&str>) -> Result<ListUsersQuery, Status> {
@@ -1017,6 +1107,7 @@ fn query_string(
     names: &[&str],
     display: &str,
 ) -> Result<Option<String>, Status> {
+    reject_nested_scalar_query_paths(values, names)?;
     let Some(values) = query_values(values, names) else {
         return Ok(None);
     };
@@ -1033,6 +1124,7 @@ fn query_u64(
     names: &[&str],
     display: &str,
 ) -> Result<Option<u64>, Status> {
+    reject_nested_scalar_query_paths(values, names)?;
     let Some(values) = query_values(values, names) else {
         return Ok(None);
     };
@@ -1049,6 +1141,21 @@ fn query_u64(
 
 fn query_values(values: &BTreeMap<String, Vec<String>>, names: &[&str]) -> Option<Vec<String>> {
     names.iter().find_map(|name| values.get(*name).cloned())
+}
+
+fn reject_nested_scalar_query_paths(
+    values: &BTreeMap<String, Vec<String>>,
+    names: &[&str],
+) -> Result<(), Status> {
+    for name in names {
+        let prefix = format!("{name}.");
+        if values.keys().any(|key| key.starts_with(&prefix)) {
+            return Err(Status::invalid_argument(format!(
+                "invalid path: {name:?} is not a message"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn too_many_query_values(display: &str, values: &[String]) -> String {
@@ -1534,6 +1641,7 @@ fn query_bool(
     names: &[&str],
     display: &str,
 ) -> Result<bool, Status> {
+    reject_nested_scalar_query_paths(values, names)?;
     let Some(values) = query_values(values, names) else {
         return Ok(false);
     };

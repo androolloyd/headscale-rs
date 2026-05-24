@@ -600,6 +600,62 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_body_unknown_and_duplicate_fields_are_status_json() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        message_fragment: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "create user unknown field",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            body: r#"{"name":"alice","unknown":1}"#,
+            message_fragment: r#"unknown field "unknown""#,
+        },
+        Case {
+            name: "auth approve unknown field",
+            method: Method::POST,
+            uri: "/api/v1/auth/approve",
+            body: r#"{"authId":"abc","unknown":1}"#,
+            message_fragment: r#"unknown field "unknown""#,
+        },
+        Case {
+            name: "create user duplicate protojson field",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            body: r#"{"name":"alice","name":"bob"}"#,
+            message_fragment: r#"duplicate field "name""#,
+        },
+        Case {
+            name: "preauth json and proto field aliases conflict",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"aclTags":[],"acl_tags":[]}"#,
+            message_fragment: "duplicate field",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_query_parser_failures_are_status_json() {
     struct Case {
         name: &'static str,
@@ -670,6 +726,24 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/node/1/expire?expiry%5Bseconds%5D=1",
             message_fragment: r#"too many values for field "expiry": seconds, 1"#,
+        },
+        Case {
+            name: "nested uint64 query path on scalar",
+            method: Method::GET,
+            uri: "/api/v1/user?id.foo=1",
+            message_fragment: r#"invalid path: "id" is not a message"#,
+        },
+        Case {
+            name: "nested delete id query path on scalar",
+            method: Method::DELETE,
+            uri: "/api/v1/preauthkey?id.foo=1",
+            message_fragment: r#"invalid path: "id" is not a message"#,
+        },
+        Case {
+            name: "nested bool query path on scalar",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed.foo=true",
+            message_fragment: r#"invalid path: "confirmed" is not a message"#,
         },
     ] {
         let resp = app

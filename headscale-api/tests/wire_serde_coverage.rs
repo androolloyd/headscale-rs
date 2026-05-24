@@ -784,6 +784,23 @@ fn ssh_policy_serialises_tailcfg_shape() {
 }
 
 #[test]
+fn ssh_action_serialises_hold_and_delegate() {
+    let action = SshAction {
+        hold_and_delegate:
+            "https://headscale.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID".into(),
+        ..SshAction::default()
+    };
+
+    let v = serde_json::to_value(action).unwrap();
+    assert_eq!(
+        v["holdAndDelegate"],
+        "https://headscale.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID"
+    );
+    assert!(v.get("accept").is_none());
+    assert!(v.get("sessionDuration").is_none());
+}
+
+#[test]
 fn map_response_emits_ssh_policy_all_caps_name() {
     let r = MapResponse {
         node: Some(mk_node()),

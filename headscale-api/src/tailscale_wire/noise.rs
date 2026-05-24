@@ -810,6 +810,10 @@ pub(crate) fn inner_router(state: WireState) -> Router {
             post(super::register::handle_register_flat),
         )
         .route("/machine/map", post(super::map::handle_map_flat))
+        .route(
+            "/machine/ssh/action/:src_node_id/to/:dst_node_id",
+            get(super::ssh::handle_ssh_action),
+        )
         .route("/machine/whoami", get(not_implemented_handler))
         .route("/machine/set-dns", post(not_implemented_handler))
         .route("/machine/set-device-attr", patch(not_implemented_handler))

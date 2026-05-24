@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use super::PolicyDoc;
 use crate::tailscale_wire::wire::{SshAction, SshPolicy, SshPrincipal, SshRule};
@@ -11,6 +14,8 @@ pub struct SshPolicyNode {
     pub addrs: Vec<String>,
     pub tags: Vec<String>,
 }
+
+const SSH_CHECK_PERIOD_DEFAULT: Duration = Duration::from_secs(12 * 60 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SshUserRule {
@@ -29,6 +34,15 @@ pub fn compile_ssh_policy(
     nodes: &[SshPolicyNode],
     target_node_id: u64,
 ) -> Option<SshPolicy> {
+    compile_ssh_policy_with_base_url(doc, nodes, target_node_id, "")
+}
+
+pub fn compile_ssh_policy_with_base_url(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    target_node_id: u64,
+    base_url: &str,
+) -> Option<SshPolicy> {
     if doc.ssh.is_empty() {
         return None;
     }
@@ -41,7 +55,7 @@ pub fn compile_ssh_policy(
             continue;
         }
 
-        let action = ssh_action(&rule.action, rule.check_period.as_deref());
+        let action = ssh_action(base_url, &rule.action);
         let ssh_user_rules = ssh_user_rules(&rule.users, &source_nodes);
         if ssh_user_rules.is_empty() {
             continue;
@@ -70,7 +84,49 @@ pub fn compile_ssh_policy(
         }
     }
 
+    out.sort_by_key(|rule| i32::from(rule.action.hold_and_delegate.is_empty()));
     Some(SshPolicy { rules: out })
+}
+
+pub fn ssh_check_period_for(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    src_node_id: u64,
+    dst_node_id: u64,
+) -> Option<Duration> {
+    if doc.ssh.is_empty() {
+        return None;
+    }
+    let src_node = nodes.iter().find(|node| node.id == src_node_id)?;
+    let dst_node = nodes.iter().find(|node| node.id == dst_node_id)?;
+
+    for rule in &doc.ssh {
+        if rule.action != "check" {
+            continue;
+        }
+        let source_nodes = resolve_ssh_source_nodes(doc, &rule.src, nodes);
+        if !source_nodes.iter().any(|node| node.id == src_node.id) {
+            continue;
+        }
+
+        for dst in &rule.dst {
+            if dst == "autogroup:self" {
+                if is_untagged_user_owned(src_node)
+                    && is_untagged_user_owned(dst_node)
+                    && src_node.user == dst_node.user
+                {
+                    return Some(check_period_from_rule(rule.check_period.as_deref()));
+                }
+                continue;
+            }
+
+            if ssh_destination_matches(doc, dst, dst_node) {
+                return Some(check_period_from_rule(rule.check_period.as_deref()));
+            }
+        }
+    }
+
+    None
 }
 
 fn push_ssh_rules_for_nodes(
@@ -342,16 +398,16 @@ fn ssh_user_rules_with_localparts(
     rules
 }
 
-fn ssh_action(action: &str, check_period: Option<&str>) -> SshAction {
-    let session_duration = if action == "check" {
-        check_period.and_then(parse_duration_nanos).unwrap_or(0)
-    } else {
-        0
-    };
+fn ssh_action(base_url: &str, action: &str) -> SshAction {
+    if action == "check" {
+        return SshAction {
+            hold_and_delegate: ssh_check_hold_url(base_url, None),
+            ..SshAction::default()
+        };
+    }
+
     SshAction {
         accept: true,
-        reject: false,
-        session_duration,
         allow_agent_forwarding: true,
         allow_local_port_forwarding: true,
         allow_remote_port_forwarding: true,
@@ -359,10 +415,39 @@ fn ssh_action(action: &str, check_period: Option<&str>) -> SshAction {
     }
 }
 
+fn ssh_check_hold_url(base_url: &str, auth_id: Option<&str>) -> String {
+    let mut url = format!(
+        "{}/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+        base_url.trim_end_matches('/')
+    );
+    if let Some(auth_id) = auth_id {
+        url.push_str("&auth_id=");
+        url.push_str(auth_id);
+    }
+    url
+}
+
+pub(crate) fn ssh_check_hold_url_with_auth(base_url: &str, auth_id: &str) -> String {
+    ssh_check_hold_url(base_url, Some(auth_id))
+}
+
+fn check_period_from_rule(check_period: Option<&str>) -> Duration {
+    match check_period.map(str::trim) {
+        None => SSH_CHECK_PERIOD_DEFAULT,
+        Some("always" | "0") => Duration::ZERO,
+        Some(period) => parse_duration_nanos(period)
+            .and_then(|nanos| u64::try_from(nanos).ok())
+            .map_or(SSH_CHECK_PERIOD_DEFAULT, Duration::from_nanos),
+    }
+}
+
 fn parse_duration_nanos(input: &str) -> Option<i64> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if trimmed == "always" {
+        return Some(0);
     }
     if trimmed == "0" {
         return Some(0);
@@ -573,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn check_period_serialises_as_duration_nanos() {
+    fn check_action_delegates_and_check_period_stays_server_side() {
         let doc = parse_hujson_policy(
             r#"{
               "groups": {"group:admins": ["bob@"]},
@@ -602,10 +687,18 @@ mod tests {
                 tags: vec!["tag:db".into()],
             },
         ];
-        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+        let pol =
+            compile_ssh_policy_with_base_url(&doc, &nodes, 2, "https://headscale.example").unwrap();
+        assert!(!pol.rules[0].action.accept);
+        assert!(!pol.rules[0].action.reject);
+        assert_eq!(pol.rules[0].action.session_duration, 0);
         assert_eq!(
-            pol.rules[0].action.session_duration,
-            24 * 60 * 60 * 1_000_000_000
+            pol.rules[0].action.hold_and_delegate,
+            "https://headscale.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
+        );
+        assert_eq!(
+            ssh_check_period_for(&doc, &nodes, 1, 2),
+            Some(Duration::from_secs(24 * 60 * 60))
         );
     }
 

@@ -745,9 +745,10 @@ fn ssh_policy_for_snapshot(
     policy: &crate::policy::PolicyStore,
     snapshot: &std::collections::HashMap<String, super::MachineRecord>,
     self_node_key: &str,
+    base_url: &str,
 ) -> Option<super::wire::SshPolicy> {
     let nodes = ssh_policy_nodes_from_snapshot(snapshot);
-    policy.ssh_policy_for(&nodes, node_id_for_key(snapshot, self_node_key))
+    policy.ssh_policy_for(&nodes, node_id_for_key(snapshot, self_node_key), base_url)
 }
 
 #[derive(Serialize)]
@@ -1059,7 +1060,12 @@ async fn map_inner(
         // PacketFilters["base"], already reduced for this map
         // recipient.
         packet_filters: packet_filters_for_node(&state.policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(&state.policy, &snapshot, &node_key_hex),
+        ssh_policy: ssh_policy_for_snapshot(
+            &state.policy,
+            &snapshot,
+            &node_key_hex,
+            state.public_control_url.as_deref().unwrap_or(""),
+        ),
         control_time: Some(chrono::Utc::now()),
         debug: Some(DebugConfig {
             disable_log_tail: true,
@@ -1576,7 +1582,7 @@ fn rebuild_peer_delta_chunk(
             allowed_peer_ids.as_ref(),
         ),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
+        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, ""),
         control_time: Some(chrono::Utc::now()),
         keep_alive: false,
         ..MapResponse::default()
@@ -1685,7 +1691,7 @@ fn rebuild_map_chunk(
         domain: tailnet_domain,
         collect_services: Some(false),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key),
+        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, ""),
         control_time: Some(chrono::Utc::now()),
         debug: Some(DebugConfig {
             disable_log_tail: true,
@@ -5183,9 +5189,13 @@ mod tests {
         assert_eq!(ssh.rules[0].principals[0].node_ip, "100.64.0.12");
         assert_eq!(ssh.rules[0].ssh_users["*"], "=");
         assert_eq!(ssh.rules[0].ssh_users["root"], "root");
-        assert_eq!(
-            ssh.rules[0].action.session_duration,
-            24 * 60 * 60 * 1_000_000_000
+        assert!(!ssh.rules[0].action.accept);
+        assert_eq!(ssh.rules[0].action.session_duration, 0);
+        assert!(
+            ssh.rules[0]
+                .action
+                .hold_and_delegate
+                .contains("/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID")
         );
     }
 

@@ -1316,6 +1316,8 @@ pub struct SshAction {
     pub session_duration: i64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_agent_forwarding: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hold_and_delegate: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_local_port_forwarding: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

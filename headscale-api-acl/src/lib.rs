@@ -958,10 +958,12 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         )),
     }
 
-    if let Some(period) = rule.check_period.as_deref()
-        && parse_duration_nanos(period).is_none()
-    {
-        errs.push(format!("not a valid duration string: {period:?}"));
+    if let Some(period) = rule.check_period.as_deref() {
+        if rule.action != "check" {
+            errs.push("checkPeriod is only valid with action \"check\"".to_string());
+        } else if parse_duration_nanos(period).is_none() {
+            errs.push(format!("not a valid duration string: {period:?}"));
+        }
     }
 
     for user in &rule.users {
@@ -1381,6 +1383,9 @@ fn parse_duration_nanos(input: &str) -> Option<i64> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if trimmed == "always" {
+        return Some(0);
     }
     if trimmed == "0" {
         return Some(0);
@@ -3457,6 +3462,40 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("invalid SSH action"));
+    }
+
+    #[test]
+    fn accepts_ssh_check_period_always_like_headscale_go() {
+        parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "always",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_ssh_check_period_on_accept_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "checkPeriod": "12h",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("checkPeriod is only valid with action"));
     }
 
     #[test]

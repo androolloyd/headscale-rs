@@ -46,7 +46,7 @@ pub use doc::{
 };
 pub use filter::{PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node};
 pub use hujson::{PolicyParseError, parse_hujson_policy};
-pub use ssh::{SshPolicyNode, compile_ssh_policy};
+pub use ssh::{SshPolicyNode, compile_ssh_policy, compile_ssh_policy_with_base_url};
 
 use crate::tailscale_wire::wire::{FilterRule, SshPolicy};
 
@@ -224,9 +224,22 @@ impl PolicyStore {
         &self,
         nodes: &[SshPolicyNode],
         target_node_id: u64,
+        base_url: &str,
     ) -> Option<SshPolicy> {
         match self.inner.state.read().doc.as_ref() {
-            Some(doc) => compile_ssh_policy(doc, nodes, target_node_id),
+            Some(doc) => compile_ssh_policy_with_base_url(doc, nodes, target_node_id, base_url),
+            None => None,
+        }
+    }
+
+    pub fn ssh_check_period_for(
+        &self,
+        nodes: &[SshPolicyNode],
+        src_node_id: u64,
+        dst_node_id: u64,
+    ) -> Option<std::time::Duration> {
+        match self.inner.state.read().doc.as_ref() {
+            Some(doc) => ssh::ssh_check_period_for(doc, nodes, src_node_id, dst_node_id),
             None => None,
         }
     }

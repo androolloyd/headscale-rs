@@ -86,6 +86,7 @@ pub mod raw_tls;
 pub mod register;
 pub mod routes;
 pub mod serve;
+pub mod ssh;
 pub mod tls;
 pub mod wire;
 
@@ -914,16 +915,30 @@ fn new_ping_id() -> String {
 /// 24-character registration ID.
 pub struct RegistrationCache {
     inner: RwLock<BTreeMap<String, Arc<RegistrationEntry>>>,
+    last_ssh_auth: RwLock<BTreeMap<SshCheckBinding, SshAuthRecord>>,
     expiration: Duration,
     cleanup: Duration,
 }
 
 #[derive(Debug)]
 struct RegistrationEntry {
-    record: MachineRecord,
+    record: Option<MachineRecord>,
+    ssh_binding: Option<SshCheckBinding>,
     expires_at: Instant,
     outcome: Mutex<Option<RegistrationOutcome>>,
     notify: Notify,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SshCheckBinding {
+    pub src_node_id: u64,
+    pub dst_node_id: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SshAuthRecord {
+    at: Instant,
+    policy_updated_at: Option<i64>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -946,6 +961,15 @@ pub enum RegistrationWaitOutcome {
     Missing,
 }
 
+/// Result of waiting for a generic auth request to finish.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum AuthWaitOutcome {
+    Accepted,
+    Rejected(String),
+    Expired,
+    Missing,
+}
+
 impl RegistrationCache {
     pub fn new() -> Self {
         Self::with_tuning(REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_CLEANUP)
@@ -954,6 +978,7 @@ impl RegistrationCache {
     pub fn with_tuning(expiration: Duration, cleanup: Duration) -> Self {
         Self {
             inner: RwLock::new(BTreeMap::new()),
+            last_ssh_auth: RwLock::new(BTreeMap::new()),
             expiration,
             cleanup,
         }
@@ -961,25 +986,49 @@ impl RegistrationCache {
 
     pub fn insert(&self, registration_id: String, record: MachineRecord) {
         self.prune_expired();
-        let entry = Arc::new(RegistrationEntry::new(record, self.expiration));
+        let entry = Arc::new(RegistrationEntry::new_registration(record, self.expiration));
         if let Some(old) = self.inner.write().insert(registration_id, entry) {
+            old.expire();
+        }
+    }
+
+    pub fn insert_ssh_check(&self, auth_id: String, binding: SshCheckBinding) {
+        self.prune_expired();
+        let entry = Arc::new(RegistrationEntry::new_ssh_check(binding, self.expiration));
+        if let Some(old) = self.inner.write().insert(auth_id, entry) {
             old.expire();
         }
     }
 
     pub fn get(&self, registration_id: &str) -> Option<MachineRecord> {
         self.get_entry(registration_id)
-            .map(|entry| entry.record.clone())
+            .and_then(|entry| entry.record.clone())
+    }
+
+    pub fn ssh_binding(&self, auth_id: &str) -> Option<SshCheckBinding> {
+        self.get_entry(auth_id).and_then(|entry| entry.ssh_binding)
     }
 
     pub fn remove(&self, registration_id: &str) -> Option<MachineRecord> {
-        let entry = self.inner.write().remove(registration_id)?;
+        let entry = {
+            let mut inner = self.inner.write();
+            match inner.get(registration_id) {
+                Some(entry) if entry.record.is_some() => inner.remove(registration_id),
+                _ => None,
+            }
+        }?;
         entry.expire();
-        Some(entry.record.clone())
+        entry.record.clone()
     }
 
     pub fn complete(&self, registration_id: &str, registered: MachineRecord) -> bool {
-        let entry = self.inner.write().remove(registration_id);
+        let entry = {
+            let mut inner = self.inner.write();
+            match inner.get(registration_id) {
+                Some(entry) if entry.record.is_some() => inner.remove(registration_id),
+                _ => None,
+            }
+        };
         match entry {
             Some(entry) => {
                 entry.complete(registered);
@@ -990,7 +1039,13 @@ impl RegistrationCache {
     }
 
     pub fn approve_without_node(&self, registration_id: &str) -> bool {
-        let entry = self.inner.write().remove(registration_id);
+        let entry = {
+            let mut inner = self.inner.write();
+            match inner.get(registration_id) {
+                Some(entry) if entry.ssh_binding.is_some() => Some(entry.clone()),
+                _ => inner.remove(registration_id),
+            }
+        };
         match entry {
             Some(entry) => {
                 entry.approve_without_node();
@@ -1001,7 +1056,13 @@ impl RegistrationCache {
     }
 
     pub fn reject(&self, registration_id: &str, reason: impl Into<String>) -> bool {
-        let entry = self.inner.write().remove(registration_id);
+        let entry = {
+            let mut inner = self.inner.write();
+            match inner.get(registration_id) {
+                Some(entry) if entry.ssh_binding.is_some() => Some(entry.clone()),
+                _ => inner.remove(registration_id),
+            }
+        };
         match entry {
             Some(entry) => {
                 entry.reject(reason.into());
@@ -1015,6 +1076,9 @@ impl RegistrationCache {
         let Some(entry) = self.get_entry(registration_id) else {
             return RegistrationWaitOutcome::Missing;
         };
+        if entry.record.is_none() {
+            return RegistrationWaitOutcome::Missing;
+        }
 
         loop {
             let notified = entry.notify.notified();
@@ -1049,6 +1113,74 @@ impl RegistrationCache {
         }
     }
 
+    pub async fn wait_for_auth(&self, auth_id: &str) -> AuthWaitOutcome {
+        let Some(entry) = self.get_entry(auth_id) else {
+            return AuthWaitOutcome::Missing;
+        };
+
+        loop {
+            let notified = entry.notify.notified();
+            tokio::pin!(notified);
+
+            match entry.outcome() {
+                Some(
+                    RegistrationOutcome::Registered(_) | RegistrationOutcome::ApprovedWithoutNode,
+                ) => {
+                    return AuthWaitOutcome::Accepted;
+                }
+                Some(RegistrationOutcome::Rejected(reason)) => {
+                    return AuthWaitOutcome::Rejected(reason);
+                }
+                Some(RegistrationOutcome::Expired) => return AuthWaitOutcome::Expired,
+                None => {}
+            }
+
+            let now = Instant::now();
+            if now >= entry.expires_at {
+                self.expire_if_current(auth_id, &entry);
+                continue;
+            }
+
+            tokio::select! {
+                () = &mut notified => {}
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(entry.expires_at)) => {
+                    self.expire_if_current(auth_id, &entry);
+                }
+            }
+        }
+    }
+
+    pub fn record_ssh_auth(
+        &self,
+        binding: SshCheckBinding,
+        now: Instant,
+        policy_updated_at: Option<i64>,
+    ) {
+        self.last_ssh_auth.write().insert(
+            binding,
+            SshAuthRecord {
+                at: now,
+                policy_updated_at,
+            },
+        );
+    }
+
+    pub fn last_ssh_auth(
+        &self,
+        binding: SshCheckBinding,
+        policy_updated_at: Option<i64>,
+    ) -> Option<Instant> {
+        self.last_ssh_auth
+            .read()
+            .get(&binding)
+            .filter(|record| record.policy_updated_at == policy_updated_at)
+            .map(|record| record.at)
+    }
+
+    pub fn clear_ssh_auth(&self) {
+        self.last_ssh_auth.write().clear();
+    }
+
     pub fn len(&self) -> usize {
         self.prune_expired();
         self.inner.read().len()
@@ -1061,10 +1193,12 @@ impl RegistrationCache {
 
     pub fn contains_node_key(&self, node_key_hex: &str) -> bool {
         self.prune_expired();
-        self.inner
-            .read()
-            .values()
-            .any(|entry| entry.record.node_key_hex == node_key_hex)
+        self.inner.read().values().any(|entry| {
+            entry
+                .record
+                .as_ref()
+                .is_some_and(|record| record.node_key_hex == node_key_hex)
+        })
     }
 
     pub fn expiration(&self) -> Duration {
@@ -1131,9 +1265,20 @@ impl Default for RegistrationCache {
 }
 
 impl RegistrationEntry {
-    fn new(record: MachineRecord, expiration: Duration) -> Self {
+    fn new_registration(record: MachineRecord, expiration: Duration) -> Self {
         Self {
-            record,
+            record: Some(record),
+            ssh_binding: None,
+            expires_at: Instant::now() + expiration,
+            outcome: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    fn new_ssh_check(binding: SshCheckBinding, expiration: Duration) -> Self {
+        Self {
+            record: None,
+            ssh_binding: Some(binding),
             expires_at: Instant::now() + expiration,
             outcome: Mutex::new(None),
             notify: Notify::new(),
@@ -4058,7 +4203,8 @@ fn control_router_with_optional_oidc_inner(
         .route(
             "/machine/ping-response",
             head(basic_handlers::handle_ping_response),
-        );
+        )
+        .route("/auth/:auth_id", get(basic_handlers::handle_web_auth));
 
     inner = if let Some(oidc) = oidc {
         let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {

@@ -164,6 +164,19 @@ pub async fn handle_web_register(Path(registration_id): Path<String>) -> Respons
         .into_response()
 }
 
+pub async fn handle_web_auth(Path(auth_id): Path<String>) -> Response {
+    let Some(auth_id) = auth_id_from_path(&auth_id) else {
+        return http_error(StatusCode::BAD_REQUEST, "invalid auth id");
+    };
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        auth_web_html(auth_id),
+    )
+        .into_response()
+}
+
 pub async fn handle_favicon() -> Response {
     (
         StatusCode::OK,
@@ -2648,7 +2661,11 @@ fn debug_ssh_policies(state: &WireState) -> BTreeMap<String, Option<SshPolicy>> 
         .iter()
         .map(|(node_key, rec)| {
             let id = stable_id_from_key(node_key);
-            let policy = state.policy.ssh_policy_for(&nodes, id);
+            let policy = state.policy.ssh_policy_for(
+                &nodes,
+                id,
+                state.public_control_url.as_deref().unwrap_or(""),
+            );
             (
                 format!(
                     "id:{id} hostname:{} givenname:{}",
@@ -2917,10 +2934,24 @@ fn registration_id_from_register_path(segment: &str) -> Option<&str> {
     (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
 }
 
+fn auth_id_from_path(segment: &str) -> Option<&str> {
+    segment
+        .strip_prefix(AUTH_ID_PREFIX)
+        .filter(|rest| segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH)
+        .map(|_| segment)
+}
+
 fn register_web_html(registration_id: &str) -> String {
     let escaped_auth_id = html_escape(&format!("hskey-authreq-{registration_id}"));
     format!(
         r#"<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" href="/favicon.ico"><title>Node registration - Headscale</title></head><body translate="no"><main><h1>Node registration</h1><p>Run the command below in the headscale server to add this node to your network:</p><pre><code>headscale auth register --auth-id {escaped_auth_id} --user USERNAME</code></pre><footer>Powered by <a href="https://github.com/juanfont/headscale" rel="noreferrer noopener" target="_blank">Headscale</a></footer></main></body></html>"#
+    )
+}
+
+fn auth_web_html(auth_id: &str) -> String {
+    let escaped_auth_id = html_escape(auth_id);
+    format!(
+        r#"<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" href="/favicon.ico"><title>Authentication check - Headscale</title></head><body translate="no"><main><h1>Authentication check</h1><p>Run the command below in the headscale server to approve this authentication request:</p><pre><code>headscale auth approve --auth-id {escaped_auth_id}</code></pre><footer>Powered by <a href="https://github.com/juanfont/headscale" rel="noreferrer noopener" target="_blank">Headscale</a></footer></main></body></html>"#
     )
 }
 
@@ -3239,6 +3270,66 @@ mod tests {
         assert_eq!(&body[..], b"invalid registration id\n");
     }
 
+    #[tokio::test]
+    async fn web_auth_renders_current_headscale_go_cli_instruction() {
+        let (state, _dir) = fixture_state();
+        let auth_id = "hskey-authreq-3oYCOZYA2zZmGB4PQ7aHBaMi";
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/auth/{auth_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains("<title>Authentication check - Headscale</title>"),
+            "{body}"
+        );
+        assert!(body.contains("<h1>Authentication check</h1>"), "{body}");
+        assert!(
+            body.contains(&format!("headscale auth approve --auth-id {auth_id}")),
+            "{body}"
+        );
+        assert!(!body.contains("hskey-authreq-hskey-authreq-"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn web_auth_rejects_invalid_auth_id_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/auth/short")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"invalid auth id\n");
+    }
+
     #[test]
     fn web_register_template_escapes_registration_id_in_command() {
         let html = register_web_html("abc<&\"'defghijklmnopqrs");
@@ -3247,6 +3338,16 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("abc<&\"'defghijklmnopqrs"), "{html}");
+    }
+
+    #[test]
+    fn web_auth_template_escapes_auth_id_in_command() {
+        let html = auth_web_html("hskey-authreq-abc<&\"'defghij");
+        assert!(
+            html.contains("hskey-authreq-abc&lt;&amp;&quot;&#39;defghij"),
+            "{html}"
+        );
+        assert!(!html.contains("hskey-authreq-abc<&\"'defghij"), "{html}");
     }
 
     #[tokio::test]
@@ -5341,8 +5442,12 @@ mod tests {
         );
         assert_eq!(server_policy["rules"][0]["sshUsers"]["*"], "=");
         assert_eq!(
-            server_policy["rules"][0]["action"]["sessionDuration"],
-            24_i64 * 60 * 60 * 1_000_000_000
+            server_policy["rules"][0]["action"]["accept"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            server_policy["rules"][0]["action"]["holdAndDelegate"],
+            "/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
         );
         assert!(admin_policy["rules"].as_array().unwrap().is_empty());
     }

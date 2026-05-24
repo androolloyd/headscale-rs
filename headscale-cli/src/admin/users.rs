@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use headscale_api::admin::UserRecord;
 use headscale_api::generated::User as GrpcUser;
 use serde::Serialize;
@@ -293,8 +293,8 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
 struct UserOutput {
     id: u64,
     name: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<TimestampOutput>,
     #[serde(skip_serializing_if = "String::is_empty")]
     display_name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -309,18 +309,42 @@ struct UserOutput {
     created: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct TimestampOutput {
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    seconds: i64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    nanos: i32,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+impl From<prost_types::Timestamp> for TimestampOutput {
+    fn from(ts: prost_types::Timestamp) -> Self {
+        Self {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        }
+    }
+}
+
 impl From<GrpcUser> for UserOutput {
     fn from(user: GrpcUser) -> Self {
-        let created = user.created_at.as_ref().and_then(|ts| {
+        let created_at = user.created_at;
+        let created = created_at.as_ref().and_then(|ts| {
             let nanos = u32::try_from(ts.nanos).ok()?;
             DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
         });
         Self {
             id: user.id,
             name: user.name,
-            created_at: created
-                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
-                .unwrap_or_default(),
+            created_at: created_at.map(TimestampOutput::from),
             display_name: user.display_name,
             email: user.email,
             provider_id: user.provider_id,
@@ -357,5 +381,29 @@ mod tests {
         assert!(validate_picture_url("avatar.png").is_ok());
         assert!(validate_picture_url("https://example.com/%zz").is_err());
         assert!(validate_picture_url("https://example.com/\n").is_err());
+    }
+
+    #[test]
+    fn grpc_user_output_keeps_proto_timestamps_for_structured_output() {
+        let out = UserOutput::from(GrpcUser {
+            id: 7,
+            name: "alice".into(),
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+            display_name: "Alice Example".into(),
+            email: "alice@example.com".into(),
+            provider_id: String::new(),
+            provider: String::new(),
+            profile_pic_url: "https://example.com/alice.png".into(),
+        });
+        assert_eq!(out.id, 7);
+        assert_eq!(
+            out.created_at.as_ref().map(|ts| ts.seconds),
+            Some(1_704_067_200)
+        );
+        assert_eq!(out.created, "2024-01-01 00:00:00");
+        assert_eq!(out.profile_pic_url, "https://example.com/alice.png");
     }
 }

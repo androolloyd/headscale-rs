@@ -1253,6 +1253,254 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stderr(&list_users), "");
 
+    let create_user_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "users",
+            "create",
+            "bob",
+            "--display-name",
+            "Bob Example",
+            "--email",
+            "bob@example.com",
+            "--picture-url",
+            "https://example.com/bob.png",
+        ],
+    );
+    let bob_json = json_output(&create_user_json);
+    assert_eq!(bob_json["name"].as_str(), Some("bob"));
+    assert_eq!(bob_json["display_name"].as_str(), Some("Bob Example"));
+    assert_eq!(bob_json["email"].as_str(), Some("bob@example.com"));
+    assert_eq!(
+        bob_json["profile_pic_url"].as_str(),
+        Some("https://example.com/bob.png")
+    );
+    assert!(bob_json["created_at"]["seconds"].as_i64().is_some());
+    assert!(bob_json.get("createdAt").is_none());
+    assert!(bob_json.get("displayName").is_none());
+    assert!(bob_json.get("profilePicUrl").is_none());
+    assert_eq!(stderr(&create_user_json), "");
+    let bob_id = bob_json["id"].as_u64().unwrap().to_string();
+
+    let list_user_json =
+        headscale_with_config(&config, &["-o", "json", "users", "list", "--name", "bob"]);
+    let listed_bob_json = json_output(&list_user_json);
+    assert_eq!(listed_bob_json.as_array().unwrap().len(), 1);
+    let listed_bob_json = &listed_bob_json[0];
+    assert_eq!(listed_bob_json["id"].as_u64().unwrap().to_string(), bob_id);
+    assert_eq!(listed_bob_json["name"].as_str(), Some("bob"));
+    assert_eq!(
+        listed_bob_json["display_name"].as_str(),
+        Some("Bob Example")
+    );
+    assert!(listed_bob_json["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_bob_json.get("createdAt").is_none());
+    assert!(listed_bob_json.get("displayName").is_none());
+    assert_eq!(stderr(&list_user_json), "");
+
+    let rename_user_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "users",
+            "rename",
+            "--identifier",
+            &bob_id,
+            "--new-name",
+            "bob-renamed",
+        ],
+    );
+    let renamed_bob_json = json_output(&rename_user_json);
+    assert_eq!(renamed_bob_json["name"].as_str(), Some("bob-renamed"));
+    assert_eq!(renamed_bob_json["id"].as_u64().unwrap().to_string(), bob_id);
+    assert!(renamed_bob_json["created_at"]["seconds"].as_i64().is_some());
+    assert!(renamed_bob_json.get("createdAt").is_none());
+    assert_eq!(stderr(&rename_user_json), "");
+
+    let destroy_user_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "--force",
+            "users",
+            "destroy",
+            "--identifier",
+            &bob_id,
+        ],
+    );
+    assert_eq!(
+        json_output(&destroy_user_json).as_object().unwrap().len(),
+        0
+    );
+    assert_eq!(stderr(&destroy_user_json), "");
+
+    let create_user_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "users",
+            "create",
+            "carol",
+            "--display-name",
+            "Carol Example",
+            "--email",
+            "carol@example.com",
+        ],
+    );
+    let carol_json_line: serde_json::Value =
+        serde_json::from_slice(&create_user_json_line.stdout).unwrap();
+    assert_eq!(carol_json_line["name"].as_str(), Some("carol"));
+    assert_eq!(
+        carol_json_line["display_name"].as_str(),
+        Some("Carol Example")
+    );
+    assert!(carol_json_line["created_at"]["seconds"].as_i64().is_some());
+    assert!(carol_json_line.get("createdAt").is_none());
+    assert!(carol_json_line.get("displayName").is_none());
+    assert!(!stdout(&create_user_json_line).contains('\t'));
+    assert_eq!(stderr(&create_user_json_line), "");
+    let carol_id = carol_json_line["id"].as_u64().unwrap().to_string();
+
+    let list_user_json_line = headscale_with_config(
+        &config,
+        &["-ojson-line", "users", "list", "--identifier", &carol_id],
+    );
+    let listed_carol_json_line: serde_json::Value =
+        serde_json::from_slice(&list_user_json_line.stdout).unwrap();
+    let listed_carol_json_line = &listed_carol_json_line[0];
+    assert_eq!(listed_carol_json_line["name"].as_str(), Some("carol"));
+    assert!(
+        listed_carol_json_line["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(listed_carol_json_line.get("createdAt").is_none());
+    assert_eq!(stderr(&list_user_json_line), "");
+
+    let rename_user_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "users",
+            "rename",
+            "--identifier",
+            &carol_id,
+            "--new-name",
+            "carol-renamed",
+        ],
+    );
+    let renamed_carol_json_line: serde_json::Value =
+        serde_json::from_slice(&rename_user_json_line.stdout).unwrap();
+    assert_eq!(
+        renamed_carol_json_line["name"].as_str(),
+        Some("carol-renamed")
+    );
+    assert!(
+        renamed_carol_json_line["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(renamed_carol_json_line.get("createdAt").is_none());
+    assert_eq!(stderr(&rename_user_json_line), "");
+
+    let destroy_user_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "--force",
+            "users",
+            "destroy",
+            "--identifier",
+            &carol_id,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&destroy_user_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&destroy_user_json_line), "");
+
+    let create_user_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "users",
+            "create",
+            "dana",
+            "--display-name",
+            "Dana Example",
+            "--email",
+            "dana@example.com",
+        ],
+    );
+    let dana_yaml = yaml_output(&create_user_yaml);
+    assert_eq!(dana_yaml["name"].as_str(), Some("dana"));
+    assert_eq!(dana_yaml["display_name"].as_str(), Some("Dana Example"));
+    assert!(dana_yaml["created_at"]["seconds"].as_i64().is_some());
+    assert!(dana_yaml.get("createdAt").is_none());
+    assert!(dana_yaml.get("displayName").is_none());
+    assert_eq!(stderr(&create_user_yaml), "");
+    let dana_id = dana_yaml["id"].as_u64().unwrap().to_string();
+
+    let list_user_yaml =
+        headscale_with_config(&config, &["-o", "yaml", "users", "list", "--name", "dana"]);
+    let listed_dana_yaml = yaml_output(&list_user_yaml);
+    let listed_dana_yaml = &listed_dana_yaml[0];
+    assert_eq!(listed_dana_yaml["name"].as_str(), Some("dana"));
+    assert!(listed_dana_yaml["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_dana_yaml.get("createdAt").is_none());
+    assert_eq!(stderr(&list_user_yaml), "");
+
+    let rename_user_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "users",
+            "rename",
+            "--identifier",
+            &dana_id,
+            "--new-name",
+            "dana-renamed",
+        ],
+    );
+    let renamed_dana_yaml = yaml_output(&rename_user_yaml);
+    assert_eq!(renamed_dana_yaml["name"].as_str(), Some("dana-renamed"));
+    assert!(
+        renamed_dana_yaml["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(renamed_dana_yaml.get("createdAt").is_none());
+    assert_eq!(stderr(&rename_user_yaml), "");
+
+    let destroy_user_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "--force",
+            "users",
+            "destroy",
+            "--identifier",
+            &dana_id,
+        ],
+    );
+    assert_eq!(
+        yaml_output(&destroy_user_yaml).as_mapping().unwrap().len(),
+        0
+    );
+    assert_eq!(stderr(&destroy_user_yaml), "");
+
     let create_preauth = headscale_with_config(
         &config,
         &[

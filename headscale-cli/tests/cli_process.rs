@@ -866,6 +866,37 @@ fn generate_missing_or_unknown_subcommand_matches_upstream_help() {
 }
 
 #[test]
+fn utility_extra_args_match_upstream_unknown_command_errors() {
+    for args in [
+        &["version", "bad"][..],
+        &["health", "bad"][..],
+        &["configtest", "bad"][..],
+        &["dumpConfig", "bad"][..],
+        &["mockoidc", "bad"][..],
+        &["completion", "bash", "bad"][..],
+        &["completion", "bash", "--bad"][..],
+        &["generate", "private-key", "bad"][..],
+        &["gen", "private-key", "bad"][..],
+        &["help", "version", "bad"][..],
+    ] {
+        let output = headscale_clean(args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "unexpected status for {args:?}; stdout: {}; stderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
+        assert_eq!(
+            stderr(&output),
+            format!("Error: unknown command \"{}\" for \"headscale\"\n", args.join(" ")),
+            "stderr snapshot for {args:?}"
+        );
+    }
+}
+
+#[test]
 fn completion_no_descriptions_strips_zsh_help_text() {
     let output = headscale_clean(&["completion", "zsh"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

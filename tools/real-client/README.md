@@ -129,6 +129,8 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-health-mixed-exit-restart` | `route-health-mixed-exit-restart-smoke.sh` | `route-health-mixed-exit-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node separation survives server restart |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
+| SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
+| SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants and exact denial status/stderr |
 
 ## Local and CI Execution
 
@@ -716,6 +718,19 @@ attempt to time out.
 ```sh
 tools/real-client/ssh-smoke.sh
 tools/real-client/ssh-headscale-go-smoke.sh
+```
+
+The current-head localpart wrappers exercise `localpart:*@domain` login users
+with profile emails. The profile-variant row also checks split username/email
+profiles against headscale-go, wrong-domain profile emails, bare usernames with
+no profile email, exact denied status `255`, empty denied stdout, and the
+stable first denial stderr line:
+
+```sh
+tools/real-client/ssh-localpart-smoke.sh
+tools/real-client/ssh-localpart-headscale-go-smoke.sh
+tools/real-client/ssh-profile-variants-smoke.sh
+tools/real-client/ssh-profile-variants-headscale-go-smoke.sh
 ```
 
 Useful knobs:

@@ -257,6 +257,10 @@ async fn main() -> ExitCode {
         print!("{help}");
         return ExitCode::SUCCESS;
     }
+    if let Some(error) = upstream_exact_error(&raw_args) {
+        eprint!("{error}");
+        return ExitCode::from(1);
+    }
 
     let skip_config_load = raw_args_skip_config_load(&raw_args);
     let error_output_format = output_format_from_raw_args(&raw_args);
@@ -817,6 +821,71 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        parts.push(arg.as_ref().to_str()?);
+    }
+
+    let command_is_unknown = match parts.as_slice() {
+        ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => true,
+        ["health" | "configtest", tail @ ..]
+            if !tail.is_empty() && !tail_is_help_or_global_config(tail) =>
+        {
+            true
+        }
+        ["dumpConfig" | "mockoidc", tail @ ..] if !tail.is_empty() && !tail_is_help(tail) => true,
+        ["completion", "bash" | "fish" | "powershell" | "zsh", tail @ ..]
+            if !tail.is_empty() && !completion_tail_is_supported(tail) =>
+        {
+            true
+        }
+        ["generate" | "gen", "private-key", tail @ ..]
+            if !tail.is_empty() && !tail_is_help(tail) =>
+        {
+            true
+        }
+        ["help", _, _, ..] => true,
+        _ => false,
+    };
+
+    command_is_unknown
+        .then(|| format!("Error: unknown command \"{}\" for \"headscale\"\n", parts.join(" ")))
+}
+
+fn tail_is_help(tail: &[&str]) -> bool {
+    matches!(tail, ["-h" | "--help"])
+}
+
+fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
+    if tail_is_help(tail) {
+        return true;
+    }
+    match tail {
+        ["--config" | "-c", _] => true,
+        [value] if value.starts_with("--config=") => true,
+        _ => false,
+    }
+}
+
+fn completion_tail_is_supported(tail: &[&str]) -> bool {
+    matches!(tail, ["--no-descriptions"]) || tail_is_help(tail)
+}
+
+fn version_tail_is_supported(tail: &[&str]) -> bool {
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" | "--json" => i += 1,
+            "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            value if value.starts_with("--output=") => i += 1,
+            value if value.starts_with("-o") && value.len() > 2 => i += 1,
+            _ => return false,
+        }
+    }
+    true
 }
 
 // Current upstream headscale main (4483fd0) Cobra help. Keep these explicit

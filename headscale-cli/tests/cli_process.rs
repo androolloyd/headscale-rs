@@ -1150,6 +1150,54 @@ fn implemented_admin_local_errors_match_snapshots() {
     );
 }
 
+#[test]
+fn implemented_admin_errors_follow_output_format() {
+    let json = headscale_clean(&["-o", "json", "preauthkeys", "expire"]);
+    assert_eq!(json.status.code(), Some(6));
+    assert_eq!(stdout(&json), "");
+    assert_eq!(
+        stderr(&json),
+        "{\n\t\"error\": \"missing --id parameter\"\n}\n"
+    );
+
+    let json_line = headscale_clean(&["-ojson-line", "preauthkeys", "delete"]);
+    assert_eq!(json_line.status.code(), Some(6));
+    assert_eq!(stdout(&json_line), "");
+    assert_eq!(
+        stderr(&json_line),
+        "{\"error\":\"missing --id parameter\"}\n"
+    );
+
+    let yaml = headscale_clean(&[
+        "--output",
+        "yaml",
+        "--server",
+        "http://127.0.0.1:9",
+        "apikeys",
+        "expire",
+    ]);
+    assert_eq!(yaml.status.code(), Some(6));
+    assert_eq!(stdout(&yaml), "");
+    assert_eq!(
+        stderr(&yaml),
+        "error: either --id or --prefix must be provided\n\n"
+    );
+
+    let remote = headscale_clean(&[
+        "--output=json",
+        "--address",
+        "http://127.0.0.1:9",
+        "users",
+        "list",
+    ]);
+    assert_eq!(remote.status.code(), Some(6));
+    assert_eq!(stdout(&remote), "");
+    assert_eq!(
+        stderr(&remote),
+        "{\n\t\"error\": \"--api-key is required for remote gRPC\"\n}\n"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
@@ -1786,7 +1834,7 @@ async fn hidden_status_probe_uses_failure_exit_codes() {
     assert_status_command_failed(&output);
     let err = stderr(&output);
     assert!(
-        err.contains("error: failed to connect to control plane"),
+        err.contains("Error: failed to connect to control plane"),
         "stderr: {err}"
     );
     assert!(

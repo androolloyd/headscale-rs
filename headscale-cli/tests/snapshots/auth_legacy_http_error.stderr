@@ -1,1 +1,1 @@
-error: auth commands require the upstream gRPC transport
+Error: auth commands require the upstream gRPC transport

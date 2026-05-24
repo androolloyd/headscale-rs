@@ -15,6 +15,11 @@ use serde_json::ser::PrettyFormatter;
 
 use super::AdminError;
 
+#[derive(Serialize)]
+struct ErrorOutput<'a> {
+    error: &'a str,
+}
+
 /// The upstream `headscale` CLI accepts an empty human-readable format
 /// plus `json`, `json-line`, and `yaml` through `-o/--output`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -50,16 +55,19 @@ impl OutputFormat {
 /// Print `value` as pretty JSON to stdout. Used by legacy `--json`
 /// paths so the format is uniform.
 pub fn print_json<T: Serialize>(value: &T) -> Result<(), AdminError> {
+    let s = format_json_string(value)?;
+    println!("{s}");
+    Ok(())
+}
+
+fn format_json_string<T: Serialize>(value: &T) -> Result<String, AdminError> {
     let mut buf = Vec::new();
     let formatter = PrettyFormatter::with_indent(b"\t");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
     value
         .serialize(&mut ser)
         .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
-    let s =
-        String::from_utf8(buf).map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
-    println!("{s}");
-    Ok(())
+    String::from_utf8(buf).map_err(|e| AdminError::Decode(format!("serialise output: {e}")))
 }
 
 /// Print `value` in one of the upstream machine-readable formats.
@@ -79,6 +87,26 @@ pub fn print_structured<T: Serialize>(fmt: OutputFormat, value: &T) -> Result<()
             print!("{s}");
             Ok(())
         }
+    }
+}
+
+/// Format an error exactly like upstream `headscale`'s `printError` helper.
+pub fn format_error(fmt: OutputFormat, message: &str) -> String {
+    let value = ErrorOutput { error: message };
+    match fmt {
+        OutputFormat::Table => format!("Error: {message}\n"),
+        OutputFormat::Json => format_json_string(&value).map_or_else(
+            |_| format!("Error: {message}\n"),
+            |json| format!("{json}\n"),
+        ),
+        OutputFormat::JsonLine => serde_json::to_string(&value).map_or_else(
+            |_| format!("Error: {message}\n"),
+            |json| format!("{json}\n"),
+        ),
+        OutputFormat::Yaml => serde_yaml::to_string(&value).map_or_else(
+            |_| format!("Error: {message}\n"),
+            |yaml| format!("{yaml}\n"),
+        ),
     }
 }
 
@@ -198,6 +226,26 @@ mod tests {
             OutputFormat::Yaml
         );
         assert!(OutputFormat::from_flags(false, Some("xml")).is_err());
+    }
+
+    #[test]
+    fn formats_errors_like_upstream() {
+        assert_eq!(
+            format_error(OutputFormat::Table, "missing parameters"),
+            "Error: missing parameters\n"
+        );
+        assert_eq!(
+            format_error(OutputFormat::Json, "missing parameters"),
+            "{\n\t\"error\": \"missing parameters\"\n}\n"
+        );
+        assert_eq!(
+            format_error(OutputFormat::JsonLine, "missing parameters"),
+            "{\"error\":\"missing parameters\"}\n"
+        );
+        assert_eq!(
+            format_error(OutputFormat::Yaml, "missing parameters"),
+            "error: missing parameters\n\n"
+        );
     }
 
     #[test]

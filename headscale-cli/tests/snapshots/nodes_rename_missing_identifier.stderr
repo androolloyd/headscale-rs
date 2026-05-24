@@ -1,1 +1,1 @@
-error: rename requires --identifier ID NEW_NAME
+Error: rename requires --identifier ID NEW_NAME

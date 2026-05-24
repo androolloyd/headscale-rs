@@ -1,1 +1,1 @@
-error: either --id or --prefix must be provided
+Error: either --id or --prefix must be provided

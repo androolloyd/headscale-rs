@@ -6,7 +6,7 @@
 //! Migrated groups default to the local Unix socket; unmigrated groups still
 //! use the legacy `/api/v1/*` GUI surface.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -24,8 +24,8 @@ mod server;
 
 use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
-    self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, NodesCmd, PolicyCmd,
-    PreauthKeysCmd, TailnetCmd, UsersCmd,
+    self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, NodesCmd, OutputFormat,
+    PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
 
 #[derive(Parser)]
@@ -259,6 +259,7 @@ async fn main() -> ExitCode {
     }
 
     let skip_config_load = raw_args_skip_config_load(&raw_args);
+    let error_output_format = output_format_from_raw_args(&raw_args);
     let cli = Cli::parse();
 
     // Initialize logging
@@ -275,13 +276,58 @@ async fn main() -> ExitCode {
     match dispatch(cli, skip_config_load).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(MainError::Admin(e)) => {
-            eprintln!("error: {e}");
+            eprint!(
+                "{}",
+                admin::output::format_error(error_output_format, &e.to_string())
+            );
             ExitCode::from(e.exit_code() as u8)
         }
         Err(MainError::Other(e)) => {
-            eprintln!("error: {e:#}");
+            eprint!(
+                "{}",
+                admin::output::format_error(error_output_format, &format!("{e:#}"))
+            );
             ExitCode::from(1)
         }
+    }
+}
+
+fn output_format_from_raw_args(raw_args: &[OsString]) -> OutputFormat {
+    let mut fmt = OutputFormat::Table;
+    let mut args = raw_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == OsStr::new("--") {
+            break;
+        }
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        match arg {
+            "--json" => fmt = OutputFormat::Json,
+            "-o" | "--output" => {
+                if let Some(value) = args.next().and_then(|value| value.to_str()) {
+                    fmt = raw_output_format(value);
+                }
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--output=") {
+                    fmt = raw_output_format(value);
+                } else if let Some(value) = arg.strip_prefix("-o").filter(|value| !value.is_empty())
+                {
+                    fmt = raw_output_format(value);
+                }
+            }
+        }
+    }
+    fmt
+}
+
+fn raw_output_format(value: &str) -> OutputFormat {
+    match value {
+        "json" => OutputFormat::Json,
+        "json-line" => OutputFormat::JsonLine,
+        "yaml" => OutputFormat::Yaml,
+        _ => OutputFormat::Table,
     }
 }
 

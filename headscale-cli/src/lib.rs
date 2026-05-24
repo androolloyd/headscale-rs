@@ -26,7 +26,7 @@
 //! The contract is *byte-identical to the standalone binary*. Both
 //! `headscale users list` and `octravpn-node headscale users list`
 //! call the same `admin::run_users` dispatcher, so stdout, exit code,
-//! and the stderr `error: …` envelope match.
+//! and the stderr `Error: …`/machine-readable error envelope match.
 
 pub mod admin;
 
@@ -106,9 +106,9 @@ pub enum AdminCmd {
 /// | 5    | entity not found (404)                           |
 /// | 6    | other server-side failure (4xx / 5xx / decode)   |
 ///
-/// On error the function also writes `error: <message>` to stderr,
-/// matching the standalone binary's `main()` so consumers of either
-/// binary see the same diagnostic prefix.
+/// On error the function also writes the upstream-shaped diagnostic
+/// envelope to stderr, matching the standalone binary's `main()` so
+/// consumers of either binary see the same output.
 ///
 /// This is the entry-point [`octravpn-node`] (sibling repo) calls. The
 /// standalone binary's `main()` still routes its admin variants through
@@ -126,7 +126,8 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
     match result {
         Ok(()) => ExitCode::Success as i32,
         Err(e) => {
-            eprintln!("error: {e}");
+            let fmt = connect.fmt().unwrap_or(OutputFormat::Table);
+            eprint!("{}", admin::output::format_error(fmt, &e.to_string()));
             e.exit_code() as i32
         }
     }

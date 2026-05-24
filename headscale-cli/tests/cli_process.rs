@@ -69,6 +69,23 @@ fn assert_stdout_snapshot(args: &[&str], expected: &str) {
     assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
 }
 
+fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
+    let output = headscale_clean(args);
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "unexpected status for {args:?}; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
+    assert_eq!(
+        trim_line_end_spaces(&stderr(&output)),
+        trim_line_end_spaces(expected),
+        "stderr snapshot for {args:?}"
+    );
+}
+
 #[test]
 fn top_level_help_exposes_upstream_operator_commands() {
     let output = headscale(&["--help"]);
@@ -744,6 +761,95 @@ fn implemented_admin_clap_error_matches_snapshot() {
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/invalid_output_format.stderr")
+    );
+}
+
+#[test]
+fn implemented_admin_local_errors_match_snapshots() {
+    assert_stderr_snapshot(
+        &["preauthkeys", "expire"],
+        6,
+        include_str!("snapshots/preauthkeys_missing_id.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["preauthkeys", "delete"],
+        6,
+        include_str!("snapshots/preauthkeys_missing_id.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--server", "http://127.0.0.1:9", "apikeys", "expire"],
+        6,
+        include_str!("snapshots/apikeys_missing_selector.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "apikeys",
+            "delete",
+            "--id",
+            "7",
+            "--prefix",
+            "hskey-api-abcdefghijkl-***",
+        ],
+        6,
+        include_str!("snapshots/apikeys_conflicting_selector.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--server", "http://127.0.0.1:9", "nodes", "expire"],
+        6,
+        include_str!("snapshots/nodes_missing_identifier.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "nodes",
+            "rename",
+            "new-name",
+        ],
+        6,
+        include_str!("snapshots/nodes_rename_missing_identifier.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "auth",
+            "approve",
+            "--auth-id",
+            "abc",
+        ],
+        6,
+        include_str!("snapshots/auth_legacy_http_error.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "users",
+            "rename",
+            "--name",
+            "alice",
+            "--new-name",
+            "bob",
+        ],
+        6,
+        include_str!("snapshots/users_rename_legacy_http_error.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "nodes",
+            "register",
+            "-u",
+            "alice",
+            "-k",
+            "nodekey:abc",
+        ],
+        6,
+        include_str!("snapshots/nodes_register_legacy_http_error.stderr"),
     );
 }
 

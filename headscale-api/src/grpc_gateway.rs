@@ -1552,6 +1552,7 @@ fn query_timestamp(
     values: &BTreeMap<String, Vec<String>>,
     name: &str,
 ) -> Result<Option<prost_types::Timestamp>, Status> {
+    reject_nested_timestamp_scalar_query_paths(values, name)?;
     if let Some(values) = values.get(name) {
         if values.len() > 1 {
             return Err(Status::invalid_argument(too_many_query_values(
@@ -1600,6 +1601,21 @@ fn query_timestamp(
         seconds: seconds.unwrap_or(0),
         nanos: nanos.unwrap_or(0),
     }))
+}
+
+fn reject_nested_timestamp_scalar_query_paths(
+    values: &BTreeMap<String, Vec<String>>,
+    name: &str,
+) -> Result<(), Status> {
+    for scalar in ["seconds", "nanos"] {
+        let nested_prefix = format!("{name}.{scalar}.");
+        if values.keys().any(|key| key.starts_with(&nested_prefix)) {
+            return Err(Status::invalid_argument(format!(
+                "invalid path: {scalar:?} is not a message"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parse_query_timestamp_value(name: &str, value: &str) -> Result<prost_types::Timestamp, Status> {

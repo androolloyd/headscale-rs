@@ -710,6 +710,12 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             message_fragment: r#"parsing field "seconds": strconv.ParseInt: parsing "not-a-number": invalid syntax"#,
         },
         Case {
+            name: "nested timestamp seconds query path on scalar",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry.seconds.foo=1",
+            message_fragment: r#"invalid path: "seconds" is not a message"#,
+        },
+        Case {
             name: "timestamp root query field",
             method: Method::POST,
             uri: "/api/v1/node/1/expire?expiry=not-a-date",

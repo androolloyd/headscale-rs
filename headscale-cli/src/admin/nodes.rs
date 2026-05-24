@@ -175,23 +175,15 @@ pub fn select_node_id<'a>(
 }
 
 pub fn select_rename_args<'a>(
-    value: &'a str,
-    legacy_hostname: Option<&'a str>,
+    new_name: &'a str,
     identifier: Option<&'a str>,
 ) -> Result<(&'a str, &'a str), AdminError> {
-    if let Some(identifier) = identifier {
-        if legacy_hostname.is_some() {
-            return Err(AdminError::Local(
-                "rename with --identifier accepts only NEW_NAME".into(),
-            ));
-        }
-        return Ok((identifier, value));
+    match identifier {
+        Some(identifier) if !identifier.trim().is_empty() => Ok((identifier, new_name)),
+        _ => Err(AdminError::Local(
+            "rename requires --identifier ID NEW_NAME".into(),
+        )),
     }
-
-    let hostname = legacy_hostname.ok_or_else(|| {
-        AdminError::Local("rename requires --identifier ID NEW_NAME or legacy ID HOSTNAME".into())
-    })?;
-    Ok((value, hostname))
 }
 
 pub fn merged_tags(flags: &[String], positional: &[String]) -> Vec<String> {
@@ -862,19 +854,16 @@ mod tests {
     }
 
     #[test]
-    fn selector_helpers_accept_upstream_and_legacy_forms() {
+    fn selector_helpers_accept_upstream_forms() {
         assert_eq!(select_node_id(None, Some("42")).unwrap(), "42");
         assert_eq!(select_node_id(Some("node-key"), None).unwrap(), "node-key");
         assert!(select_node_id(Some("1"), Some("2")).is_err());
 
         assert_eq!(
-            select_rename_args("new-name", None, Some("42")).unwrap(),
+            select_rename_args("new-name", Some("42")).unwrap(),
             ("42", "new-name")
         );
-        assert_eq!(
-            select_rename_args("42", Some("legacy-name"), None).unwrap(),
-            ("42", "legacy-name")
-        );
+        assert!(select_rename_args("legacy-name", None).is_err());
 
         assert_eq!(
             merged_tags(

@@ -173,6 +173,10 @@ the Go baseline is bumped to a version that exposes the same surface.
 
 ## Remaining Gap Backlog
 
+Recent coverage note: key-expiry-only peer stream deltas now use
+`PeersChangedPatch.KeyExpiry`, matching headscale-go's lightweight peer patch
+shape while preserving the existing self-node expiry update path.
+
 Use this backlog to turn each `Partial` row into implementation and
 parity-test work. Most upstream references are from the pinned v0.28.0
 module under `tools/parity/headscale-go`; rows marked `upstream-main`

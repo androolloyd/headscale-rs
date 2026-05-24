@@ -300,12 +300,9 @@ pub enum NodesCmd {
     },
     /// Renames a node in your network.
     Rename {
-        /// New hostname in upstream form, or node ID in legacy positional form.
-        #[arg(value_name = "NEW_NAME_OR_ID")]
-        value: String,
-        /// New hostname when using the legacy `rename ID HOSTNAME` form.
-        #[arg(value_name = "HOSTNAME")]
-        legacy_hostname: Option<String>,
+        /// New hostname.
+        #[arg(value_name = "NEW_NAME")]
+        new_name: String,
         /// Node identifier (ID).
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
         identifier: Option<String>,
@@ -605,15 +602,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
                 nodes::expire(&client, id, expiry.as_deref()).await
             }
             NodesCmd::Rename {
-                value,
-                legacy_hostname,
+                new_name,
                 identifier,
             } => {
-                let (id, hostname) = nodes::select_rename_args(
-                    value,
-                    legacy_hostname.as_deref(),
-                    identifier.as_deref(),
-                )?;
+                let (id, hostname) = nodes::select_rename_args(new_name, identifier.as_deref())?;
                 nodes::rename(&client, id, hostname).await
             }
             NodesCmd::Tags {
@@ -659,15 +651,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
             nodes::expire_grpc(&mut client, id, expiry.as_deref(), *disable, fmt).await
         }
         NodesCmd::Rename {
-            value,
-            legacy_hostname,
+            new_name,
             identifier,
         } => {
-            let (id, hostname) = nodes::select_rename_args(
-                value,
-                legacy_hostname.as_deref(),
-                identifier.as_deref(),
-            )?;
+            let (id, hostname) = nodes::select_rename_args(new_name, identifier.as_deref())?;
             nodes::rename_grpc(&mut client, id, hostname, fmt).await
         }
         NodesCmd::Tags {
@@ -1128,10 +1115,9 @@ mod tests {
                 .unwrap()
                 .action,
             NodesCmd::Rename {
-                value,
-                legacy_hostname: None,
+                new_name,
                 identifier: Some(identifier),
-            } if value == "node-new" && identifier == "42"
+            } if new_name == "node-new" && identifier == "42"
         ));
         assert!(matches!(
             NodesHarness::try_parse_from([

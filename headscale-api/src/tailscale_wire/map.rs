@@ -430,9 +430,15 @@ fn peer_patch_if_only_patchable_fields_changed(
     let derp_changed = previous.home_derp != current.home_derp;
     let online_changed = previous.online != current.online;
     let last_seen_changed = previous.last_seen != current.last_seen;
+    let key_expiry_changed = previous.key_expiry != current.key_expiry;
     let last_seen_patch =
         last_seen_changed && !online_changed && !endpoints_changed && !derp_changed;
-    if !endpoints_changed && !derp_changed && !online_changed && !last_seen_patch {
+    if !endpoints_changed
+        && !derp_changed
+        && !online_changed
+        && !last_seen_patch
+        && !key_expiry_changed
+    {
         return None;
     }
     // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
@@ -460,6 +466,7 @@ fn peer_patch_if_only_patchable_fields_changed(
         .clone_from(&previous.hostinfo.net_info);
     current_normalized.last_seen = previous.last_seen;
     current_normalized.online = previous.online;
+    current_normalized.key_expiry = previous.key_expiry;
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
         return None;
@@ -476,6 +483,11 @@ fn peer_patch_if_only_patchable_fields_changed(
         online: if online_changed { current.online } else { None },
         last_seen: if last_seen_patch {
             current.last_seen
+        } else {
+            None
+        },
+        key_expiry: if key_expiry_changed {
+            current.key_expiry
         } else {
             None
         },
@@ -3803,6 +3815,38 @@ mod tests {
         assert!(!self_node.machine_authorized);
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_peer_key_expiry_uses_peer_changed_patch() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+        assert!(first_mr.peers[0].key_expiry.is_none());
+
+        let expiry = chrono::Utc::now() + chrono::Duration::days(7);
+        assert!(state.machines.set_expiry(&a, Some(expiry)));
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_changed_patch.len(), 1);
+        let patch = &mr.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.derp_region, 0);
+        assert!(patch.online.is_none());
+        assert!(patch.last_seen.is_none());
+        assert_eq!(patch.key_expiry, Some(expiry));
     }
 
     #[tokio::test(start_paused = true)]

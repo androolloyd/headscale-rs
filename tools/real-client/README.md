@@ -110,6 +110,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
+| Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
@@ -584,6 +585,16 @@ asserts the stock-client netmap moves that route owner after reload:
 ```sh
 tools/real-client/route-via-reload-smoke.sh
 tools/real-client/route-via-reload-headscale-go-smoke.sh
+```
+
+The route-via restart variant runs the same current-head steering semantics
+through the production server, persistent SQLite state, and stock clients on
+both implementations, then restarts the server and asserts Alice and Bob still
+see only their policy-selected route owner:
+
+```sh
+tools/real-client/route-via-restart-smoke.sh
+tools/real-client/route-via-restart-headscale-go-smoke.sh
 ```
 
 The multi-prefix route-via variant has both routers advertise two subnets and

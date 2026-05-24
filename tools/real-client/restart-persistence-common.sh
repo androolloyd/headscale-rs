@@ -19,10 +19,30 @@ timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"
 initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
+route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
 run_id="hs-restart-${target}-$(date +%s)-$$"
-router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router}"
-observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-observer}"
+case "${route_via_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_via_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_via_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_VIA must be true or false, got ${route_via_restart}" >&2
+    exit 2
+    ;;
+esac
+if ((route_via_restart_flag)); then
+  router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router-a}"
+  observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-alice}"
+else
+  router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router}"
+  observer_name="${REAL_CLIENT_OBSERVER_NAME:-${run_id}-observer}"
+fi
+router_b_name="${REAL_CLIENT_ROUTER_B_NAME:-${run_id}-router-b}"
+bob_name="${REAL_CLIENT_BOB_NAME:-${run_id}-bob}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 
 case "${work_root}" in
@@ -46,9 +66,11 @@ tls_key_path=""
 health_curl_opts="-fsS"
 headscale_bin=""
 authkey=""
+router_a_authkey=""
+router_b_authkey=""
 
 cleanup() {
-  docker rm -f "${router_name}" "${observer_name}" >/dev/null 2>&1 || true
+  docker rm -f "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" >/dev/null 2>&1 || true
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
@@ -117,7 +139,7 @@ wait_pid_with_timeout() {
 
 dump_debug() {
   headscale_cmd -o json nodes list 2>&1 || true
-  for client_name in "${router_name}" "${observer_name}"; do
+  for client_name in "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"; do
     docker exec "${client_name}" tailscale status 2>&1 || true
     docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2 || true
   done
@@ -178,6 +200,41 @@ EOF
 }
 
 write_policy() {
+  if ((route_via_restart_flag)); then
+    cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-a": ["router@"],
+    "tag:router-b": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-a", "tag:router-b"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-a", "tag:router-b"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-a"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    }
+  ]
+}
+EOF
+    return
+  fi
   cat >"${work_dir}/policy.hujson" <<EOF
 {
   "tagOwners": {
@@ -333,7 +390,9 @@ create_user_and_key() {
   case "${target}" in
     rust)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
-      headscale_cmd -o json preauthkeys create --user alice --reusable --expires-in 1h >"${work_dir}/preauth.json"
+      local user_id
+      user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
+      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
       ;;
     headscale-go)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
@@ -344,6 +403,51 @@ create_user_and_key() {
   esac
   authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
   echo "minted ${authkey%%-*}-..."
+  echo "::endgroup::"
+}
+
+create_user_json() {
+  local user="$1"
+  local output_path="$2"
+  headscale_cmd -o json users create "${user}" >"${output_path}"
+  ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${output_path}"
+}
+
+create_tagged_preauth_key() {
+  local user_id="$1"
+  local tag="$2"
+  local output_path="$3"
+  case "${target}" in
+    rust)
+      headscale_cmd -o json preauthkeys create \
+        --user "${user_id}" \
+        --reusable \
+        --expires-in 1h \
+        --tags "${tag}" \
+        >"${output_path}"
+      ;;
+    headscale-go)
+      headscale_cmd -o json preauthkeys create \
+        --user "${user_id}" \
+        --reusable \
+        --expiration 1h \
+        --tags "${tag}" \
+        >"${output_path}"
+      ;;
+  esac
+  ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${output_path}"
+}
+
+create_route_via_users_and_keys() {
+  echo "::group::create route-via users and preauth keys"
+  local router_user_id alice_user_id bob_user_id
+  router_user_id="$(create_user_json router "${work_dir}/user-router.json")"
+  alice_user_id="$(create_user_json alice "${work_dir}/user-alice.json")"
+  bob_user_id="$(create_user_json bob "${work_dir}/user-bob.json")"
+  router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-a "${work_dir}/preauth-router-a.json")"
+  router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
+  echo "created router user ${router_user_id}, alice user ${alice_user_id}, and bob user ${bob_user_id}"
+  echo "minted tagged router keys"
   echo "::endgroup::"
 }
 
@@ -389,30 +493,32 @@ write_registration_id() {
   ruby -rjson -e '
     status = JSON.parse(STDIN.read)
     url = status["AuthURL"].to_s
-    match = url.match(%r{/register/([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    match = url.match(%r{/register/([^/?#]+)(?:\z|[?#])})
     exit 1 unless match
     File.write(ARGV.fetch(0), match[1])
   ' "${output_path}" <<<"${status_json}"
 }
 
 login_router_with_authkey() {
-  echo "::group::tailscale up auth-key router"
+  local client_name="${1:-${router_name}}"
+  local key="${2:-${authkey}}"
+  echo "::group::tailscale up auth-key router ${client_name}"
   up_status=0
-  docker exec "${router_name}" tailscale up \
+  docker exec "${client_name}" tailscale up \
     "--login-server=${control_url}" \
-    "--hostname=${router_name}" \
+    "--hostname=${client_name}" \
     --timeout=60s \
     --accept-routes=false \
     --accept-dns=false \
     "--advertise-routes=${route}" \
-    "--authkey=${authkey}" \
-    >"${work_dir}/${router_name}.tailscale-up.stdout" \
-    2>"${work_dir}/${router_name}.tailscale-up.stderr" ||
+    "--authkey=${key}" \
+    >"${work_dir}/${client_name}.tailscale-up.stdout" \
+    2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
     up_status="$?"
   if ((up_status != 0)); then
-    echo "tailscale up ${router_name} returned ${up_status}; verifying logged-in netmap"
+    echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"
   fi
-  wait_for "logged-in router netmap" "tailscale_logged_in '${router_name}'" || {
+  wait_for "logged-in router netmap ${client_name}" "tailscale_logged_in '${client_name}'" || {
     dump_debug
     return 1
   }
@@ -420,32 +526,34 @@ login_router_with_authkey() {
 }
 
 login_observer_with_web_registration() {
-  echo "::group::tailscale up web observer"
-  docker exec "${observer_name}" tailscale up \
+  local client_name="${1:-${observer_name}}"
+  local user="${2:-alice}"
+  echo "::group::tailscale up web observer ${client_name}"
+  docker exec "${client_name}" tailscale up \
     "--login-server=${control_url}" \
-    "--hostname=${observer_name}" \
+    "--hostname=${client_name}" \
     --timeout=60s \
     --accept-routes=true \
     --accept-dns=false \
-    >"${work_dir}/${observer_name}.tailscale-up.stdout" \
-    2>"${work_dir}/${observer_name}.tailscale-up.stderr" &
+    >"${work_dir}/${client_name}.tailscale-up.stdout" \
+    2>"${work_dir}/${client_name}.tailscale-up.stderr" &
   local up_pid="$!"
 
-  local registration_id_path="${work_dir}/${observer_name}.registration-id"
-  if ! wait_for "web registration URL ${observer_name}" \
-    "write_registration_id '${observer_name}' '${registration_id_path}'"; then
+  local registration_id_path="${work_dir}/${client_name}.registration-id"
+  if ! wait_for "web registration URL ${client_name}" \
+    "write_registration_id '${client_name}' '${registration_id_path}'"; then
     dump_debug
     return 1
   fi
   local registration_id
   registration_id="$(cat "${registration_id_path}")"
-  headscale_cmd -o json nodes register --user alice --key "${registration_id}" \
-    >"${work_dir}/${observer_name}.registered.json"
+  headscale_cmd -o json nodes register --user "${user}" --key "${registration_id}" \
+    >"${work_dir}/${client_name}.registered.json"
 
-  if ! wait_pid_with_timeout "tailscale up ${observer_name}" "${up_pid}"; then
-    echo "tailscale up ${observer_name} returned non-zero; verifying logged-in netmap"
+  if ! wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}"; then
+    echo "tailscale up ${client_name} returned non-zero; verifying logged-in netmap"
   fi
-  wait_for "logged-in observer netmap" "tailscale_logged_in '${observer_name}'" || {
+  wait_for "logged-in observer netmap ${client_name}" "tailscale_logged_in '${client_name}'" || {
     dump_debug
     return 1
   }
@@ -473,9 +581,26 @@ node_id_for_host() {
   ' "${nodes_path}" "${hostname}"
 }
 
+load_node_id() {
+  local hostname="$1"
+  local safe_hostname="${hostname//[^a-zA-Z0-9_.-]/-}"
+  local nodes_path="${work_dir}/nodes-for-${safe_hostname}-id.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  node_id_for_host "${nodes_path}" "${hostname}"
+}
+
 load_router_id() {
-  headscale_cmd -o json nodes list >"${work_dir}/nodes-for-router-id.json"
-  node_id_for_host "${work_dir}/nodes-for-router-id.json" "${router_name}"
+  load_node_id "${router_name}"
+}
+
+approve_router_routes() {
+  local hostname="$1"
+  local router_id
+  router_id="$(load_node_id "${hostname}")"
+  echo "::group::approve router routes ${hostname}"
+  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${route}" \
+    >"${work_dir}/approved-routes-${router_id}.json"
+  echo "::endgroup::"
 }
 
 set_router_routes_and_tag() {
@@ -526,6 +651,142 @@ assert_persisted_nodes() {
       tag: expected_tag,
     })
   ' "${nodes_path}" "${route}" "${expected_tag}" "${router_name}" "${observer_name}"
+}
+
+assert_route_via_persisted_nodes() {
+  local label="$1"
+  local nodes_path="${work_dir}/nodes-${label}.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    route = ARGV.fetch(1)
+    router_a_name = ARGV.fetch(2)
+    router_b_name = ARGV.fetch(3)
+    alice_name = ARGV.fetch(4)
+    bob_name = ARGV.fetch(5)
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    def find_node(nodes, name)
+      nodes.find { |node| node_name(node).to_s == name } ||
+        abort("missing node #{name.inspect} in #{nodes.inspect}")
+    end
+
+    def assert_router(node, route, tag)
+      available = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
+      approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+      tags = Array(node["tags"] || node["Tags"]).map(&:to_s).sort
+      abort("expected router available route #{route.inspect}, got #{available.inspect}") unless available.include?(route)
+      abort("expected router approved route #{route.inspect}, got #{approved.inspect}") unless approved.include?(route)
+      abort("expected router tag #{tag.inspect}, got #{tags.inspect}") unless tags.include?(tag)
+    end
+
+    router_a = find_node(nodes, router_a_name)
+    router_b = find_node(nodes, router_b_name)
+    alice = find_node(nodes, alice_name)
+    bob = find_node(nodes, bob_name)
+    assert_router(router_a, route, "tag:router-a")
+    assert_router(router_b, route, "tag:router-b")
+
+    puts JSON.pretty_generate({
+      router_a: router_a,
+      router_b: router_b,
+      alice: alice,
+      bob: bob,
+      route: route,
+    })
+  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
+}
+
+peer_netmap_route_owner_matches() {
+  local source_name="$1"
+  local peer_name="$2"
+  local expected_route="$3"
+  local output_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${source_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected_peer = ARGV.fetch(1)
+      expected_route = ARGV.fetch(2)
+      peers = Array(netmap["Peers"] || netmap["peers"])
+
+      def names_for(peer)
+        [
+          peer["HostName"],
+          peer["Name"],
+          peer["DNSName"],
+          peer["ComputedName"],
+          peer["Hostinfo"] && peer["Hostinfo"]["Hostname"],
+          peer["HostInfo"] && peer["HostInfo"]["Hostname"],
+        ].compact.map(&:to_s)
+      end
+
+      def route_fields(peer)
+        [
+          peer["AllowedIPs"],
+          peer["AllowedIps"],
+          peer["allowedIPs"],
+          peer["allowed_ips"],
+          peer["PrimaryRoutes"],
+          peer["primaryRoutes"],
+          peer["primary_routes"],
+          peer["SubnetRoutes"],
+          peer["subnetRoutes"],
+          peer["subnet_routes"],
+        ].compact.flatten.map(&:to_s)
+      end
+
+      peer = peers.find do |candidate|
+        names_for(candidate).any? do |name|
+          name == expected_peer || name.split(".").first == expected_peer || name.include?(expected_peer)
+        end
+      end
+      abort("missing peer #{expected_peer.inspect} in netmap peers #{peers.inspect}") unless peer
+
+      owner_routes = route_fields(peer)
+      unless owner_routes.include?(expected_route)
+        abort("expected #{expected_peer.inspect} to own route #{expected_route.inspect}, got #{owner_routes.inspect} in #{peer.inspect}")
+      end
+
+      other_owners = peers.reject { |candidate| candidate.equal?(peer) }.select do |candidate|
+        route_fields(candidate).include?(expected_route)
+      end
+      unless other_owners.empty?
+        details = other_owners.map { |candidate| {names: names_for(candidate), routes: route_fields(candidate)} }
+        abort("expected only #{expected_peer.inspect} to own #{expected_route.inspect}, but found #{details.inspect}")
+      end
+
+      puts JSON.pretty_generate({
+        source: netmap.dig("SelfNode", "HostName") || netmap.dig("SelfNode", "Name"),
+        peer: expected_peer,
+        route: expected_route,
+        peer_names: names_for(peer),
+        peer_routes: owner_routes,
+      })
+    ' "${netmap_path}" "${peer_name}" "${expected_route}" >"${output_path}"
+}
+
+wait_for_route_via_peer_maps() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for "${label} alice route via router-a" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${router_name}' '${route}' '${work_dir}/route-via-${safe_label}-alice.json'" || {
+      cat "${work_dir}/route-via-${safe_label}-alice.json.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  wait_for "${label} bob route via router-b" \
+    "peer_netmap_route_owner_matches '${bob_name}' '${router_b_name}' '${route}' '${work_dir}/route-via-${safe_label}-bob.json'" || {
+      cat "${work_dir}/route-via-${safe_label}-bob.json.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${work_dir}/route-via-${safe_label}-alice.json"
+  cat "${work_dir}/route-via-${safe_label}-bob.json"
 }
 
 peer_map_has_route_and_tag() {
@@ -630,23 +891,49 @@ if [[ "${target}" == "headscale-go" ]]; then
   generate_headscale_go_tls
 fi
 start_server
-create_user_and_key
-start_client "${router_name}"
-start_client "${observer_name}"
-login_router_with_authkey
-set_router_routes_and_tag "${initial_tag}"
-login_observer_with_web_registration
-assert_persisted_nodes "${initial_tag}" "before-restart"
 
-stop_server
-start_server
-wait_for "router reconnected after restart" "tailscale_logged_in '${router_name}'"
-wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
-assert_persisted_nodes "${initial_tag}" "after-restart"
-wait_for_peer_map "${initial_tag}" "observer sees restarted route and tag"
+if ((route_via_restart_flag)); then
+  create_route_via_users_and_keys
+  start_client "${router_name}"
+  start_client "${router_b_name}"
+  start_client "${observer_name}"
+  start_client "${bob_name}"
+  login_router_with_authkey "${router_name}" "${router_a_authkey}"
+  login_router_with_authkey "${router_b_name}" "${router_b_authkey}"
+  approve_router_routes "${router_name}"
+  approve_router_routes "${router_b_name}"
+  login_observer_with_web_registration "${observer_name}" alice
+  login_observer_with_web_registration "${bob_name}" bob
+  assert_route_via_persisted_nodes "before-restart"
+  wait_for_route_via_peer_maps "before restart"
 
-set_router_routes_and_tag "${mutated_tag}"
-assert_persisted_nodes "${mutated_tag}" "after-post-restart-tag-mutation"
-wait_for_peer_map "${mutated_tag}" "observer sees post-restart tag mutation"
+  stop_server
+  start_server
+  wait_for "router-a reconnected after restart" "tailscale_logged_in '${router_name}'"
+  wait_for "router-b reconnected after restart" "tailscale_logged_in '${router_b_name}'"
+  wait_for "alice reconnected after restart" "tailscale_logged_in '${observer_name}'"
+  wait_for "bob reconnected after restart" "tailscale_logged_in '${bob_name}'"
+  assert_route_via_persisted_nodes "after-restart"
+  wait_for_route_via_peer_maps "after restart"
+else
+  create_user_and_key
+  start_client "${router_name}"
+  start_client "${observer_name}"
+  login_router_with_authkey
+  set_router_routes_and_tag "${initial_tag}"
+  login_observer_with_web_registration
+  assert_persisted_nodes "${initial_tag}" "before-restart"
+
+  stop_server
+  start_server
+  wait_for "router reconnected after restart" "tailscale_logged_in '${router_name}'"
+  wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
+  assert_persisted_nodes "${initial_tag}" "after-restart"
+  wait_for_peer_map "${initial_tag}" "observer sees restarted route and tag"
+
+  set_router_routes_and_tag "${mutated_tag}"
+  assert_persisted_nodes "${mutated_tag}" "after-post-restart-tag-mutation"
+  wait_for_peer_map "${mutated_tag}" "observer sees post-restart tag mutation"
+fi
 
 echo "${target} restart persistence real-client smoke passed"

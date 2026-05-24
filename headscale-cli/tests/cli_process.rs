@@ -1305,6 +1305,8 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(listed_preauth.get("acl_tags").is_none());
     assert!(listed_preauth["expiration"]["seconds"].as_i64().is_some());
     assert!(listed_preauth["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_preauth.get("createdAt").is_none());
+    assert!(listed_preauth.get("aclTags").is_none());
     let preauth_id = listed_preauth["id"].as_u64().unwrap();
     let preauth_id = preauth_id.to_string();
     let expire_preauth =
@@ -1365,6 +1367,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         created_preauth_json["acl_tags"],
         serde_json::json!(["tag:test1", "tag:test2"])
     );
+    assert!(created_preauth_json.get("aclTags").is_none());
     assert!(
         created_preauth_json["expiration"]["seconds"]
             .as_i64()
@@ -1375,6 +1378,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .as_i64()
             .is_some()
     );
+    assert!(created_preauth_json.get("createdAt").is_none());
     assert_eq!(stderr(&create_preauth_json), "");
     let created_preauth_id = created_preauth_json["id"].as_u64().unwrap().to_string();
     let delete_preauth_json = headscale_with_config(
@@ -1393,6 +1397,235 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         0
     );
     assert_eq!(stderr(&delete_preauth_json), "");
+
+    let create_preauth_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--reusable",
+            "--expiration",
+            "1h",
+            "--tags",
+            "tag:test1,tag:test2",
+        ],
+    );
+    let created_preauth_json_line: serde_json::Value =
+        serde_json::from_slice(&create_preauth_json_line.stdout).unwrap();
+    assert_eq!(
+        created_preauth_json_line["user"]["name"].as_str(),
+        Some("alice")
+    );
+    assert!(
+        created_preauth_json_line["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("hskey-auth-")
+    );
+    assert_eq!(created_preauth_json_line["reusable"].as_bool(), Some(true));
+    assert!(created_preauth_json_line.get("ephemeral").is_none());
+    assert_eq!(
+        created_preauth_json_line["acl_tags"],
+        serde_json::json!(["tag:test1", "tag:test2"])
+    );
+    assert!(created_preauth_json_line.get("aclTags").is_none());
+    assert!(
+        created_preauth_json_line["expiration"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(
+        created_preauth_json_line["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(created_preauth_json_line.get("createdAt").is_none());
+    assert!(!stdout(&create_preauth_json_line).contains('\t'));
+    assert_eq!(stderr(&create_preauth_json_line), "");
+
+    let list_preauth_json_line =
+        headscale_with_config(&config, &["-ojson-line", "preauthkeys", "list"]);
+    let listed_preauth_json_line: serde_json::Value =
+        serde_json::from_slice(&list_preauth_json_line.stdout).unwrap();
+    let listed_preauth_json_line = &listed_preauth_json_line[0];
+    assert_eq!(
+        listed_preauth_json_line["key"].as_str(),
+        created_preauth_json_line["key"].as_str()
+    );
+    assert_eq!(
+        listed_preauth_json_line["user"]["name"].as_str(),
+        Some("alice")
+    );
+    assert_eq!(listed_preauth_json_line["reusable"].as_bool(), Some(true));
+    assert_eq!(
+        listed_preauth_json_line["acl_tags"],
+        serde_json::json!(["tag:test1", "tag:test2"])
+    );
+    assert!(
+        listed_preauth_json_line["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(listed_preauth_json_line.get("createdAt").is_none());
+    assert!(listed_preauth_json_line.get("aclTags").is_none());
+    assert_eq!(stderr(&list_preauth_json_line), "");
+
+    let preauth_json_line_id = listed_preauth_json_line["id"].as_u64().unwrap().to_string();
+    let expire_preauth_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "preauthkeys",
+            "expire",
+            "--id",
+            &preauth_json_line_id,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&expire_preauth_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&expire_preauth_json_line), "");
+
+    let delete_preauth_json_line = headscale_with_config(
+        &config,
+        &[
+            "-ojson-line",
+            "preauthkeys",
+            "delete",
+            "--id",
+            &preauth_json_line_id,
+        ],
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&delete_preauth_json_line.stdout)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&delete_preauth_json_line), "");
+
+    let create_preauth_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--reusable",
+            "--expiration",
+            "1h",
+            "--tags",
+            "tag:test1,tag:test2",
+        ],
+    );
+    let created_preauth_yaml = yaml_output(&create_preauth_yaml);
+    assert_eq!(created_preauth_yaml["user"]["name"].as_str(), Some("alice"));
+    assert!(
+        created_preauth_yaml["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("hskey-auth-")
+    );
+    assert_eq!(created_preauth_yaml["reusable"].as_bool(), Some(true));
+    assert!(created_preauth_yaml.get("ephemeral").is_none());
+    assert_eq!(
+        created_preauth_yaml["acl_tags"],
+        serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("tag:test1".into()),
+            serde_yaml::Value::String("tag:test2".into()),
+        ])
+    );
+    assert!(created_preauth_yaml.get("aclTags").is_none());
+    assert!(
+        created_preauth_yaml["expiration"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(
+        created_preauth_yaml["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(created_preauth_yaml.get("createdAt").is_none());
+    assert_eq!(stderr(&create_preauth_yaml), "");
+
+    let list_preauth_yaml = headscale_with_config(&config, &["-o", "yaml", "preauthkeys", "list"]);
+    let listed_preauth_yaml = yaml_output(&list_preauth_yaml);
+    let listed_preauth_yaml = &listed_preauth_yaml[0];
+    assert_eq!(
+        listed_preauth_yaml["key"].as_str(),
+        created_preauth_yaml["key"].as_str()
+    );
+    assert_eq!(listed_preauth_yaml["user"]["name"].as_str(), Some("alice"));
+    assert_eq!(listed_preauth_yaml["reusable"].as_bool(), Some(true));
+    assert_eq!(
+        listed_preauth_yaml["acl_tags"],
+        serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("tag:test1".into()),
+            serde_yaml::Value::String("tag:test2".into()),
+        ])
+    );
+    assert!(
+        listed_preauth_yaml["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(listed_preauth_yaml.get("createdAt").is_none());
+    assert!(listed_preauth_yaml.get("aclTags").is_none());
+    assert_eq!(stderr(&list_preauth_yaml), "");
+
+    let preauth_yaml_id = listed_preauth_yaml["id"].as_u64().unwrap().to_string();
+    let expire_preauth_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "preauthkeys",
+            "expire",
+            "--id",
+            &preauth_yaml_id,
+        ],
+    );
+    assert_eq!(
+        yaml_output(&expire_preauth_yaml)
+            .as_mapping()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&expire_preauth_yaml), "");
+
+    let delete_preauth_yaml = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "preauthkeys",
+            "delete",
+            "--id",
+            &preauth_yaml_id,
+        ],
+    );
+    assert_eq!(
+        yaml_output(&delete_preauth_yaml)
+            .as_mapping()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(stderr(&delete_preauth_yaml), "");
 
     let create_api_key =
         headscale_with_config(&config, &["apikeys", "create", "--expiration", "1h"]);

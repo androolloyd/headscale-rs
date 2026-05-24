@@ -3920,6 +3920,18 @@ mod tests {
         assert!(parsed["paths"].get("/api/v1/auth/register").is_some());
         assert!(parsed["paths"].get("/api/v1/auth/approve").is_some());
         assert!(parsed["paths"].get("/api/v1/auth/reject").is_some());
+        assert_eq!(
+            parsed["paths"]["/api/v1/policy/check"]["post"]["operationId"],
+            "HeadscaleService_CheckPolicy"
+        );
+        assert_eq!(
+            parsed["paths"]["/api/v1/policy/check"]["post"]["parameters"][0]["schema"]["$ref"],
+            "#/definitions/v1CheckPolicyRequest"
+        );
+        assert_eq!(
+            parsed["paths"]["/api/v1/policy/check"]["post"]["responses"]["200"]["schema"]["$ref"],
+            "#/definitions/v1CheckPolicyResponse"
+        );
         assert!(parsed["definitions"].get("v1Node").is_some());
         assert!(parsed["definitions"].get("v1AuthRegisterRequest").is_some());
         assert!(
@@ -3931,6 +3943,8 @@ mod tests {
         assert!(parsed["definitions"].get("v1AuthApproveResponse").is_some());
         assert!(parsed["definitions"].get("v1AuthRejectRequest").is_some());
         assert!(parsed["definitions"].get("v1AuthRejectResponse").is_some());
+        assert!(parsed["definitions"].get("v1CheckPolicyRequest").is_some());
+        assert!(parsed["definitions"].get("v1CheckPolicyResponse").is_some());
     }
 
     #[tokio::test]

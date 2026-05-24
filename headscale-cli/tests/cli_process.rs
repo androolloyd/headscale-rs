@@ -10,6 +10,7 @@ use headscale_api::admin::{
 use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::policy::PolicyStore;
 use headscale_api::tailscale_wire::MachineRegistry;
+use httpmock::prelude::*;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -213,6 +214,17 @@ fn display_prefix(secret: &str, token_prefix: &str) -> String {
 fn json_output(output: &Output) -> serde_json::Value {
     assert!(output.status.success(), "stderr: {}", stderr(output));
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn assert_status_command_failed(output: &Output) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}; stderr: {}",
+        stdout(output),
+        stderr(output)
+    );
+    assert_eq!(stdout(output), "");
 }
 
 #[test]
@@ -1352,6 +1364,60 @@ async fn live_local_grpc_health_failure_matches_process_stderr() {
 
     handle.abort();
     let _ = handle.await;
+}
+
+#[tokio::test]
+async fn hidden_status_probe_uses_failure_exit_codes() {
+    let healthy = MockServer::start_async().await;
+    healthy
+        .mock_async(|when, then| {
+            when.method(GET).path("/health");
+            then.status(200).body("ok");
+        })
+        .await;
+    let output = headscale_clean(&["status", "--server", &healthy.base_url()]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("Control plane at {} is healthy\n", healthy.base_url())
+    );
+    assert_eq!(stderr(&output), "");
+
+    let unhealthy = MockServer::start_async().await;
+    unhealthy
+        .mock_async(|when, then| {
+            when.method(GET).path("/health");
+            then.status(500).body("offline");
+        })
+        .await;
+    let output = headscale_clean(&["status", "--server", &unhealthy.base_url()]);
+    assert_status_command_failed(&output);
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/status_http_failure.stderr")
+    );
+
+    let output = headscale_clean(&["status"]);
+    assert_status_command_failed(&output);
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/status_missing_server.stderr")
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let refused_url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let output = headscale_clean(&["status", "--server", &refused_url]);
+    assert_status_command_failed(&output);
+    let err = stderr(&output);
+    assert!(
+        err.contains("error: failed to connect to control plane"),
+        "stderr: {err}"
+    );
+    assert!(
+        err.contains(&format!("{refused_url}/health")),
+        "stderr: {err}"
+    );
 }
 
 #[test]

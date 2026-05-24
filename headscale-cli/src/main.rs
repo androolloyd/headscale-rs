@@ -1792,12 +1792,10 @@ async fn check_status(server: Option<&str>) -> Result<()> {
             Ok(())
         }
         Ok(r) => {
-            println!("Control plane returned: {}", r.status());
-            Ok(())
+            anyhow::bail!("control plane returned: {}", r.status())
         }
         Err(e) => {
-            println!("Failed to connect to control plane: {e}");
-            Ok(())
+            anyhow::bail!("failed to connect to control plane: {e}")
         }
     }
 }

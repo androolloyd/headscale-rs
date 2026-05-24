@@ -221,7 +221,8 @@ pub struct AutoApprovers {
 }
 
 /// SSH grant. Minimal mirror of upstream `SSH` rule — `action`,
-/// `src`, `dst`, `users`, and optional `checkPeriod`.
+/// `src`, `dst`, `users`, optional `checkPeriod`, and optional
+/// `acceptEnv`.
 /// `deny_unknown_fields` mirrors the rest of the schema; unknown SSH
 /// keys are loud parse errors.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -234,6 +235,8 @@ pub struct SshRule {
     pub users: Vec<String>,
     #[serde(default, rename = "check_period", alias = "checkPeriod")]
     pub check_period: Option<String>,
+    #[serde(default, rename = "accept_env", alias = "acceptEnv")]
+    pub accept_env: Vec<String>,
 }
 
 /// One upstream `tests` entry. These are operator assertions checked
@@ -491,9 +494,11 @@ impl AclDoc {
                 let mut src = s.src.clone();
                 let mut dst = s.dst.clone();
                 let mut users = s.users.clone();
+                let mut accept_env = s.accept_env.clone();
                 src.sort();
                 dst.sort();
                 users.sort();
+                accept_env.sort();
                 let mut value = serde_json::Map::new();
                 value.insert("action".to_string(), serde_json::json!(s.action));
                 value.insert("src".to_string(), serde_json::json!(src));
@@ -501,6 +506,9 @@ impl AclDoc {
                 value.insert("users".to_string(), serde_json::json!(users));
                 if let Some(check_period) = &s.check_period {
                     value.insert("check_period".to_string(), serde_json::json!(check_period));
+                }
+                if !accept_env.is_empty() {
+                    value.insert("accept_env".to_string(), serde_json::json!(accept_env));
                 }
                 serde_json::Value::Object(value)
             })
@@ -958,19 +966,38 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         )),
     }
 
+    if rule.users.is_empty() {
+        errs.push("users must be specified".to_string());
+    }
+
     if let Some(period) = rule.check_period.as_deref() {
-        if rule.action != "check" {
+        if rule.action == "check" {
+            match parse_duration_nanos(period) {
+                Some(nanos) if nanos <= SSH_CHECK_PERIOD_MAX_NANOS => {}
+                Some(nanos) => errs.push(format!(
+                    "checkPeriod {} is above the max (168h)",
+                    format_duration_nanos(nanos)
+                )),
+                None => errs.push(format!("not a valid duration string: {period:?}")),
+            }
+        } else {
             errs.push("checkPeriod is only valid with action \"check\"".to_string());
-        } else if parse_duration_nanos(period).is_none() {
-            errs.push(format!("not a valid duration string: {period:?}"));
         }
     }
 
     for user in &rule.users {
-        if user.starts_with("autogroup:") && user != "autogroup:nonroot" {
+        if matches!(user.as_str(), "" | "*") {
+            errs.push(format!("user {user:?} is not a valid SSH user"));
+        } else if user.starts_with("autogroup:") && user != "autogroup:nonroot" {
             errs.push(format!(
                 "autogroup {user:?} is not supported for SSH user, can be [autogroup:nonroot]"
             ));
+        }
+    }
+
+    for env in &rule.accept_env {
+        if env.is_empty() {
+            errs.push("acceptEnv values cannot be empty".to_string());
         }
     }
 
@@ -981,7 +1008,7 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
         validate_ssh_source_group_recursion(doc, src, errs);
     }
     for dst in &rule.dst {
-        validate_ssh_dst_alias(dst, errs);
+        validate_ssh_dst_alias(doc, dst, errs);
         validate_tag_ref(doc, dst, errs);
     }
     validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
@@ -1311,12 +1338,19 @@ fn validate_ssh_src_alias(alias: &str, errs: &mut Vec<String>) {
     }
 }
 
-fn validate_ssh_dst_alias(alias: &str, errs: &mut Vec<String>) {
+fn validate_ssh_dst_alias(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
     if alias == "*" {
         errs.push(
             "wildcard (*) is not supported as SSH destination; use 'autogroup:member' for user-owned devices, 'autogroup:tagged' for tagged devices, or specific tags/users"
                 .to_string(),
         );
+        return;
+    }
+
+    if alias.starts_with("host:") || host_defined(doc, alias) {
+        errs.push(format!(
+            "host alias {alias:?} is not supported as SSH destination"
+        ));
         return;
     }
 
@@ -1379,6 +1413,8 @@ fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut
     }
 }
 
+const SSH_CHECK_PERIOD_MAX_NANOS: i64 = 168 * 60 * 60 * 1_000_000_000;
+
 fn parse_duration_nanos(input: &str) -> Option<i64> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -1423,6 +1459,13 @@ fn parse_duration_nanos(input: &str) -> Option<i64> {
         total = total.checked_add(value.checked_mul(multiplier)?)?;
     }
     i64::try_from(total).ok()
+}
+
+fn format_duration_nanos(nanos: i64) -> String {
+    if nanos % (60 * 60 * 1_000_000_000) == 0 {
+        return format!("{}h", nanos / (60 * 60 * 1_000_000_000));
+    }
+    format!("{nanos}ns")
 }
 
 /// Strip `//` + `/* … */` comments and trailing commas. Preserves
@@ -3481,6 +3524,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_ssh_check_period_above_max_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "169h",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("above the max (168h)"));
+    }
+
+    #[test]
     fn rejects_ssh_check_period_on_accept_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{
@@ -3496,6 +3557,71 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("checkPeriod is only valid with action"));
+    }
+
+    #[test]
+    fn parses_ssh_accept_env_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "acceptEnv": ["LANG", "LC_*", "*", "**"],
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(doc.ssh[0].accept_env, vec!["LANG", "LC_*", "*", "**"]);
+    }
+
+    #[test]
+    fn rejects_empty_ssh_accept_env_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "acceptEnv": [""],
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("acceptEnv values cannot be empty"));
+    }
+
+    #[test]
+    fn rejects_missing_or_wildcard_ssh_users_like_headscale_go() {
+        let missing = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("users must be specified"));
+
+        let wildcard = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(wildcard.contains(r#"user "*" is not a valid SSH user"#));
     }
 
     #[test]
@@ -3545,6 +3671,39 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("wildcard (*) is not supported as SSH destination"));
+    }
+
+    #[test]
+    fn rejects_ssh_host_destination_like_current_head() {
+        let err = parse_hujson_policy(
+            r#"{
+              "hosts": {"server": "100.64.0.4/32"},
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["server"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#"host alias "server" is not supported as SSH destination"#));
+
+        let err = parse_hujson_policy(
+            r#"{
+              "hosts": {"server": "100.64.0.4/32"},
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["host:server"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#"host alias "host:server" is not supported as SSH destination"#));
     }
 
     #[test]

@@ -4,9 +4,6 @@
     "groups": {
       "group:admins": ["bob@"]
     },
-    "hosts": {
-      "serverHost": "100.64.0.4/32"
-    },
     "tagOwners": {
       "tag:server": ["alice@"],
       "tag:db": ["alice@"]
@@ -22,15 +19,8 @@
       {
         "action": "accept",
         "src": ["bob@"],
-        "dst": ["serverHost"],
+        "dst": ["tag:server"],
         "users": ["autogroup:nonroot", "root", "deploy"]
-      },
-      {
-        "action": "check",
-        "checkPeriod": "24h",
-        "src": ["group:admins"],
-        "dst": ["tag:db"],
-        "users": ["admin"]
       },
       {
         "action": "accept",

@@ -28,7 +28,7 @@ Scenarios may also include:
   one-way ACL visibility and route-backed subnet-router visibility.
 - `tag_checks`: `NodeCanHaveTag` checks for `tagOwners` behavior.
 - `ssh_checks`: per-node `SSHPolicy` checks, including SSH user maps,
-  `autogroup:self`, tagged destinations, host destinations, and `checkPeriod`.
+  `autogroup:self`, tagged destinations, and host destinations.
 - `expect_policy_error`: a substring that both engines must reject during
   policy load; used for negative parser/validator parity scenarios.
 - `wire`: typed `tailcfg` JSON fragments for DNS, DERP, register, and map
@@ -49,4 +49,6 @@ outputs match. Refresh it with `PARITY_UPDATE_GOLDEN=1
 Current-head-only scenarios live in `tools/parity/current-head/*.json`. They use
 Rust golden verification through `./scripts/headscale_rs_current_head_golden.sh`
 until `tools/parity/headscale-go` is deliberately rebased to an upstream version
-that can execute the same policy surface.
+that can execute the same policy surface. Current-head-only SSH scenarios cover
+fields such as `acceptEnv`, and behavior such as hold-and-delegate SSH checks,
+that the pinned v0.28 policy parser or compiler does not expose.

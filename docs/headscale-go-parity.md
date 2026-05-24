@@ -224,6 +224,14 @@ Recent coverage note: key-expiry-only peer stream deltas now use
 `PeersChangedPatch.KeyExpiry`, matching headscale-go's lightweight peer patch
 shape while preserving the existing self-node expiry update path.
 
+Recent coverage note: SSH policy parity now includes `acceptEnv` parsing,
+tailcfg emission, and differential harness normalization, plus current-upstream
+validation for missing users, invalid literal `*`/empty users, empty
+`acceptEnv` entries, host-alias SSH destinations, and the 168h `checkPeriod`
+maximum. Current-head-only SSH parity scenarios now cover `acceptEnv` and
+hold-and-delegate `check` behavior while the pinned v0.28 differential matrix
+stays limited to policy fields and compiler behavior that v0.28 exposes.
+
 Use this backlog to turn each `Partial` row into implementation and
 parity-test work. Most upstream references are from the pinned v0.28.0
 module under `tools/parity/headscale-go`; rows marked `upstream-main`

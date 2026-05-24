@@ -175,6 +175,8 @@ struct SshRuleOut {
     principals: Vec<String>,
     ssh_users: BTreeMap<String, String>,
     action: SshActionOut,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accept_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -182,6 +184,8 @@ struct SshActionOut {
     accept: bool,
     reject: bool,
     session_duration_nanos: i64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    hold_and_delegate: String,
     allow_agent_forwarding: bool,
     allow_local_port_forwarding: bool,
     allow_remote_port_forwarding: bool,
@@ -916,10 +920,12 @@ fn normalize_ssh_policy(policy: Option<&WireSshPolicy>) -> Vec<SshRuleOut> {
                 accept: rule.action.accept,
                 reject: rule.action.reject,
                 session_duration_nanos: rule.action.session_duration,
+                hold_and_delegate: rule.action.hold_and_delegate.clone(),
                 allow_agent_forwarding: rule.action.allow_agent_forwarding,
                 allow_local_port_forwarding: rule.action.allow_local_port_forwarding,
                 allow_remote_port_forwarding: rule.action.allow_remote_port_forwarding,
             },
+            accept_env: rule.accept_env.clone(),
         });
     }
     out

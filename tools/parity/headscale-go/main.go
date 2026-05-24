@@ -120,15 +120,17 @@ type sshRuleOut struct {
 	Principals []string          `json:"principals"`
 	SSHUsers   map[string]string `json:"ssh_users"`
 	Action     sshActionOut      `json:"action"`
+	AcceptEnv  []string          `json:"accept_env,omitempty"`
 }
 
 type sshActionOut struct {
-	Accept                    bool  `json:"accept"`
-	Reject                    bool  `json:"reject"`
-	SessionDurationNanos      int64 `json:"session_duration_nanos"`
-	AllowAgentForwarding      bool  `json:"allow_agent_forwarding"`
-	AllowLocalPortForwarding  bool  `json:"allow_local_port_forwarding"`
-	AllowRemotePortForwarding bool  `json:"allow_remote_port_forwarding"`
+	Accept                    bool   `json:"accept"`
+	Reject                    bool   `json:"reject"`
+	SessionDurationNanos      int64  `json:"session_duration_nanos"`
+	HoldAndDelegate           string `json:"hold_and_delegate,omitempty"`
+	AllowAgentForwarding      bool   `json:"allow_agent_forwarding"`
+	AllowLocalPortForwarding  bool   `json:"allow_local_port_forwarding"`
+	AllowRemotePortForwarding bool   `json:"allow_remote_port_forwarding"`
 }
 
 type wireScenario struct {
@@ -732,6 +734,7 @@ func normalizeSSHPolicy(policy *tailcfg.SSHPolicy) []sshRuleOut {
 				Accept:                    rule.Action.Accept,
 				Reject:                    rule.Action.Reject,
 				SessionDurationNanos:      int64(rule.Action.SessionDuration),
+				HoldAndDelegate:           rule.Action.HoldAndDelegate,
 				AllowAgentForwarding:      rule.Action.AllowAgentForwarding,
 				AllowLocalPortForwarding:  rule.Action.AllowLocalPortForwarding,
 				AllowRemotePortForwarding: rule.Action.AllowRemotePortForwarding,
@@ -742,6 +745,7 @@ func normalizeSSHPolicy(policy *tailcfg.SSHPolicy) []sshRuleOut {
 			Principals: principals,
 			SSHUsers:   rule.SSHUsers,
 			Action:     action,
+			AcceptEnv:  rule.AcceptEnv,
 		})
 	}
 	return out

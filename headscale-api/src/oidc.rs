@@ -1382,6 +1382,7 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
     }
 }
 
+#[cfg(feature = "full")]
 fn status_for_auth_error(err: &OidcAuthError) -> StatusCode {
     match err {
         OidcAuthError::SessionExpired | OidcAuthError::SourceNodeMissing => StatusCode::GONE,

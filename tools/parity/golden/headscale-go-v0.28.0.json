@@ -1169,23 +1169,6 @@
         "rules": [
           {
             "principals": [
-              "100.64.0.3",
-              "fd7a:115c:a1e0::3"
-            ],
-            "ssh_users": {
-              "admin": "admin"
-            },
-            "action": {
-              "accept": true,
-              "reject": false,
-              "session_duration_nanos": 86400000000000,
-              "allow_agent_forwarding": true,
-              "allow_local_port_forwarding": true,
-              "allow_remote_port_forwarding": true
-            }
-          },
-          {
-            "principals": [
               "100.64.0.4",
               "fd7a:115c:a1e0::4"
             ],

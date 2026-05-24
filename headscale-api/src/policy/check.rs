@@ -745,15 +745,15 @@ mod tests {
     }
 
     #[test]
-    fn ssh_tests_treat_star_user_as_literal_tailcfg_wildcard() {
+    fn ssh_tests_treat_nonroot_as_tailcfg_wildcard() {
         let doc = parse_hujson_policy(
             r#"{
                 "tagOwners": {"tag:server": ["alice@"]},
                 "ssh": [
-                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["*"]}
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["autogroup:nonroot"]}
                 ],
                 "sshTests": [
-                    {"src": "alice@", "dst": ["tag:server"], "accept": ["root", "ubuntu"]}
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["ubuntu"], "deny": ["root"]}
                 ]
             }"#,
         )

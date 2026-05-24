@@ -52,5 +52,78 @@
         ]
       }
     ]
+  },
+  {
+    "engine": "headscale-rs",
+    "name": "ssh-accept-env",
+    "filter": [
+
+    ],
+    "ssh_policies": [
+      {
+        "name": "server",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "LANG",
+              "LC_*"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale-rs",
+    "name": "ssh-check-hold-delegate",
+    "filter": [
+
+    ],
+    "ssh_policies": [
+      {
+        "name": "db",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1"
+            ],
+            "ssh_users": {
+              "admin": "admin"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale-rs",
+    "name": "ssh-validation-host-dst",
+    "filter": [
+
+    ],
+    "policy_error": "host alias \"server\" is not supported as SSH destination"
   }
 ]

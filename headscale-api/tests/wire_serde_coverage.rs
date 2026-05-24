@@ -769,7 +769,7 @@ fn ssh_policy_serialises_tailcfg_shape() {
                 allow_remote_port_forwarding: true,
                 ..SshAction::default()
             },
-            ..SshRule::default()
+            accept_env: vec!["LANG".into(), "LC_*".into()],
         }],
     };
     let v = serde_json::to_value(policy).unwrap();
@@ -779,6 +779,7 @@ fn ssh_policy_serialises_tailcfg_shape() {
     assert!(rule["principals"][0].get("nodeIp").is_none());
     assert_eq!(rule["sshUsers"]["*"], "=");
     assert_eq!(rule["sshUsers"]["root"], "");
+    assert_eq!(rule["acceptEnv"], serde_json::json!(["LANG", "LC_*"]));
     assert_eq!(rule["action"]["accept"], true);
     assert_eq!(rule["action"]["sessionDuration"], 86_400_000_000_000_i64);
 }

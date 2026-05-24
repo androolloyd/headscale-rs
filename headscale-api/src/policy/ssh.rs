@@ -28,7 +28,7 @@ struct SshUserRule {
 ///
 /// Mirrors headscale-go v0.28.0's policy/v2 compiler for the currently
 /// supported alias set: users, groups, tags, `autogroup:member`,
-/// `autogroup:tagged`, `autogroup:self`, and host destinations.
+/// `autogroup:tagged`, and `autogroup:self`.
 pub fn compile_ssh_policy(
     doc: &PolicyDoc,
     nodes: &[SshPolicyNode],
@@ -72,15 +72,27 @@ pub fn compile_ssh_policy_with_base_url(
 
         if !self_dsts.is_empty() && is_untagged_user_owned(target_node) {
             let same_user = same_user_untagged_nodes(&source_nodes, target_node);
-            push_ssh_rules_for_nodes(&mut out, &same_user, &ssh_user_rules, &action);
+            push_ssh_rules_for_nodes(
+                &mut out,
+                &same_user,
+                &ssh_user_rules,
+                &action,
+                &rule.accept_env,
+            );
         }
 
         if !other_dsts.is_empty()
             && other_dsts
                 .iter()
-                .any(|dst| ssh_destination_matches(doc, dst, target_node))
+                .any(|dst| ssh_destination_matches(dst, target_node))
         {
-            push_ssh_rules_for_nodes(&mut out, &source_nodes, &ssh_user_rules, &action);
+            push_ssh_rules_for_nodes(
+                &mut out,
+                &source_nodes,
+                &ssh_user_rules,
+                &action,
+                &rule.accept_env,
+            );
         }
     }
 
@@ -120,7 +132,7 @@ pub fn ssh_check_period_for(
                 continue;
             }
 
-            if ssh_destination_matches(doc, dst, dst_node) {
+            if ssh_destination_matches(dst, dst_node) {
                 return Some(check_period_from_rule(rule.check_period.as_deref()));
             }
         }
@@ -134,10 +146,17 @@ fn push_ssh_rules_for_nodes(
     nodes: &[&SshPolicyNode],
     ssh_user_rules: &[SshUserRule],
     action: &SshAction,
+    accept_env: &[String],
 ) {
     for ssh_user_rule in ssh_user_rules {
         let principals = source_node_addrs_for_rule(nodes, ssh_user_rule);
-        push_ssh_rule(out, &principals, &ssh_user_rule.ssh_users, action);
+        push_ssh_rule(
+            out,
+            &principals,
+            &ssh_user_rule.ssh_users,
+            action,
+            accept_env,
+        );
     }
 }
 
@@ -146,6 +165,7 @@ fn push_ssh_rule(
     principals: &[String],
     ssh_users: &BTreeMap<String, String>,
     action: &SshAction,
+    accept_env: &[String],
 ) {
     if principals.is_empty() {
         return;
@@ -162,7 +182,7 @@ fn push_ssh_rule(
             .collect(),
         ssh_users: ssh_users.clone(),
         action: action.clone(),
-        ..SshRule::default()
+        accept_env: accept_env.to_vec(),
     });
 }
 
@@ -265,7 +285,7 @@ fn resolve_ssh_source_node<'a>(
     }
 }
 
-fn ssh_destination_matches(doc: &PolicyDoc, token: &str, node: &SshPolicyNode) -> bool {
+fn ssh_destination_matches(token: &str, node: &SshPolicyNode) -> bool {
     if token.contains('@') {
         return is_untagged_user_owned(node)
             && node
@@ -282,13 +302,6 @@ fn ssh_destination_matches(doc: &PolicyDoc, token: &str, node: &SshPolicyNode) -
             "tagged" => !node.tags.is_empty(),
             _ => false,
         };
-    }
-    let host = token.strip_prefix("host:").unwrap_or(token);
-    if let Some(prefix) = doc.hosts.get(host) {
-        return node
-            .addrs
-            .iter()
-            .any(|addr| prefix_contains_addr(prefix, addr));
     }
     false
 }
@@ -532,16 +545,6 @@ fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
         || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
 }
 
-fn prefix_contains_addr(prefix: &str, addr: &str) -> bool {
-    let Some(net) = headscale_api_acl::parse_cidr(prefix) else {
-        return false;
-    };
-    let Ok(addr) = addr.parse::<std::net::IpAddr>() else {
-        return false;
-    };
-    net.contains(&addr)
-}
-
 fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !out.contains(&value) {
         out.push(value);
@@ -703,15 +706,16 @@ mod tests {
     }
 
     #[test]
-    fn literal_star_user_maps_to_tailcfg_star_like_headscale_go() {
+    fn accept_env_compiles_to_tailcfg_rule_like_headscale_go() {
         let doc = parse_hujson_policy(
             r#"{
               "tagOwners": {"tag:server": ["alice@"]},
               "ssh": [{
                 "action": "accept",
+                "acceptEnv": ["LANG", "LC_*"],
                 "src": ["alice@"],
                 "dst": ["tag:server"],
-                "users": ["*"]
+                "users": ["root"]
               }]
             }"#,
         )
@@ -732,8 +736,8 @@ mod tests {
         ];
         let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
 
-        assert_eq!(pol.rules[0].ssh_users["*"], "*");
-        assert!(!pol.rules[0].ssh_users.contains_key("root"));
+        assert_eq!(pol.rules[0].accept_env, vec!["LANG", "LC_*"]);
+        assert_eq!(pol.rules[0].ssh_users["root"], "root");
     }
 
     #[test]

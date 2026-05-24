@@ -11,7 +11,9 @@ pub const HEADSCALE_GO_IMPORT_BASELINE: &str = "v0.28.0";
 
 const SUPPORTED_MAJOR: u64 = 0;
 const SUPPORTED_MINOR: u64 = 28;
+const CURRENT_UPSTREAM_MINOR: u64 = 29;
 const REQUIRED_GO_MIGRATION: &str = "202601121700-migrate-hostinfo-request-tags";
+const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str = "202602201200-clear-tagged-node-user-id";
 
 const GO_SHAPED_TABLES: &[&str] = &["users", "pre_auth_keys", "api_keys", "nodes", "policies"];
 
@@ -38,6 +40,7 @@ const KNOWN_GO_MIGRATIONS_THROUGH_V028: &[&str] = &[
     "202511122344-remove-newline-index",
     "202511131445-node-forced-tags-to-tags",
     REQUIRED_GO_MIGRATION,
+    CLEAR_TAGGED_NODE_USER_ID_MIGRATION,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,12 +130,15 @@ async fn check_database_versions_table(
         ))
     })?;
 
-    match (
-        stored.major == SUPPORTED_MAJOR,
-        stored.minor.cmp(&SUPPORTED_MINOR),
-    ) {
-        (true, std::cmp::Ordering::Equal) => {
+    match (stored.major == SUPPORTED_MAJOR, stored.minor) {
+        (true, SUPPORTED_MINOR) => {
             validate_versioned_go_shape(pool, stored_version).await?;
+            Ok(HeadscaleGoImportCompatibility::Versioned {
+                stored_version: stored_version.to_string(),
+            })
+        }
+        (true, CURRENT_UPSTREAM_MINOR) => {
+            validate_current_upstream_go_shape(pool, stored_version).await?;
             Ok(HeadscaleGoImportCompatibility::Versioned {
                 stored_version: stored_version.to_string(),
             })
@@ -141,11 +147,11 @@ async fn check_database_versions_table(
             "database was last used by headscale-go {stored_version}, but this crate only \
              imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible SQLite schemas"
         )),
-        (true, std::cmp::Ordering::Less) => unsupported(format!(
+        (true, minor) if minor < SUPPORTED_MINOR => unsupported(format!(
             "database was last used by headscale-go {stored_version}; upgrade it with \
              headscale-go {HEADSCALE_GO_IMPORT_BASELINE} before importing"
         )),
-        (true, std::cmp::Ordering::Greater) => unsupported(format!(
+        (true, _) => unsupported(format!(
             "database was last used by newer headscale-go {stored_version}; this crate only \
              imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible SQLite schemas"
         )),
@@ -188,10 +194,31 @@ async fn validate_versioned_go_shape(pool: &SqlitePool, stored_version: &str) ->
     Ok(())
 }
 
+async fn validate_current_upstream_go_shape(pool: &SqlitePool, stored_version: &str) -> Result<()> {
+    if !table_exists(pool, "migrations").await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but current headscale-go imports \
+             require migration history through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+
+    let migration_ids = go_migration_ids(pool).await?;
+    validate_known_go_migrations(&migration_ids)?;
+    if !migration_ids
+        .iter()
+        .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
+    {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+
+    Ok(())
+}
+
 async fn check_go_migrations_table(pool: &SqlitePool) -> Result<HeadscaleGoImportCompatibility> {
-    let migration_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM migrations ORDER BY id")
-        .fetch_all(pool)
-        .await?;
+    let migration_ids = go_migration_ids(pool).await?;
 
     if migration_ids.is_empty() {
         if has_any_go_shaped_table(pool).await? {
@@ -203,6 +230,35 @@ async fn check_go_migrations_table(pool: &SqlitePool) -> Result<HeadscaleGoImpor
         return Ok(HeadscaleGoImportCompatibility::Fresh);
     }
 
+    validate_known_go_migrations(&migration_ids)?;
+
+    if !migration_ids.iter().any(|id| id == REQUIRED_GO_MIGRATION) {
+        return unsupported(format!(
+            "headscale-go migrations table is not migrated through {REQUIRED_GO_MIGRATION}; \
+             upgrade with headscale-go {HEADSCALE_GO_IMPORT_BASELINE} before importing"
+        ));
+    }
+
+    let required_migration = if migration_ids
+        .iter()
+        .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
+    {
+        CLEAR_TAGGED_NODE_USER_ID_MIGRATION
+    } else {
+        REQUIRED_GO_MIGRATION
+    };
+    Ok(HeadscaleGoImportCompatibility::GoMigrations {
+        required_migration: required_migration.to_string(),
+    })
+}
+
+async fn go_migration_ids(pool: &SqlitePool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT id FROM migrations ORDER BY id")
+        .fetch_all(pool)
+        .await?)
+}
+
+fn validate_known_go_migrations(migration_ids: &[String]) -> Result<()> {
     let unknown: Vec<&str> = migration_ids
         .iter()
         .map(String::as_str)
@@ -216,16 +272,7 @@ async fn check_go_migrations_table(pool: &SqlitePool) -> Result<HeadscaleGoImpor
         ));
     }
 
-    if !migration_ids.iter().any(|id| id == REQUIRED_GO_MIGRATION) {
-        return unsupported(format!(
-            "headscale-go migrations table is not migrated through {REQUIRED_GO_MIGRATION}; \
-             upgrade with headscale-go {HEADSCALE_GO_IMPORT_BASELINE} before importing"
-        ));
-    }
-
-    Ok(HeadscaleGoImportCompatibility::GoMigrations {
-        required_migration: REQUIRED_GO_MIGRATION.to_string(),
-    })
+    Ok(())
 }
 
 async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {

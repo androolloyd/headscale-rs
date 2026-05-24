@@ -3015,7 +3015,7 @@ mod upstream_tests {
             .node
             .expect("registered node");
         assert_eq!(registered.id, 1);
-        assert_eq!(registered.user.as_ref().unwrap().id, 1);
+        assert!(registered.user.is_none());
         assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(registered.machine_key, format!("mkey:{machine_key_hex}"));
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
@@ -3047,7 +3047,7 @@ mod upstream_tests {
         let row = headscale_db::headscale_nodes::get_by_id(reopened.pool(), 1)
             .await
             .unwrap();
-        assert_eq!(row.user_id, Some(1));
+        assert_eq!(row.user_id, None);
         assert_eq!(row.auth_key_id, None);
         assert_eq!(
             row.register_method,
@@ -3117,7 +3117,7 @@ mod upstream_tests {
         assert_eq!(listed.nodes.len(), 1);
         let listed_node = &listed.nodes[0];
         assert_eq!(listed_node.id, 1);
-        assert_eq!(listed_node.user.as_ref().unwrap().id, 1);
+        assert!(listed_node.user.is_none());
         assert_eq!(listed_node.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(listed_node.machine_key, format!("mkey:{machine_key_hex}"));
         assert_eq!(listed_node.register_method, RegisterMethod::Cli as i32);

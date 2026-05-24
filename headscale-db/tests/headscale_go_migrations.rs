@@ -10,6 +10,8 @@ const LEGACY_ROUTES_MIGRATION: &str =
     include_str!("../migrations/20260522000010_migrate_legacy_routes.sql");
 const PREAUTH_USER_FK_MIGRATION: &str =
     include_str!("../migrations/20260523000012_preauth_user_fk.sql");
+const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str =
+    include_str!("../migrations/20260524000014_clear_tagged_node_user_id.sql");
 const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
 const HEADSCALE_GO_V0260_EMPTY_FIXTURE: &str =
@@ -452,6 +454,7 @@ async fn accepts_existing_headscale_go_v028_rows_and_marks_rust_managed_after_mi
         .await
         .expect("read imported node");
     assert_eq!(node.given_name, "alice-laptop");
+    assert_eq!(node.user_id, None);
     assert_eq!(node.tag_list(), vec!["tag:server"]);
     assert_eq!(node.approved_route_list(), vec!["10.0.0.0/24"]);
     assert_eq!(
@@ -536,7 +539,7 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     assert_eq!(node.machine_key, "mkey:modern");
     assert_eq!(node.node_key, "nodekey:modern");
     assert_eq!(node.disco_key, "discokey:modern");
-    assert_eq!(node.user_id, Some(1));
+    assert_eq!(node.user_id, None);
     assert_eq!(
         node.register_method,
         headscale_nodes::REGISTER_METHOD_AUTH_KEY
@@ -566,11 +569,10 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     assert_eq!(node.updated_at, 1_767_225_600);
     assert_eq!(node.deleted_at, None);
 
-    let linked_metadata: (String, String, String) = sqlx::query_as(
+    let linked_metadata: (String, String) = sqlx::query_as(
         "
-        SELECT users.name, pre_auth_keys.prefix, nodes.register_method
+        SELECT pre_auth_keys.prefix, nodes.register_method
         FROM nodes
-        JOIN users ON users.id = nodes.user_id
         JOIN pre_auth_keys ON pre_auth_keys.id = nodes.auth_key_id
         WHERE nodes.id = 1
         ",
@@ -581,7 +583,6 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     assert_eq!(
         linked_metadata,
         (
-            "alice".to_string(),
             "AuthPrefix01".to_string(),
             headscale_nodes::REGISTER_METHOD_AUTH_KEY.to_string()
         )
@@ -645,7 +646,76 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
 }
 
 #[tokio::test]
-async fn database_versions_v028_cannot_mask_unsupported_go_migrations() {
+async fn accepts_current_database_versions_with_tagged_node_migration_history() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.1', '2026-05-22 00:00:00');
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
+        INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current database_versions plus migrations");
+
+    let status = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check import compatibility");
+    assert_eq!(
+        status,
+        HeadscaleGoImportCompatibility::Versioned {
+            stored_version: "v0.29.0-beta.1".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn rejects_current_database_versions_without_tagged_node_migration_history() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.1', '2026-05-22 00:00:00');
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current database_versions without current migration");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("current Go DB without current migration marker is rejected");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("202602201200-clear-tagged-node-user-id")
+    );
+}
+
+#[tokio::test]
+async fn database_versions_v028_accepts_current_tagged_node_user_migration() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(
         "
@@ -660,25 +730,74 @@ async fn database_versions_v028_cannot_mask_unsupported_go_migrations() {
         CREATE TABLE migrations(id text, PRIMARY KEY(id));
         INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
         INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
-        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        CREATE TABLE users(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            name text,
+            display_name text,
+            email text,
+            provider_identifier text,
+            provider text,
+            profile_pic_url text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO users (id, name, display_name, email, provider, profile_pic_url, created_at, updated_at)
+            VALUES (1, 'alice', 'Alice', 'alice@example.com', 'cli', '', datetime('now'), datetime('now'));
+        CREATE TABLE nodes(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            machine_key text,
+            node_key text,
+            disco_key text,
+            endpoints text,
+            host_info text,
+            ipv4 text,
+            ipv6 text,
+            hostname text,
+            given_name text,
+            user_id integer,
+            register_method text,
+            tags text,
+            auth_key_id integer,
+            expiry datetime,
+            last_seen datetime,
+            approved_routes text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO nodes
+            (id, machine_key, node_key, disco_key, endpoints, host_info, hostname, given_name,
+             user_id, register_method, tags, approved_routes, created_at, updated_at)
+        VALUES
+            (1, 'mkey:tagged', 'nodekey:tagged', 'discokey:tagged', '[]', '{}',
+             'tagged', 'tagged', 1, 'authkey', '[\"tag:server\"]', '[]',
+             datetime('now'), datetime('now')),
+            (2, 'mkey:user', 'nodekey:user', 'discokey:user', '[]', '{}',
+             'user-node', 'user-node', 1, 'authkey', '[]', '[]',
+             datetime('now'), datetime('now'));
         ",
     )
     .execute(db.pool())
     .await
-    .expect("seed database_versions plus newer migration history");
+    .expect("seed database_versions plus current migration history");
 
-    let err = db
-        .migrate()
+    db.migrate()
         .await
-        .expect_err("version row must not hide unsupported migration history");
-    assert!(matches!(
-        err,
-        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
-    ));
-    assert!(
-        err.to_string()
-            .contains("202602201200-clear-tagged-node-user-id")
-    );
+        .expect("current tagged-node user migration is accepted");
+
+    let tagged_user_id: Option<i64> = sqlx::query_scalar("SELECT user_id FROM nodes WHERE id = 1")
+        .fetch_one(db.pool())
+        .await
+        .expect("query tagged node");
+    assert_eq!(tagged_user_id, None);
+
+    let user_node_user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM nodes WHERE id = 2")
+            .fetch_one(db.pool())
+            .await
+            .expect("query user-owned node");
+    assert_eq!(user_node_user_id, Some(1));
 }
 
 #[tokio::test]
@@ -749,6 +868,56 @@ async fn node_address_uniqueness_indexes_are_partial() {
 }
 
 #[tokio::test]
+async fn fresh_rust_migration_creates_empty_database_versions_table() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
+
+    assert!(sqlite_table_exists(&db, "database_versions").await);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM database_versions")
+        .fetch_one(db.pool())
+        .await
+        .expect("count database_versions");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn clear_tagged_node_user_id_migration_preserves_untagged_nodes() {
+    let db = Database::in_memory().await.expect("open db");
+    sqlx::raw_sql(
+        "
+        CREATE TABLE nodes(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            user_id integer,
+            tags text
+        );
+        INSERT INTO nodes (id, user_id, tags)
+        VALUES
+            (1, 10, '[\"tag:server\"]'),
+            (2, 11, '[]'),
+            (3, 12, ''),
+            (4, 13, NULL);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed nodes");
+
+    sqlx::raw_sql(CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
+        .execute(db.pool())
+        .await
+        .expect("run tagged ownership migration");
+
+    let rows: Vec<(i64, Option<i64>)> = sqlx::query_as("SELECT id, user_id FROM nodes ORDER BY id")
+        .fetch_all(db.pool())
+        .await
+        .expect("query nodes");
+    assert_eq!(
+        rows,
+        vec![(1, None), (2, Some(11)), (3, Some(12)), (4, Some(13))]
+    );
+}
+
+#[tokio::test]
 async fn rejects_database_versions_from_newer_headscale_go() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(
@@ -759,7 +928,7 @@ async fn rejects_database_versions_from_newer_headscale_go() {
             updated_at datetime
         );
         INSERT INTO database_versions (id, version, updated_at)
-            VALUES (1, 'v0.29.0-beta.1', '2026-05-22 00:00:00');
+            VALUES (1, 'v0.30.0', '2026-05-22 00:00:00');
         ",
     )
     .execute(db.pool())

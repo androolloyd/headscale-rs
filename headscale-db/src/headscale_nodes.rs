@@ -182,6 +182,10 @@ fn normalize_tags(mut tags: Vec<String>) -> Vec<String> {
     tags
 }
 
+fn tag_owned_user_id(user_id: Option<i64>, tags: &[String]) -> Option<i64> {
+    if tags.is_empty() { user_id } else { None }
+}
+
 fn expand_exit_routes(mut routes: Vec<String>) -> Vec<String> {
     let has_ipv4_exit = routes.iter().any(|route| route == "0.0.0.0/0");
     let has_ipv6_exit = routes.iter().any(|route| route == "::/0");
@@ -203,9 +207,11 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     }
 
     let now = now_unix();
+    let tags = normalize_tags(params.tags);
+    let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
-    let tags = json_array(&params.tags)?;
+    let tags = json_array(&tags)?;
     let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
 
     let id: i64 = sqlx::query_scalar(
@@ -264,7 +270,7 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     .bind(&params.ipv6)
     .bind(&params.hostname)
     .bind(&params.given_name)
-    .bind(params.user_id)
+    .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
@@ -349,9 +355,11 @@ pub async fn update_from_auth_path(
         return Err(DbError::General(NodeError::NameNotUnique.to_string()));
     }
 
+    let tags = normalize_tags(params.tags);
+    let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
-    let tags = json_array(&normalize_tags(params.tags))?;
+    let tags = json_array(&tags)?;
     let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
     let now = now_unix();
     let affected = sqlx::query(
@@ -387,7 +395,7 @@ pub async fn update_from_auth_path(
     .bind(&params.ipv6)
     .bind(&params.hostname)
     .bind(&params.given_name)
-    .bind(params.user_id)
+    .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
@@ -426,15 +434,21 @@ pub async fn list_by_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<Headsca
 }
 
 pub async fn set_tags(pool: &SqlitePool, id: i64, tags: Vec<String>) -> Result<HeadscaleNodeRow> {
-    let tags = json_array(&normalize_tags(tags))?;
+    let tags = normalize_tags(tags);
+    let clear_user_id = !tags.is_empty();
+    let tags = json_array(&tags)?;
     let now = now_unix();
     let affected = sqlx::query(
         "
         UPDATE nodes
-        SET tags = ?, updated_at = datetime(?, 'unixepoch')
+        SET
+            user_id = CASE WHEN ? THEN NULL ELSE user_id END,
+            tags = ?,
+            updated_at = datetime(?, 'unixepoch')
         WHERE id = ? AND deleted_at IS NULL
         ",
     )
+    .bind(clear_user_id)
     .bind(tags)
     .bind(now)
     .bind(id)
@@ -763,7 +777,7 @@ mod tests {
             given_name: "alice-laptop".into(),
             user_id: Some(user_id),
             register_method: REGISTER_METHOD_AUTH_KEY.into(),
-            tags: vec!["tag:dev".into()],
+            tags: Vec::new(),
             auth_key_id: Some(auth_key_id),
             expiry: Some(4_102_444_800),
             last_seen: Some(1_700_000_000),
@@ -793,7 +807,7 @@ mod tests {
             node.endpoint_list(),
             vec!["192.0.2.10:41641", "[2001:db8::1]:41641"]
         );
-        assert_eq!(node.tag_list(), vec!["tag:dev"]);
+        assert!(node.tag_list().is_empty());
         assert_eq!(node.approved_route_list(), vec!["10.0.0.0/24"]);
         assert_eq!(node.host_info_value()["Hostname"], "alice-laptop");
         assert_eq!(node.expiry, Some(4_102_444_800));
@@ -838,6 +852,27 @@ mod tests {
         assert_eq!(raw.get::<i64, _>("expiry"), 4_102_444_800);
         assert_eq!(raw.get::<i64, _>("last_seen"), 1_700_000_000);
         assert!(raw.get::<Option<String>, _>("deleted_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn tagged_nodes_are_tag_owned_without_user_id() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let mut params = node_params(user_id, auth_key_id);
+        params.tags = vec!["tag:dev".into()];
+
+        let node = create(db.pool(), params).await.unwrap();
+
+        assert_eq!(node.user_id, None);
+        assert_eq!(node.tag_list(), vec!["tag:dev"]);
+        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+        let raw_user_id: Option<i64> = sqlx::query_scalar("SELECT user_id FROM nodes WHERE id = ?")
+            .bind(node.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(raw_user_id, None);
     }
 
     #[tokio::test]
@@ -888,6 +923,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_from_auth_path_clears_user_id_for_tagged_node() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let original = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+        let mut params = node_params(user_id, auth_key_id);
+        params.node_key = "nodekey:tagged".into();
+        params.given_name = "alice-tagged".into();
+        params.tags = vec!["tag:server".into()];
+
+        let updated = update_from_auth_path(db.pool(), original.id, params)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.user_id, None);
+        assert_eq!(updated.tag_list(), vec!["tag:server"]);
+        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_from_auth_path_restores_user_id_when_tags_are_empty() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let mut original_params = node_params(user_id, auth_key_id);
+        original_params.tags = vec!["tag:server".into()];
+        let original = create(db.pool(), original_params).await.unwrap();
+        assert_eq!(original.user_id, None);
+
+        let mut params = node_params(user_id, auth_key_id);
+        params.node_key = "nodekey:user-owned".into();
+        params.tags = Vec::new();
+
+        let updated = update_from_auth_path(db.pool(), original.id, params)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.user_id, Some(user_id));
+        assert!(updated.tag_list().is_empty());
+        assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn list_get_update_and_destroy_round_trip() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;
@@ -919,6 +1000,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tagged.tag_list(), vec!["tag:dev", "tag:prod"]);
+        assert_eq!(tagged.user_id, None);
+        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
 
         let expired = set_expiry(db.pool(), node.id, Some(1_700_000_001))
             .await

@@ -2582,7 +2582,7 @@ mod tests {
         assert_eq!(wire.node_key_hex, created.id);
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
         assert_eq!(wire.hostname, "alice-laptop");
-        assert_eq!(wire.user, "alice");
+        assert_eq!(wire.user, "");
         assert_eq!(
             wire.ipv4.map(|ip| ip.to_string()).as_deref(),
             Some("100.64.0.9")
@@ -2872,7 +2872,7 @@ mod tests {
             .record;
         assert_eq!(created.node_id, 1);
         assert_eq!(created.id, node_key);
-        assert_eq!(created.user, "alice");
+        assert_eq!(created.user, "");
         assert_eq!(created.machine_key_hex, machine_key);
         assert_eq!(created.register_method, REGISTER_METHOD_AUTH_KEY);
         assert_eq!(created.tags, vec!["tag:server"]);
@@ -2883,7 +2883,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.id, 1);
-        assert_eq!(raw.user_id, Some(1));
+        assert_eq!(raw.user_id, None);
         assert_eq!(raw.node_key, format!("nodekey:{}", record.node_key_hex));
         assert_eq!(raw.machine_key, format!("mkey:{}", record.machine_key_hex));
         assert_eq!(raw.disco_key, "discokey:authkey-node");
@@ -2927,7 +2927,7 @@ mod tests {
         let hydrated = registry.get(&record.node_key_hex).unwrap();
         assert_eq!(hydrated.node_key_hex, record.node_key_hex);
         assert_eq!(hydrated.machine_key_hex, record.machine_key_hex);
-        assert_eq!(hydrated.user, "alice");
+        assert_eq!(hydrated.user, "");
         assert_eq!(hydrated.hostname, "authkey-node");
         assert_eq!(
             hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
@@ -3314,7 +3314,7 @@ mod tests {
         let stored = admin.get(&node_key).await.unwrap();
         assert_eq!(stored.node_id, 1);
         assert_eq!(stored.id, node_key);
-        assert_eq!(stored.user, "alice@example.com");
+        assert_eq!(stored.user, "");
         assert_eq!(stored.machine_key_hex, machine_key);
         assert_eq!(stored.register_method, REGISTER_METHOD_OIDC);
         assert_eq!(stored.expiry, None);
@@ -3326,7 +3326,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.id, 1);
-        assert_eq!(raw.user_id, Some(user.id as i64));
+        assert_eq!(raw.user_id, None);
         assert_eq!(raw.node_key, format!("nodekey:{}", pending.node_key_hex));
         assert_eq!(raw.machine_key, format!("mkey:{}", pending.machine_key_hex));
         assert_eq!(raw.disco_key, "discokey:oidc-node");
@@ -3373,7 +3373,7 @@ mod tests {
         let hydrated = registry.get(&pending.node_key_hex).unwrap();
         assert_eq!(hydrated.node_key_hex, pending.node_key_hex);
         assert_eq!(hydrated.machine_key_hex, pending.machine_key_hex);
-        assert_eq!(hydrated.user, "alice@example.com");
+        assert_eq!(hydrated.user, "");
         assert_eq!(hydrated.hostname, "oidc-node");
         assert_eq!(
             hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),

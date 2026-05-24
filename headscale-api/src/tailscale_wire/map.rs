@@ -1284,29 +1284,29 @@ async fn map_inner(
                                 &last_peer_state,
                                 &initial_peer_ids,
                                 &mapresponse_debug,
+                                PeerDeltaOptions::registry_change(),
                             )
                         }
                     }
                     () = &mut policy_changed => {
-                        // Policy edited via admin PUT — every parked
-                        // poller wakes and emits a refreshed
-                        // MapResponse with the new packet_filter.
-                        (
-                            rebuild_map_chunk(
-                                &machines,
-                                &policy,
-                                &self_node_key,
-                                &machines_derp_map,
-                                &dns,
-                                cap_version,
-                                taildrop_enabled,
-                                compression,
-                                "policy",
-                                &mapresponse_debug,
-                                MapResponseDebugType::Policy,
-                            ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                        // Policy edits can remove every visible peer.
+                        // Emit an incremental delta with PeersRemoved
+                        // rather than a full map whose empty Peers list
+                        // would serialize away and leave clients with
+                        // stale peers/routes.
+                        rebuild_peer_delta_chunk(
+                            &machines,
+                            &policy,
+                            &self_node_key,
+                            &dns,
+                            cap_version,
+                            taildrop_enabled,
+                            compression,
+                            last_self_node.as_ref(),
+                            &last_peer_state,
+                            &initial_peer_ids,
+                            &mapresponse_debug,
+                            PeerDeltaOptions::policy_change(),
                         )
                     }
                     () = &mut dns_changed => {
@@ -1491,6 +1491,7 @@ fn rebuild_peer_delta_chunk(
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
     mapresponse_debug: &MapResponseDebugStore,
+    options: PeerDeltaOptions,
 ) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
     if machines.get(self_node_key).is_none() {
         return (
@@ -1499,21 +1500,25 @@ fn rebuild_peer_delta_chunk(
             last_self_node.cloned(),
         );
     }
-    machines.record_mapresponse_generated("peers");
+    machines.record_mapresponse_generated(options.response_type);
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let allowed_peer_ids = incremental_allowed_peer_ids_for_snapshot(
-        policy,
-        &snapshot,
-        self_node_key,
-        &served_routes,
-        initial_peer_ids,
-        last_peer_state,
-    );
+    let allowed_peer_ids = if options.use_incremental_empty_acl_semantics {
+        incremental_allowed_peer_ids_for_snapshot(
+            policy,
+            &snapshot,
+            self_node_key,
+            &served_routes,
+            initial_peer_ids,
+            last_peer_state,
+        )
+    } else {
+        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes)
+    };
     let self_node_id = node_id_for_key(&snapshot, self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let current_self_node = self_map_node_from_snapshot(
@@ -1576,6 +1581,9 @@ fn rebuild_peer_delta_chunk(
         peers_changed: full_peers_changed,
         peers_removed,
         peers_changed_patch: peer_patches,
+        dns_config: options
+            .include_dns_config
+            .then(|| build_dns_for_snapshot(dns, policy, &snapshot, self_node_key)),
         user_profiles: user_profiles_for_snapshot(
             &snapshot,
             self_node_key,
@@ -1587,17 +1595,40 @@ fn rebuild_peer_delta_chunk(
         keep_alive: false,
         ..MapResponse::default()
     };
-    record_mapresponse_debug(
-        mapresponse_debug,
-        self_node_id,
-        MapResponseDebugType::Change,
-        &mr,
-    );
+    record_mapresponse_debug(mapresponse_debug, self_node_id, options.debug_type, &mr);
     (
         build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
         current_peer_state,
         current_self_node,
     )
+}
+
+#[derive(Clone, Copy)]
+struct PeerDeltaOptions {
+    response_type: &'static str,
+    debug_type: MapResponseDebugType,
+    include_dns_config: bool,
+    use_incremental_empty_acl_semantics: bool,
+}
+
+impl PeerDeltaOptions {
+    const fn registry_change() -> Self {
+        Self {
+            response_type: "peers",
+            debug_type: MapResponseDebugType::Change,
+            include_dns_config: false,
+            use_incremental_empty_acl_semantics: true,
+        }
+    }
+
+    const fn policy_change() -> Self {
+        Self {
+            response_type: "policy",
+            debug_type: MapResponseDebugType::Policy,
+            include_dns_config: true,
+            use_incremental_empty_acl_semantics: false,
+        }
+    }
 }
 
 fn build_ping_request_chunk(
@@ -3262,6 +3293,10 @@ mod tests {
         })
     }
 
+    fn changed_peer<'a>(mr: &'a MapResponse, name: &str) -> Option<&'a MapNode> {
+        mr.peers_changed.iter().find(|peer| peer.name == name)
+    }
+
     #[tokio::test]
     async fn map_response_steers_same_prefix_to_different_via_routers_per_viewer() {
         let (state, _dir) = fixture();
@@ -3327,8 +3362,19 @@ mod tests {
         });
 
         let updated = next_zstd_map_response(&mut body).await;
-        assert!(peer_route(&updated, "router-a", route).is_none());
-        assert!(peer_route(&updated, "router-b", route).is_some());
+        assert!(
+            updated.peers.is_empty(),
+            "policy wake should use incremental peer deltas"
+        );
+        assert!(updated.peers_removed.is_empty());
+        let router_a = changed_peer(&updated, "router-a").expect("router-a changed");
+        assert!(!router_a.allowed_ips.iter().any(|allowed| allowed == route));
+        let router_b = changed_peer(&updated, "router-b").expect("router-b changed");
+        assert!(router_b.allowed_ips.iter().any(|allowed| allowed == route));
+        assert!(
+            updated.dns_config.is_some(),
+            "policy deltas carry policy-derived DNSConfig updates"
+        );
     }
 
     #[tokio::test]
@@ -4056,6 +4102,76 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_policy_reload_to_empty_acl_emits_peers_removed() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&b));
+
+        let policy_update = tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let raw = r#"{"acls":[]}"#;
+                policy.set(crate::policy::parse_hujson_policy(raw).unwrap(), raw.into());
+            }
+        });
+
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        policy_update.await.expect("policy update task");
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert!(
+            mr.dns_config.is_some(),
+            "policy deltas should carry policy-derived DNSConfig updates"
+        );
+        assert!(
+            mr.packet_filters
+                .get("base")
+                .and_then(|rules| rules.as_ref())
+                .is_some_and(Vec::is_empty),
+            "loaded empty ACL should keep the base packet filter empty"
+        );
     }
 
     #[tokio::test(start_paused = true)]

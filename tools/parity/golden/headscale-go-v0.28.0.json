@@ -730,6 +730,14 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-validation-unknown-ipsets",
+    "filter": [
+
+    ],
+    "policy_error": "unknown field \"ipsets\""
+  },
+  {
+    "engine": "headscale",
     "name": "route-autoapprove-edge-matrix",
     "filter": [
       {

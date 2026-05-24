@@ -1101,9 +1101,6 @@ fn resolve_principal(
             .map(|prefix| resolve_prefix(prefix, nodes, true))
             .unwrap_or_default();
     }
-    if let Some(ipset) = token.strip_prefix("ipset:") {
-        return doc.ipsets.get(ipset).cloned().unwrap_or_default();
-    }
     if let Some(prefix) = doc.hosts.get(token) {
         return resolve_prefix(prefix, nodes, true);
     }

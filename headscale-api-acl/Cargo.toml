@@ -36,9 +36,8 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# Policy v2: CIDR / IPNet parsing for `hosts`, `ipsets`, and
-# `auto_approvers.routes` prefix matching. Same version as
-# `headscale-api`.
+# Policy v2: CIDR / IPNet parsing for `hosts` and
+# `auto_approvers.routes` prefix matching. Same version as `headscale-api`.
 ipnet = "2"
 # `policy_hash` returns SHA-256(canonical_bytes) — matches the
 # on-chain `acl_policy` field for an OctraVPN tailnet.

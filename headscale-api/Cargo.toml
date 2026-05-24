@@ -93,7 +93,7 @@ futures = { version = "0.3", optional = true }
 # when downstream callers disable `default-features`).
 hmac = "0.12"
 sha2 = "0.10"
-# Policy v2: CIDR / IPNet parsing for `hosts`, `ipsets`, and
+# Policy v2: CIDR / IPNet parsing for `hosts` and
 # `auto_approvers.routes` prefix matching. The `auto_approves_route`
 # logic compares an operator-declared CIDR key against a node's
 # advertised prefix using prefix-covers semantics — needs structured

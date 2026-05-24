@@ -1,0 +1,10 @@
+{
+  "name": "policy-validation-unknown-ipsets",
+  "expect_policy_error": "unknown field \"ipsets\"",
+  "policy": {
+    "ipsets": {
+      "office": ["10.0.0.0/8"]
+    },
+    "acls": []
+  }
+}

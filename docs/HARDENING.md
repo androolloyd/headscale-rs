@@ -101,8 +101,9 @@ stock-client smokes, not comments. The current fixtures cover:
 - Tailscale wire acronym fields such as `AuthURL`, `DNSConfig`, `DERPMap`,
   `AllowedIPs`, `DiscoKey`, and `ID`;
 - ACL default-deny, first-match-wins, group ordering canonicalisation, hosts,
-  auto-approvers, and HuJSON compatibility; Rust-extension node attrs/ipsets
-  are fuzzed but intentionally outside pinned v0.28 differential parity.
+  auto-approvers, and HuJSON compatibility. Headscale-go-compatible policy
+  rejects `ipsets`; Octra-specific multi-CIDR aliases should be expanded before
+  policy submission.
 - real Tailscale client auth-key, web registration, OIDC, lifecycle, tag, ACL
   visibility, MagicDNS enabled/custom/disabled, address-family, route
   primary/failover/withdrawal, DERP, and SSH smokes against both headscale-rs

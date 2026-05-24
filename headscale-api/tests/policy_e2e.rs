@@ -1,8 +1,7 @@
 //! End-to-end coverage for policy v2 surfaces. Headscale-go v0.28
 //! HuJSON fixtures use the strict upstream schema; Octra/internal
-//! extension surfaces such as `node_attrs` and `ipsets` are exercised
-//! through the TOML/internal parser instead of the public Go-shaped
-//! HuJSON parser.
+//! extension surfaces such as `node_attrs` are exercised through the
+//! TOML/internal parser instead of the public Go-shaped HuJSON parser.
 //!
 //! 1. The hujson parser accepts the upstream-shape document.
 //! 2. The PolicyDoc fields land in the right places (no silent drop).
@@ -54,24 +53,14 @@ fn nodeattrs_doc() -> PolicyDoc {
     .unwrap()
 }
 
-fn ipsets_doc() -> PolicyDoc {
+fn hosts_doc() -> PolicyDoc {
     PolicyDoc::from_toml(
         r#"
             version = 1
 
-            [ipsets]
-            office = ["10.0.0.0/8", "192.168.0.0/16"]
-            lab = ["172.16.0.0/12"]
-
             [hosts]
             monitor = "10.1.2.3/32"
             router = "10.0.0.1/32"
-
-            [[rules]]
-            action = "accept"
-            src = ["ipset:office"]
-            dst = ["ipset:lab"]
-            ports = ["*/*"]
 
             [[rules]]
             action = "accept"
@@ -145,20 +134,14 @@ fn parses_internal_nodeattrs_toml() {
 }
 
 // ---------------------------------------------------------------------------
-// internal ipsets — `ipsets` + `hosts` expansion via `expand_principal`
+// internal hosts — `hosts` expansion via `expand_principal`
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parses_internal_ipsets_toml() {
-    let doc = ipsets_doc();
-    assert_eq!(doc.ipsets["office"].len(), 2);
-    assert_eq!(doc.ipsets["lab"].len(), 1);
+fn parses_internal_hosts_toml() {
+    let doc = hosts_doc();
     assert_eq!(doc.hosts["monitor"], "10.1.2.3/32");
 
-    // expand_principal flattens these for the FilterRule layer.
-    let office = doc.expand_principal("ipset:office");
-    assert_eq!(office.len(), 2);
-    assert!(office.iter().any(|s| s == "10.0.0.0/8"));
     let host = doc.expand_principal("host:router");
     assert_eq!(host, vec!["10.0.0.1/32"]);
 }
@@ -297,13 +280,7 @@ fn expand_principal_drops_non_flattenable_autogroups() {
 }
 
 #[test]
-fn expand_principal_handles_unknown_ipset() {
-    let doc = ipsets_doc();
-    assert!(doc.expand_principal("ipset:does-not-exist").is_empty());
-}
-
-#[test]
 fn expand_principal_handles_unknown_host() {
-    let doc = ipsets_doc();
+    let doc = hosts_doc();
     assert!(doc.expand_principal("host:does-not-exist").is_empty());
 }

@@ -38,8 +38,9 @@ Scenarios may also include:
 
 Add scenarios here when closing parity gaps. Keep the default scenario set green;
 put known divergences in separate local files until the implementation catches up.
-The pinned headscale-go v0.28 policy surface does not expose `ipsets`; do not add
-`ipset:` scenarios to this harness until the Go side supports them.
+Headscale-go does not expose public `ipsets`; keep only negative rejection
+coverage for that field, and do not add positive `ipset:` alias scenarios unless
+a future upstream baseline adds the same surface.
 
 The default differential run also checks
 `tools/parity/golden/headscale-go-v0.28.0.json` after confirming the Rust and Go

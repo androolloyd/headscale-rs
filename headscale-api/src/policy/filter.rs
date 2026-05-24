@@ -33,8 +33,8 @@
 //! ## Static-vs-dynamic principal expansion
 //!
 //! `expand_principal` (on the canonical [`PolicyDoc`]) handles the
-//! SrcIP / DstIP token expansion for groups, hosts, ipsets, and the
-//! flattenable autogroups (`internet`, `member`). The
+//! SrcIP / DstIP token expansion for groups, hosts, and the flattenable
+//! autogroups (`internet`, `member`). The
 //! non-flattenable autogroups (`self`, `nonroot`, `tagged`, `tag:*`)
 //! need per-evaluation NodeView context and cannot be expressed in
 //! a static `FilterRule.SrcIPs` list — they're silently dropped from
@@ -291,9 +291,6 @@ fn resolve_principal(
             .get(host)
             .map(|prefix| resolve_prefix(prefix, nodes, true))
             .unwrap_or_default();
-    }
-    if let Some(ipset) = token.strip_prefix("ipset:") {
-        return doc.ipsets.get(ipset).cloned().unwrap_or_default();
     }
     if let Some(prefix) = doc.hosts.get(token) {
         return resolve_prefix(prefix, nodes, true);
@@ -717,7 +714,6 @@ mod tests {
             tags: BTreeMap::new(),
             tag_owners: BTreeMap::new(),
             hosts: BTreeMap::new(),
-            ipsets: BTreeMap::new(),
             auto_approvers: AutoApprovers::default(),
             node_attrs: Vec::new(),
             grants: Vec::new(),

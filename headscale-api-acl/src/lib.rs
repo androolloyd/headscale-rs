@@ -46,7 +46,7 @@
 //!
 //! The HuJSON parser is intentionally strict to match headscale-go:
 //! upstream top-level names only (`groups`, `hosts`, `tagOwners`,
-//! `acls`, `grants`, `nodeAttrs`, `ipsets`, `autoApprovers`, `ssh`),
+//! `acls`, `grants`, `nodeAttrs`, `autoApprovers`, `ssh`),
 //! ACL `action` must be `accept`, and ports live in `dst` entries
 //! (`host:22`), not a rule-level `ports` field. TOML keeps the
 //! canonical/internal field names used by OctraVPN (`rules`,
@@ -293,10 +293,6 @@ pub struct AclDoc {
     /// `host:<name>`.
     #[serde(default)]
     pub hosts: BTreeMap<String, String>,
-    /// `ipsets`: named multi-CIDR aliases. Referenced as
-    /// `ipset:<name>`.
-    #[serde(default)]
-    pub ipsets: BTreeMap<String, Vec<String>>,
     /// `auto_approvers` / `autoApprovers`.
     #[serde(default, alias = "autoApprovers")]
     pub auto_approvers: AutoApprovers,
@@ -444,7 +440,6 @@ impl AclDoc {
         for (k, v) in &self.hosts {
             hosts_sorted.insert(k.clone(), v.clone());
         }
-        let ipsets_sorted = sort_map_of_vecs(&self.ipsets);
         let auto_approver_routes = sort_map_of_vecs(&self.auto_approvers.routes);
         let mut exit_node_sorted = self.auto_approvers.exit_node.clone();
         exit_node_sorted.sort();
@@ -519,7 +514,6 @@ impl AclDoc {
             "tags": tags_sorted,
             "tag_owners": tag_owners_sorted,
             "hosts": hosts_sorted,
-            "ipsets": ipsets_sorted,
             "auto_approvers": {
                 "routes": auto_approver_routes,
                 "exit_node": exit_node_sorted,
@@ -664,7 +658,6 @@ fn go_policy_field_name(field: &str) -> Option<&'static str> {
         "acls" => Some("acls"),
         "grants" => Some("grants"),
         "nodeattrs" => Some("nodeAttrs"),
-        "ipsets" => Some("ipsets"),
         "autoapprovers" => Some("autoApprovers"),
         "randomizeclientport" => Some("randomizeClientPort"),
         "ssh" => Some("ssh"),
@@ -743,7 +736,6 @@ fn validate_go_acl_alias_syntax(alias: &str) -> Result<(), String> {
         || alias.starts_with("group:")
         || alias.starts_with("tag:")
         || alias.starts_with("autogroup:")
-        || alias.starts_with("ipset:")
         || parse_cidr(alias).is_some()
         || is_go_host_alias(alias)
     {
@@ -1117,12 +1109,8 @@ fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
     validate_group_ref(doc, alias, errs);
     validate_tag_ref(doc, alias, errs);
 
-    if let Some(ipset) = alias.strip_prefix("ipset:") {
-        if !doc.ipsets.contains_key(ipset) {
-            errs.push(format!(
-                "IP set {ipset:?} is not defined in the Policy, please define or remove the reference to it"
-            ));
-        }
+    if alias.starts_with("ipset:") {
+        errs.push("ipset aliases are not supported by headscale-go policy".to_string());
         return;
     }
 
@@ -1310,7 +1298,6 @@ fn is_bare_host_alias(alias: &str) -> bool {
         && !alias.starts_with("group:")
         && !alias.starts_with("tag:")
         && !alias.starts_with("autogroup:")
-        && !alias.starts_with("ipset:")
         && parse_cidr(alias).is_none()
 }
 
@@ -1547,7 +1534,7 @@ impl AclDoc {
     /// Evaluate using full NodeViews so the matcher can resolve
     /// `autogroup:self`, `autogroup:member`, `autogroup:nonroot`,
     /// `autogroup:tagged`, `autogroup:tag:<x>`, and
-    /// `host:` / `ipset:` aliases.
+    /// `host:` aliases.
     pub fn evaluate_with(
         &self,
         src: &NodeView<'_>,
@@ -1814,8 +1801,8 @@ impl AclDoc {
 
     /// Expand a principal token into the list of literal strings
     /// suitable for a static `tailcfg.FilterRule.SrcIPs` / `DstIPs`
-    /// entry. Group references expand to their members; `host:` /
-    /// `ipset:` resolve to their CIDR contents; the flattenable
+    /// entry. Group references expand to their members; `host:`
+    /// resolves to its CIDR contents; the flattenable
     /// autogroups (`internet`, `member`) collapse to the IPv4 and
     /// IPv6 default routes; the
     /// non-flattenable autogroups (`self`, `nonroot`, `tagged`,
@@ -1832,12 +1819,6 @@ impl AclDoc {
         if let Some(h) = token.strip_prefix("host:") {
             if let Some(cidr) = self.hosts.get(h) {
                 return vec![cidr.clone()];
-            }
-            return Vec::new();
-        }
-        if let Some(s) = token.strip_prefix("ipset:") {
-            if let Some(cidrs) = self.ipsets.get(s) {
-                return cidrs.clone();
             }
             return Vec::new();
         }
@@ -1915,12 +1896,6 @@ impl AclDoc {
         if let Some(host) = entry.strip_prefix("host:") {
             if let Some(cidr) = self.hosts.get(host) {
                 return addr_in_cidr(principal.addr, cidr);
-            }
-            return false;
-        }
-        if let Some(ipset) = entry.strip_prefix("ipset:") {
-            if let Some(cidrs) = self.ipsets.get(ipset) {
-                return cidrs.iter().any(|c| addr_in_cidr(principal.addr, c));
             }
             return false;
         }
@@ -2202,7 +2177,7 @@ fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
 }
 
 fn is_namespaced_alias_without_port(dst: &str) -> bool {
-    ["tag:", "group:", "autogroup:", "host:", "ipset:"]
+    ["tag:", "group:", "autogroup:", "host:"]
         .iter()
         .any(|prefix| dst.starts_with(prefix) && !dst[prefix.len()..].contains(':'))
 }
@@ -2935,7 +2910,7 @@ mod tests {
         );
     }
 
-    // --- Hosts / ipsets --------------------------------------------
+    // --- Hosts -----------------------------------------------------
 
     #[test]
     fn host_alias_matches_address_inside_cidr() {
@@ -2972,38 +2947,8 @@ mod tests {
     }
 
     #[test]
-    fn ipset_alias_matches_any_member_cidr() {
-        let mut doc = doc_with_rule(&["*"], &["ipset:office"]);
-        doc.ipsets.insert(
-            "office".into(),
-            vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
-        );
-        let s = NodeView::new("100.64.0.1");
-        let in1 = NodeView::new("10.1.2.3");
-        let in2 = NodeView::new("192.168.4.5");
-        let out = NodeView::new("172.16.0.1");
-        assert_eq!(
-            doc.evaluate_with(&s, &in1, PortRef::any()),
-            AclAction::Accept
-        );
-        assert_eq!(
-            doc.evaluate_with(&s, &in2, PortRef::any()),
-            AclAction::Accept
-        );
-        assert_eq!(doc.evaluate_with(&s, &out, PortRef::any()), AclAction::Deny);
-    }
-
-    #[test]
     fn unknown_host_alias_is_deny() {
         let doc = doc_with_rule(&["*"], &["host:noexist"]);
-        let s = NodeView::new("100.64.0.1");
-        let d = NodeView::new("10.0.0.5");
-        assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Deny);
-    }
-
-    #[test]
-    fn unknown_ipset_alias_is_deny() {
-        let doc = doc_with_rule(&["*"], &["ipset:noexist"]);
         let s = NodeView::new("100.64.0.1");
         let d = NodeView::new("10.0.0.5");
         assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Deny);
@@ -3366,19 +3311,6 @@ mod tests {
         assert_eq!(doc.auto_approvers.exit_node.len(), 2);
         assert_eq!(doc.auto_approvers.routes.len(), 2);
         assert!(doc.auto_approvers.routes.contains_key("10.0.0.0/8"));
-    }
-
-    #[test]
-    fn parses_ipsets_from_toml() {
-        let doc = AclDoc::from_toml(
-            r#"
-            version = 1
-            [ipsets]
-            office = ["10.0.0.0/8", "192.168.0.0/16"]
-        "#,
-        )
-        .unwrap();
-        assert_eq!(doc.ipsets["office"].len(), 2);
     }
 
     #[test]
@@ -3879,10 +3811,42 @@ mod tests {
     }
 
     #[test]
-    fn hujson_accepts_public_ipsets_and_node_attrs_app_maps() {
-        let doc = parse_hujson_policy(
+    fn hujson_rejects_public_ipsets_like_headscale_go() {
+        let err = parse_hujson_policy(
             r#"{
               "ipsets": {"office": ["10.0.0.0/8", "192.168.0.0/16"]},
+              "acls": []
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#"unknown field "ipsets""#));
+    }
+
+    #[test]
+    fn rejects_ipset_aliases_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["*"],
+                "dst": ["ipset:office:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("ipset:office"),
+            "ipset alias should be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn hujson_accepts_public_node_attrs_app_maps() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "hosts": {"office": "10.0.0.0/8"},
               "nodeAttrs": [{
                 "target": ["*"],
                 "attr": ["randomize-client-port"],
@@ -3893,21 +3857,20 @@ mod tests {
               }],
               "grants": [{
                 "src": ["*"],
-                "dst": ["ipset:office"],
+                "dst": ["office"],
                 "ip": ["udp:53"]
               }]
             }"#,
         )
         .unwrap();
 
-        assert_eq!(doc.ipsets["office"].len(), 2);
         assert_eq!(doc.node_attrs[0].attr, vec!["randomize-client-port"]);
         assert_eq!(
             doc.node_attrs[0].app["example.com/cap/connector"][0]["name"],
             "prod"
         );
         assert_eq!(doc.node_attrs[0].ip_pool, vec!["100.81.0.0/16"]);
-        assert_eq!(doc.rules[0].dst, vec!["ipset:office"]);
+        assert_eq!(doc.rules[0].dst, vec!["office"]);
         assert_eq!(doc.rules[0].ports, vec!["udp/53"]);
     }
 
@@ -3972,18 +3935,16 @@ mod tests {
             version: 1,
             ..Default::default()
         };
-        a.ipsets.insert(
-            "o".into(),
-            vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
-        );
+        a.auto_approvers
+            .routes
+            .insert("10.0.0.0/8".into(), vec!["tag:b".into(), "tag:a".into()]);
         let mut b = AclDoc {
             version: 1,
             ..Default::default()
         };
-        b.ipsets.insert(
-            "o".into(),
-            vec!["192.168.0.0/16".into(), "10.0.0.0/8".into()],
-        );
+        b.auto_approvers
+            .routes
+            .insert("10.0.0.0/8".into(), vec!["tag:a".into(), "tag:b".into()]);
         assert_eq!(a.policy_hash(), b.policy_hash());
     }
 

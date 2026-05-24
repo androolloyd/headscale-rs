@@ -496,14 +496,6 @@ fn resolve_alias_inner(
         resolve_host_or_prefix(doc, nodes, token, host, out);
         return;
     }
-    if let Some(ipset) = token.strip_prefix("ipset:") {
-        if let Some(prefixes) = doc.ipsets.get(ipset) {
-            for prefix in prefixes {
-                resolve_prefix(nodes, prefix, out);
-            }
-        }
-        return;
-    }
     resolve_host_or_prefix(doc, nodes, token, token, out);
 }
 
@@ -597,7 +589,7 @@ fn split_test_destination(dst: &str) -> Result<(&str, &str), String> {
 }
 
 fn is_namespaced_alias_without_port(dst: &str) -> bool {
-    ["tag:", "group:", "autogroup:", "host:", "ipset:"]
+    ["tag:", "group:", "autogroup:", "host:"]
         .iter()
         .any(|prefix| dst.starts_with(prefix) && !dst[prefix.len()..].contains(':'))
 }

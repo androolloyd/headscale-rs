@@ -42,7 +42,10 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
-use crate::config::{PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname};
+use crate::config::{
+    PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname,
+    validate_server_url_base_domain,
+};
 use crate::derp_config::DerpConfig;
 use headscale_db::Database;
 
@@ -783,6 +786,9 @@ fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
     }
     if cfg.tls.letsencrypt_enabled() {
         anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
+    }
+    if let (Some(server_url), Some(dns)) = (cfg.server_url.as_deref(), cfg.dns.as_ref()) {
+        validate_server_url_base_domain(server_url, &dns.base_domain)?;
     }
     Ok(())
 }
@@ -2868,6 +2874,25 @@ database:
         let err = validate_supported_runtime_config(&cfg).unwrap_err();
 
         assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+    }
+
+    #[test]
+    fn runtime_config_rejects_unsafe_server_url_dns_base_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.server_url = Some("https://login.tail.example.org".into());
+        cfg.dns = Some(DnsConfigSpec {
+            magic_dns: true,
+            override_local_dns: false,
+            base_domain: "tail.example.org".into(),
+            ..DnsConfigSpec::default()
+        });
+
+        let err = validate_supported_runtime_config(&cfg).unwrap_err();
+
+        assert!(format!("{err:#}").contains(
+            "server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable"
+        ));
     }
 
     #[test]

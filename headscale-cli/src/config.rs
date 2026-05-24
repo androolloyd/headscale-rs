@@ -849,6 +849,7 @@ impl CliConfig {
 
         if let Some(dns) = &self.dns {
             dns.validate().context("invalid DNS configuration")?;
+            validate_server_url_base_domain(server_url, &dns.base_domain)?;
         }
         if let Some(derp) = &self.derp {
             crate::derp_config::validate_static_derp_config(derp)
@@ -1239,6 +1240,72 @@ fn parse_server_url_parts(raw: &str) -> Result<ServerUrlParts> {
         .with_context(|| format!("server.server_url must include a valid port: {raw:?}"))?;
 
     Ok(ServerUrlParts { host, port })
+}
+
+pub(crate) fn validate_server_url_base_domain(server_url: &str, base_domain: &str) -> Result<()> {
+    let base_domain = base_domain.trim();
+    if base_domain.is_empty() {
+        return Ok(());
+    }
+
+    parse_server_url_parts(server_url)?;
+    let (server_host, server_hostname) = raw_server_url_hosts(server_url)
+        .with_context(|| format!("server.server_url must include a host: {server_url:?}"))?;
+
+    if server_hostname == base_domain {
+        bail!(
+            "server_url cannot use the same domain as base_domain in a way that could make the DERP and headscale server unreachable"
+        );
+    }
+
+    let server_domain_parts: Vec<_> = server_host.split('.').collect();
+    let base_domain_parts: Vec<_> = base_domain.split('.').collect();
+    if server_domain_parts.len() <= base_domain_parts.len() {
+        return Ok(());
+    }
+
+    for i in 0..base_domain_parts.len() {
+        if server_domain_parts[server_domain_parts.len() - i - 1]
+            != base_domain_parts[base_domain_parts.len() - i - 1]
+        {
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable"
+    );
+}
+
+fn raw_server_url_hosts(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+    let after_scheme = raw
+        .strip_prefix("http://")
+        .or_else(|| raw.strip_prefix("https://"))?;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.is_empty() {
+        return None;
+    }
+
+    let hostname = if let Some(without_open_bracket) = host.strip_prefix('[') {
+        without_open_bracket
+            .split_once(']')
+            .map(|(hostname, _)| hostname.to_string())?
+    } else if let Some((hostname, _)) = host.rsplit_once(':') {
+        hostname.to_string()
+    } else {
+        host.to_string()
+    };
+
+    if hostname.is_empty() {
+        return None;
+    }
+
+    Some((host.to_string(), hostname))
 }
 
 fn validate_socket_addr(value: &str, field: &str) -> Result<()> {
@@ -3005,6 +3072,60 @@ enabled = true
         let err = config.validate_for_configtest().unwrap_err();
 
         assert!(format!("{err:#}").contains("server.server_url must be a valid URL"));
+    }
+
+    #[test]
+    fn configtest_rejects_server_url_matching_dns_base_domain() {
+        let source = r#"
+server_url = "https://tail.example.org"
+
+[dns]
+magic_dns = true
+override_local_dns = false
+base_domain = "tail.example.org"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains(
+            "server_url cannot use the same domain as base_domain in a way that could make the DERP and headscale server unreachable"
+        ));
+    }
+
+    #[test]
+    fn configtest_rejects_server_url_under_dns_base_domain() {
+        let source = r#"
+server_url = "https://login.tail.example.org"
+
+[dns]
+magic_dns = true
+override_local_dns = false
+base_domain = "tail.example.org"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains(
+            "server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable"
+        ));
+    }
+
+    #[test]
+    fn configtest_matches_upstream_explicit_port_suffix_boundary() {
+        let source = r#"
+server_url = "https://login.tail.example.org:443"
+
+[dns]
+magic_dns = true
+override_local_dns = false
+base_domain = "tail.example.org"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+
+        config.validate_for_configtest().unwrap();
     }
 
     #[test]

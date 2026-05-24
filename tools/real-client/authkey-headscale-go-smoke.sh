@@ -66,6 +66,7 @@ expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
+client_user_emails_csv="${REAL_CLIENT_CLIENT_USER_EMAILS:-}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
 ssh_user="${REAL_CLIENT_SSH_USER:-}"
@@ -599,6 +600,23 @@ if [[ -n "${client_users_csv}" ]]; then
 else
   for ((idx = 0; idx < client_count; idx++)); do
     client_users+=("alice")
+  done
+fi
+client_user_emails=()
+if [[ -n "${client_user_emails_csv}" ]]; then
+  IFS=',' read -r -a client_user_emails <<<"${client_user_emails_csv}"
+  if ((${#client_user_emails[@]} != client_count)); then
+    echo "REAL_CLIENT_CLIENT_USER_EMAILS must contain ${client_count} comma-separated values, got ${client_user_emails_csv}" >&2
+    exit 2
+  fi
+  for idx in "${!client_user_emails[@]}"; do
+    if [[ "${client_user_emails[$idx]}" == "-" ]]; then
+      client_user_emails[$idx]=""
+    fi
+  done
+else
+  for ((idx = 0; idx < client_count; idx++)); do
+    client_user_emails+=("")
   done
 fi
 expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
@@ -1349,6 +1367,7 @@ fi
 
 user_names=()
 user_ids=()
+user_emails=()
 
 lookup_user_id() {
   local target="$1"
@@ -1363,10 +1382,18 @@ lookup_user_id() {
 }
 
 echo "::group::create users"
-for user in "${client_users[@]}"; do
+for idx in "${!client_users[@]}"; do
+  user="${client_users[$idx]}"
+  user_email="${client_user_emails[$idx]}"
   already_created=0
-  for existing in "${user_names[@]}"; do
+  for existing_idx in "${!user_names[@]}"; do
+    existing="${user_names[$existing_idx]}"
     if [[ "${existing}" == "${user}" ]]; then
+      existing_email="${user_emails[$existing_idx]}"
+      if [[ -n "${user_email}" && "${existing_email}" != "${user_email}" ]]; then
+        echo "REAL_CLIENT_CLIENT_USER_EMAILS supplies conflicting emails for user ${user}: ${existing_email} vs ${user_email}" >&2
+        exit 2
+      fi
       already_created=1
       break
     fi
@@ -1375,10 +1402,15 @@ for user in "${client_users[@]}"; do
     continue
   fi
   user_path="${work_dir}/user-${user}.json"
-  "${headscale_bin}" -c "${config_path}" -o json users create "${user}" >"${user_path}"
+  user_create_args=("${headscale_bin}" -c "${config_path}" -o json users create "${user}")
+  if [[ -n "${user_email}" ]]; then
+    user_create_args+=(--email "${user_email}")
+  fi
+  "${user_create_args[@]}" >"${user_path}"
   user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${user_path}")"
   user_names+=("${user}")
   user_ids+=("${user_id}")
+  user_emails+=("${user_email}")
   echo "created user ${user} ${user_id}"
 done
 echo "::endgroup::"

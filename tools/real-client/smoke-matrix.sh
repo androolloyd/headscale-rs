@@ -112,6 +112,7 @@ smoke_ids=(
   route-health-mixed-exit
   derp-private
   ssh
+  ssh-localpart
 )
 
 smoke_areas=(
@@ -159,6 +160,7 @@ smoke_areas=(
   routes
   routes
   derp
+  ssh
   ssh
 )
 
@@ -208,6 +210,7 @@ smoke_rust_scripts=(
   tools/real-client/route-health-mixed-exit-smoke.sh
   tools/real-client/derp-private-smoke.sh
   tools/real-client/ssh-smoke.sh
+  tools/real-client/ssh-localpart-smoke.sh
 )
 
 smoke_go_scripts=(
@@ -256,6 +259,7 @@ smoke_go_scripts=(
   tools/real-client/route-health-mixed-exit-headscale-go-smoke.sh
   tools/real-client/derp-private-headscale-go-smoke.sh
   tools/real-client/ssh-headscale-go-smoke.sh
+  tools/real-client/ssh-localpart-headscale-go-smoke.sh
 )
 
 smoke_assertions=(
@@ -304,6 +308,7 @@ smoke_assertions=(
   "current-head route-health ignores exit-only routes during HA failover"
   "private DERP relay, STUN, verify-client admission, and DERP map metadata"
   "Tailscale SSH allow, deny, and ACL timeout"
+  "current-head Tailscale SSH localpart login users from profile emails"
 )
 
 assert_matrix_lengths() {

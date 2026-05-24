@@ -80,6 +80,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
         "users",
         "nodes",
         "preauthkeys",
+        "auth",
         "apikeys",
         "policy",
         "debug",
@@ -92,13 +93,7 @@ fn top_level_help_exposes_upstream_operator_commands() {
     ] {
         assert!(out.contains(command), "missing {command} in help:\n{out}");
     }
-    for hidden in [
-        "  server",
-        "  auth ",
-        "  tailnet",
-        "  status",
-        "  init-config",
-    ] {
+    for hidden in ["  server", "  tailnet", "  status", "  init-config"] {
         assert!(!out.contains(hidden), "unexpected {hidden} in help:\n{out}");
     }
 }
@@ -317,6 +312,47 @@ database:
 }
 
 #[test]
+fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let db_path = cwd.path().join("should-not-exist.sqlite");
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "http://127.0.0.1:8080"
+listen_addr: "127.0.0.1:0"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: postgres
+  sqlite:
+    path: "{}"
+"#,
+            db_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in(&["serve"], cwd.path(), home.path());
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("headscale-rs server currently supports SQLite only"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(
+        !db_path.exists(),
+        "unsupported postgres serve path should fail before opening SQLite at {}",
+        db_path.display()
+    );
+}
+
+#[test]
 fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["users", "list", "--help"],
@@ -343,8 +379,20 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/policy_check_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["auth", "--help"],
+        include_str!("snapshots/auth_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["auth", "register", "--help"],
+        include_str!("snapshots/auth_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["auth", "approve", "--help"],
         include_str!("snapshots/auth_approve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["auth", "reject", "--help"],
+        include_str!("snapshots/auth_reject_help.stdout"),
     );
     assert_stdout_snapshot(
         &["tailnet", "status", "--help"],

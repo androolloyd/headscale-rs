@@ -126,7 +126,6 @@ enum Commands {
         action: PreauthKeysCmd,
     },
     /// Manage node authentication and approval.
-    #[command(hide = true)]
     Auth {
         #[command(subcommand)]
         action: AuthCmd,

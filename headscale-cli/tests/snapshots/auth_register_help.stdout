@@ -1,0 +1,11 @@
+Register a node to your network
+
+Usage: headscale auth register [OPTIONS] --user <USER> --auth-id <AUTH_ID>
+
+Options:
+  -c, --config <CONFIG>    config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -u, --user <USER>        User
+      --auth-id <AUTH_ID>  Auth ID
+  -o, --output <OUTPUT>    Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force              Disable prompts and forces the execution
+  -h, --help               Print help

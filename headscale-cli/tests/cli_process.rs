@@ -426,6 +426,10 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/preauthkeys_expire_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["preauthkeys", "delete", "--help"],
+        include_str!("snapshots/preauthkeys_delete_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["apikeys", "delete", "--help"],
         include_str!("snapshots/apikeys_delete_help.stdout"),
     );
@@ -462,6 +466,10 @@ fn implemented_admin_command_help_matches_snapshots() {
 #[test]
 fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
+        &["serve", "--help"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["health", "--help"],
         include_str!("snapshots/health_help.stdout"),
     );
@@ -476,6 +484,22 @@ fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["dumpConfig", "--help"],
         include_str!("snapshots/dump_config_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["generate", "private-key", "--help"],
+        include_str!("snapshots/generate_private_key_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["mockoidc", "--help"],
+        include_str!("snapshots/mockoidc_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["completion", "--help"],
+        include_str!("snapshots/completion_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["completion", "zsh", "--help"],
+        include_str!("snapshots/completion_zsh_help.stdout"),
     );
 }
 

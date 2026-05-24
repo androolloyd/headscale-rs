@@ -1,0 +1,9 @@
+Runs a mock OIDC server for testing
+
+Usage: headscale mockoidc [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force            Disable prompts and forces the execution
+  -h, --help             Print help

@@ -1,0 +1,13 @@
+Launches the headscale server
+
+Usage: headscale serve [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>              config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
+  -l, --listen <LISTEN>              Listen address for the API [default: 0.0.0.0:8080]
+  -d, --db-path <DB_PATH>            Database path [default: /var/lib/headscale/db.sqlite]
+      --mesh-cidr <MESH_CIDR>        Mesh network CIDR [default: 100.64.0.0/10]
+      --mesh-cidr-v6 <MESH_CIDR_V6>  Optional IPv6 mesh network CIDR
+  -o, --output <OUTPUT>              Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+      --force                        Disable prompts and forces the execution
+  -h, --help                         Print help

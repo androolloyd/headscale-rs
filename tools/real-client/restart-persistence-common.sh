@@ -17,9 +17,11 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"
+route_b="${REAL_CLIENT_RESTART_ROUTE_B:-${REAL_CLIENT_ROUTE_B:-10.88.0.0/24}}"
 initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
+route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
@@ -34,6 +36,19 @@ case "${route_via_restart}" in
     ;;
   *)
     echo "REAL_CLIENT_RESTART_ROUTE_VIA must be true or false, got ${route_via_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_via_multiprefix_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_via_multiprefix_restart_flag=1
+    route_via_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_via_multiprefix_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX must be true or false, got ${route_via_multiprefix_restart}" >&2
     exit 2
     ;;
 esac
@@ -66,6 +81,11 @@ if ((route_health_restart_flag)); then
     echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS must be less than REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS" >&2
     exit 2
   fi
+fi
+if ((route_via_multiprefix_restart_flag)); then
+  advertised_routes="${route},${route_b}"
+else
+  advertised_routes="${route}"
 fi
 if ((route_via_restart_flag || route_health_restart_flag)); then
   router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router-a}"
@@ -237,6 +257,54 @@ EOF
 
 write_policy() {
   if ((route_via_restart_flag)); then
+    if ((route_via_multiprefix_restart_flag)); then
+      cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-a": ["router@"],
+    "tag:router-b": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-a", "tag:router-b"],
+      "${route_b}": ["tag:router-a", "tag:router-b"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-a", "tag:router-b"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-a"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route_b}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route_b}"],
+      "ip": ["*"],
+      "via": ["tag:router-a"]
+    }
+  ]
+}
+EOF
+      return
+    fi
     cat >"${work_dir}/policy.hujson" <<EOF
 {
   "tagOwners": {
@@ -575,7 +643,7 @@ login_router_with_authkey() {
     --timeout=60s \
     --accept-routes=false \
     --accept-dns=false \
-    "--advertise-routes=${route}" \
+    "--advertise-routes=${advertised_routes}" \
     "--authkey=${key}" \
     >"${work_dir}/${client_name}.tailscale-up.stdout" \
     2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
@@ -663,7 +731,7 @@ approve_router_routes() {
   local router_id
   router_id="$(load_node_id "${hostname}")"
   echo "::group::approve router routes ${hostname}"
-  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${route}" \
+  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${advertised_routes}" \
     >"${work_dir}/approved-routes-${router_id}.json"
   echo "::endgroup::"
 }
@@ -723,7 +791,7 @@ assert_route_via_persisted_nodes() {
   local nodes_path="${work_dir}/nodes-${label}.json"
   headscale_cmd -o json nodes list >"${nodes_path}"
   ruby -rjson -e '
-    route = ARGV.fetch(1)
+    routes = ARGV.fetch(1).split(",").map(&:to_s)
     router_a_name = ARGV.fetch(2)
     router_b_name = ARGV.fetch(3)
     alice_name = ARGV.fetch(4)
@@ -740,12 +808,14 @@ assert_route_via_persisted_nodes() {
         abort("missing node #{name.inspect} in #{nodes.inspect}")
     end
 
-    def assert_router(node, route, tag)
+    def assert_router(node, routes, tag)
       available = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
       approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
       tags = Array(node["tags"] || node["Tags"]).map(&:to_s).sort
-      abort("expected router available route #{route.inspect}, got #{available.inspect}") unless available.include?(route)
-      abort("expected router approved route #{route.inspect}, got #{approved.inspect}") unless approved.include?(route)
+      routes.each do |route|
+        abort("expected router available route #{route.inspect}, got #{available.inspect}") unless available.include?(route)
+        abort("expected router approved route #{route.inspect}, got #{approved.inspect}") unless approved.include?(route)
+      end
       abort("expected router tag #{tag.inspect}, got #{tags.inspect}") unless tags.include?(tag)
     end
 
@@ -753,17 +823,17 @@ assert_route_via_persisted_nodes() {
     router_b = find_node(nodes, router_b_name)
     alice = find_node(nodes, alice_name)
     bob = find_node(nodes, bob_name)
-    assert_router(router_a, route, "tag:router-a")
-    assert_router(router_b, route, "tag:router-b")
+    assert_router(router_a, routes, "tag:router-a")
+    assert_router(router_b, routes, "tag:router-b")
 
     puts JSON.pretty_generate({
       router_a: router_a,
       router_b: router_b,
       alice: alice,
       bob: bob,
-      route: route,
+      routes: routes,
     })
-  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
+  ' "${nodes_path}" "${advertised_routes}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
 }
 
 assert_route_health_persisted_nodes() {
@@ -1155,21 +1225,43 @@ peer_netmap_route_owner_matches() {
     ' "${netmap_path}" "${peer_name}" "${expected_route}" >"${output_path}"
 }
 
+wait_for_route_via_owner() {
+  local label="$1"
+  local client_name="$2"
+  local peer_name="$3"
+  local expected_route="$4"
+  local output_path="$5"
+  wait_for "${label}" \
+    "peer_netmap_route_owner_matches '${client_name}' '${peer_name}' '${expected_route}' '${output_path}'" || {
+      cat "${output_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+}
+
 wait_for_route_via_peer_maps() {
   local label="$1"
   local safe_label="${label//[^a-zA-Z0-9_-]/-}"
-  wait_for "${label} alice route via router-a" \
-    "peer_netmap_route_owner_matches '${observer_name}' '${router_name}' '${route}' '${work_dir}/route-via-${safe_label}-alice.json'" || {
-      cat "${work_dir}/route-via-${safe_label}-alice.json.err" >&2 || true
-      dump_debug
-      return 1
-    }
-  wait_for "${label} bob route via router-b" \
-    "peer_netmap_route_owner_matches '${bob_name}' '${router_b_name}' '${route}' '${work_dir}/route-via-${safe_label}-bob.json'" || {
-      cat "${work_dir}/route-via-${safe_label}-bob.json.err" >&2 || true
-      dump_debug
-      return 1
-    }
+  if ((route_via_multiprefix_restart_flag)); then
+    wait_for_route_via_owner "${label} alice route ${route} via router-a" \
+      "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-a.json"
+    wait_for_route_via_owner "${label} alice route ${route_b} via router-b" \
+      "${observer_name}" "${router_b_name}" "${route_b}" "${work_dir}/route-via-${safe_label}-alice-b.json"
+    wait_for_route_via_owner "${label} bob route ${route} via router-b" \
+      "${bob_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-bob-a.json"
+    wait_for_route_via_owner "${label} bob route ${route_b} via router-a" \
+      "${bob_name}" "${router_name}" "${route_b}" "${work_dir}/route-via-${safe_label}-bob-b.json"
+    cat "${work_dir}/route-via-${safe_label}-alice-a.json"
+    cat "${work_dir}/route-via-${safe_label}-alice-b.json"
+    cat "${work_dir}/route-via-${safe_label}-bob-a.json"
+    cat "${work_dir}/route-via-${safe_label}-bob-b.json"
+    return
+  fi
+
+  wait_for_route_via_owner "${label} alice route via router-a" \
+    "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice.json"
+  wait_for_route_via_owner "${label} bob route via router-b" \
+    "${bob_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-bob.json"
   cat "${work_dir}/route-via-${safe_label}-alice.json"
   cat "${work_dir}/route-via-${safe_label}-bob.json"
 }

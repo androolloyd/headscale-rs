@@ -112,6 +112,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
+| Routes | `route-via-multiprefix-restart` | `route-via-multiprefix-restart-smoke.sh` | `route-via-multiprefix-restart-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` restart persistence |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
 | Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
@@ -605,6 +606,8 @@ asserts opposite per-prefix steering for two users:
 ```sh
 tools/real-client/route-via-multiprefix-smoke.sh
 tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
+tools/real-client/route-via-multiprefix-restart-smoke.sh
+tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited

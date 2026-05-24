@@ -63,10 +63,18 @@ use crate::tailscale_wire::{
 };
 
 use super::auth::now_unix;
-use super::users::UserAdmin;
+use super::users::{UserAdmin, UserRecord};
 
 const REGISTER_METHOD_AUTH_KEY: i32 = 1;
 const REGISTER_METHOD_OIDC: i32 = 3;
+
+#[derive(Clone, Debug, Default)]
+struct UserIdentity {
+    id: Option<u64>,
+    login_name: String,
+    display_name: String,
+    profile_pic_url: String,
+}
 
 /// Admin-side view of one registered machine.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -724,22 +732,38 @@ impl PersistentMachineAdmin {
         Ok(())
     }
 
-    async fn user_name_for_row(
+    async fn user_identity_for_row(
         &self,
         row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
-    ) -> String {
+    ) -> UserIdentity {
         let Some(user_id) = row.user_id else {
-            return String::new();
+            return UserIdentity::default();
         };
+        let fallback_id = u64::try_from(user_id).ok();
         let Some(users) = &self.users else {
-            return user_id.to_string();
+            let id = user_id.to_string();
+            return UserIdentity {
+                id: fallback_id,
+                login_name: id.clone(),
+                display_name: id,
+                profile_pic_url: String::new(),
+            };
         };
-        match u64::try_from(user_id).ok().map(|id| users.get_by_id(id)) {
-            Some(fut) => match fut.await {
-                Ok(Some(user)) => user_login_name(&user),
-                Ok(None) | Err(_) => user_id.to_string(),
-            },
-            None => user_id.to_string(),
+        match fallback_id.map(|id| users.get_by_id(id)) {
+            Some(fut) => {
+                if let Ok(Some(user)) = fut.await {
+                    user_identity_from_record(&user)
+                } else {
+                    let id = user_id.to_string();
+                    UserIdentity {
+                        id: fallback_id,
+                        login_name: id.clone(),
+                        display_name: id,
+                        profile_pic_url: String::new(),
+                    }
+                }
+            }
+            None => UserIdentity::default(),
         }
     }
 
@@ -766,11 +790,12 @@ impl PersistentMachineAdmin {
                 .unwrap_or(false);
             Some((online, record.last_seen.timestamp().max(0) as u64))
         });
+        let user_identity = self.user_identity_for_row(&row).await;
         MachineAdminRecord {
             node_id: u64::try_from(row.id).unwrap_or_default(),
             id: node_key_hex,
             name,
-            user: self.user_name_for_row(&row).await,
+            user: user_identity.login_name,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
             online: live.map_or(!expired, |(online, _)| online && !expired),
@@ -839,17 +864,24 @@ impl PersistentMachineAdmin {
         } else {
             row.given_name.clone()
         };
+        let user_identity = self.user_identity_for_row(&row).await;
         let mut record = MachineRecord::new_at_with_addresses(
             created_at,
             node_key.clone(),
             key_without_prefix("mkey:", &row.machine_key),
-            self.user_name_for_row(&row).await,
+            user_identity.login_name.clone(),
             name.clone(),
             ipv4,
             ipv6,
             false,
         );
         record.node_id = u64::try_from(row.id).ok();
+        record.set_user_identity(
+            user_identity.id,
+            user_identity.login_name,
+            user_identity.display_name,
+            user_identity.profile_pic_url,
+        );
         record.replace_host_info(host_info_from_value(&host_info));
         record.os = os_from_host_info(&host_info);
         record.os_version = version_from_host_info(&host_info);
@@ -891,10 +923,16 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         user: &crate::oidc::OidcStoredUser,
         node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
-        let pending = self
+        let mut pending = self
             .registration_cache
             .get(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        pending.set_user_identity(
+            Some(user.id),
+            oidc_user_name(user),
+            user.display_name.clone(),
+            user.profile_pic_url.clone(),
+        );
         let mut record = machine_admin_record_from_wire(&pending);
         record.user = oidc_user_name(user);
         let effective_expiry = if pending.forced_tags.is_empty() {
@@ -956,8 +994,16 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             .create_or_update_auth_key_path(record, policy, auth_key_id)
             .await
             .map_err(|err| err.to_string())?;
-        let record = canonical_wire_record_for_auth_path(&result.record, Some(&wire_record))
+        let row = self
+            .row_by_slug(&result.record.id)
+            .await
             .map_err(|err| err.to_string())?;
+        let mut record = self
+            .row_to_wire_record(row)
+            .await
+            .map_err(|err| err.to_string())?;
+        record.disco_key = wire_record.disco_key;
+        record.endpoints = wire_record.endpoints;
         Ok(PersistedMachineRegistration {
             record,
             replaced_node_key_hex: result.replaced_node_key_hex,
@@ -1717,6 +1763,20 @@ fn user_login_name(user: &crate::admin::users::UserRecord) -> String {
         user.provider_id.clone()
     } else {
         user.id.to_string()
+    }
+}
+
+fn user_identity_from_record(user: &UserRecord) -> UserIdentity {
+    let login_name = user_login_name(user);
+    UserIdentity {
+        id: Some(user.id),
+        display_name: if user.display_name.is_empty() {
+            login_name.clone()
+        } else {
+            user.display_name.clone()
+        },
+        login_name,
+        profile_pic_url: user.profile_pic_url.clone(),
     }
 }
 
@@ -2886,6 +2946,50 @@ mod tests {
         drop(reopened_admin);
         drop(reopened_users);
         reopened_db.close().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_auth_key_registration_returns_upstream_user_identity() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let preauth = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let record = MachineRecord::new_at(
+            Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            "ca".repeat(32),
+            "cb".repeat(32),
+            "alice".into(),
+            "authkey-identity-node".into(),
+            Ipv4Addr::new(100, 64, 0, 99),
+            false,
+        );
+
+        let saved = admin
+            .create_or_update_auth_key_registration(
+                record,
+                &PolicyStore::new(),
+                Some(preauth.row.id),
+            )
+            .await
+            .unwrap()
+            .record;
+
+        assert_eq!(saved.user_id, Some(1));
+        assert_eq!(saved.tailscale_user_id(), 1);
+        let profile = saved.tailscale_user_profile();
+        assert_eq!(profile.id, 1);
+        assert_eq!(profile.login_name, "alice");
+        assert_eq!(profile.display_name, "alice");
+        assert_eq!(profile.profile_pic_url, "");
     }
 
     #[tokio::test]

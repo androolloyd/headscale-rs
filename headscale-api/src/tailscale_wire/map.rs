@@ -2337,6 +2337,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_response_user_profiles_prefer_owner_user_metadata() {
+        let (state, _dir) = fixture();
+        let alice = "aa".repeat(32);
+        let mut record = policy_record(&alice, "alice-node", 10, "alice@example.com", Vec::new());
+        record.set_user_identity(
+            Some(42),
+            "alice@example.com".into(),
+            "Alice Example".into(),
+            "https://example.com/alice.png".into(),
+        );
+        state.machines.upsert(alice.clone(), record);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        assert_eq!(mr.node.as_ref().expect("own node present").user, 42);
+        let profile = mr
+            .user_profiles
+            .iter()
+            .find(|profile| profile.id == 42)
+            .expect("owner profile present");
+        assert_eq!(profile.login_name, "alice@example.com");
+        assert_eq!(profile.display_name, "Alice Example");
+        assert_eq!(profile.profile_pic_url, "https://example.com/alice.png");
+    }
+
+    #[tokio::test]
     async fn map_response_emits_reduced_base_packet_filter_for_target_node() {
         let (state, _dir) = fixture();
         let policy = r#"{

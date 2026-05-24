@@ -2518,6 +2518,9 @@ mod registry_tests {
             node_key_hex: format!("nodekey-{host:08x}"),
             machine_key_hex: format!("mkey-{host:08x}"),
             user: "alice".to_string(),
+            user_id: None,
+            user_display_name: String::new(),
+            user_profile_pic_url: String::new(),
             hostname: format!("host-{host}"),
             os: "linux".to_string(),
             os_version: "test".to_string(),
@@ -3963,6 +3966,12 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             .registration_cache
             .get(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        pending.set_user_identity(
+            Some(user.id),
+            user_name.clone(),
+            user.display_name.clone(),
+            user.profile_pic_url.clone(),
+        );
         pending.expiry = if pending.forced_tags.is_empty() {
             node_expiry.or(pending.expiry)
         } else {

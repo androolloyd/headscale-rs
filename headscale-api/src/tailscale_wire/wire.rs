@@ -107,6 +107,16 @@ pub struct MachineRecord {
     pub machine_key_hex: String,
     /// User the preauth key was minted for.
     pub user: String,
+    /// Upstream user ID for `tailcfg.Node.User` and `UserProfile.ID`.
+    ///
+    /// Persistent stores populate this from `nodes.user_id`; in-memory
+    /// embedders fall back to the deterministic legacy user hash.
+    pub user_id: Option<u64>,
+    /// Display metadata from the owner user row. Empty falls back to
+    /// `user`, mirroring headscale-go `User.Display()`.
+    pub user_display_name: String,
+    /// Owner profile picture URL, if supplied by OIDC.
+    pub user_profile_pic_url: String,
     /// Hostname the client advertised in HostInfo (best-effort; may
     /// be empty).
     pub hostname: String,
@@ -249,7 +259,8 @@ impl MachineRecord {
         if self.is_tagged() {
             TAGGED_DEVICES_USER_ID
         } else {
-            stable_id_from_key(&self.user)
+            self.user_id
+                .unwrap_or_else(|| stable_id_from_key(&self.user))
         }
     }
 
@@ -266,9 +277,30 @@ impl MachineRecord {
             UserProfile {
                 id: self.tailscale_user_id(),
                 login_name: self.user.clone(),
-                display_name: self.user.clone(),
-                profile_pic_url: String::new(),
+                display_name: self.user_display_name(),
+                profile_pic_url: self.user_profile_pic_url.clone(),
             }
+        }
+    }
+
+    pub fn set_user_identity(
+        &mut self,
+        user_id: Option<u64>,
+        login_name: String,
+        display_name: String,
+        profile_pic_url: String,
+    ) {
+        self.user_id = user_id;
+        self.user = login_name;
+        self.user_display_name = display_name;
+        self.user_profile_pic_url = profile_pic_url;
+    }
+
+    fn user_display_name(&self) -> String {
+        if self.user_display_name.is_empty() {
+            self.user.clone()
+        } else {
+            self.user_display_name.clone()
         }
     }
 
@@ -321,6 +353,9 @@ impl MachineRecord {
             node_key_hex,
             machine_key_hex,
             user,
+            user_id: None,
+            user_display_name: String::new(),
+            user_profile_pic_url: String::new(),
             hostname: hostname.clone(),
             os: String::new(),
             os_version: String::new(),

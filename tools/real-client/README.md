@@ -109,6 +109,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
+| Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
@@ -574,6 +575,15 @@ route is owned only by the router selected by that user's `via` grant:
 ```sh
 tools/real-client/route-via-smoke.sh
 tools/real-client/route-via-headscale-go-smoke.sh
+```
+
+The route-via reload variant starts from the same two-router state, reloads the
+policy so Alice's `via` grant moves from `tag:router-a` to `tag:router-b`, and
+asserts the stock-client netmap moves that route owner after reload:
+
+```sh
+tools/real-client/route-via-reload-smoke.sh
+tools/real-client/route-via-reload-headscale-go-smoke.sh
 ```
 
 The multi-prefix route-via variant has both routers advertise two subnets and

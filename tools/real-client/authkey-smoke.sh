@@ -28,6 +28,7 @@ expected_primary_sticky_route="${REAL_CLIENT_EXPECT_PRIMARY_STICKY_ROUTE:-}"
 expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
 expected_peer_route_owners="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS:-}"
+expected_peer_route_owners_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS_AFTER_POLICY_RELOAD:-}"
 expected_route_health_failover_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE:-}"
 expected_route_health_all_unhealthy_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_ALL_UNHEALTHY_ROUTE:-}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-}"
@@ -40,6 +41,7 @@ reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
+policy_reload_json="${REAL_CLIENT_POLICY_RELOAD_JSON:-}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
@@ -974,6 +976,40 @@ dump_client_debug() {
   docker exec "${client_name}" sh -c 'tail -160 /tmp/tailscaled.log 2>/dev/null || true' >&2
 }
 
+assert_peer_route_owners() {
+  local checks="$1"
+  local group_label="$2"
+  local raw_check source_idx peer_idx route extra source_name peer_name safe_check
+  echo "::group::${group_label}"
+  IFS=';' read -r -a peer_route_owner_checks <<<"${checks}"
+  for raw_check in "${peer_route_owner_checks[@]}"; do
+    IFS=':' read -r source_idx peer_idx route extra <<<"${raw_check}"
+    if [[ -n "${extra:-}" ||
+      ! "${source_idx}" =~ ^[0-9]+$ ||
+      ! "${peer_idx}" =~ ^[0-9]+$ ||
+      -z "${route}" ||
+      "${source_idx}" -lt 1 ||
+      "${peer_idx}" -lt 1 ||
+      "${source_idx}" -gt "${client_count}" ||
+      "${peer_idx}" -gt "${client_count}" ]]; then
+      echo "REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS entries must be source_index:peer_index:route, got ${raw_check}" >&2
+      exit 2
+    fi
+    source_name="${client_names[$((source_idx - 1))]}"
+    peer_name="${client_names[$((peer_idx - 1))]}"
+    safe_check="${source_idx}-${peer_idx}-${route//[^a-zA-Z0-9_.-]/-}"
+    if ! wait_for "route ${route} from ${source_name} via ${peer_name}" \
+      "peer_netmap_route_owner_matches '${source_name}' '${peer_name}' '${route}' '${work_dir}/route-owner-${safe_check}.json'"; then
+      cat "${work_dir}/route-owner-${safe_check}.json.err" >&2 || true
+      dump_client_debug "${source_name}"
+      dump_client_debug "${peer_name}"
+      exit 1
+    fi
+    cat "${work_dir}/route-owner-${safe_check}.json"
+  done
+  echo "::endgroup::"
+}
+
 need cargo
 need curl
 need docker
@@ -1684,34 +1720,25 @@ if [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]]; then
 fi
 
 if [[ -n "${expected_peer_route_owners}" ]]; then
-  echo "::group::assert route-via peer route owners"
-  IFS=';' read -r -a peer_route_owner_checks <<<"${expected_peer_route_owners}"
-  for raw_check in "${peer_route_owner_checks[@]}"; do
-    IFS=':' read -r source_idx peer_idx route extra <<<"${raw_check}"
-    if [[ -n "${extra:-}" ||
-      ! "${source_idx}" =~ ^[0-9]+$ ||
-      ! "${peer_idx}" =~ ^[0-9]+$ ||
-      -z "${route}" ||
-      "${source_idx}" -lt 1 ||
-      "${peer_idx}" -lt 1 ||
-      "${source_idx}" -gt "${client_count}" ||
-      "${peer_idx}" -gt "${client_count}" ]]; then
-      echo "REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS entries must be source_index:peer_index:route, got ${raw_check}" >&2
-      exit 2
-    fi
-    source_name="${client_names[$((source_idx - 1))]}"
-    peer_name="${client_names[$((peer_idx - 1))]}"
-    safe_check="${source_idx}-${peer_idx}-${route//[^a-zA-Z0-9_.-]/-}"
-    if ! wait_for "route ${route} from ${source_name} via ${peer_name}" \
-      "peer_netmap_route_owner_matches '${source_name}' '${peer_name}' '${route}' '${work_dir}/route-owner-${safe_check}.json'"; then
-      cat "${work_dir}/route-owner-${safe_check}.json.err" >&2 || true
-      dump_client_debug "${source_name}"
-      dump_client_debug "${peer_name}"
-      exit 1
-    fi
-    cat "${work_dir}/route-owner-${safe_check}.json"
-  done
+  assert_peer_route_owners "${expected_peer_route_owners}" "assert route-via peer route owners"
+fi
+
+if [[ -n "${policy_reload_json}" ]]; then
+  echo "::group::reload policy"
+  curl -fsS -X PUT "http://127.0.0.1:${http_port}/harness/policy" \
+    -H 'content-type: application/json' \
+    --data-binary "${policy_reload_json}" \
+    >"${work_dir}/policy-reload.txt"
   echo "::endgroup::"
+fi
+
+if [[ -n "${expected_peer_route_owners_after_policy_reload}" ]]; then
+  if [[ -z "${policy_reload_json}" ]]; then
+    echo "REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS_AFTER_POLICY_RELOAD requires REAL_CLIENT_POLICY_RELOAD_JSON" >&2
+    exit 2
+  fi
+  assert_peer_route_owners "${expected_peer_route_owners_after_policy_reload}" \
+    "assert route-via peer route owners after policy reload"
 fi
 
 if [[ -n "${expected_derp_region_id}" ]]; then

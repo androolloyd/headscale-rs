@@ -353,6 +353,61 @@ database:
 }
 
 #[test]
+fn serve_rejects_unsupported_acme_before_state_startup() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let db_path = cwd.path().join("should-not-exist.sqlite");
+    let cache_dir = cwd.path().join("acme-cache");
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:0"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: "{}"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: "{}"
+tls_letsencrypt_listen: ":http"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+            db_path.display(),
+            cache_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in(&["serve"], cwd.path(), home.path());
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    let cache_fragment = format!("cache_dir {}", cache_dir.display());
+    assert!(err.contains("ACME TLS is not implemented"), "stderr: {err}");
+    assert!(
+        err.contains("HTTP-01 challenge listener :http"),
+        "stderr: {err}"
+    );
+    assert!(err.contains(&cache_fragment), "stderr: {err}");
+    assert!(
+        !db_path.exists(),
+        "unsupported ACME serve path should fail before opening SQLite at {}",
+        db_path.display()
+    );
+    assert!(
+        !cache_dir.exists(),
+        "unsupported ACME serve path should fail before creating ACME cache at {}",
+        cache_dir.display()
+    );
+}
+
+#[test]
 fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["users", "list", "--help"],

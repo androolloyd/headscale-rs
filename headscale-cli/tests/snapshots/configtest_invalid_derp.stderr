@@ -1,0 +1,1 @@
+Error: invalid static DERP configuration: derp.server.automatically_add_embedded_derp_region=false requires at least one derp.paths entry

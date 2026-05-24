@@ -1,0 +1,1 @@
+Error: policy.mode must be either file or database, got "consul"

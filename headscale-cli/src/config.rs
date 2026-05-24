@@ -1,6 +1,6 @@
 //! Configuration file handling for the CLI.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -817,6 +817,15 @@ impl CliConfig {
                 "server.server_url is required so clients receive absolute registration URLs",
             )?;
         parse_server_url_parts(server_url)?;
+        validate_socket_addr(&server.listen, "listen_addr")?;
+        if let Some(https_listen) = server.https_listen.as_deref() {
+            validate_socket_addr(https_listen, "https_listen")?;
+        }
+        validate_optional_socket_addr(
+            server.metrics_listen_addr.as_deref(),
+            "metrics_listen_addr",
+        )?;
+        validate_socket_addr(&server.grpc_listen_addr, "grpc_listen_addr")?;
         if server.ephemeral_node_inactivity_timeout_secs <= 65 {
             bail!(
                 "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 65s",
@@ -1230,6 +1239,27 @@ fn parse_server_url_parts(raw: &str) -> Result<ServerUrlParts> {
         .with_context(|| format!("server.server_url must include a valid port: {raw:?}"))?;
 
     Ok(ServerUrlParts { host, port })
+}
+
+fn validate_socket_addr(value: &str, field: &str) -> Result<()> {
+    let normalized;
+    let value = if value.starts_with(':') {
+        normalized = format!("0.0.0.0{value}");
+        normalized.as_str()
+    } else {
+        value
+    };
+    value
+        .parse::<SocketAddr>()
+        .with_context(|| format!("Invalid {field} address: {value}"))?;
+    Ok(())
+}
+
+fn validate_optional_socket_addr(value: Option<&str>, field: &str) -> Result<()> {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        validate_socket_addr(value, field)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn server_url_hostname(raw: &str) -> Option<String> {

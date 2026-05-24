@@ -833,6 +833,69 @@ database:
     );
 }
 
+fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label: &str) {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), config).unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(&output, 1, expected, label);
+}
+
+#[test]
+fn configtest_rejects_supported_server_init_validation_errors() {
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#,
+        include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
+        "configtest incomplete manual TLS",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+tls_letsencrypt_hostname: "headscale.example"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#,
+        include_str!("snapshots/configtest_tls_conflict.stderr"),
+        "configtest TLS conflict",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+metrics_listen_addr: "not-a-socket"
+"#,
+        include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
+        "configtest invalid metrics listener",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+derp:
+  server:
+    enabled: true
+    automatically_add_embedded_derp_region: false
+"#,
+        include_str!("snapshots/configtest_invalid_derp.stderr"),
+        "configtest invalid DERP",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+policy:
+  mode: consul
+"#,
+        include_str!("snapshots/configtest_invalid_policy_mode.stderr"),
+        "configtest invalid policy mode",
+    );
+}
+
 #[test]
 fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
     let cwd = tempfile::tempdir().unwrap();

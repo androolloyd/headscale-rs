@@ -252,7 +252,13 @@ enum CompletionShell {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let skip_config_load = raw_args_skip_config_load(std::env::args_os().skip(1));
+    let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if raw_args_are_top_level_help(&raw_args) {
+        print!("{UPSTREAM_TOP_LEVEL_HELP}");
+        return ExitCode::SUCCESS;
+    }
+
+    let skip_config_load = raw_args_skip_config_load(&raw_args);
     let cli = Cli::parse();
 
     // Initialize logging
@@ -568,6 +574,57 @@ where
         Some("version" | "mockoidc" | "completion")
     )
 }
+
+fn raw_args_are_top_level_help<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return false;
+    };
+    if args.next().is_some() {
+        return false;
+    }
+    matches!(first.as_ref().to_str(), Some("-h" | "--help" | "help"))
+}
+
+// Current upstream headscale main (4483fd0) Cobra top-level help. Keep
+// this explicit because Clap's formatter cannot reproduce Cobra output exactly.
+const UPSTREAM_TOP_LEVEL_HELP: &str = r#"
+headscale is an open source implementation of the Tailscale control server
+
+https://github.com/juanfont/headscale
+
+Usage:
+  headscale [command]
+
+Available Commands:
+  apikeys     Handle the Api keys in Headscale
+  auth        Manage node authentication and approval
+  completion  Generate the autocompletion script for the specified shell
+  configtest  Test the configuration.
+  debug       debug and testing commands
+  generate    Generate commands
+  health      Check the health of the Headscale server
+  help        Help about any command
+  mockoidc    Runs a mock OIDC server for testing
+  nodes       Manage the nodes of Headscale
+  policy      Manage the Headscale ACL Policy
+  preauthkeys Handle the preauthkeys in Headscale
+  serve       Launches the headscale server
+  users       Manage the users of Headscale
+  version     Print the version.
+
+Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -h, --help            help for headscale
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale [command] --help" for more information about a command.
+"#;
 
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
@@ -1120,6 +1177,15 @@ mod tests {
             "version"
         ]));
         assert!(!raw_args_skip_config_load(["-o", "json", "version"]));
+    }
+
+    #[test]
+    fn raw_top_level_help_matches_cobra_forms() {
+        assert!(raw_args_are_top_level_help(["--help"]));
+        assert!(raw_args_are_top_level_help(["-h"]));
+        assert!(raw_args_are_top_level_help(["help"]));
+        assert!(!raw_args_are_top_level_help(["nodes", "--help"]));
+        assert!(!raw_args_are_top_level_help(["--help", "nodes"]));
     }
 
     #[test]

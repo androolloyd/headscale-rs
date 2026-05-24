@@ -99,6 +99,13 @@ fn top_level_help_exposes_upstream_operator_commands() {
 }
 
 #[test]
+fn top_level_help_matches_current_upstream_snapshot() {
+    assert_stdout_snapshot(&["--help"], include_str!("snapshots/top_level_help.stdout"));
+    assert_stdout_snapshot(&["-h"], include_str!("snapshots/top_level_help.stdout"));
+    assert_stdout_snapshot(&["help"], include_str!("snapshots/top_level_help.stdout"));
+}
+
+#[test]
 fn auth_and_preauth_delete_help_are_accepted() {
     let auth = headscale(&["auth", "--help"]);
     assert!(auth.status.success(), "stderr: {}", stderr(&auth));

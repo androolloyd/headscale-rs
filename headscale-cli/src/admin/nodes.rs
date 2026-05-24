@@ -226,14 +226,7 @@ pub async fn list_routes_grpc(
         .into_iter()
         .map(NodeOutput::from)
         .collect();
-    if let Some(requested_id) = requested_id {
-        nodes.retain(|n| n.id == requested_id);
-    }
-    nodes.retain(|n| {
-        !n.subnet_routes.is_empty()
-            || !n.available_routes.is_empty()
-            || !n.approved_routes.is_empty()
-    });
+    nodes = route_nodes_for_display(nodes, requested_id);
     if fmt.is_structured() {
         print_structured(fmt, &nodes)?;
     } else {
@@ -827,9 +820,51 @@ fn short_key(key: &str) -> String {
     format!("{prefix}:{}", short_id(body))
 }
 
+fn route_nodes_for_display(
+    mut nodes: Vec<NodeOutput>,
+    requested_id: Option<u64>,
+) -> Vec<NodeOutput> {
+    if let Some(requested_id) = requested_id
+        && let Some(position) = nodes.iter().position(|node| node.id == requested_id)
+    {
+        nodes = vec![nodes.remove(position)];
+    }
+    nodes.into_iter().filter(node_has_routes).collect()
+}
+
+fn node_has_routes(node: &NodeOutput) -> bool {
+    !node.subnet_routes.is_empty()
+        || !node.available_routes.is_empty()
+        || !node.approved_routes.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn route_node(id: u64, routes: &[&str]) -> NodeOutput {
+        NodeOutput {
+            id,
+            name: format!("node-{id}"),
+            given_name: String::new(),
+            user: "alice".into(),
+            machine_key: String::new(),
+            node_key: String::new(),
+            disco_key: String::new(),
+            ip_addresses: Vec::new(),
+            online: false,
+            tags: Vec::new(),
+            approved_routes: routes.iter().map(|route| (*route).to_string()).collect(),
+            available_routes: Vec::new(),
+            subnet_routes: Vec::new(),
+            ephemeral: false,
+            last_seen: None,
+            expiry: None,
+            created_at: None,
+            expired: false,
+            register_method: 0,
+        }
+    }
 
     #[test]
     fn short_id_truncates() {
@@ -851,6 +886,24 @@ mod tests {
             parse_node_id("node-key"),
             Err(AdminError::Local(_))
         ));
+    }
+
+    #[test]
+    fn route_list_identifier_only_narrows_on_match() {
+        let nodes = vec![
+            route_node(1, &["10.0.0.0/24"]),
+            route_node(2, &[]),
+            route_node(3, &["10.1.0.0/24"]),
+        ];
+
+        let matched = route_nodes_for_display(nodes.clone(), Some(3));
+        assert_eq!(matched.iter().map(|node| node.id).collect::<Vec<_>>(), [3]);
+
+        let missing = route_nodes_for_display(nodes, Some(99));
+        assert_eq!(
+            missing.iter().map(|node| node.id).collect::<Vec<_>>(),
+            [1, 3]
+        );
     }
 
     #[test]

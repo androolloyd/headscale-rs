@@ -3968,6 +3968,10 @@ pub fn metrics_debug_router(state: WireState) -> Router {
         )
         .route("/debug/batcher", get(basic_handlers::handle_debug_batcher))
         .route(
+            "/debug/ping",
+            get(basic_handlers::handle_debug_ping_get).post(basic_handlers::handle_debug_ping_post),
+        )
+        .route(
             "/debug/policy-manager",
             get(basic_handlers::handle_debug_policy_manager),
         )

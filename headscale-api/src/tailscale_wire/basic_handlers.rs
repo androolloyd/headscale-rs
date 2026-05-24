@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json,
     body::to_bytes,
-    extract::{Path, Query, Request, State},
+    extract::{Form, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
@@ -54,6 +54,7 @@ const DEBUG_INDEX_LINKS: &[(&str, &str)] = &[
     ("/debug/policy-manager", "Policy manager state"),
     ("/debug/mapresponses", "Map responses for all nodes"),
     ("/debug/batcher", "Batcher connected nodes"),
+    ("/debug/ping", "Ping a node to check connectivity"),
     ("/debug/gc", "force GC"),
     ("/debug/statsviz", "Statsviz (visualise go metrics)"),
     ("/metrics", "Prometheus metrics"),
@@ -550,6 +551,27 @@ pub struct DebugBatcherInfo {
 pub struct DebugBatcherNodeInfo {
     pub connected: bool,
     pub active_connections: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct DebugPingQuery {
+    #[serde(default)]
+    pub node: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DebugPingConnectedNode {
+    id: u64,
+    hostname: String,
+    ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DebugPingResult {
+    status: &'static str,
+    latency: Option<std::time::Duration>,
+    node_id: Option<u64>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1290,6 +1312,20 @@ pub async fn handle_debug_batcher(State(state): State<WireState>, headers: Heade
         )
             .into_response()
     }
+}
+
+pub async fn handle_debug_ping_get(
+    State(state): State<WireState>,
+    Query(query): Query<DebugPingQuery>,
+) -> Response {
+    debug_ping_response(state, query.node, false).await
+}
+
+pub async fn handle_debug_ping_post(
+    State(state): State<WireState>,
+    Form(query): Form<DebugPingQuery>,
+) -> Response {
+    debug_ping_response(state, query.node, true).await
 }
 
 pub async fn handle_debug_policy_manager(
@@ -2335,6 +2371,139 @@ fn debug_batcher_info(state: &WireState) -> DebugBatcherInfo {
     }
 }
 
+async fn debug_ping_response(state: WireState, node_query: String, post_submit: bool) -> Response {
+    let node_query = node_query.trim().to_string();
+    let result = if post_submit || !node_query.is_empty() {
+        Some(debug_ping_node(&state, &node_query).await)
+    } else {
+        None
+    };
+    let nodes = debug_ping_connected_nodes(&state);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        debug_ping_html(&node_query, result.as_ref(), &nodes),
+    )
+        .into_response()
+}
+
+async fn debug_ping_node(state: &WireState, query: &str) -> DebugPingResult {
+    if query.is_empty() {
+        return DebugPingResult {
+            status: "error",
+            latency: None,
+            node_id: None,
+            message: "No node specified.".to_string(),
+        };
+    }
+
+    let Some(node_id) = resolve_debug_ping_node(state, query) else {
+        return DebugPingResult {
+            status: "error",
+            latency: None,
+            node_id: None,
+            message: format!("Node {query:?} not found."),
+        };
+    };
+
+    if state
+        .machines
+        .active_connections()
+        .get(&node_id)
+        .copied()
+        .unwrap_or(0)
+        == 0
+    {
+        return DebugPingResult {
+            status: "error",
+            latency: None,
+            node_id: Some(node_id),
+            message: format!("Node {node_id} is not connected."),
+        };
+    }
+
+    let (ping_id, response) = state.register_ping(node_id);
+    state.dispatch_ping_request(node_id, &ping_id, true, false);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(30), response).await {
+        Ok(Ok(latency)) => DebugPingResult {
+            status: "ok",
+            latency: Some(latency),
+            node_id: Some(node_id),
+            message: String::new(),
+        },
+        Ok(Err(_)) => DebugPingResult {
+            status: "error",
+            latency: None,
+            node_id: Some(node_id),
+            message: "Request cancelled.".to_string(),
+        },
+        Err(_) => {
+            state.pings.cancel(&ping_id);
+            DebugPingResult {
+                status: "timeout",
+                latency: None,
+                node_id: Some(node_id),
+                message: "No response after 30s.".to_string(),
+            }
+        }
+    }
+}
+
+fn resolve_debug_ping_node(state: &WireState, query: &str) -> Option<u64> {
+    let query = query.trim();
+    let query_node_key = query.strip_prefix("nodekey:").unwrap_or(query);
+    let dns_spec = state.dns.spec();
+    let base_domain = dns_spec.base_domain.trim().trim_end_matches('.');
+    state
+        .machines
+        .snapshot()
+        .iter()
+        .find_map(|(node_key, rec)| {
+            let node_id = stable_id_from_key(node_key);
+            let id_matches = query == node_id.to_string();
+            let key_matches = query_node_key == node_key;
+            let name_matches = rec.hostname == query
+                || (!base_domain.is_empty()
+                    && query
+                        .strip_suffix(base_domain)
+                        .and_then(|prefix| prefix.strip_suffix('.'))
+                        .is_some_and(|label| label == rec.hostname));
+            let ip_matches = rec.ipv4.is_some_and(|ip| query == ip.to_string())
+                || rec.ipv6.is_some_and(|ip| query == ip.to_string());
+            (id_matches || key_matches || name_matches || ip_matches).then_some(node_id)
+        })
+}
+
+fn debug_ping_connected_nodes(state: &WireState) -> Vec<DebugPingConnectedNode> {
+    let active = state.machines.active_connections();
+    let now = chrono::Utc::now();
+    let snapshot = state.machines.snapshot();
+    let mut nodes = snapshot
+        .iter()
+        .filter_map(|(node_key, rec)| {
+            let id = stable_id_from_key(node_key);
+            if active.get(&id).copied().unwrap_or(0) == 0 || rec.is_expired_at(now) {
+                return None;
+            }
+            let mut ips = Vec::new();
+            if let Some(ipv4) = rec.ipv4 {
+                ips.push(ipv4.to_string());
+            }
+            if let Some(ipv6) = rec.ipv6 {
+                ips.push(ipv6.to_string());
+            }
+            Some(DebugPingConnectedNode {
+                id,
+                hostname: rec.hostname.clone(),
+                ips,
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.id);
+    nodes
+}
+
 #[allow(clippy::format_push_string)]
 fn debug_batcher_string(info: &DebugBatcherInfo) -> String {
     let mut out = String::from("=== Batcher Connected Nodes ===\n\n");
@@ -2625,6 +2794,60 @@ fn debug_index_html() -> String {
 
     out.push_str("</ul></body></html>");
     out
+}
+
+fn debug_ping_html(
+    query: &str,
+    result: Option<&DebugPingResult>,
+    nodes: &[DebugPingConnectedNode],
+) -> String {
+    let mut out = format!(
+        r#"<html><head><title>Ping Node - Headscale</title></head><body><h1>Ping Node</h1><p>Check if a connected node responds to a PingRequest.</p><form method="POST" action="/debug/ping"><input type="text" name="node" value="{}" placeholder="Node ID, IP, or hostname" autofocus><button type="submit">Ping</button></form>"#,
+        html_escape(query),
+    );
+
+    if let Some(result) = result {
+        out.push_str(&debug_ping_result_html(result));
+    }
+
+    if !nodes.is_empty() {
+        out.push_str("<h2>Connected Nodes</h2><ul>");
+        for node in nodes {
+            out.push_str("<li><a href=\"/debug/ping?node=");
+            out.push_str(&node.id.to_string());
+            out.push_str("\">");
+            out.push_str(&html_escape(&format!(
+                "{} (ID: {}, {})",
+                node.hostname,
+                node.id,
+                node.ips.join(", ")
+            )));
+            out.push_str("</a></li>");
+        }
+        out.push_str("</ul>");
+    }
+
+    out.push_str("</body></html>");
+    out
+}
+
+fn debug_ping_result_html(result: &DebugPingResult) -> String {
+    match result.status {
+        "ok" => format!(
+            "<section><h2>Pong</h2><p>Node {} responded in {}ms</p></section>",
+            result.node_id.unwrap_or_default(),
+            result.latency.unwrap_or_default().as_millis()
+        ),
+        "timeout" => format!(
+            "<section><h2>Timeout</h2><p>Node {} did not respond. {}</p></section>",
+            result.node_id.unwrap_or_default(),
+            html_escape(&result.message),
+        ),
+        _ => format!(
+            "<section><h2>Error</h2><p>{}</p></section>",
+            html_escape(&result.message)
+        ),
+    }
 }
 
 fn debug_pprof_index_html() -> String {
@@ -4711,6 +4934,155 @@ mod tests {
         assert_eq!(parsed["total_nodes"], 1);
         assert_eq!(node["connected"], false);
         assert_eq!(node["active_connections"], 0);
+    }
+
+    #[tokio::test]
+    async fn debug_ping_get_lists_connected_nodes_without_dispatching() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-ping-node";
+        let node_id = stable_id_from_key(node_key);
+        state
+            .machines
+            .upsert(node_key.to_string(), record(node_key, 32, &[], &[]));
+        let _guard = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/ping")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Ping Node"));
+        assert!(body.contains(&format!("/debug/ping?node={node_id}")));
+        assert!(body.contains("host-32"));
+        assert_eq!(state.pings.queued_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn debug_ping_get_missing_node_renders_upstream_error() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/ping?node=missing")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Node &quot;missing&quot; not found."));
+    }
+
+    #[tokio::test]
+    async fn debug_ping_post_empty_node_renders_upstream_error() {
+        let (state, _dir) = fixture_state();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri("/debug/ping")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from("node="))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("No node specified."));
+    }
+
+    #[tokio::test]
+    async fn debug_ping_get_disconnected_node_does_not_queue_request() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-ping-disconnected";
+        let node_id = stable_id_from_key(node_key);
+        state
+            .machines
+            .upsert(node_key.to_string(), record(node_key, 33, &[], &[]));
+
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/debug/ping?node={node_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(&format!("Node {node_id} is not connected.")));
+        assert_eq!(state.pings.queued_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn debug_ping_get_queues_ping_request_and_reports_pong() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-ping-success";
+        let node_id = stable_id_from_key(node_key);
+        state
+            .machines
+            .upsert(node_key.to_string(), record(node_key, 34, &[], &[]));
+        let _guard = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+
+        let app = router(state.clone());
+        let request = axum::http::Request::builder()
+            .uri(format!("/debug/ping?node={node_id}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let pending_response = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+
+        let ping_request = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(request) = state.pings.pop_next_for_node(node_id) {
+                    return request;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("debug ping queued a request");
+        assert!(ping_request.log);
+        assert!(!ping_request.url_is_noise);
+        let ping_id = ping_request
+            .url
+            .split_once("id=")
+            .expect("callback URL carries id")
+            .1
+            .to_string();
+        state
+            .pings
+            .complete(&ping_id)
+            .expect("pending ping completes");
+
+        let resp = pending_response.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Pong"));
+        assert!(body.contains(&format!("Node {node_id} responded in")));
     }
 
     #[tokio::test]

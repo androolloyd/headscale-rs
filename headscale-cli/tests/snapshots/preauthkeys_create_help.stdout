@@ -1,14 +1,20 @@
 Creates a new preauthkey
 
-Usage: headscale preauthkeys create [OPTIONS]
+Usage:
+  headscale preauthkeys create [flags]
 
-Options:
-  -c, --config <CONFIG>          config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -u, --user <USER>              User identifier (ID)
-      --reusable                 Make the preauthkey reusable
-      --ephemeral                Preauthkey for ephemeral nodes
-      --tags <TAGS>              Tags to automatically assign to node
-  -e, --expiration <EXPIRES_IN>  Human-readable expiration of the key (e.g. 30m, 24h) [default: 1h]
-  -o, --output <OUTPUT>          Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force                    Disable prompts and forces the execution
-  -h, --help                     Print help
+Aliases:
+  create, c, new
+
+Flags:
+      --ephemeral           Preauthkey for ephemeral nodes
+  -e, --expiration string   Human-readable expiration of the key (e.g. 30m, 24h) (default "1h")
+  -h, --help                help for create
+      --reusable            Make the preauthkey reusable
+      --tags strings        Tags to automatically assign to node
+  -u, --user uint           User identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

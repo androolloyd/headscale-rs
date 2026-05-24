@@ -1,9 +1,15 @@
-List all known API keys
+List the Api keys for headscale
 
-Usage: headscale apikeys list [OPTIONS]
+Usage:
+  headscale apikeys list [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Aliases:
+  list, ls, show
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

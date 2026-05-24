@@ -1,0 +1,23 @@
+Handle the preauthkeys in Headscale
+
+Usage:
+  headscale preauthkeys [command]
+
+Aliases:
+  preauthkeys, preauthkey, authkey, pre
+
+Available Commands:
+  create      Creates a new preauthkey
+  delete      Delete a preauthkey
+  expire      Expire a preauthkey
+  list        List all preauthkeys
+
+Flags:
+  -h, --help   help for preauthkeys
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale preauthkeys [command] --help" for more information about a command.

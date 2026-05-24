@@ -1,0 +1,23 @@
+Handle the Api keys in Headscale
+
+Usage:
+  headscale apikeys [command]
+
+Aliases:
+  apikeys, apikey, api
+
+Available Commands:
+  create      Creates a new Api key
+  delete      Delete an ApiKey
+  expire      Expire an ApiKey
+  list        List the Api keys for headscale
+
+Flags:
+  -h, --help   help for apikeys
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale apikeys [command] --help" for more information about a command.

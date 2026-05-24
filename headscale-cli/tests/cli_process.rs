@@ -145,6 +145,22 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["nodes", "del", "--help"],
         include_str!("snapshots/nodes_delete_help.stdout"),
     );
+    assert_stdout_snapshot(
+        &["authkey", "new", "--help"],
+        include_str!("snapshots/preauthkeys_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "pre", "rm"],
+        include_str!("snapshots/preauthkeys_delete_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["api", "revoke", "-h"],
+        include_str!("snapshots/apikeys_expire_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "apikey", "remove"],
+        include_str!("snapshots/apikeys_delete_help.stdout"),
+    );
 }
 
 #[test]
@@ -527,6 +543,10 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/preauthkeys_list_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["preauthkeys", "--help"],
+        include_str!("snapshots/preauthkeys_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["preauthkeys", "expire", "--help"],
         include_str!("snapshots/preauthkeys_expire_help.stdout"),
     );
@@ -537,6 +557,10 @@ fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["apikeys", "create", "--help"],
         include_str!("snapshots/apikeys_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["apikeys", "--help"],
+        include_str!("snapshots/apikeys_help.stdout"),
     );
     assert_stdout_snapshot(
         &["apikeys", "list", "--help"],

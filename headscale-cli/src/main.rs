@@ -650,6 +650,91 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         | ["help", "nodes" | "node", "delete" | "del"] => Some(UPSTREAM_NODES_DELETE_HELP),
         ["nodes" | "node", "backfillips", "-h" | "--help"]
         | ["help", "nodes" | "node", "backfillips"] => Some(UPSTREAM_NODES_BACKFILLIPS_HELP),
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "-h" | "--help",
+        ]
+        | ["help", "preauthkeys" | "preauthkey" | "authkey" | "pre"] => {
+            Some(UPSTREAM_PREAUTHKEYS_HELP)
+        }
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "create" | "c" | "new",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "create" | "c" | "new",
+        ] => Some(UPSTREAM_PREAUTHKEYS_CREATE_HELP),
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "list" | "ls" | "show",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "list" | "ls" | "show",
+        ] => Some(UPSTREAM_PREAUTHKEYS_LIST_HELP),
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "expire" | "revoke" | "exp" | "e",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "expire" | "revoke" | "exp" | "e",
+        ] => Some(UPSTREAM_PREAUTHKEYS_EXPIRE_HELP),
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "delete" | "del" | "rm" | "d",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            "delete" | "del" | "rm" | "d",
+        ] => Some(UPSTREAM_PREAUTHKEYS_DELETE_HELP),
+        ["apikeys" | "apikey" | "api", "-h" | "--help"]
+        | ["help", "apikeys" | "apikey" | "api"] => Some(UPSTREAM_APIKEYS_HELP),
+        [
+            "apikeys" | "apikey" | "api",
+            "create" | "c" | "new",
+            "-h" | "--help",
+        ]
+        | ["help", "apikeys" | "apikey" | "api", "create" | "c" | "new"] => {
+            Some(UPSTREAM_APIKEYS_CREATE_HELP)
+        }
+        [
+            "apikeys" | "apikey" | "api",
+            "list" | "ls" | "show",
+            "-h" | "--help",
+        ]
+        | ["help", "apikeys" | "apikey" | "api", "list" | "ls" | "show"] => {
+            Some(UPSTREAM_APIKEYS_LIST_HELP)
+        }
+        [
+            "apikeys" | "apikey" | "api",
+            "expire" | "revoke" | "exp" | "e",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "apikeys" | "apikey" | "api",
+            "expire" | "revoke" | "exp" | "e",
+        ] => Some(UPSTREAM_APIKEYS_EXPIRE_HELP),
+        [
+            "apikeys" | "apikey" | "api",
+            "delete" | "remove" | "del",
+            "-h" | "--help",
+        ]
+        | [
+            "help",
+            "apikeys" | "apikey" | "api",
+            "delete" | "remove" | "del",
+        ] => Some(UPSTREAM_APIKEYS_DELETE_HELP),
         _ => None,
     }
 }
@@ -1163,6 +1248,206 @@ Usage:
 
 Flags:
   -h, --help   help for backfillips
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_PREAUTHKEYS_HELP: &str = r#"Handle the preauthkeys in Headscale
+
+Usage:
+  headscale preauthkeys [command]
+
+Aliases:
+  preauthkeys, preauthkey, authkey, pre
+
+Available Commands:
+  create      Creates a new preauthkey
+  delete      Delete a preauthkey
+  expire      Expire a preauthkey
+  list        List all preauthkeys
+
+Flags:
+  -h, --help   help for preauthkeys
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale preauthkeys [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_PREAUTHKEYS_CREATE_HELP: &str = r#"Creates a new preauthkey
+
+Usage:
+  headscale preauthkeys create [flags]
+
+Aliases:
+  create, c, new
+
+Flags:
+      --ephemeral           Preauthkey for ephemeral nodes
+  -e, --expiration string   Human-readable expiration of the key (e.g. 30m, 24h) (default "1h")
+  -h, --help                help for create
+      --reusable            Make the preauthkey reusable
+      --tags strings        Tags to automatically assign to node
+  -u, --user uint           User identifier (ID)
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+"#;
+
+const UPSTREAM_PREAUTHKEYS_LIST_HELP: &str = r"List all preauthkeys
+
+Usage:
+  headscale preauthkeys list [flags]
+
+Aliases:
+  list, ls, show
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_PREAUTHKEYS_EXPIRE_HELP: &str = r"Expire a preauthkey
+
+Usage:
+  headscale preauthkeys expire [flags]
+
+Aliases:
+  expire, revoke, exp, e
+
+Flags:
+  -h, --help      help for expire
+  -i, --id uint   Authkey ID
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_PREAUTHKEYS_DELETE_HELP: &str = r"Delete a preauthkey
+
+Usage:
+  headscale preauthkeys delete [flags]
+
+Aliases:
+  delete, del, rm, d
+
+Flags:
+  -h, --help      help for delete
+  -i, --id uint   Authkey ID
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_APIKEYS_HELP: &str = r#"Handle the Api keys in Headscale
+
+Usage:
+  headscale apikeys [command]
+
+Aliases:
+  apikeys, apikey, api
+
+Available Commands:
+  create      Creates a new Api key
+  delete      Delete an ApiKey
+  expire      Expire an ApiKey
+  list        List the Api keys for headscale
+
+Flags:
+  -h, --help   help for apikeys
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale apikeys [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_APIKEYS_CREATE_HELP: &str = r#"Creates a new Api key, the Api key is only visible on creation
+and cannot be retrieved again.
+If you lose a key, create a new one and revoke (expire) the old one.
+
+Usage:
+  headscale apikeys create [flags]
+
+Aliases:
+  create, c, new
+
+Flags:
+  -e, --expiration string   Human-readable expiration of the key (e.g. 30m, 24h) (default "90d")
+  -h, --help                help for create
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+"#;
+
+const UPSTREAM_APIKEYS_LIST_HELP: &str = r"List the Api keys for headscale
+
+Usage:
+  headscale apikeys list [flags]
+
+Aliases:
+  list, ls, show
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_APIKEYS_EXPIRE_HELP: &str = r"Expire an ApiKey
+
+Usage:
+  headscale apikeys expire [flags]
+
+Aliases:
+  expire, revoke, exp, e
+
+Flags:
+  -h, --help            help for expire
+  -i, --id uint         ApiKey ID
+  -p, --prefix string   ApiKey prefix
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_APIKEYS_DELETE_HELP: &str = r"Delete an ApiKey
+
+Usage:
+  headscale apikeys delete [flags]
+
+Aliases:
+  delete, remove, del
+
+Flags:
+  -h, --help            help for delete
+  -i, --id uint         ApiKey ID
+  -p, --prefix string   ApiKey prefix
 
 Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
@@ -1773,6 +2058,22 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["nodes", "del", "--help"]),
             Some(UPSTREAM_NODES_DELETE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["authkey", "new", "--help"]),
+            Some(UPSTREAM_PREAUTHKEYS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "pre", "rm"]),
+            Some(UPSTREAM_PREAUTHKEYS_DELETE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["api", "revoke", "-h"]),
+            Some(UPSTREAM_APIKEYS_EXPIRE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "apikey", "remove"]),
+            Some(UPSTREAM_APIKEYS_DELETE_HELP)
         );
         assert_eq!(upstream_exact_help(&["--help", "nodes"]), None);
     }

@@ -1,0 +1,19 @@
+Manage the Headscale ACL Policy
+
+Usage:
+  headscale policy [command]
+
+Available Commands:
+  check       Check the Policy file for errors
+  get         Print the current ACL Policy
+  set         Updates the ACL Policy
+
+Flags:
+  -h, --help   help for policy
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale policy [command] --help" for more information about a command.

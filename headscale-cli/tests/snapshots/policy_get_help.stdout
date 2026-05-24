@@ -1,9 +1,16 @@
-Fetch the policy currently loaded on the server
+Print the current ACL Policy
 
-Usage: headscale policy get [OPTIONS]
+Usage:
+  headscale policy get [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Aliases:
+  get, show, view, fetch
+
+Flags:
+      --bypass-grpc-and-access-database-directly   Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running
+  -h, --help                                       help for get
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

@@ -161,6 +161,22 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["help", "apikey", "remove"],
         include_str!("snapshots/apikeys_delete_help.stdout"),
     );
+    assert_stdout_snapshot(
+        &["policy", "--help"],
+        include_str!("snapshots/policy_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "policy", "fetch"],
+        include_str!("snapshots/policy_get_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["policy", "update", "-h"],
+        include_str!("snapshots/policy_set_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "policy", "check"],
+        include_str!("snapshots/policy_check_help.stdout"),
+    );
 }
 
 #[test]
@@ -575,6 +591,10 @@ fn implemented_admin_command_help_matches_snapshots() {
         include_str!("snapshots/apikeys_delete_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["policy", "--help"],
+        include_str!("snapshots/policy_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["policy", "get", "--help"],
         include_str!("snapshots/policy_get_help.stdout"),
     );
@@ -657,6 +677,61 @@ fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["completion", "zsh", "--help"],
         include_str!("snapshots/completion_zsh_help.stdout"),
+    );
+}
+
+#[test]
+fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    let db_path = dir.path().join("db.sqlite");
+    let policy_path = dir.path().join("policy.hujson");
+    fs::write(
+        &config_path,
+        format!(
+            "server:\n  db_path: {}\npolicy:\n  mode: database\n",
+            db_path.display()
+        ),
+    )
+    .unwrap();
+    fs::write(&policy_path, "{\n  // preserved\n  \"acls\": []\n}\n").unwrap();
+
+    let positional = headscale_clean(&["policy", "set", "policy.hujson"]);
+    assert!(!positional.status.success());
+    assert_eq!(positional.status.code(), Some(2));
+    assert!(
+        stderr(&positional).contains("unexpected argument 'policy.hujson'"),
+        "stderr: {}",
+        stderr(&positional)
+    );
+
+    let config = config_path.to_str().unwrap();
+    let policy = policy_path.to_str().unwrap();
+    let bypass = "--bypass-grpc-and-access-database-directly";
+
+    let set = headscale_clean(&[
+        "--config", config, "--force", "-o", "json", "policy", "set", "--file", policy, bypass,
+    ]);
+    assert!(set.status.success(), "stderr: {}", stderr(&set));
+    let set_json: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(set_json["applied"], true);
+    assert_eq!(set_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
+
+    let get = headscale_clean(&[
+        "--config", config, "--force", "-o", "json", "policy", "get", bypass,
+    ]);
+    assert!(get.status.success(), "stderr: {}", stderr(&get));
+    let get_json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
+    assert_eq!(get_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
+
+    let check = headscale_clean(&[
+        "--config", config, "--force", "policy", "check", "--file", policy, bypass,
+    ]);
+    assert!(check.status.success(), "stderr: {}", stderr(&check));
+    assert!(
+        stdout(&check).contains("validates OK"),
+        "stdout: {}",
+        stdout(&check)
     );
 }
 

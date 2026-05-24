@@ -4,10 +4,16 @@
 //! and `CheckPolicy` RPCs by default. Supplying explicit `--server` keeps
 //! the legacy admin HTTP behavior, where `check` remains local-only.
 
+use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use headscale_api::admin::{MachineAdmin, PersistentMachineAdmin, PersistentUserAdmin};
 use headscale_api::generated::{GetPolicyResponse, SetPolicyResponse};
+use headscale_api::policy::{PolicyCheckNode, check_policy_semantics, parse_hujson_policy};
+use headscale_api::tailscale_wire::wire::stable_id_from_key;
+use headscale_db::Database;
 use serde::Serialize;
 
 use super::AdminError;
@@ -37,6 +43,29 @@ pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminErr
 
 pub async fn get_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
     let response = PolicyOutput::from(client.get_policy().await?);
+    if fmt.is_structured() {
+        print_structured(fmt, &response)?;
+    } else {
+        print!("{}", response.policy);
+        if !response.policy.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+pub async fn get_direct_db(db_path: &Path, fmt: OutputFormat) -> Result<(), AdminError> {
+    let db = open_policy_database(db_path).await?;
+    let policy = headscale_db::policies::get_latest(db.pool())
+        .await
+        .map_err(|e| AdminError::Local(format!("loading ACL from database: {e}")))?
+        .ok_or_else(|| {
+            AdminError::Local("loading ACL from database: acl policy not found".into())
+        })?;
+    let response = PolicyOutput {
+        policy: policy.data,
+        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
+    };
     if fmt.is_structured() {
         print_structured(fmt, &response)?;
     } else {
@@ -83,6 +112,30 @@ pub async fn set_grpc(
     Ok(())
 }
 
+pub async fn set_direct_db(
+    db_path: &Path,
+    path: &Path,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    let body = read_policy_file(path)?;
+    let db = open_policy_database(db_path).await?;
+    validate_policy_with_database(db.pool(), &body, "setting policy").await?;
+    let policy = headscale_db::policies::set(db.pool(), &body)
+        .await
+        .map_err(|e| AdminError::Local(format!("persisting policy to database: {e}")))?;
+    let response = PolicySetOutput {
+        applied: true,
+        policy: policy.data,
+        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
+    };
+    if fmt.is_structured() {
+        print_structured(fmt, &response)?;
+    } else {
+        println!("Policy applied: true");
+    }
+    Ok(())
+}
+
 /// Local-only validation. Reads the file, strips hujson `//` line
 /// comments + trailing commas, then ensures the result parses as
 /// `serde_json::Value`. The check is intentionally permissive — we
@@ -102,6 +155,38 @@ pub async fn check_grpc(client: &mut GrpcAdminClient, path: &Path) -> Result<(),
     Ok(())
 }
 
+pub async fn check_direct_db(db_path: &Path, path: &Path) -> Result<(), AdminError> {
+    let raw = read_policy_file(path)?;
+    let db = open_policy_database(db_path).await?;
+    validate_policy_with_database(db.pool(), &raw, "checking policy").await?;
+    println!("Policy at {} validates OK.", path.display());
+    Ok(())
+}
+
+pub fn confirm_direct_database_access(force: bool) -> Result<(), AdminError> {
+    if force {
+        return Ok(());
+    }
+
+    eprint!(
+        "Bypassing gRPC accesses the headscale database directly and does not notify a running server. Continue? [y/n] "
+    );
+    std::io::stderr()
+        .flush()
+        .map_err(|e| AdminError::Local(format!("write confirmation prompt: {e}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| AdminError::Local(format!("read confirmation response: {e}")))?;
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") {
+        Ok(())
+    } else {
+        Err(AdminError::Local(
+            "direct database policy access aborted".into(),
+        ))
+    }
+}
+
 fn read_policy_file(path: &Path) -> Result<String, AdminError> {
     std::fs::read_to_string(path).map_err(|e| {
         AdminError::Local(format!(
@@ -111,11 +196,106 @@ fn read_policy_file(path: &Path) -> Result<String, AdminError> {
     })
 }
 
+async fn validate_policy_with_database(
+    pool: &sqlx::SqlitePool,
+    raw: &str,
+    context: &str,
+) -> Result<(), AdminError> {
+    let doc = parse_hujson_policy(raw).map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
+    let nodes = policy_check_nodes(pool).await;
+    check_policy_semantics(&doc, &nodes)
+        .map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
+    Ok(())
+}
+
+async fn policy_check_nodes(pool: &sqlx::SqlitePool) -> Vec<PolicyCheckNode> {
+    let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
+    let machines = PersistentMachineAdmin::new(pool.clone()).with_user_admin(users);
+    machines
+        .list()
+        .await
+        .iter()
+        .map(policy_check_node_from_machine)
+        .collect()
+}
+
+fn policy_check_node_from_machine(
+    machine: &headscale_api::admin::MachineAdminRecord,
+) -> PolicyCheckNode {
+    PolicyCheckNode {
+        id: machine_numeric_id(machine),
+        name: machine.name.clone(),
+        user: (!machine.user.is_empty()).then(|| machine.user.clone()),
+        addrs: node_ip_addresses(machine),
+        tags: machine.tags.clone(),
+    }
+}
+
+fn machine_numeric_id(machine: &headscale_api::admin::MachineAdminRecord) -> u64 {
+    if machine.node_id == 0 {
+        stable_id_from_key(&machine.id)
+    } else {
+        machine.node_id
+    }
+}
+
+fn node_ip_addresses(machine: &headscale_api::admin::MachineAdminRecord) -> Vec<String> {
+    let mut addresses = Vec::with_capacity(1 + usize::from(machine.ipv6.is_some()));
+    if !machine.ipv4.is_empty() {
+        addresses.push(machine.ipv4.clone());
+    }
+    if let Some(ipv6) = machine.ipv6.as_ref().filter(|ipv6| !ipv6.is_empty()) {
+        addresses.push(ipv6.clone());
+    }
+    addresses
+}
+
+async fn open_policy_database(path: &Path) -> Result<Database, AdminError> {
+    ensure_parent_dir(path)?;
+    let url = sqlite_url_for_path(path);
+    let db = Database::new(&url).await.map_err(|e| {
+        AdminError::Local(format!("open SQLite database at {}: {e}", path.display()))
+    })?;
+    db.migrate().await.map_err(|e| {
+        AdminError::Local(format!(
+            "migrate SQLite database at {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(db)
+}
+
+fn sqlite_url_for_path(path: &Path) -> String {
+    format!("sqlite://{}?mode=rwc", path.display())
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), AdminError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AdminError::Local(format!(
+                "failed to create database directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
     let ts = ts?;
     let nanos = u32::try_from(ts.nanos).ok()?;
     DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn unix_timestamp_rfc3339(seconds: i64) -> String {
+    DateTime::<Utc>::from_timestamp(seconds, 0).map_or_else(
+        || "1970-01-01T00:00:00Z".to_string(),
+        |time| time.to_rfc3339_opts(SecondsFormat::Secs, true),
+    )
 }
 
 #[derive(Debug, Serialize)]

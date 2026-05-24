@@ -207,17 +207,41 @@ mod tests {
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Policy {
-                action: PolicyCmd::Get
+                action: PolicyCmd::Get { .. }
             }
         ));
 
-        let parsed =
-            AdminHarness::try_parse_from(["headscale", "policy", "update", "policy.hujson"])
-                .unwrap();
+        let parsed = AdminHarness::try_parse_from([
+            "headscale",
+            "policy",
+            "update",
+            "--file",
+            "policy.hujson",
+        ])
+        .unwrap();
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Policy {
                 action: PolicyCmd::Set { .. }
+            }
+        ));
+
+        let parsed = AdminHarness::try_parse_from([
+            "headscale",
+            "policy",
+            "check",
+            "-f",
+            "policy.hujson",
+            "--bypass-grpc-and-access-database-directly",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Policy {
+                action: PolicyCmd::Check {
+                    bypass_direct_db: true,
+                    ..
+                }
             }
         ));
     }

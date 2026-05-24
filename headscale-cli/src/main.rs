@@ -551,6 +551,12 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
                 .map(|server| server.unix_socket.clone())
         });
     }
+    if merged.direct_database_path.is_none() {
+        merged.direct_database_path = Some(config.server.as_ref().map_or_else(
+            || ServerConfig::default().db_path,
+            |server| server.db_path.clone(),
+        ));
+    }
 
     merged
 }
@@ -735,6 +741,14 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
             "apikeys" | "apikey" | "api",
             "delete" | "remove" | "del",
         ] => Some(UPSTREAM_APIKEYS_DELETE_HELP),
+        ["policy", "-h" | "--help"] | ["help", "policy"] => Some(UPSTREAM_POLICY_HELP),
+        ["policy", "get" | "show" | "view" | "fetch", "-h" | "--help"]
+        | ["help", "policy", "get" | "show" | "view" | "fetch"] => Some(UPSTREAM_POLICY_GET_HELP),
+        ["policy", "set" | "put" | "update", "-h" | "--help"]
+        | ["help", "policy", "set" | "put" | "update"] => Some(UPSTREAM_POLICY_SET_HELP),
+        ["policy", "check", "-h" | "--help"] | ["help", "policy", "check"] => {
+            Some(UPSTREAM_POLICY_CHECK_HELP)
+        }
         _ => None,
     }
 }
@@ -1455,6 +1469,86 @@ Global Flags:
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
 
+const UPSTREAM_POLICY_HELP: &str = r#"Manage the Headscale ACL Policy
+
+Usage:
+  headscale policy [command]
+
+Available Commands:
+  check       Check the Policy file for errors
+  get         Print the current ACL Policy
+  set         Updates the ACL Policy
+
+Flags:
+  -h, --help   help for policy
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale policy [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_POLICY_GET_HELP: &str = r"Print the current ACL Policy
+
+Usage:
+  headscale policy get [flags]
+
+Aliases:
+  get, show, view, fetch
+
+Flags:
+      --bypass-grpc-and-access-database-directly   Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running
+  -h, --help                                       help for get
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_POLICY_SET_HELP: &str = "
+\tUpdates the existing ACL Policy with the provided policy. The policy must be a valid HuJSON object.
+\tThis command only works when the acl.policy_mode is set to \"db\", and the policy will be stored in the database.
+
+Usage:
+  headscale policy set [flags]
+
+Aliases:
+  set, put, update
+
+Flags:
+      --bypass-grpc-and-access-database-directly   Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running
+  -f, --file string                                Path to a policy file in HuJSON format
+  -h, --help                                       help for set
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_POLICY_CHECK_HELP: &str = "
+\tCheck validates the policy against the server's live users and nodes,
+\trunning any \"tests\" or \"sshTests\" block. By default the command is a
+\tthin frontend for a gRPC call to a running headscale; pass --bypass-grpc-and-access-database-directly to
+\topen the database directly when headscale is not running.
+
+Usage:
+  headscale policy check [flags]
+
+Flags:
+      --bypass-grpc-and-access-database-directly   Open the database directly (no gRPC, no running server) to resolve user references and to evaluate the policy's tests and sshTests blocks. Required when those checks are needed.
+  -f, --file string                                Path to a policy file in HuJSON format
+  -h, --help                                       help for check
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
     config.validate_for_configtest()?;
@@ -1879,9 +1973,42 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Policy {
-                action: PolicyCmd::Get
+                action: PolicyCmd::Get { .. }
             }
         ));
+
+        let parsed =
+            Cli::try_parse_from(["headscale", "policy", "set", "--file", "policy.hujson"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Policy {
+                action: PolicyCmd::Set { .. }
+            }
+        ));
+
+        let parsed = Cli::try_parse_from([
+            "headscale",
+            "policy",
+            "check",
+            "-f",
+            "policy.hujson",
+            "--bypass-grpc-and-access-database-directly",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Policy {
+                action: PolicyCmd::Check {
+                    bypass_direct_db: true,
+                    ..
+                }
+            }
+        ));
+
+        let Err(err) = Cli::try_parse_from(["headscale", "policy", "set", "policy.hujson"]) else {
+            panic!("upstream policy set requires --file");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -2075,6 +2202,22 @@ mod tests {
             upstream_exact_help(&["help", "apikey", "remove"]),
             Some(UPSTREAM_APIKEYS_DELETE_HELP)
         );
+        assert_eq!(
+            upstream_exact_help(&["policy", "--help"]),
+            Some(UPSTREAM_POLICY_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "policy", "fetch"]),
+            Some(UPSTREAM_POLICY_GET_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["policy", "update", "-h"]),
+            Some(UPSTREAM_POLICY_SET_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "policy", "check"]),
+            Some(UPSTREAM_POLICY_CHECK_HELP)
+        );
         assert_eq!(upstream_exact_help(&["--help", "nodes"]), None);
     }
 
@@ -2152,6 +2295,7 @@ mod tests {
             json: false,
             output: None,
             force: false,
+            direct_database_path: None,
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {
@@ -2189,6 +2333,7 @@ mod tests {
             json: false,
             output: None,
             force: false,
+            direct_database_path: None,
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {

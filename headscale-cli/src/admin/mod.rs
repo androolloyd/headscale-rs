@@ -152,6 +152,11 @@ pub struct ConnectArgs {
     /// Disable prompts and forces the execution.
     #[arg(long, global = true)]
     pub force: bool,
+    /// SQLite DB path from the loaded headscale config. This is not a
+    /// CLI flag; it lets `policy --bypass-grpc-and-access-database-directly`
+    /// match upstream's config-driven recovery path.
+    #[arg(skip)]
+    pub direct_database_path: Option<PathBuf>,
 }
 
 impl ConnectArgs {
@@ -465,17 +470,29 @@ pub enum ApiKeysCmd {
 pub enum PolicyCmd {
     /// Fetch the policy currently loaded on the server.
     #[command(alias = "show", alias = "view", alias = "fetch")]
-    Get,
+    Get {
+        /// Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running.
+        #[arg(long = "bypass-grpc-and-access-database-directly")]
+        bypass_direct_db: bool,
+    },
     /// Push a policy file to the server.
     #[command(alias = "put", alias = "update")]
     Set {
-        #[arg(value_name = "FILE")]
+        /// Path to a policy file in HuJSON format.
+        #[arg(short = 'f', long = "file", value_name = "FILE", required = true)]
         path: PathBuf,
+        /// Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running.
+        #[arg(long = "bypass-grpc-and-access-database-directly")]
+        bypass_direct_db: bool,
     },
-    /// Validate a policy file locally without touching the server.
+    /// Check the Policy file for errors.
     Check {
-        #[arg(value_name = "FILE")]
+        /// Path to a policy file in HuJSON format.
+        #[arg(short = 'f', long = "file", value_name = "FILE", required = true)]
         path: PathBuf,
+        /// Open the database directly (no gRPC, no running server) to resolve user references and to evaluate the policy's tests and sshTests blocks. Required when those checks are needed.
+        #[arg(long = "bypass-grpc-and-access-database-directly")]
+        bypass_direct_db: bool,
     },
 }
 
@@ -808,14 +825,28 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
 
 pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
+    if cmd.bypasses_direct_database() {
+        policy::confirm_direct_database_access(conn.force)?;
+        let db_path = conn.direct_database_path.as_deref().ok_or_else(|| {
+            AdminError::Local(
+                "direct database policy access requires a loaded headscale config".into(),
+            )
+        })?;
+        return match cmd {
+            PolicyCmd::Check { path, .. } => policy::check_direct_db(db_path, path).await,
+            PolicyCmd::Get { .. } => policy::get_direct_db(db_path, fmt).await,
+            PolicyCmd::Set { path, .. } => policy::set_direct_db(db_path, path, fmt).await,
+        };
+    }
+
     if conn.should_use_legacy_http_for_migrated_commands() {
         return match cmd {
-            PolicyCmd::Check { path } => policy::check(path),
-            PolicyCmd::Get => {
+            PolicyCmd::Check { path, .. } => policy::check(path),
+            PolicyCmd::Get { .. } => {
                 let client = conn.build_client()?;
                 policy::get(&client, fmt).await
             }
-            PolicyCmd::Set { path } => {
+            PolicyCmd::Set { path, .. } => {
                 let client = conn.build_client()?;
                 policy::set(&client, path, fmt).await
             }
@@ -824,9 +855,23 @@ pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), Admin
 
     let mut client = conn.build_grpc_client().await?;
     match cmd {
-        PolicyCmd::Check { path } => policy::check_grpc(&mut client, path).await,
-        PolicyCmd::Get => policy::get_grpc(&mut client, fmt).await,
-        PolicyCmd::Set { path } => policy::set_grpc(&mut client, path, fmt).await,
+        PolicyCmd::Check { path, .. } => policy::check_grpc(&mut client, path).await,
+        PolicyCmd::Get { .. } => policy::get_grpc(&mut client, fmt).await,
+        PolicyCmd::Set { path, .. } => policy::set_grpc(&mut client, path, fmt).await,
+    }
+}
+
+impl PolicyCmd {
+    fn bypasses_direct_database(&self) -> bool {
+        match self {
+            Self::Get { bypass_direct_db }
+            | Self::Set {
+                bypass_direct_db, ..
+            }
+            | Self::Check {
+                bypass_direct_db, ..
+            } => *bypass_direct_db,
+        }
     }
 }
 
@@ -984,6 +1029,7 @@ mod tests {
             json: false,
             output: None,
             force: false,
+            direct_database_path: None,
         };
         let e = conn.build_client().unwrap_err();
         assert!(matches!(e, AdminError::Local(_)));
@@ -1001,6 +1047,7 @@ mod tests {
             json: false,
             output: None,
             force: false,
+            direct_database_path: None,
         };
         assert!(conn.build_client().is_ok());
     }
@@ -1017,6 +1064,7 @@ mod tests {
             json: false,
             output: Some("json-line".into()),
             force: false,
+            direct_database_path: None,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
     }
@@ -1033,6 +1081,7 @@ mod tests {
             json: false,
             output: None,
             force: false,
+            direct_database_path: None,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());
     }

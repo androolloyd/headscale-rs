@@ -1,12 +1,18 @@
-Validate a policy file locally without touching the server
 
-Usage: headscale policy check [OPTIONS] <FILE>
+	Check validates the policy against the server's live users and nodes,
+	running any "tests" or "sshTests" block. By default the command is a
+	thin frontend for a gRPC call to a running headscale; pass --bypass-grpc-and-access-database-directly to
+	open the database directly when headscale is not running.
 
-Arguments:
-  <FILE>
+Usage:
+  headscale policy check [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+      --bypass-grpc-and-access-database-directly   Open the database directly (no gRPC, no running server) to resolve user references and to evaluate the policy's tests and sshTests blocks. Required when those checks are needed.
+  -f, --file string                                Path to a policy file in HuJSON format
+  -h, --help                                       help for check
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

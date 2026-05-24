@@ -1,12 +1,19 @@
-Push a policy file to the server
 
-Usage: headscale policy set [OPTIONS] <FILE>
+	Updates the existing ACL Policy with the provided policy. The policy must be a valid HuJSON object.
+	This command only works when the acl.policy_mode is set to "db", and the policy will be stored in the database.
 
-Arguments:
-  <FILE>
+Usage:
+  headscale policy set [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Aliases:
+  set, put, update
+
+Flags:
+      --bypass-grpc-and-access-database-directly   Uses the headscale config to directly access the database, bypassing gRPC and does not require the server to be running
+  -f, --file string                                Path to a policy file in HuJSON format
+  -h, --help                                       help for set
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

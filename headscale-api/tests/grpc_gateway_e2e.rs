@@ -716,6 +716,12 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             message_fragment: r#"parsing field "expiry": parsing time "not-a-date" as "2006-01-02T15:04:05.999999999Z07:00": cannot parse "not-a-date" as "2006""#,
         },
         Case {
+            name: "timestamp root query underflow",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry=0000-01-01T00%3A00%3A00.00Z",
+            message_fragment: r#"parsing field "expiry": 0000-01-01T00:00:00.00Z before 0001-01-01"#,
+        },
+        Case {
             name: "timestamp duplicate root query field",
             method: Method::POST,
             uri: "/api/v1/node/1/expire?expiry=2030-01-02T03%3A04%3A05Z&expiry=2031-01-02T03%3A04%3A05Z",
@@ -836,6 +842,13 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/apikey",
             body: r#"{"expiration":{"seconds":4102444800}}"#,
             message_fragment: "unexpected token { for timestamp field expiration",
+        },
+        Case {
+            name: "timestamp body underflow",
+            method: Method::POST,
+            uri: "/api/v1/apikey",
+            body: r#"{"expiration":"0001-01-01T00:00:00+01:00"}"#,
+            message_fragment: r#"google.protobuf.Timestamp value out of range: "0001-01-01T00:00:00+01:00""#,
         },
         Case {
             name: "string bool body field",

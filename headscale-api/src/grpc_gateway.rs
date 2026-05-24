@@ -39,6 +39,8 @@ use crate::grpc::upstream::HeadscaleAdminService;
 
 const BODY_LIMIT: usize = 1024 * 1024;
 const GO_RFC3339_NANO_LAYOUT: &str = "2006-01-02T15:04:05.999999999Z07:00";
+const MIN_TIMESTAMP_SECONDS: i64 = -62_135_596_800;
+const MAX_TIMESTAMP_SECONDS: i64 = 253_402_300_799;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -1532,6 +1534,7 @@ fn timestamp_field(
             let parsed = chrono::DateTime::parse_from_rfc3339(s).map_err(|e| {
                 Status::invalid_argument(format!("invalid timestamp field {display}: {e}"))
             })?;
+            validate_body_timestamp_range(display, s, parsed.timestamp())?;
             Ok(Some(prost_types::Timestamp {
                 seconds: parsed.timestamp(),
                 nanos: parsed.timestamp_subsec_nanos() as i32,
@@ -1606,10 +1609,29 @@ fn parse_query_timestamp_value(name: &str, value: &str) -> Result<prost_types::T
             go_rfc3339_parse_error(value, e)
         ))
     })?;
+    validate_query_timestamp_range(name, value, parsed.timestamp())?;
     Ok(prost_types::Timestamp {
         seconds: parsed.timestamp(),
         nanos: parsed.timestamp_subsec_nanos() as i32,
     })
+}
+
+fn validate_query_timestamp_range(name: &str, raw: &str, seconds: i64) -> Result<(), Status> {
+    if !(MIN_TIMESTAMP_SECONDS..=MAX_TIMESTAMP_SECONDS).contains(&seconds) {
+        return Err(Status::invalid_argument(format!(
+            "parsing field {name:?}: {raw} before 0001-01-01"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_body_timestamp_range(display: &str, raw: &str, seconds: i64) -> Result<(), Status> {
+    if !(MIN_TIMESTAMP_SECONDS..=MAX_TIMESTAMP_SECONDS).contains(&seconds) {
+        return Err(Status::invalid_argument(format!(
+            "invalid timestamp field {display}: google.protobuf.Timestamp value out of range: {raw:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn go_rfc3339_parse_error(value: &str, fallback: chrono::ParseError) -> String {

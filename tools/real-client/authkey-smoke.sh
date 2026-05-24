@@ -82,6 +82,7 @@ expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIO
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 expected_derp_verify_requests_min="${REAL_CLIENT_EXPECT_DERP_VERIFY_REQUESTS_MIN:-}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 harness_derp_map="${HSRS_HARNESS_DERP_MAP:-${REAL_CLIENT_DERP_MAP:-}}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
@@ -153,6 +154,18 @@ case "${assert_derp_stun}" in
     ;;
   *)
     echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_debug_ping}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_debug_ping=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_debug_ping=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DEBUG_PING must be true or false, got ${expected_debug_ping}" >&2
     exit 2
     ;;
 esac
@@ -482,6 +495,7 @@ fi
 
 http_port=""
 https_port=""
+metrics_port=""
 harness_pid=""
 client_names=()
 for ((idx = 1; idx <= client_count; idx++)); do
@@ -1017,6 +1031,7 @@ need ruby
 
 http_port="$(free_port)"
 https_port="$(free_port)"
+metrics_port="$(free_port)"
 
 echo "::group::build headscale-rs real-client harness"
 cargo build --quiet --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml
@@ -1027,6 +1042,7 @@ harness_args=(
   tools/real-client/headscale-rs-harness/target/debug/headscale-rs-real-client-harness
   --http "127.0.0.1:${http_port}"
   --https "0.0.0.0:${https_port}"
+  --metrics "127.0.0.1:${metrics_port}"
   --hostname host.docker.internal
   --public-url "https://host.docker.internal:${https_port}"
   --state-dir "${work_dir}/state"
@@ -1066,9 +1082,12 @@ harness_pid="$!"
 
 wait_for "harness health" \
   "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >/dev/null"
+wait_for "harness metrics" \
+  "curl -fsS 'http://127.0.0.1:${metrics_port}/metrics' >/dev/null"
 wait_for "harness TLS certificate" "test -s '${work_dir}/state/tls.crt'"
 echo "harness http=http://127.0.0.1:${http_port}"
 echo "harness login=https://host.docker.internal:${https_port}"
+echo "harness metrics=http://127.0.0.1:${metrics_port}"
 echo "::endgroup::"
 
 if ((assert_derp_stun_flag)); then
@@ -1449,8 +1468,8 @@ ruby -rjson -e '
     }
     abort("expected user #{expected_user.inspect}, got #{machine["user"].inspect}") unless machine["user"] == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
-    expected_routes = expected_routes_by_host.fetch(machine["hostname"], [])
-    expected_approved = expected_approved_by_host.fetch(machine["hostname"], [])
+    expected_routes = expected_routes_by_host.fetch(machine["hostname"], []) || []
+    expected_approved = expected_approved_by_host.fetch(machine["hostname"], []) || []
     ips = Array(machine["addresses"])
     ips << machine["ipv4"] if ips.empty? && machine["ipv4"].to_s != ""
     ips << machine["ipv6"] if ips.empty? && machine["ipv6"].to_s != ""
@@ -1490,6 +1509,22 @@ ruby -rjson -e '
   end
   ' "${work_dir}/machines.json" "${expected_available_routes_spec}" "${expected_approved_routes_spec}" "${expected_machine_count}" "${expected_primary_route}" "${work_dir}/debug-routes.json" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}" "${expected_tailscale_ip_families}" "${expected_primary_route_candidates}" "${expect_available_by_client}" "${expect_approved_by_client}"
 echo "::endgroup::"
+
+if ((expect_debug_ping)); then
+  echo "::group::assert debug PingRequest lifecycle"
+  ping_target="${client_names[0]}"
+  curl -fsS --max-time "${timeout_secs}" \
+    "http://127.0.0.1:${metrics_port}/debug/ping?node=${ping_target}" \
+    >"${work_dir}/debug-ping.html"
+  if ! grep -Eq 'Ping OK|Pong|responded' "${work_dir}/debug-ping.html"; then
+    echo "expected /debug/ping to report a successful PingRequest callback" >&2
+    cat "${work_dir}/debug-ping.html" >&2 || true
+    dump_client_debug "${ping_target}"
+    exit 1
+  fi
+  ruby -rjson -e 'puts JSON.pretty_generate({debug_ping: "ok", node: ARGV.fetch(0)})' "${ping_target}"
+  echo "::endgroup::"
+fi
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "::group::assert MagicDNS client status"

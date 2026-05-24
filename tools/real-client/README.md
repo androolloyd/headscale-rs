@@ -69,12 +69,15 @@ headscale-rs wire surface.
 
 Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
 truth for the checked-in real-client matrix. Each row has a Rust harness script
-and a matching pinned headscale-go script so parity work can compare behavior
-with the same stock `tailscaled` image.
+and a matching headscale-go script so parity work can compare behavior with the
+same stock `tailscaled` image. Most headscale-go rows use the pinned v0.28.0
+baseline; `ping-lifecycle` targets the current-head audit commit because v0.28.0
+predates the executable PingRequest lifecycle.
 
 | Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
+| Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |

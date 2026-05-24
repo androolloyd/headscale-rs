@@ -24,9 +24,9 @@ use headscale_api::{
     dns::{DnsConfigSpec, DnsStore, parse_extra_records},
     policy::{NodeView, PolicyStore, parse_hujson_policy},
     tailscale_wire::{
-        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, PingTracker,
-        PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey, WireState,
-        derp_config,
+        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry,
+        MapResponseDebugStore, PingTracker, PreauthRedeemer, RedeemError, RedeemOk,
+        RegistrationCache, ServerNoiseKey, WireState, derp_config,
         routes::{DebugRoutes, normalize_routes},
         serve, spawn_route_health_probe,
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
@@ -51,6 +51,8 @@ struct Args {
     http: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:443", env = "HSRS_HARNESS_HTTPS")]
     https: SocketAddr,
+    #[arg(long, default_value = "127.0.0.1:0", env = "HSRS_HARNESS_METRICS")]
+    metrics: SocketAddr,
     #[arg(long, env = "HSRS_HARNESS_NO_HTTPS")]
     no_https: bool,
     #[arg(
@@ -362,6 +364,7 @@ struct DerpVerifyLogResponse {
 struct StartupInfo {
     http: String,
     https: Option<String>,
+    metrics: Option<String>,
     public_url: String,
     tls_cert_path: Option<String>,
     embedded_derp: Option<EmbeddedDerpStartup>,
@@ -470,6 +473,7 @@ async fn main() -> Result<()> {
         runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
         registration_cache: registration_cache.clone(),
         pings: Arc::new(PingTracker::new()),
+        mapresponse_debug: Arc::new(MapResponseDebugStore::disabled()),
     };
 
     let app_state = AppState {
@@ -493,7 +497,7 @@ async fn main() -> Result<()> {
         },
         trusted_proxies: serve::TrustedProxyConfig::default(),
         oidc: None,
-        metrics_addr: None,
+        metrics_addr: Some(args.metrics),
     };
     let route_health_probe = spawn_route_health_probe(
         state.clone(),
@@ -505,12 +509,14 @@ async fn main() -> Result<()> {
         .tls
         .as_ref()
         .map(|tls| tls.cert_path.display().to_string());
+    let metrics_addr = handle.metrics_addr.map(|addr| addr.to_string());
 
     println!(
         "{}",
         serde_json::to_string_pretty(&StartupInfo {
             http: args.http.to_string(),
             https: (!args.no_https).then_some(args.https.to_string()),
+            metrics: metrics_addr,
             public_url,
             tls_cert_path,
             embedded_derp: embedded_derp_startup,

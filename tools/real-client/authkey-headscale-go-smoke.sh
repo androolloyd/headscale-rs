@@ -93,6 +93,7 @@ expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-
 expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-}"
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
   enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-true}"
@@ -187,6 +188,18 @@ case "${assert_derp_stun}" in
     ;;
   *)
     echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_debug_ping}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_debug_ping=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_debug_ping=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DEBUG_PING must be true or false, got ${expected_debug_ping}" >&2
     exit 2
     ;;
 esac
@@ -1774,8 +1787,8 @@ ruby -rjson -e '
     end
     abort("expected user #{expected_user}, got #{user.inspect}") unless user_name == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{given_name.inspect}") unless given_name.to_s.start_with?(expected_hostname_prefix)
-    expected_routes = expected_routes_by_host.fetch(given_name.to_s, [])
-    expected_approved = expected_approved_by_host.fetch(given_name.to_s, [])
+    expected_routes = expected_routes_by_host.fetch(given_name.to_s, []) || []
+    expected_approved = expected_approved_by_host.fetch(given_name.to_s, []) || []
     assert_ip_families("node #{given_name}", addresses, expected_families)
     unless (!assert_available && expected_routes.empty?) || available_routes == expected_routes
       abort("expected available routes #{expected_routes.inspect}, got #{available_routes.inspect}")
@@ -1803,6 +1816,22 @@ ruby -rjson -e '
   end
   ' "${work_dir}/nodes.json" "${expected_available_routes_spec}" "${expected_approved_routes_spec}" "${expected_machine_count}" "${expected_primary_route}" "${expected_tags}" "${run_id}" "$([[ "${expect_tags_exact}" -eq 1 ]] && printf true || printf false)" "${expected_client_names_csv}" "${expected_client_users_csv}" "${expected_tailscale_ip_families}" "${expect_available_by_client}" "${expect_approved_by_client}"
 echo "::endgroup::"
+
+if ((expect_debug_ping)); then
+  echo "::group::assert debug PingRequest lifecycle"
+  ping_target="${client_names[0]}"
+  curl -fsS --max-time "${timeout_secs}" \
+    "http://127.0.0.1:${metrics_port}/debug/ping?node=${ping_target}" \
+    >"${work_dir}/debug-ping.html"
+  if ! grep -Eq 'Ping OK|Pong|responded' "${work_dir}/debug-ping.html"; then
+    echo "expected /debug/ping to report a successful PingRequest callback" >&2
+    cat "${work_dir}/debug-ping.html" >&2 || true
+    dump_client_debug "${ping_target}"
+    exit 1
+  fi
+  ruby -rjson -e 'puts JSON.pretty_generate({debug_ping: "ok", node: ARGV.fetch(0)})' "${ping_target}"
+  echo "::endgroup::"
+fi
 
 if [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "::group::assert MagicDNS client status"

@@ -630,6 +630,12 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             message_fragment: r#"too many values for field "id": 1, 2"#,
         },
         Case {
+            name: "duplicate string query field",
+            method: Method::GET,
+            uri: "/api/v1/node?user=alice&user=bob",
+            message_fragment: r#"too many values for field "user": alice, bob"#,
+        },
+        Case {
             name: "empty uint64 query field",
             method: Method::DELETE,
             uri: "/api/v1/preauthkey?id=",
@@ -646,6 +652,24 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/node/1/expire?expiry.seconds=not-a-number",
             message_fragment: r#"parsing field "seconds": strconv.ParseInt: parsing "not-a-number": invalid syntax"#,
+        },
+        Case {
+            name: "timestamp root query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry=not-a-date",
+            message_fragment: r#"parsing field "expiry": parsing time "not-a-date" as "2006-01-02T15:04:05.999999999Z07:00": cannot parse "not-a-date" as "2006""#,
+        },
+        Case {
+            name: "timestamp duplicate root query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry=2030-01-02T03%3A04%3A05Z&expiry=2031-01-02T03%3A04%3A05Z",
+            message_fragment: r#"too many values for field "expiry": 2030-01-02T03:04:05Z, 2031-01-02T03:04:05Z"#,
+        },
+        Case {
+            name: "timestamp bracket query field",
+            method: Method::POST,
+            uri: "/api/v1/node/1/expire?expiry%5Bseconds%5D=1",
+            message_fragment: r#"too many values for field "expiry": seconds, 1"#,
         },
     ] {
         let resp = app

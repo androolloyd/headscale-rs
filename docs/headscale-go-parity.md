@@ -57,7 +57,9 @@ Current-head audit overlay, refreshed 2026-05-23:
   expanded SSH real-client coverage, current-upstream SSH
   `localpart:*@domain` login-user compiler and `sshTests` semantics,
   paired current-head SSH localpart/profile real-client coverage,
-  scoped grpc-gateway fallback routing, and
+  scoped grpc-gateway fallback routing, upstream-shaped grpc-gateway
+  timestamp query parser errors plus duplicate scalar/timestamp query
+  edge coverage, and
   private-DERP/STUN sidecar real-client parity in the current branch.
 - Active P0 implementation lanes against the pinned v0.28 executable
   baseline: none known from the 2026-05-23 audit; current-head parity

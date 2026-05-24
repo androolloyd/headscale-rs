@@ -34,6 +34,7 @@ use crate::generated::{
 use crate::grpc::upstream::HeadscaleAdminService;
 
 const BODY_LIMIT: usize = 1024 * 1024;
+const GO_RFC3339_NANO_LAYOUT: &str = "2006-01-02T15:04:05.999999999Z07:00";
 
 #[derive(Clone)]
 struct GatewayState {
@@ -1448,12 +1449,7 @@ fn query_timestamp(
             )));
         }
         let value = values.first().map_or("", String::as_str);
-        let parsed = chrono::DateTime::parse_from_rfc3339(value)
-            .map_err(|e| Status::invalid_argument(format!("parsing field {name:?}: {e}")))?;
-        return Ok(Some(prost_types::Timestamp {
-            seconds: parsed.timestamp(),
-            nanos: parsed.timestamp_subsec_nanos() as i32,
-        }));
+        return parse_query_timestamp_value(name, value).map(Some);
     }
 
     let seconds_key = format!("{name}.seconds");
@@ -1494,6 +1490,43 @@ fn query_timestamp(
         seconds: seconds.unwrap_or(0),
         nanos: nanos.unwrap_or(0),
     }))
+}
+
+fn parse_query_timestamp_value(name: &str, value: &str) -> Result<prost_types::Timestamp, Status> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|e| {
+        Status::invalid_argument(format!(
+            "parsing field {name:?}: {}",
+            go_rfc3339_parse_error(value, e)
+        ))
+    })?;
+    Ok(prost_types::Timestamp {
+        seconds: parsed.timestamp(),
+        nanos: parsed.timestamp_subsec_nanos() as i32,
+    })
+}
+
+fn go_rfc3339_parse_error(value: &str, fallback: chrono::ParseError) -> String {
+    if !starts_with_ascii_digits(value, 4) {
+        return format!(
+            "parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: cannot parse {value:?} as \"2006\""
+        );
+    }
+
+    for (offset, expected) in [(4, "-"), (7, "-"), (10, "T"), (13, ":"), (16, ":")] {
+        if value.as_bytes().get(offset).copied() != Some(expected.as_bytes()[0]) {
+            let rest = value.get(offset..).unwrap_or("");
+            return format!(
+                "parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: cannot parse {rest:?} as {expected:?}"
+            );
+        }
+    }
+
+    format!("parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: {fallback}")
+}
+
+fn starts_with_ascii_digits(value: &str, count: usize) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= count && bytes[..count].iter().all(u8::is_ascii_digit)
 }
 
 fn query_bool(

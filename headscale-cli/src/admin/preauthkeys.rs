@@ -2,9 +2,9 @@
 //! gRPC, with a legacy `/api/v1/preauthkeys` HTTP path kept for explicit
 //! `--server` use.
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use headscale_api::admin::{PreauthAdminKey, PreauthMintRequest};
-use headscale_api::generated::PreAuthKey as GrpcPreAuthKey;
+use headscale_api::generated::{PreAuthKey as GrpcPreAuthKey, User as GrpcUser};
 use serde::Serialize;
 
 use super::AdminError;
@@ -99,7 +99,7 @@ pub async fn list_grpc(
         .map(PreauthOutput::from)
         .collect();
     if let Some(u) = user_filter {
-        keys.retain(|k| k.user == u);
+        keys.retain(|k| k.user.as_ref().is_some_and(|user| user.name == u));
     }
     if fmt.is_structured() {
         print_structured(fmt, &keys)?;
@@ -226,7 +226,7 @@ fn render_grpc_keys(keys: &[PreauthOutput]) {
                 k.used.to_string(),
                 k.expires_at_display.clone(),
                 k.created_at_display.clone(),
-                owner_display(&k.user, &k.tags),
+                owner_display(k.user.as_ref().map_or("", UserOutput::name), &k.acl_tags),
             ]
         })
         .collect();
@@ -254,13 +254,6 @@ fn expiration_unix(ttl_secs: u64) -> Option<i64> {
         .map_or(0, |duration| duration.as_secs());
     let expires_at = now.saturating_add(ttl_secs);
     i64::try_from(expires_at).ok()
-}
-
-fn timestamp_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
-    let ts = ts?;
-    let nanos = u32::try_from(ts.nanos).ok()?;
-    DateTime::<Utc>::from_timestamp(ts.seconds, nanos)
-        .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn timestamp_display_proto(ts: Option<&prost_types::Timestamp>) -> String {
@@ -313,17 +306,24 @@ fn short_prefix(key: &str) -> String {
 
 #[derive(Clone, Debug, Serialize)]
 struct PreauthOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<UserOutput>,
+    #[serde(skip_serializing_if = "is_zero_u64")]
     id: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
     key: String,
-    user: String,
+    #[serde(skip_serializing_if = "is_false")]
     reusable: bool,
+    #[serde(skip_serializing_if = "is_false")]
     ephemeral: bool,
+    #[serde(skip_serializing_if = "is_false")]
     used: bool,
-    tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
+    expiration: Option<TimestampOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    expires_at: Option<String>,
+    created_at: Option<TimestampOutput>,
+    #[serde(rename = "acl_tags", skip_serializing_if = "Vec::is_empty")]
+    acl_tags: Vec<String>,
     #[serde(skip)]
     expires_at_display: String,
     #[serde(skip)]
@@ -337,22 +337,95 @@ impl PreauthOutput {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct UserOutput {
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    id: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<TimestampOutput>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    display_name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    email: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    provider_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    provider: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    profile_pic_url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TimestampOutput {
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    seconds: i64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    nanos: i32,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl UserOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl From<GrpcUser> for UserOutput {
+    fn from(user: GrpcUser) -> Self {
+        Self {
+            id: user.id,
+            name: user.name,
+            created_at: user.created_at.map(TimestampOutput::from),
+            display_name: user.display_name,
+            email: user.email,
+            provider_id: user.provider_id,
+            provider: user.provider,
+            profile_pic_url: user.profile_pic_url,
+        }
+    }
+}
+
+impl From<prost_types::Timestamp> for TimestampOutput {
+    fn from(ts: prost_types::Timestamp) -> Self {
+        Self {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        }
+    }
+}
+
 impl From<GrpcPreAuthKey> for PreauthOutput {
     fn from(key: GrpcPreAuthKey) -> Self {
-        let user = key.user.map_or_else(String::new, |user| user.name);
-        let expires_at = timestamp_rfc3339(key.expiration.as_ref());
+        let user = key.user.map(UserOutput::from);
         Self {
+            user,
             id: key.id,
             key: key.key,
-            user,
             reusable: key.reusable,
             ephemeral: key.ephemeral,
             used: key.used,
-            tags: key.acl_tags,
-            created_at: timestamp_rfc3339(key.created_at.as_ref()),
-            created_at_display: timestamp_display_proto(key.created_at.as_ref()),
             expires_at_display: timestamp_display_proto(key.expiration.as_ref()),
-            expires_at,
+            expiration: key.expiration.map(TimestampOutput::from),
+            created_at_display: timestamp_display_proto(key.created_at.as_ref()),
+            created_at: key.created_at.map(TimestampOutput::from),
+            acl_tags: key.acl_tags,
         }
     }
 }
@@ -394,8 +467,12 @@ mod tests {
             acl_tags: vec!["tag:server".into()],
         });
         assert_eq!(out.id, 42);
-        assert_eq!(out.user, "alice");
-        assert_eq!(out.expires_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(out.user.as_ref().unwrap().name, "alice");
+        assert_eq!(
+            out.expiration.as_ref().map(|ts| ts.seconds),
+            Some(1_704_067_200)
+        );
+        assert_eq!(out.acl_tags, vec!["tag:server"]);
         assert!(out.matches_prefix("hskey-auth-abcdefghijkl"));
         assert!(out.matches_prefix("hskey-auth-abcdefghijkl-***"));
         assert!(!out.matches_prefix("hskey-auth-deadbeef"));

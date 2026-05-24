@@ -1242,7 +1242,17 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&list_preauth), "");
 
     let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
-    let preauth_id = json_output(&preauth_json)[0]["id"].as_u64().unwrap();
+    let preauth_json = json_output(&preauth_json);
+    let listed_preauth = &preauth_json[0];
+    assert_eq!(listed_preauth["key"].as_str(), Some(preauth_key.as_str()));
+    assert_eq!(listed_preauth["user"]["name"].as_str(), Some("alice"));
+    assert_eq!(listed_preauth["reusable"].as_bool(), Some(true));
+    assert_eq!(listed_preauth["ephemeral"].as_bool(), Some(true));
+    assert!(listed_preauth.get("used").is_none());
+    assert!(listed_preauth.get("acl_tags").is_none());
+    assert!(listed_preauth["expiration"]["seconds"].as_i64().is_some());
+    assert!(listed_preauth["created_at"]["seconds"].as_i64().is_some());
+    let preauth_id = listed_preauth["id"].as_u64().unwrap();
     let preauth_id = preauth_id.to_string();
     let expire_preauth =
         headscale_with_config(&config, &["preauthkeys", "expire", "--id", &preauth_id]);
@@ -1271,6 +1281,65 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(stdout(&empty_preauth).starts_with("ID  Key/Prefix"));
     assert!(!stdout(&empty_preauth).contains("No preauth keys."));
     assert_eq!(stderr(&empty_preauth), "");
+
+    let create_preauth_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--reusable",
+            "--expiration",
+            "1h",
+            "--tags",
+            "tag:test1,tag:test2",
+        ],
+    );
+    let created_preauth_json = json_output(&create_preauth_json);
+    assert_eq!(created_preauth_json["user"]["name"].as_str(), Some("alice"));
+    assert!(
+        created_preauth_json["key"]
+            .as_str()
+            .unwrap()
+            .starts_with("hskey-auth-")
+    );
+    assert_eq!(created_preauth_json["reusable"].as_bool(), Some(true));
+    assert!(created_preauth_json.get("ephemeral").is_none());
+    assert_eq!(
+        created_preauth_json["acl_tags"],
+        serde_json::json!(["tag:test1", "tag:test2"])
+    );
+    assert!(
+        created_preauth_json["expiration"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert!(
+        created_preauth_json["created_at"]["seconds"]
+            .as_i64()
+            .is_some()
+    );
+    assert_eq!(stderr(&create_preauth_json), "");
+    let created_preauth_id = created_preauth_json["id"].as_u64().unwrap().to_string();
+    let delete_preauth_json = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "delete",
+            "--id",
+            &created_preauth_id,
+        ],
+    );
+    assert_eq!(
+        json_output(&delete_preauth_json).as_object().unwrap().len(),
+        0
+    );
+    assert_eq!(stderr(&delete_preauth_json), "");
 
     let create_api_key =
         headscale_with_config(&config, &["apikeys", "create", "--expiration", "1h"]);

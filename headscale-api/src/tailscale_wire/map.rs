@@ -2151,6 +2151,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keyed_map_prefers_body_node_key_like_upstream_noise_map() {
+        let (state, _dir) = fixture();
+        let path_node_key = "a6".repeat(32);
+        let body_node_key = "b6".repeat(32);
+        insert_peer(&state, &path_node_key, "peer-a", 10);
+        state.machines.upsert(
+            body_node_key.clone(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                body_node_key.clone(),
+                "22".repeat(32),
+                "u".into(),
+                "peer-b".into(),
+                Ipv4Addr::new(100, 64, 0, 11),
+                false,
+            ),
+        );
+
+        let app = router(state);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{body_node_key}"),
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{path_node_key}/map"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey("22".repeat(32)));
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+        assert_eq!(node.name, "peer-b");
+        assert_eq!(node.addresses[0], "100.64.0.11/32");
+    }
+
+    #[tokio::test]
     async fn map_response_reduces_peers_when_policy_is_loaded() {
         let (state, _dir) = fixture();
         let policy = r#"{

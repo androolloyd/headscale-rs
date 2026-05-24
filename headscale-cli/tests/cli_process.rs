@@ -142,6 +142,16 @@ fn assert_process_stderr_snapshot(
     );
 }
 
+fn assert_config_stderr_snapshot(
+    config: &Path,
+    args: &[&str],
+    expected_status: i32,
+    expected: &str,
+) {
+    let output = headscale_with_config(config, args);
+    assert_process_stderr_snapshot(&output, expected_status, expected, &format!("{args:?}"));
+}
+
 async fn wait_for_headscale_status(config: &Path, args: &[&str], expected_status: i32) -> Output {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -2370,6 +2380,100 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stdout(&destroy_user), "User destroyed\n");
     assert_eq!(stderr(&destroy_user), "");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_local_grpc_cli_domain_errors_match_snapshots() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+    assert!(
+        create_user.status.success(),
+        "stderr: {}",
+        stderr(&create_user)
+    );
+    assert_eq!(stdout(&create_user), "User created\n");
+    assert_eq!(stderr(&create_user), "");
+
+    assert_config_stderr_snapshot(
+        &config,
+        &["users", "create", "alice"],
+        6,
+        include_str!("snapshots/grpc_live_duplicate_user.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-ojson-line",
+            "preauthkeys",
+            "create",
+            "--user",
+            "404",
+            "--expiration",
+            "1h",
+        ],
+        5,
+        include_str!("snapshots/grpc_live_preauth_missing_user_json_line.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--tags",
+            "tag:Bad",
+            "--expiration",
+            "1h",
+        ],
+        6,
+        include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "json", "apikeys", "expire", "--id", "999"],
+        5,
+        include_str!("snapshots/grpc_live_apikey_not_found_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["auth", "approve", "--auth-id", "dddddddddddddddddddddddd"],
+        5,
+        include_str!("snapshots/grpc_live_auth_missing.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-ojson-line", "nodes", "expire", "--identifier", "404"],
+        5,
+        include_str!("snapshots/grpc_live_node_not_found_json_line.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "nodes",
+            "tag",
+            "--identifier",
+            "404",
+            "--tags",
+            "tag:Bad",
+        ],
+        6,
+        include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
+    );
 
     handle.abort();
     let _ = handle.await;

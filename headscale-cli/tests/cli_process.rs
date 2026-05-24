@@ -120,6 +120,14 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["help", "auth", "register"],
         include_str!("snapshots/auth_register_help.stdout"),
     );
+    assert_stdout_snapshot(
+        &["users", "-h"],
+        include_str!("snapshots/users_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "users", "create"],
+        include_str!("snapshots/users_create_help.stdout"),
+    );
 }
 
 #[test]
@@ -433,6 +441,10 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 
 #[test]
 fn implemented_admin_command_help_matches_snapshots() {
+    assert_stdout_snapshot(
+        &["users", "--help"],
+        include_str!("snapshots/users_help.stdout"),
+    );
     assert_stdout_snapshot(
         &["users", "create", "--help"],
         include_str!("snapshots/users_create_help.stdout"),

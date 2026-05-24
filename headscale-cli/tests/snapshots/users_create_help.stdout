@@ -1,15 +1,18 @@
 Creates a new user
 
-Usage: headscale users create [OPTIONS] <NAME>
+Usage:
+  headscale users create NAME [flags]
 
-Arguments:
-  <NAME>
+Aliases:
+  create, c, new
 
-Options:
-  -c, --config <CONFIG>              config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -d, --display-name <DISPLAY_NAME>  Display name
-  -e, --email <EMAIL>                Email address
-  -p, --picture-url <PICTURE_URL>    Profile picture URL
-  -o, --output <OUTPUT>              Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force                        Disable prompts and forces the execution
-  -h, --help                         Print help
+Flags:
+  -d, --display-name string   Display name
+  -e, --email string          Email
+  -h, --help                  help for create
+  -p, --picture-url string    Profile picture URL
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

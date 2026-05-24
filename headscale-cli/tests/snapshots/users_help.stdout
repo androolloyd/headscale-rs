@@ -1,0 +1,23 @@
+Manage the users of Headscale
+
+Usage:
+  headscale users [command]
+
+Aliases:
+  users, user
+
+Available Commands:
+  create      Creates a new user
+  destroy     Destroys a user
+  list        List all the users
+  rename      Renames a user
+
+Flags:
+  -h, --help   help for users
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale users [command] --help" for more information about a command.

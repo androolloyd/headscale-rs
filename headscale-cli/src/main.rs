@@ -605,6 +605,19 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["auth", "reject", "-h" | "--help"] | ["help", "auth", "reject"] => {
             Some(UPSTREAM_AUTH_REJECT_HELP)
         }
+        ["users", "-h" | "--help"] | ["help", "users"] => Some(UPSTREAM_USERS_HELP),
+        ["users", "create", "-h" | "--help"] | ["help", "users", "create"] => {
+            Some(UPSTREAM_USERS_CREATE_HELP)
+        }
+        ["users", "list", "-h" | "--help"] | ["help", "users", "list"] => {
+            Some(UPSTREAM_USERS_LIST_HELP)
+        }
+        ["users", "rename", "-h" | "--help"] | ["help", "users", "rename"] => {
+            Some(UPSTREAM_USERS_RENAME_HELP)
+        }
+        ["users", "destroy", "-h" | "--help"] | ["help", "users", "destroy"] => {
+            Some(UPSTREAM_USERS_DESTROY_HELP)
+        }
         _ => None,
     }
 }
@@ -834,6 +847,110 @@ Usage:
 Flags:
       --auth-id string   Auth ID
   -h, --help             help for reject
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_USERS_HELP: &str = r#"Manage the users of Headscale
+
+Usage:
+  headscale users [command]
+
+Aliases:
+  users, user
+
+Available Commands:
+  create      Creates a new user
+  destroy     Destroys a user
+  list        List all the users
+  rename      Renames a user
+
+Flags:
+  -h, --help   help for users
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale users [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_USERS_CREATE_HELP: &str = r"Creates a new user
+
+Usage:
+  headscale users create NAME [flags]
+
+Aliases:
+  create, c, new
+
+Flags:
+  -d, --display-name string   Display name
+  -e, --email string          Email
+  -h, --help                  help for create
+  -p, --picture-url string    Profile picture URL
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_USERS_LIST_HELP: &str = r"List all the users
+
+Usage:
+  headscale users list [flags]
+
+Aliases:
+  list, ls, show
+
+Flags:
+  -e, --email string     Email
+  -h, --help             help for list
+  -i, --identifier int   User identifier (ID) (default -1)
+  -n, --name string      Username
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_USERS_RENAME_HELP: &str = r"Renames a user
+
+Usage:
+  headscale users rename [flags]
+
+Aliases:
+  rename, mv
+
+Flags:
+  -h, --help              help for rename
+  -i, --identifier int    User identifier (ID) (default -1)
+  -n, --name string       Username
+  -r, --new-name string   New username
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_USERS_DESTROY_HELP: &str = r"Destroys a user
+
+Usage:
+  headscale users destroy --identifier ID or --name NAME [flags]
+
+Aliases:
+  destroy, delete
+
+Flags:
+  -h, --help             help for destroy
+  -i, --identifier int   User identifier (ID) (default -1)
+  -n, --name string      Username
 
 Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
@@ -1412,6 +1529,14 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["help", "auth", "register"]),
             Some(UPSTREAM_AUTH_REGISTER_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["users", "--help"]),
+            Some(UPSTREAM_USERS_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "users", "create"]),
+            Some(UPSTREAM_USERS_CREATE_HELP)
         );
         assert_eq!(upstream_exact_help(&["nodes", "--help"]), None);
         assert_eq!(upstream_exact_help(&["--help", "nodes"]), None);

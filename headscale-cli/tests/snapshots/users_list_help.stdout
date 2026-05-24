@@ -1,12 +1,18 @@
 List all the users
 
-Usage: headscale users list [OPTIONS]
+Usage:
+  headscale users list [flags]
 
-Options:
-  -c, --config <CONFIG>          config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -i, --identifier <IDENTIFIER>  User identifier (ID)
-  -n, --name <NAME>              Username
-  -e, --email <EMAIL>            Email address
-  -o, --output <OUTPUT>          Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force                    Disable prompts and forces the execution
-  -h, --help                     Print help
+Aliases:
+  list, ls, show
+
+Flags:
+  -e, --email string     Email
+  -h, --help             help for list
+  -i, --identifier int   User identifier (ID) (default -1)
+  -n, --name string      Username
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

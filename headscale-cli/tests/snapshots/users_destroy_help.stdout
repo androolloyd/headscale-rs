@@ -1,11 +1,17 @@
 Destroys a user
 
-Usage: headscale users destroy [OPTIONS]
+Usage:
+  headscale users destroy --identifier ID or --name NAME [flags]
 
-Options:
-  -c, --config <CONFIG>          config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -i, --identifier <IDENTIFIER>  User identifier (ID)
-  -n, --name <NAME>              Username
-  -o, --output <OUTPUT>          Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force                    Disable prompts and forces the execution
-  -h, --help                     Print help
+Aliases:
+  destroy, delete
+
+Flags:
+  -h, --help             help for destroy
+  -i, --identifier int   User identifier (ID) (default -1)
+  -n, --name string      Username
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

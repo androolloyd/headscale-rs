@@ -26,6 +26,7 @@ route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-fals
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
+web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
@@ -91,6 +92,22 @@ case "${route_health_all_unhealthy_restart}" in
     exit 2
     ;;
 esac
+case "${web_register_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    web_register_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    web_register_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_WEB_REGISTER must be true or false, got ${web_register_restart}" >&2
+    exit 2
+    ;;
+esac
+if ((web_register_restart_flag && (route_via_restart_flag || route_health_restart_flag))); then
+  echo "REAL_CLIENT_RESTART_WEB_REGISTER cannot be combined with route-via or route-health restart modes" >&2
+  exit 2
+fi
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
   exit 2
@@ -908,6 +925,50 @@ assert_route_via_persisted_nodes() {
   ' "${nodes_path}" "${advertised_routes}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
 }
 
+assert_web_registered_node() {
+  local label="$1"
+  local nodes_path="${work_dir}/nodes-${label}.json"
+  local summary_path="${work_dir}/web-registered-node-${label}.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    expected_name = ARGV.fetch(1)
+    expected_user = ARGV.fetch(2)
+    summary_path = ARGV.fetch(3)
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    abort("expected 1 web-registered node, got #{nodes.length}: #{nodes.inspect}") unless nodes.length == 1
+    node = nodes.fetch(0)
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    user = node["user"] || node["User"]
+    user_name = user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
+    register_method = node["registerMethod"] || node["register_method"]
+    addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
+    machine_key = node["machineKey"] || node["machine_key"]
+    node_key = node["nodeKey"] || node["node_key"]
+    node_id = node["id"] || node["ID"] || node["nodeId"] || node["node_id"]
+
+    abort("expected node #{expected_name.inspect}, got #{node_name(node).inspect}") unless node_name(node).to_s == expected_name
+    abort("expected user #{expected_user.inspect}, got #{user.inspect}") unless user_name == expected_user
+    abort("expected at least one IPv4 address, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.include?(".") }
+    abort("expected non-empty machine key") if machine_key.to_s.empty?
+    abort("expected non-empty node key") if node_key.to_s.empty?
+    abort("expected non-empty node ID") if node_id.to_s.empty?
+
+    File.write(summary_path, JSON.pretty_generate({
+      node_id: node_id,
+      node_name: node_name(node),
+      user: user,
+      register_method: register_method,
+      ip_addresses: addresses,
+    }))
+    puts node_id
+  ' "${nodes_path}" "${observer_name}" "alice" "${summary_path}"
+}
+
 assert_route_health_persisted_nodes() {
   local label="$1"
   local nodes_path="${work_dir}/nodes-${label}.json"
@@ -1586,7 +1647,24 @@ if [[ "${target}" == "headscale-go" ]]; then
 fi
 start_server
 
-if ((route_via_restart_flag)); then
+if ((web_register_restart_flag)); then
+  web_node_id_before=""
+  web_node_id_after=""
+  create_user_json alice "${work_dir}/user-alice.json" >/dev/null
+  start_client "${observer_name}"
+  login_observer_with_web_registration "${observer_name}" alice
+  web_node_id_before="$(assert_web_registered_node "before-restart")"
+
+  stop_server
+  start_server
+  wait_for "web-registered node reconnected after restart" "tailscale_logged_in '${observer_name}'"
+  docker exec "${observer_name}" tailscale status --json >"${work_dir}/${observer_name}.after-restart-status.json"
+  web_node_id_after="$(assert_web_registered_node "after-restart")"
+  if [[ "${web_node_id_before}" != "${web_node_id_after}" ]]; then
+    echo "expected web-registered node ID to survive restart, before=${web_node_id_before}, after=${web_node_id_after}" >&2
+    exit 1
+  fi
+elif ((route_via_restart_flag)); then
   create_route_via_users_and_keys
   start_client "${router_name}"
   start_client "${router_b_name}"

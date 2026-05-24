@@ -23,6 +23,8 @@ oidc_email="${REAL_CLIENT_OIDC_EMAIL:-alice@example.com}"
 oidc_username="${REAL_CLIENT_OIDC_USERNAME:-alice}"
 oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
 oidc_restart="${REAL_CLIENT_OIDC_RESTART:-false}"
+oidc_advertise_routes="${REAL_CLIENT_OIDC_ADVERTISE_ROUTES:-}"
+oidc_approve_routes="${REAL_CLIENT_OIDC_APPROVE_ROUTES:-}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/oidc-${target}-smoke}"
 run_id="hs-oidc-${target}-$(date +%s)-$$"
@@ -40,6 +42,10 @@ case "${oidc_restart}" in
     exit 2
     ;;
 esac
+if [[ -n "${oidc_approve_routes}" && -z "${oidc_advertise_routes}" ]]; then
+  echo "REAL_CLIENT_OIDC_APPROVE_ROUTES requires REAL_CLIENT_OIDC_ADVERTISE_ROUTES" >&2
+  exit 2
+fi
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -160,6 +166,14 @@ write_registration_id() {
 dump_client_debug() {
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
+}
+
+headscale_cmd() {
+  if [[ "${target}" == "rust" ]]; then
+    target/debug/headscale --config "${config_path}" "$@"
+  else
+    "${headscale_bin}" -c "${config_path}" "$@"
+  fi
 }
 
 install_headscale_go() {
@@ -403,12 +417,17 @@ start_client() {
 
 drive_oidc_login() {
   echo "::group::tailscale OIDC login"
-  docker exec "${client_name}" tailscale up \
+  local tailscale_up_args=(
     "--login-server=${control_url}" \
     "--hostname=${client_name}" \
     "--timeout=60s" \
     --accept-routes=false \
-    --accept-dns=false \
+    --accept-dns=false
+  )
+  if [[ -n "${oidc_advertise_routes}" ]]; then
+    tailscale_up_args+=("--advertise-routes=${oidc_advertise_routes}")
+  fi
+  docker exec "${client_name}" tailscale up "${tailscale_up_args[@]}" \
     >"${work_dir}/${client_name}.tailscale-up.stdout" \
     2>"${work_dir}/${client_name}.tailscale-up.stderr" &
   local up_pid="$!"
@@ -500,22 +519,36 @@ assert_sqlite_oidc_state() {
 
 assert_headscale_go_cli_state() {
   [[ "${target}" == "headscale-go" ]] || return 0
+  local expected_approved_routes
+  if (($# > 0)); then
+    expected_approved_routes="$1"
+  else
+    expected_approved_routes="${oidc_approve_routes}"
+  fi
   echo "::group::assert headscale-go node CLI state"
-  "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
-  assert_cli_nodes_json "${work_dir}/nodes.json"
+  headscale_cmd -o json nodes list >"${work_dir}/nodes.json"
+  assert_cli_nodes_json "${work_dir}/nodes.json" "${oidc_advertise_routes}" "${expected_approved_routes}"
   echo "::endgroup::"
 }
 
 assert_rust_cli_state() {
   [[ "${target}" == "rust" ]] || return 0
+  local expected_approved_routes
+  if (($# > 0)); then
+    expected_approved_routes="$1"
+  else
+    expected_approved_routes="${oidc_approve_routes}"
+  fi
   echo "::group::assert headscale-rs node CLI state"
-  target/debug/headscale --config "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
-  assert_cli_nodes_json "${work_dir}/nodes.json"
+  headscale_cmd -o json nodes list >"${work_dir}/nodes.json"
+  assert_cli_nodes_json "${work_dir}/nodes.json" "${oidc_advertise_routes}" "${expected_approved_routes}"
   echo "::endgroup::"
 }
 
 assert_cli_nodes_json() {
   local nodes_json_path="$1"
+  local expected_available_routes="$2"
+  local expected_approved_routes="$3"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
@@ -527,13 +560,60 @@ assert_cli_nodes_json() {
     addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
     register_method = node["registerMethod"] || node["register_method"]
     expiry = node["expiry"] || node["Expiry"] || node["expiresAt"] || node["expires_at"]
+    available_routes = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
+    approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+    expected_available = ARGV.fetch(4).split(",").reject(&:empty?).sort
+    expected_approved = ARGV.fetch(5).split(",").reject(&:empty?).sort
     abort("expected hostname #{ARGV.fetch(1)}, got #{given_name.inspect}") unless given_name.to_s == ARGV.fetch(1)
     abort("expected user #{ARGV.fetch(2)} or #{ARGV.fetch(3)}, got #{user.inspect}") unless [ARGV.fetch(2), ARGV.fetch(3)].include?(user_name)
     abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
     abort("expected OIDC register method, got #{register_method.inspect}") unless register_method.to_s.match?(/oidc/i) || register_method.to_s == "3"
     abort("expected node expiry in CLI output") if expiry.to_s.empty?
+    expected_available.each do |route|
+      abort("expected available route #{route.inspect}, got #{available_routes.inspect}") unless available_routes.include?(route)
+    end
+    expected_approved.each do |route|
+      abort("expected approved route #{route.inspect}, got #{approved_routes.inspect}") unless approved_routes.include?(route)
+    end
     puts JSON.pretty_generate(node)
-  ' "${nodes_json_path}" "${client_name}" "${oidc_email}" "${oidc_username}"
+  ' "${nodes_json_path}" "${client_name}" "${oidc_email}" "${oidc_username}" "${expected_available_routes}" "${expected_approved_routes}"
+}
+
+load_oidc_node_id() {
+  local nodes_path="${work_dir}/nodes-for-oidc-route-approval.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    expected_name = ARGV.fetch(1)
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      names = [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s)
+      names.include?(expected_name)
+    end
+    abort("missing node #{expected_name.inspect} in #{nodes.inspect}") unless node
+    node_id = node["id"] || node["ID"] || node["nodeId"] || node["node_id"]
+    abort("expected non-empty node ID for #{expected_name}") if node_id.to_s.empty?
+    puts node_id
+  ' "${nodes_path}" "${client_name}"
+}
+
+approve_oidc_routes() {
+  [[ -n "${oidc_approve_routes}" ]] || return 0
+
+  echo "::group::approve OIDC advertised routes"
+  local node_id
+  node_id="$(load_oidc_node_id)"
+  headscale_cmd -o json nodes approve-routes --identifier "${node_id}" --routes "${oidc_approve_routes}" \
+    >"${work_dir}/approved-oidc-routes-${node_id}.json"
+  echo "::endgroup::"
+
+  assert_rust_cli_state
+  assert_headscale_go_cli_state
 }
 
 restart_oidc_server_and_assert_client() {
@@ -585,8 +665,9 @@ fi
 start_client
 drive_oidc_login
 assert_sqlite_oidc_state
-assert_rust_cli_state
-assert_headscale_go_cli_state
+assert_rust_cli_state ""
+assert_headscale_go_cli_state ""
+approve_oidc_routes
 restart_oidc_server_and_assert_client
 
 echo "${target} OIDC real-client smoke passed"

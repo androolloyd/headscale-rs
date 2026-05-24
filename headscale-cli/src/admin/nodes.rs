@@ -300,17 +300,18 @@ pub async fn expire_grpc(
         return Ok(());
     }
 
+    let now = current_unix_i64();
     let expiry = match at {
-        Some(at) => Some(parse_rfc3339_unix(at)?),
-        None => Some(current_unix_i64()),
+        Some(at) => parse_rfc3339_unix(at)?,
+        None => now,
     };
-    let node = NodeOutput::from(client.expire_node(node_id, expiry, false).await?);
+    let node = NodeOutput::from(client.expire_node(node_id, Some(expiry), false).await?);
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
-    } else if let Some(at) = at {
-        println!("Scheduled expiry on node '{node_id}' at {at}");
+    } else if expiry > now {
+        println!("Node expiration updated");
     } else {
-        println!("Expired node '{node_id}'");
+        println!("Node expired");
     }
     Ok(())
 }
@@ -329,7 +330,7 @@ pub async fn logout_grpc(
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
     } else {
-        println!("Forced logout on node '{node_id}'");
+        println!("Node expired");
     }
     Ok(())
 }
@@ -345,7 +346,7 @@ pub async fn rename_grpc(
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
     } else {
-        println!("Renamed node '{node_id}' to '{hostname}'");
+        println!("Node renamed");
     }
     Ok(())
 }
@@ -357,13 +358,11 @@ pub async fn tags_grpc(
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let node_id = parse_node_id(id)?;
-    let node = NodeOutput::from(client.set_tags(node_id, tags.clone()).await?);
+    let node = NodeOutput::from(client.set_tags(node_id, tags).await?);
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
-    } else if tags.is_empty() {
-        println!("Cleared forced tags on node '{node_id}'");
     } else {
-        println!("Set forced tags on node '{node_id}': {}", tags.join(", "));
+        println!("Node updated");
     }
     Ok(())
 }
@@ -380,7 +379,6 @@ pub async fn approve_routes_grpc(
         print_structured(fmt, &node)?;
     } else {
         println!("Node updated");
-        render_grpc_routes(&[node]);
     }
     Ok(())
 }
@@ -422,13 +420,8 @@ pub async fn backfillips_grpc(
             changes: response.changes,
         };
         print_structured(fmt, &output)?;
-    } else if response.changes.is_empty() {
-        println!("No node IPs required backfill.");
     } else {
-        println!("Backfilled node IPs:");
-        for change in response.changes {
-            println!("  {change}");
-        }
+        println!("Node IPs backfilled successfully");
     }
     Ok(())
 }

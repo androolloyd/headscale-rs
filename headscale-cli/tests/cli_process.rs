@@ -1,7 +1,10 @@
 use std::fs;
+use std::io;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::{Command, Output};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use headscale_api::admin::{
@@ -10,10 +13,16 @@ use headscale_api::admin::{
 use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::policy::PolicyStore;
 use headscale_api::tailscale_wire::MachineRegistry;
+use headscale_api::tailscale_wire::tls::{self, SanConfig};
 use httpmock::prelude::*;
-use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream, UnixListener};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::transport::Server;
+use tonic::transport::server::Connected;
 
 const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_CONFIG",
@@ -167,6 +176,106 @@ async fn spawn_process_grpc_service(
     (dir, db, socket, handle)
 }
 
+async fn spawn_process_remote_grpc_service() -> (
+    tempfile::TempDir,
+    headscale_db::Database,
+    String,
+    String,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = headscale_db::Database::in_memory().await.unwrap();
+    db.migrate().await.unwrap();
+    let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
+    let token = headscale_db::api_keys::create_for_test(
+        db.pool(),
+        headscale_db::api_keys::CreateParams { expiration: None },
+    )
+    .await
+    .unwrap()
+    .plaintext;
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let machines = Arc::new(MachineRegistry::new());
+    let service = HeadscaleAdminService::with_user_admin(
+        users.clone(),
+        api_keys,
+        Arc::new(PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users)),
+        PolicyStore::new(),
+        Arc::new(WireMachineAdmin::new(machines)),
+    )
+    .with_database_pool(db.pool().clone())
+    .require_api_key_auth();
+
+    let material = tls::load_or_generate(
+        dir.path().join("remote-grpc-tls"),
+        &SanConfig::with_hostname("localhost"),
+    )
+    .unwrap();
+    let server_config = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
+        .expect("test grpc TLS config");
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("localhost:{}", listener.local_addr().unwrap().port());
+    let incoming = TcpListenerStream::new(listener).then({
+        let acceptor = acceptor.clone();
+        move |accepted| {
+            let acceptor = acceptor.clone();
+            async move {
+                let stream = accepted?;
+                acceptor
+                    .accept(stream)
+                    .await
+                    .map(ConnectedTlsStream)
+                    .map_err(io::Error::other)
+            }
+        }
+    });
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(service.into_service_server())
+            .serve_with_incoming(incoming)
+            .await
+    });
+
+    (dir, db, address, token, handle)
+}
+
+struct ConnectedTlsStream(TlsStream<TcpStream>);
+
+impl Connected for ConnectedTlsStream {
+    type ConnectInfo = ();
+
+    fn connect_info(&self) -> Self::ConnectInfo {}
+}
+
+impl AsyncRead for ConnectedTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ConnectedTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
 struct FailingDatabaseHealth;
 
 #[async_trait::async_trait]
@@ -183,6 +292,16 @@ fn write_unix_socket_config(dir: &Path, socket: &Path) -> std::path::PathBuf {
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     fs::write(&config, format!("unix_socket: \"{socket}\"\n")).unwrap();
+    config
+}
+
+fn write_remote_grpc_config(dir: &Path, address: &str, api_key: &str) -> std::path::PathBuf {
+    let config = dir.join("config.yaml");
+    fs::write(
+        &config,
+        format!("cli:\n  address: \"{address}\"\n  api_key: \"{api_key}\"\n  insecure: true\n"),
+    )
+    .unwrap();
     config
 }
 
@@ -1246,6 +1365,100 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         .as_u64()
         .unwrap()
         .to_string();
+
+    let rename_node = headscale_with_config(
+        &config,
+        &["nodes", "rename", "renamed-node", "--identifier", &node_id],
+    );
+    assert!(
+        rename_node.status.success(),
+        "stderr: {}",
+        stderr(&rename_node)
+    );
+    assert_eq!(
+        stdout(&rename_node),
+        include_str!("snapshots/nodes_rename_success.stdout")
+    );
+    assert_eq!(stderr(&rename_node), "");
+
+    let policy_path = config_dir.path().join("tag-policy.hujson");
+    fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
+    let policy_path_string = policy_path.to_string_lossy().to_string();
+    let set_policy =
+        headscale_with_config(&config, &["policy", "set", "--file", &policy_path_string]);
+    assert!(
+        set_policy.status.success(),
+        "stderr: {}",
+        stderr(&set_policy)
+    );
+    assert_eq!(stdout(&set_policy), "Policy applied: true\n");
+    assert_eq!(stderr(&set_policy), "");
+
+    let tag_node = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "tag",
+            "--identifier",
+            &node_id,
+            "--tags",
+            "tag:server",
+        ],
+    );
+    assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
+    assert_eq!(
+        stdout(&tag_node),
+        include_str!("snapshots/nodes_tag_success.stdout")
+    );
+    assert_eq!(stderr(&tag_node), "");
+
+    let schedule_expiry = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "expire",
+            "--identifier",
+            &node_id,
+            "--expiry",
+            "2030-01-01T00:00:00Z",
+        ],
+    );
+    assert!(
+        schedule_expiry.status.success(),
+        "stderr: {}",
+        stderr(&schedule_expiry)
+    );
+    assert_eq!(
+        stdout(&schedule_expiry),
+        include_str!("snapshots/nodes_expire_scheduled_success.stdout")
+    );
+    assert_eq!(stderr(&schedule_expiry), "");
+
+    let expire_node =
+        headscale_with_config(&config, &["nodes", "expire", "--identifier", &node_id]);
+    assert!(
+        expire_node.status.success(),
+        "stderr: {}",
+        stderr(&expire_node)
+    );
+    assert_eq!(
+        stdout(&expire_node),
+        include_str!("snapshots/nodes_expire_success.stdout")
+    );
+    assert_eq!(stderr(&expire_node), "");
+
+    let backfill_ips = headscale_with_config(&config, &["--force", "nodes", "backfillips"]);
+    assert!(
+        backfill_ips.status.success(),
+        "stderr: {}",
+        stderr(&backfill_ips)
+    );
+    assert_eq!(
+        stdout(&backfill_ips),
+        include_str!("snapshots/nodes_backfillips_success.stdout")
+    );
+    assert_eq!(stderr(&backfill_ips), "");
+
     let delete_node = headscale_with_config(
         &config,
         &["--force", "nodes", "delete", "--identifier", &node_id],
@@ -1344,6 +1557,51 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stdout(&destroy_user), "User destroyed\n");
     assert_eq!(stderr(&destroy_user), "");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() {
+    let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service().await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let create_user = headscale_with_config(&config, &["users", "create", "remote"]);
+    assert!(
+        create_user.status.success(),
+        "stderr: {}",
+        stderr(&create_user)
+    );
+    assert_eq!(stdout(&create_user), "User created\n");
+    assert_eq!(stderr(&create_user), "");
+
+    let list_users = headscale_with_config(&config, &["users", "list"]);
+    assert!(
+        list_users.status.success(),
+        "stderr: {}",
+        stderr(&list_users)
+    );
+    assert!(
+        stdout(&list_users).contains("remote"),
+        "stdout: {}",
+        stdout(&list_users)
+    );
+    assert_eq!(stderr(&list_users), "");
+
+    let bad_config_dir = tempfile::tempdir().unwrap();
+    let bad_config = write_remote_grpc_config(bad_config_dir.path(), &address, "bad-token");
+    let bad_auth = wait_for_headscale_status(&bad_config, &["health"], 4).await;
+    assert_eq!(stdout(&bad_auth), "");
+    assert_eq!(
+        stderr(&bad_auth),
+        include_str!("snapshots/grpc_remote_auth_failure.stderr")
+    );
 
     handle.abort();
     let _ = handle.await;

@@ -82,6 +82,7 @@ predates the executable PingRequest lifecycle.
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| Lifecycle | `oidc-restart` | `oidc-restart-smoke.sh` | `oidc-restart-headscale-go-smoke.sh` | Production OIDC registration survives server restart |
 | Lifecycle | `online-lastseen` | `online-lastseen-smoke.sh` | `online-lastseen-headscale-go-smoke.sh` | Production online transition and LastSeen after client disconnect |
 | Lifecycle | `restart-persistence` | `restart-persistence-smoke.sh` | `restart-persistence-headscale-go-smoke.sh` | Production restart persistence and route/tag netmap churn |
 | Tags | `tagged-preauth` | `tagged-preauth-smoke.sh` | `tagged-preauth-headscale-go-smoke.sh` | Tagged preauth key with `tagOwners` policy |
@@ -278,14 +279,20 @@ jar:
 ```sh
 tools/real-client/oidc-smoke.sh
 tools/real-client/oidc-headscale-go-smoke.sh
+tools/real-client/oidc-restart-smoke.sh
+tools/real-client/oidc-restart-headscale-go-smoke.sh
 ```
 
-Both scripts assert that the client reaches a logged-in netmap and that SQLite
+All OIDC scripts assert that the client reaches a logged-in netmap and that SQLite
 records one OIDC-registered node plus the expected OIDC user profile. The
-Rust script also configures the production local gRPC Unix socket at a short
+Rust scripts also check the production local gRPC CLI node view over a short
 `/tmp/hsrs-*.sock` path, overrideable with `REAL_CLIENT_HEADSCALE_RS_SOCKET`;
-the headscale-go script checks the upstream
-`headscale nodes list` JSON output.
+the headscale-go scripts check the upstream
+`headscale nodes list` JSON output. The restart variants keep the same control
+URL and SQLite DB, restart the production server after OIDC login, then assert
+that the stock client reconnects and the OIDC node/user state still matches.
+The Rust OIDC config sets `node.expiry = "180d"` to mirror the pinned
+headscale-go OIDC default through the current `node.expiry` surface.
 
 Useful knobs:
 
@@ -293,6 +300,8 @@ Useful knobs:
 - `REAL_CLIENT_WORKDIR` defaults to `target/real-client/oidc-smoke` or
   `target/real-client/oidc-headscale-go-smoke`.
 - `REAL_CLIENT_TIMEOUT_SECS` defaults to `150`.
+- `REAL_CLIENT_OIDC_RESTART=true` enables the restart assertion; the
+  `oidc-restart` wrappers set it and use a longer default timeout.
 - `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 - `REAL_CLIENT_OIDC_EMAIL`, `REAL_CLIENT_OIDC_USERNAME`,

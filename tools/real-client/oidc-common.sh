@@ -22,10 +22,24 @@ oidc_subject="${REAL_CLIENT_OIDC_SUBJECT:-alice-subject}"
 oidc_email="${REAL_CLIENT_OIDC_EMAIL:-alice@example.com}"
 oidc_username="${REAL_CLIENT_OIDC_USERNAME:-alice}"
 oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
+oidc_restart="${REAL_CLIENT_OIDC_RESTART:-false}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/oidc-${target}-smoke}"
 run_id="hs-oidc-${target}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
+
+case "${oidc_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    oidc_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    oidc_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_RESTART must be true or false, got ${oidc_restart}" >&2
+    exit 2
+    ;;
+esac
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -107,6 +121,14 @@ wait_pid_with_timeout() {
   wait "${pid}"
 }
 
+stop_server() {
+  if [[ -n "${server_pid}" ]]; then
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" >/dev/null 2>&1 || true
+    server_pid=""
+  fi
+}
+
 tailscale_logged_in() {
   local status_json
   status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
@@ -182,8 +204,12 @@ start_mock_oidc() {
 }
 
 start_rust_server() {
-  http_port="$(free_port)"
-  https_port="$(free_port)"
+  if [[ -z "${http_port}" ]]; then
+    http_port="$(free_port)"
+  fi
+  if [[ -z "${https_port}" ]]; then
+    https_port="$(free_port)"
+  fi
   control_port="${https_port}"
   control_url="https://host.docker.internal:${https_port}"
   local_health_url="http://127.0.0.1:${http_port}/health"
@@ -191,6 +217,7 @@ start_rust_server() {
   db_path="${work_dir}/db.sqlite"
   mkdir -p "${work_dir}/state"
   tls_cert_path="${work_dir}/state/tls.crt"
+  rm -f "${headscale_rs_socket_path}"
 
   echo "::group::build headscale-rs CLI"
   cargo build --quiet -p headscale-cli --bin headscale
@@ -207,6 +234,9 @@ tls_hostname = "host.docker.internal"
 unix_socket = "${headscale_rs_socket_path}"
 unix_socket_permission = 448
 
+[node]
+expiry = "180d"
+
 [oidc]
 issuer = "http://127.0.0.1:${oidc_port}/oidc"
 client_id = "${oidc_client_id}"
@@ -216,9 +246,11 @@ email_verified_required = true
 EOF
 
   echo "::group::start headscale-rs OIDC server"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stdout"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stderr"
   target/debug/headscale --config "${config_path}" server \
-    >"${work_dir}/headscale-rs.stdout" \
-    2>"${work_dir}/headscale-rs.stderr" &
+    >>"${work_dir}/headscale-rs.stdout" \
+    2>>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"
   wait_for "headscale-rs health" "curl -fsS '${local_health_url}' >/dev/null"
   wait_for "headscale-rs TLS certificate" "test -s '${tls_cert_path}'"
@@ -228,26 +260,37 @@ EOF
 }
 
 start_headscale_go_server() {
-  http_port="$(free_port)"
-  metrics_port="$(free_port)"
-  grpc_port="$(free_port)"
+  if [[ -z "${http_port}" ]]; then
+    http_port="$(free_port)"
+  fi
+  if [[ -z "${metrics_port}" ]]; then
+    metrics_port="$(free_port)"
+  fi
+  if [[ -z "${grpc_port}" ]]; then
+    grpc_port="$(free_port)"
+  fi
   control_port="${http_port}"
   control_url="https://host.docker.internal:${http_port}"
   local_health_url="https://127.0.0.1:${http_port}/health"
   config_path="${work_dir}/headscale-go.yaml"
   db_path="${work_dir}/db.sqlite"
   tls_cert_path="${work_dir}/tls.crt"
-  headscale_go_socket_path="/tmp/hs-oidc-${RANDOM}-$$.sock"
+  if [[ -z "${headscale_go_socket_path}" ]]; then
+    headscale_go_socket_path="/tmp/hs-oidc-${run_id}.sock"
+  fi
+  rm -f "${headscale_go_socket_path}"
 
-  echo "::group::generate headscale-go TLS certificate"
-  openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
-    -keyout "${work_dir}/tls.key" \
-    -out "${tls_cert_path}" \
-    -subj "/CN=host.docker.internal" \
-    -addext "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1" \
-    >"${work_dir}/openssl.stdout" \
-    2>"${work_dir}/openssl.stderr"
-  echo "::endgroup::"
+  if [[ ! -s "${tls_cert_path}" || ! -s "${work_dir}/tls.key" ]]; then
+    echo "::group::generate headscale-go TLS certificate"
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+      -keyout "${work_dir}/tls.key" \
+      -out "${tls_cert_path}" \
+      -subj "/CN=host.docker.internal" \
+      -addext "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1" \
+      >"${work_dir}/openssl.stdout" \
+      2>"${work_dir}/openssl.stderr"
+    echo "::endgroup::"
+  fi
 
   cat >"${work_dir}/derp.yaml" <<EOF
 regions:
@@ -329,9 +372,11 @@ oidc:
 EOF
 
   echo "::group::start headscale-go OIDC server"
+  printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stdout"
+  printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stderr"
   "${headscale_bin}" -c "${config_path}" serve \
-    >"${work_dir}/headscale-go.stdout" \
-    2>"${work_dir}/headscale-go.stderr" &
+    >>"${work_dir}/headscale-go.stdout" \
+    2>>"${work_dir}/headscale-go.stderr" &
   server_pid="$!"
   wait_for "headscale-go health" "curl -kfsS '${local_health_url}' >/dev/null"
   wait_for "headscale-go gRPC" "'${headscale_bin}' -c '${config_path}' health >/dev/null 2>&1"
@@ -413,13 +458,14 @@ assert_sqlite_oidc_state() {
     exit 1
   fi
 
-  local node_row
+  local node_row sqlite_sep
+  sqlite_sep="|"
   node_row="$(
-    sqlite3 -separator $'\t' "${db_path}" \
+    sqlite3 -separator "${sqlite_sep}" "${db_path}" \
       "SELECT COALESCE(n.register_method,''), COALESCE(n.machine_key,''), COALESCE(n.node_key,''), COALESCE(n.hostname,''), COALESCE(n.given_name,''), COALESCE(n.ipv4,''), COALESCE(n.expiry,''), COALESCE(n.user_id,''), COALESCE(u.name,''), COALESCE(u.email,''), COALESCE(u.provider,''), COALESCE(u.provider_identifier,'') FROM nodes n JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL WHERE n.deleted_at IS NULL LIMIT 1;"
   )"
   local register_method machine_key node_key hostname given_name ipv4 expiry user_id user_name email provider provider_identifier
-  IFS=$'\t' read -r register_method machine_key node_key hostname given_name ipv4 expiry user_id user_name email provider provider_identifier <<<"${node_row}"
+  IFS="${sqlite_sep}" read -r register_method machine_key node_key hostname given_name ipv4 expiry user_id user_name email provider provider_identifier <<<"${node_row}"
   [[ "${register_method}" == "oidc" ]] || { echo "expected node register_method oidc, got ${register_method}" >&2; exit 1; }
   [[ -n "${machine_key}" ]] || { echo "expected non-empty machine_key" >&2; exit 1; }
   [[ -n "${node_key}" ]] || { echo "expected non-empty node_key" >&2; exit 1; }
@@ -456,6 +502,20 @@ assert_headscale_go_cli_state() {
   [[ "${target}" == "headscale-go" ]] || return 0
   echo "::group::assert headscale-go node CLI state"
   "${headscale_bin}" -c "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
+  assert_cli_nodes_json "${work_dir}/nodes.json"
+  echo "::endgroup::"
+}
+
+assert_rust_cli_state() {
+  [[ "${target}" == "rust" ]] || return 0
+  echo "::group::assert headscale-rs node CLI state"
+  target/debug/headscale --config "${config_path}" -o json nodes list >"${work_dir}/nodes.json"
+  assert_cli_nodes_json "${work_dir}/nodes.json"
+  echo "::endgroup::"
+}
+
+assert_cli_nodes_json() {
+  local nodes_json_path="$1"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
@@ -473,8 +533,29 @@ assert_headscale_go_cli_state() {
     abort("expected OIDC register method, got #{register_method.inspect}") unless register_method.to_s.match?(/oidc/i) || register_method.to_s == "3"
     abort("expected node expiry in CLI output") if expiry.to_s.empty?
     puts JSON.pretty_generate(node)
-  ' "${work_dir}/nodes.json" "${client_name}" "${oidc_email}" "${oidc_username}"
+  ' "${nodes_json_path}" "${client_name}" "${oidc_email}" "${oidc_username}"
+}
+
+restart_oidc_server_and_assert_client() {
+  ((oidc_restart_flag)) || return 0
+
+  echo "::group::restart OIDC server"
+  stop_server
+  if [[ "${target}" == "rust" ]]; then
+    start_rust_server
+  else
+    start_headscale_go_server
+  fi
+  if ! wait_for "tailscale logged-in netmap after OIDC restart" "tailscale_logged_in"; then
+    dump_client_debug
+    exit 1
+  fi
+  docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
   echo "::endgroup::"
+
+  assert_sqlite_oidc_state
+  assert_rust_cli_state
+  assert_headscale_go_cli_state
 }
 
 need cargo
@@ -504,6 +585,8 @@ fi
 start_client
 drive_oidc_login
 assert_sqlite_oidc_state
+assert_rust_cli_state
 assert_headscale_go_cli_state
+restart_oidc_server_and_assert_client
 
 echo "${target} OIDC real-client smoke passed"

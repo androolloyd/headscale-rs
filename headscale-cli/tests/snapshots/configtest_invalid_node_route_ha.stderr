@@ -1,0 +1,1 @@
+Error: node.routes.ha.probe_timeout (5s) must be less than node.routes.ha.probe_interval (5s)

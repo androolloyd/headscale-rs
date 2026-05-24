@@ -1070,6 +1070,26 @@ fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label
 fn configtest_rejects_supported_server_init_validation_errors() {
     assert_configtest_default_config_snapshot(
         r#"
+server_url: "headscale.example"
+"#,
+        include_str!("snapshots/configtest_bad_server_url_scheme.stderr"),
+        "configtest bad server_url scheme",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://login.tail.example.org"
+dns:
+  magic_dns: true
+  override_local_dns: false
+  base_domain: "tail.example.org"
+"#,
+        include_str!("snapshots/configtest_server_url_under_base_domain.stderr"),
+        "configtest server_url under DNS base_domain",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
 server_url: "https://headscale.example"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
@@ -1099,6 +1119,15 @@ metrics_listen_addr: "not-a-socket"
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+grpc_listen_addr: "not-a-socket"
+"#,
+        include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
+        "configtest invalid gRPC listener",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
 derp:
   server:
     enabled: true
@@ -1116,6 +1145,29 @@ policy:
 "#,
         include_str!("snapshots/configtest_invalid_policy_mode.stderr"),
         "configtest invalid policy mode",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+node:
+  routes:
+    ha:
+      probe_interval: 5
+      probe_timeout: 5
+"#,
+        include_str!("snapshots/configtest_invalid_node_route_ha.stderr"),
+        "configtest invalid node route HA timing",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "0.0.0.0/0"
+"#,
+        include_str!("snapshots/configtest_unsafe_trusted_proxy.stderr"),
+        "configtest unsafe trusted proxy",
     );
 }
 
@@ -3153,11 +3205,11 @@ fn configtest_without_config_fails_server_validation() {
     let home = tempfile::tempdir().unwrap();
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("server.server_url is required"),
-        "stderr: {}",
-        stderr(&output)
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_missing_server_url.stderr"),
+        "configtest missing server_url",
     );
 }
 

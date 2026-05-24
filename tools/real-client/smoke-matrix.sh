@@ -106,6 +106,7 @@ smoke_ids=(
   route-via-restart
   route-via-multiprefix
   route-health
+  route-health-reload
   route-health-restart
   route-health-all-unhealthy
   route-health-mixed-exit
@@ -141,6 +142,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -200,6 +202,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-restart-smoke.sh
   tools/real-client/route-via-multiprefix-smoke.sh
   tools/real-client/route-health-smoke.sh
+  tools/real-client/route-health-reload-smoke.sh
   tools/real-client/route-health-restart-smoke.sh
   tools/real-client/route-health-all-unhealthy-smoke.sh
   tools/real-client/route-health-mixed-exit-smoke.sh
@@ -247,6 +250,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-restart-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/route-health-headscale-go-smoke.sh
+  tools/real-client/route-health-reload-headscale-go-smoke.sh
   tools/real-client/route-health-restart-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-headscale-go-smoke.sh
@@ -294,6 +298,7 @@ smoke_assertions=(
   "current-head route steering with grants via survives server restart"
   "current-head multi-prefix route steering with grants via"
   "current-head route-health failover and sticky recovery"
+  "current-head route-health policy reload expands HA failover"
   "current-head route-health production restart failover"
   "current-head route-health all-unavailable degraded primary retention"
   "current-head route-health ignores exit-only routes during HA failover"

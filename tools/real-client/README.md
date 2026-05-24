@@ -113,6 +113,7 @@ with the same stock `tailscaled` image.
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
+| Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
 | Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health degraded primary retention when all candidates are unavailable |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
@@ -617,6 +618,15 @@ recovery probe and asserts sticky ownership remains with the failover router:
 ```sh
 tools/real-client/route-health-smoke.sh
 tools/real-client/route-health-headscale-go-smoke.sh
+```
+
+The route-health reload variant starts with one tagged router auto-approved,
+reloads policy so the second tagged router is also auto-approved, and then
+asserts route-health HA failover across the newly expanded candidate set:
+
+```sh
+tools/real-client/route-health-reload-smoke.sh
+tools/real-client/route-health-reload-headscale-go-smoke.sh
 ```
 
 The route-health restart variant runs the production server with persistent

@@ -691,11 +691,52 @@ async fn mint_preauth(
 async fn set_policy(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
     match String::from_utf8(body.to_vec())
         .map_err(|err| anyhow::anyhow!("policy body must be UTF-8: {err}"))
-        .and_then(|raw| load_policy(&state.policy, raw))
-    {
+        .and_then(|raw| {
+            load_policy(&state.policy, raw)?;
+            apply_policy_auto_approvals(&state.policy, &state.machines)
+        }) {
         Ok(()) => (StatusCode::NO_CONTENT, String::new()).into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
+}
+
+fn apply_policy_auto_approvals(policy: &PolicyStore, machines: &MachineRegistry) -> Result<()> {
+    for (node_key_hex, machine) in machines.snapshot().iter() {
+        let mut approved_routes = normalize_routes(&machine.approved_routes)
+            .map_err(|err| anyhow::anyhow!("normalizing approved routes: {err}"))?;
+        let announced_routes = normalize_routes(&machine.available_routes)
+            .map_err(|err| anyhow::anyhow!("normalizing available routes: {err}"))?;
+        let primary_addr = machine.primary_addr_string();
+        let user = (!machine.user.is_empty()).then_some(machine.user.as_str());
+        let node = NodeView {
+            addr: primary_addr.as_deref(),
+            user,
+            tags: &machine.forced_tags,
+        };
+
+        for route in announced_routes {
+            if approved_routes.contains(&route) {
+                continue;
+            }
+            let auto_approved = if route == "0.0.0.0/0" || route == "::/0" {
+                policy.auto_approves_exit_node(&node)
+            } else {
+                policy.auto_approves_route(&node, &route)
+            };
+            if auto_approved {
+                approved_routes.push(route);
+            }
+        }
+
+        approved_routes.sort();
+        approved_routes.dedup();
+        if approved_routes != machine.approved_routes
+            && !machines.set_approved_routes(node_key_hex, approved_routes)
+        {
+            bail!("machine {node_key_hex} disappeared while auto-approving routes");
+        }
+    }
+    Ok(())
 }
 
 async fn register_pending(

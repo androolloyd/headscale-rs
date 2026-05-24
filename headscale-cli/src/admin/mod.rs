@@ -818,6 +818,13 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
         };
     }
 
+    match cmd {
+        ApiKeysCmd::Expire { prefix, id } | ApiKeysCmd::Delete { prefix, id } => {
+            apikeys::validate_selector(prefix.as_deref(), *id)?;
+        }
+        ApiKeysCmd::Create { .. } | ApiKeysCmd::List => {}
+    }
+
     let mut client = conn.build_grpc_client().await?;
     match cmd {
         ApiKeysCmd::Create { expiration } => {

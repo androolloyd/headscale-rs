@@ -1062,9 +1062,26 @@ fn implemented_admin_local_errors_match_snapshots() {
         include_str!("snapshots/preauthkeys_missing_id.stderr"),
     );
     assert_stderr_snapshot(
+        &["apikeys", "expire"],
+        1,
+        include_str!("snapshots/apikeys_missing_selector.stderr"),
+    );
+    assert_stderr_snapshot(
         &["--server", "http://127.0.0.1:9", "apikeys", "expire"],
         1,
         include_str!("snapshots/apikeys_missing_selector.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "apikeys",
+            "delete",
+            "--id",
+            "7",
+            "--prefix",
+            "hskey-api-abcdefghijkl-***",
+        ],
+        1,
+        include_str!("snapshots/apikeys_conflicting_selector.stderr"),
     );
     assert_stderr_snapshot(
         &[
@@ -1173,14 +1190,7 @@ fn implemented_admin_errors_follow_output_format() {
         "{\"error\":\"missing --id parameter: missing parameters\"}\n"
     );
 
-    let yaml = headscale_clean(&[
-        "--output",
-        "yaml",
-        "--server",
-        "http://127.0.0.1:9",
-        "apikeys",
-        "expire",
-    ]);
+    let yaml = headscale_clean(&["--output", "yaml", "apikeys", "expire"]);
     assert_eq!(yaml.status.code(), Some(1));
     assert_eq!(stdout(&yaml), "");
     assert_eq!(

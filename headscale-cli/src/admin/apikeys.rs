@@ -159,6 +159,10 @@ fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<
     }
 }
 
+pub(super) fn validate_selector(prefix: Option<&str>, id: Option<u64>) -> Result<(), AdminError> {
+    identify(prefix, id).map(|_| ())
+}
+
 fn expiration_unix(expiration: &str) -> Result<i64, AdminError> {
     let ttl_secs = parse_duration_secs(expiration).map_err(AdminError::Local)?;
     let ttl_secs = i64::try_from(ttl_secs)

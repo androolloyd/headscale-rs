@@ -1,0 +1,29 @@
+Usage:
+  headscale [command]
+
+Available Commands:
+  apikeys     Handle the Api keys in Headscale
+  auth        Manage node authentication and approval
+  completion  Generate the autocompletion script for the specified shell
+  configtest  Test the configuration.
+  debug       debug and testing commands
+  generate    Generate commands
+  health      Check the health of the Headscale server
+  help        Help about any command
+  mockoidc    Runs a mock OIDC server for testing
+  nodes       Manage the nodes of Headscale
+  policy      Manage the Headscale ACL Policy
+  preauthkeys Handle the preauthkeys in Headscale
+  serve       Launches the headscale server
+  users       Manage the users of Headscale
+  version     Print the version.
+
+Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -h, --help            help for headscale
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale [command] --help" for more information about a command.
+
+Error: unknown flag: --json

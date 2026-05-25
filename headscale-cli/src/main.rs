@@ -307,7 +307,6 @@ fn output_format_from_raw_args(raw_args: &[OsString]) -> OutputFormat {
             continue;
         };
         match arg {
-            "--json" => fmt = OutputFormat::Json,
             "-o" | "--output" => {
                 if let Some(value) = args.next().and_then(|value| value.to_str()) {
                     fmt = raw_output_format(value);
@@ -829,6 +828,21 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         parts.push(arg.as_ref().to_str()?);
     }
 
+    if parts
+        .iter()
+        .any(|part| *part == "--json" || part.starts_with("--json="))
+    {
+        if parts
+            .first()
+            .is_some_and(|part| *part == "--json" || part.starts_with("--json="))
+        {
+            return Some(format!(
+                "{UPSTREAM_TOP_LEVEL_USAGE}\nError: unknown flag: --json\n"
+            ));
+        }
+        return Some("Error: unknown flag: --json\n".into());
+    }
+
     if let Some(flag) = upstream_unknown_utility_flag(parts.as_slice()) {
         return Some(format!("Error: unknown flag: {flag}\n"));
     }
@@ -911,7 +925,7 @@ fn version_tail_is_supported(tail: &[&str]) -> bool {
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
-            "-h" | "--help" | "--json" => i += 1,
+            "-h" | "--help" => i += 1,
             "-o" | "--output" if i + 1 < tail.len() => i += 2,
             value if value.starts_with("--output=") => i += 1,
             value if value.starts_with("-o") && value.len() > 2 => i += 1,
@@ -929,6 +943,35 @@ headscale is an open source implementation of the Tailscale control server
 https://github.com/juanfont/headscale
 
 Usage:
+  headscale [command]
+
+Available Commands:
+  apikeys     Handle the Api keys in Headscale
+  auth        Manage node authentication and approval
+  completion  Generate the autocompletion script for the specified shell
+  configtest  Test the configuration.
+  debug       debug and testing commands
+  generate    Generate commands
+  health      Check the health of the Headscale server
+  help        Help about any command
+  mockoidc    Runs a mock OIDC server for testing
+  nodes       Manage the nodes of Headscale
+  policy      Manage the Headscale ACL Policy
+  preauthkeys Handle the preauthkeys in Headscale
+  serve       Launches the headscale server
+  users       Manage the users of Headscale
+  version     Print the version.
+
+Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -h, --help            help for headscale
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_TOP_LEVEL_USAGE: &str = r#"Usage:
   headscale [command]
 
 Available Commands:
@@ -2458,7 +2501,6 @@ mod tests {
             api_key: None,
             unix_socket: None,
             insecure: false,
-            json: false,
             output: None,
             force: false,
             direct_database_path: None,
@@ -2496,7 +2538,6 @@ mod tests {
             api_key: Some("flag-key".into()),
             unix_socket: Some(PathBuf::from("/tmp/flag.sock")),
             insecure: true,
-            json: false,
             output: None,
             force: false,
             direct_database_path: None,

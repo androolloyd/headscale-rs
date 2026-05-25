@@ -1,8 +1,7 @@
 //! Table + JSON output helpers shared across admin subcommands.
 //!
-//! The operator gets two output modes:
-//!   * `--json` ⇒ raw JSON, written verbatim. Pipe into `jq` etc.
-//!   * default ⇒ a borderless, fixed-width column table à la `kubectl`.
+//! The operator gets an upstream-compatible `-o/--output` selector for
+//! machine-readable formats, with a borderless fixed-width table by default.
 //!
 //! We deliberately don't pull in `comfy-table` / `tabled` — the output
 //! is fixed across the surface and a 30-line column writer fits the
@@ -31,11 +30,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub fn from_flag(json: bool) -> Self {
-        if json { Self::Json } else { Self::Table }
-    }
-
-    pub fn from_flags(json: bool, output: Option<&str>) -> Result<Self, AdminError> {
+    pub fn from_output(output: Option<&str>) -> Result<Self, AdminError> {
         match output {
             Some("json") => Ok(Self::Json),
             Some("json-line") => Ok(Self::JsonLine),
@@ -43,7 +38,7 @@ impl OutputFormat {
             Some(other) => Err(AdminError::Local(format!(
                 "unsupported output format '{other}' (valid: json, json-line, yaml)"
             ))),
-            None => Ok(Self::from_flag(json)),
+            None => Ok(Self::Table),
         }
     }
 
@@ -52,8 +47,7 @@ impl OutputFormat {
     }
 }
 
-/// Print `value` as pretty JSON to stdout. Used by legacy `--json`
-/// paths so the format is uniform.
+/// Print `value` as pretty JSON to stdout.
 pub fn print_json<T: Serialize>(value: &T) -> Result<(), AdminError> {
     let s = format_json_string(value)?;
     println!("{s}");
@@ -203,29 +197,20 @@ mod tests {
     }
 
     #[test]
-    fn output_format_from_flag() {
-        assert!(matches!(OutputFormat::from_flag(true), OutputFormat::Json));
-        assert!(matches!(
-            OutputFormat::from_flag(false),
-            OutputFormat::Table
-        ));
-    }
-
-    #[test]
     fn output_format_from_upstream_output_selector() {
         assert_eq!(
-            OutputFormat::from_flags(false, Some("json-line")).unwrap(),
+            OutputFormat::from_output(Some("json-line")).unwrap(),
             OutputFormat::JsonLine
         );
         assert_eq!(
-            OutputFormat::from_flags(false, Some("yaml")).unwrap(),
+            OutputFormat::from_output(Some("yaml")).unwrap(),
             OutputFormat::Yaml
         );
         assert_eq!(
-            OutputFormat::from_flags(true, Some("yaml")).unwrap(),
-            OutputFormat::Yaml
+            OutputFormat::from_output(None).unwrap(),
+            OutputFormat::Table
         );
-        assert!(OutputFormat::from_flags(false, Some("xml")).is_err());
+        assert!(OutputFormat::from_output(Some("xml")).is_err());
     }
 
     #[test]

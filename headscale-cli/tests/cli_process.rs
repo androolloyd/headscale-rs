@@ -904,6 +904,25 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn utility_json_flag_matches_upstream_stderr_snapshots() {
+    assert_stderr_snapshot(
+        &["version", "--json"],
+        1,
+        include_str!("snapshots/utility_json_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["users", "list", "--json"],
+        1,
+        include_str!("snapshots/utility_json_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--json", "version"],
+        1,
+        include_str!("snapshots/utility_top_level_json_flag.stderr"),
+    );
+}
+
+#[test]
 fn utility_extra_args_match_upstream_unknown_command_errors() {
     for args in [
         &["version", "bad"][..],
@@ -1598,6 +1617,32 @@ fn implemented_admin_local_errors_match_snapshots() {
         &["--server", "http://127.0.0.1:9", "nodes", "expire"],
         6,
         include_str!("snapshots/nodes_missing_identifier.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "nodes",
+            "expire",
+            "1",
+            "--identifier",
+            "2",
+        ],
+        6,
+        include_str!("snapshots/nodes_conflicting_identifier.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "nodes",
+            "delete",
+            "1",
+            "--identifier",
+            "2",
+        ],
+        6,
+        include_str!("snapshots/nodes_conflicting_identifier.stderr"),
     );
     assert_stderr_snapshot(
         &[
@@ -3154,6 +3199,30 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     );
     assert_config_stderr_snapshot(
         &config,
+        &["users", "destroy"],
+        6,
+        include_str!("snapshots/grpc_live_user_selector_required.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "json", "users", "rename", "--new-name", "bob"],
+        6,
+        include_str!("snapshots/grpc_live_user_selector_required_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "users",
+            "create",
+            "badpic",
+            "--picture-url",
+            "https://example.com/%zz",
+        ],
+        6,
+        include_str!("snapshots/grpc_live_user_bad_picture_url.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
         &[
             "-ojson-line",
             "preauthkeys",
@@ -3182,6 +3251,27 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         ],
         6,
         include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["apikeys", "create", "--expiration", "nope"],
+        6,
+        include_str!("snapshots/grpc_live_invalid_duration.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "create",
+            "--user",
+            "1",
+            "--expiration",
+            "nope",
+        ],
+        6,
+        include_str!("snapshots/grpc_live_invalid_duration_json.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,

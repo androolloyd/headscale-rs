@@ -149,9 +149,6 @@ pub struct ConnectArgs {
         hide = true
     )]
     pub insecure: bool,
-    /// Emit raw JSON instead of the default table view.
-    #[arg(long, global = true, hide = true)]
-    pub json: bool,
     /// Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'.
     #[arg(short = 'o', long = "output", global = true)]
     pub output: Option<String>,
@@ -200,7 +197,7 @@ impl ConnectArgs {
     }
 
     pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
-        OutputFormat::from_flags(self.json, self.output.as_deref())
+        OutputFormat::from_output(self.output.as_deref())
     }
 }
 
@@ -1050,7 +1047,6 @@ mod tests {
             api_key: None,
             unix_socket: None,
             insecure: false,
-            json: false,
             output: None,
             force: false,
             direct_database_path: None,
@@ -1068,7 +1064,6 @@ mod tests {
             api_key: None,
             unix_socket: None,
             insecure: false,
-            json: false,
             output: None,
             force: false,
             direct_database_path: None,
@@ -1085,7 +1080,6 @@ mod tests {
             api_key: None,
             unix_socket: None,
             insecure: false,
-            json: false,
             output: Some("json-line".into()),
             force: false,
             direct_database_path: None,
@@ -1102,7 +1096,6 @@ mod tests {
             api_key: Some("grpc-token".into()),
             unix_socket: None,
             insecure: false,
-            json: false,
             output: None,
             force: false,
             direct_database_path: None,

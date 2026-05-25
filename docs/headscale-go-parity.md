@@ -308,7 +308,10 @@ at the first one; `serve --help` and utility-command unknown shorthand
 flag errors now match current-upstream Cobra output, `serve` tolerates
 ignored positional args before startup validation like upstream, and
 the checked-in OpenAPI JSON now advertises the implemented
-`disableExpiry` node-expiry query parameter.
+`disableExpiry` node-expiry query parameter. Public gRPC reflection now also
+serves upstream-style `headscale/v1/*.proto` filenames and rewrites public
+descriptor dependencies to those names while keeping internal Octra descriptors
+hidden.
 
 ## Parallel Workstreams
 

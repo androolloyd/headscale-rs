@@ -206,6 +206,15 @@ pub mod upstream {
         "preauthkey.proto",
         "user.proto",
     ];
+    const PUBLIC_HEADSCALE_DESCRIPTOR_RENAMES: &[(&str, &str)] = &[
+        ("apikey.proto", "headscale/v1/apikey.proto"),
+        ("auth.proto", "headscale/v1/auth.proto"),
+        ("headscale.proto", "headscale/v1/headscale.proto"),
+        ("node.proto", "headscale/v1/node.proto"),
+        ("policy.proto", "headscale/v1/policy.proto"),
+        ("preauthkey.proto", "headscale/v1/preauthkey.proto"),
+        ("user.proto", "headscale/v1/user.proto"),
+    ];
 
     #[derive(Clone)]
     pub struct HeadscaleAdminService {
@@ -485,6 +494,20 @@ pub mod upstream {
                     .as_deref()
                     .is_some_and(|name| PUBLIC_HEADSCALE_DESCRIPTOR_FILES.contains(&name))
             });
+            for file in &mut descriptors.file {
+                if let Some(name) = file
+                    .name
+                    .as_deref()
+                    .and_then(upstream_public_descriptor_name)
+                {
+                    file.name = Some(name.to_string());
+                }
+                for dependency in &mut file.dependency {
+                    if let Some(name) = upstream_public_descriptor_name(dependency) {
+                        *dependency = name.to_string();
+                    }
+                }
+            }
 
             let has_headscale_service = descriptors.file.iter().any(|file| {
                 file.package.as_deref() == Some("headscale.v1")
@@ -646,6 +669,12 @@ pub mod upstream {
                 node: Some(machine_to_node(&node, &self.users).await?),
             })
         }
+    }
+
+    fn upstream_public_descriptor_name(name: &str) -> Option<&'static str> {
+        PUBLIC_HEADSCALE_DESCRIPTOR_RENAMES
+            .iter()
+            .find_map(|(from, to)| (*from == name).then_some(*to))
     }
 
     fn bearer_token(metadata: &MetadataMap) -> Result<&str, Status> {
@@ -2454,6 +2483,12 @@ mod upstream_tests {
             .iter()
             .filter_map(|file| file.name.as_deref())
             .collect::<Vec<_>>();
+        assert!(file_names.contains(&"headscale/v1/headscale.proto"));
+        assert!(file_names.contains(&"headscale/v1/node.proto"));
+        assert!(file_names.contains(&"headscale/v1/auth.proto"));
+        assert!(!file_names.contains(&"headscale.proto"));
+        assert!(!file_names.contains(&"node.proto"));
+        assert!(!file_names.contains(&"auth.proto"));
         assert!(file_names.contains(&"google/api/annotations.proto"));
         assert!(file_names.contains(&"google/api/http.proto"));
         assert!(file_names.contains(&"google/protobuf/descriptor.proto"));
@@ -2464,13 +2499,19 @@ mod upstream_tests {
         let headscale_file = descriptors
             .file
             .iter()
-            .find(|file| file.name.as_deref() == Some("headscale.proto"))
-            .expect("headscale.proto present");
+            .find(|file| file.name.as_deref() == Some("headscale/v1/headscale.proto"))
+            .expect("headscale/v1/headscale.proto present");
         assert!(
             headscale_file
                 .dependency
                 .contains(&"google/api/annotations.proto".to_string()),
             "public descriptor should preserve grpc-gateway annotation dependency"
+        );
+        assert!(
+            headscale_file
+                .dependency
+                .contains(&"headscale/v1/auth.proto".to_string()),
+            "public descriptor dependencies should use upstream filenames"
         );
 
         let _reflection =
@@ -2634,7 +2675,9 @@ mod upstream_tests {
             },
             ServerReflectionRequest {
                 host: String::new(),
-                message_request: Some(MessageRequest::FileByFilename("payments.proto".into())),
+                message_request: Some(MessageRequest::FileByFilename(
+                    "headscale/v1/headscale.proto".into(),
+                )),
             },
         ]);
         let mut responses = client
@@ -2661,6 +2704,61 @@ mod upstream_tests {
         };
         assert_eq!(service_names, vec!["headscale.v1.HeadscaleService"]);
 
+        let response = responses
+            .next()
+            .await
+            .expect("upstream filename descriptor response")
+            .expect("upstream filename descriptor is served");
+        let descriptors = match response
+            .message_response
+            .expect("file descriptor message response")
+        {
+            MessageResponse::FileDescriptorResponse(response) => response
+                .file_descriptor_proto
+                .into_iter()
+                .map(|bytes| {
+                    prost_types::FileDescriptorProto::decode(bytes.as_slice())
+                        .expect("file descriptor decodes")
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("unexpected reflection response: {other:?}"),
+        };
+        let file_names = descriptors
+            .iter()
+            .filter_map(|file| file.name.as_deref())
+            .collect::<Vec<_>>();
+        assert!(file_names.contains(&"headscale/v1/headscale.proto"));
+        assert!(!file_names.contains(&"headscale.proto"));
+
+        drop(responses);
+
+        let requests = stream::iter([ServerReflectionRequest {
+            host: String::new(),
+            message_request: Some(MessageRequest::FileByFilename("headscale.proto".into())),
+        }]);
+        let mut responses = client
+            .server_reflection_info(Request::new(requests))
+            .await
+            .expect("bare descriptor request starts")
+            .into_inner();
+        let err = responses
+            .next()
+            .await
+            .expect("bare descriptor response")
+            .expect_err("bare generated descriptor filename is not served");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(err.message().contains("headscale.proto"));
+        drop(responses);
+
+        let requests = stream::iter([ServerReflectionRequest {
+            host: String::new(),
+            message_request: Some(MessageRequest::FileByFilename("payments.proto".into())),
+        }]);
+        let mut responses = client
+            .server_reflection_info(Request::new(requests))
+            .await
+            .expect("internal descriptor request starts")
+            .into_inner();
         let err = responses
             .next()
             .await

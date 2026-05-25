@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package headscale.v1;
 
+import "google/api/annotations.proto";
+
 import "apikey.proto";
 import "auth.proto";
 import "node.proto";
@@ -10,41 +12,170 @@ import "preauthkey.proto";
 import "user.proto";
 
 service HeadscaleService {
-  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
-  rpc RenameUser(RenameUserRequest) returns (RenameUserResponse);
-  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
-  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/user"
+      body: "*"
+    };
+  }
+  rpc RenameUser(RenameUserRequest) returns (RenameUserResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/user/{old_id}/rename/{new_name}"
+    };
+  }
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse) {
+    option (google.api.http) = {
+      delete: "/api/v1/user/{id}"
+    };
+  }
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/user"
+    };
+  }
 
-  rpc CreatePreAuthKey(CreatePreAuthKeyRequest) returns (CreatePreAuthKeyResponse);
-  rpc ExpirePreAuthKey(ExpirePreAuthKeyRequest) returns (ExpirePreAuthKeyResponse);
-  rpc DeletePreAuthKey(DeletePreAuthKeyRequest) returns (DeletePreAuthKeyResponse);
-  rpc ListPreAuthKeys(ListPreAuthKeysRequest) returns (ListPreAuthKeysResponse);
+  rpc CreatePreAuthKey(CreatePreAuthKeyRequest) returns (CreatePreAuthKeyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/preauthkey"
+      body: "*"
+    };
+  }
+  rpc ExpirePreAuthKey(ExpirePreAuthKeyRequest) returns (ExpirePreAuthKeyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/preauthkey/expire"
+      body: "*"
+    };
+  }
+  rpc DeletePreAuthKey(DeletePreAuthKeyRequest) returns (DeletePreAuthKeyResponse) {
+    option (google.api.http) = {
+      delete: "/api/v1/preauthkey"
+    };
+  }
+  rpc ListPreAuthKeys(ListPreAuthKeysRequest) returns (ListPreAuthKeysResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/preauthkey"
+    };
+  }
 
-  rpc DebugCreateNode(DebugCreateNodeRequest) returns (DebugCreateNodeResponse);
-  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
-  rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
-  rpc SetApprovedRoutes(SetApprovedRoutesRequest) returns (SetApprovedRoutesResponse);
-  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
-  rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
-  rpc ExpireNode(ExpireNodeRequest) returns (ExpireNodeResponse);
-  rpc RenameNode(RenameNodeRequest) returns (RenameNodeResponse);
-  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
-  rpc BackfillNodeIPs(BackfillNodeIPsRequest) returns (BackfillNodeIPsResponse);
+  rpc DebugCreateNode(DebugCreateNodeRequest) returns (DebugCreateNodeResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/debug/node"
+      body: "*"
+    };
+  }
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/node/{node_id}"
+    };
+  }
+  rpc SetTags(SetTagsRequest) returns (SetTagsResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/{node_id}/tags"
+      body: "*"
+    };
+  }
+  rpc SetApprovedRoutes(SetApprovedRoutesRequest) returns (SetApprovedRoutesResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/{node_id}/approve_routes"
+      body: "*"
+    };
+  }
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/register"
+    };
+  }
+  rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse) {
+    option (google.api.http) = {
+      delete: "/api/v1/node/{node_id}"
+    };
+  }
+  rpc ExpireNode(ExpireNodeRequest) returns (ExpireNodeResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/{node_id}/expire"
+    };
+  }
+  rpc RenameNode(RenameNodeRequest) returns (RenameNodeResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/{node_id}/rename/{new_name}"
+    };
+  }
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/node"
+    };
+  }
+  rpc BackfillNodeIPs(BackfillNodeIPsRequest) returns (BackfillNodeIPsResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/node/backfillips"
+    };
+  }
 
-  rpc AuthRegister(AuthRegisterRequest) returns (AuthRegisterResponse);
-  rpc AuthApprove(AuthApproveRequest) returns (AuthApproveResponse);
-  rpc AuthReject(AuthRejectRequest) returns (AuthRejectResponse);
+  rpc AuthRegister(AuthRegisterRequest) returns (AuthRegisterResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/auth/register"
+      body: "*"
+    };
+  }
+  rpc AuthApprove(AuthApproveRequest) returns (AuthApproveResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/auth/approve"
+      body: "*"
+    };
+  }
+  rpc AuthReject(AuthRejectRequest) returns (AuthRejectResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/auth/reject"
+      body: "*"
+    };
+  }
 
-  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
-  rpc ExpireApiKey(ExpireApiKeyRequest) returns (ExpireApiKeyResponse);
-  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
-  rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse);
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/apikey"
+      body: "*"
+    };
+  }
+  rpc ExpireApiKey(ExpireApiKeyRequest) returns (ExpireApiKeyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/apikey/expire"
+      body: "*"
+    };
+  }
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/apikey"
+    };
+  }
+  rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse) {
+    option (google.api.http) = {
+      delete: "/api/v1/apikey/{prefix}"
+    };
+  }
 
-  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
-  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
-  rpc CheckPolicy(CheckPolicyRequest) returns (CheckPolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/policy"
+    };
+  }
+  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse) {
+    option (google.api.http) = {
+      put: "/api/v1/policy"
+      body: "*"
+    };
+  }
+  rpc CheckPolicy(CheckPolicyRequest) returns (CheckPolicyResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/policy/check"
+      body: "*"
+    };
+  }
 
-  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Health(HealthRequest) returns (HealthResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/health"
+    };
+  }
 }
 
 message HealthRequest {}

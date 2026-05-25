@@ -196,6 +196,9 @@ pub mod upstream {
     const PUBLIC_HEADSCALE_DESCRIPTOR_FILES: &[&str] = &[
         "apikey.proto",
         "auth.proto",
+        "google/api/annotations.proto",
+        "google/api/http.proto",
+        "google/protobuf/descriptor.proto",
         "google/protobuf/timestamp.proto",
         "headscale.proto",
         "node.proto",
@@ -1827,6 +1830,7 @@ mod upstream_tests {
     use axum::body::to_bytes;
     use chrono::Utc;
     use futures::{StreamExt as _, stream};
+    use prost::Message as _;
     use tonic::{
         Request,
         transport::{Endpoint, Server},
@@ -1853,6 +1857,7 @@ mod upstream_tests {
         RenameNodeRequest, RenameUserRequest, SetApprovedRoutesRequest, SetPolicyRequest,
         SetTagsRequest,
     };
+    use crate::generated::{google_api::HttpRule, google_api::http_rule::Pattern};
     use crate::policy::{PeerMapNode, PolicyStore, parse_hujson_policy};
     use crate::tailscale_wire::wire::{MachineRecord, stable_id_from_key};
     use crate::tailscale_wire::{
@@ -2098,6 +2103,153 @@ mod upstream_tests {
         assert_eq!(got.exclude.as_slice(), exclude);
     }
 
+    fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64, String> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while *pos < buf.len() {
+            let byte = buf[*pos];
+            *pos += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err("protobuf varint overflow".to_string());
+            }
+        }
+        Err("truncated protobuf varint".to_string())
+    }
+
+    fn for_each_field<'a>(
+        buf: &'a [u8],
+        mut f: impl FnMut(u64, u64, &'a [u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut pos = 0usize;
+        while pos < buf.len() {
+            let tag = read_varint(buf, &mut pos)?;
+            let number = tag >> 3;
+            let wire_type = tag & 0x07;
+            match wire_type {
+                0 => {
+                    let start = pos;
+                    let _ = read_varint(buf, &mut pos)?;
+                    f(number, wire_type, &buf[start..pos])?;
+                }
+                1 => {
+                    let end = pos.checked_add(8).ok_or("protobuf field offset overflow")?;
+                    let data = buf
+                        .get(pos..end)
+                        .ok_or("truncated fixed64 protobuf field")?;
+                    pos = end;
+                    f(number, wire_type, data)?;
+                }
+                2 => {
+                    let len = usize::try_from(read_varint(buf, &mut pos)?)
+                        .map_err(|_| "protobuf field length overflow")?;
+                    let end = pos
+                        .checked_add(len)
+                        .ok_or("protobuf field offset overflow")?;
+                    let data = buf
+                        .get(pos..end)
+                        .ok_or("truncated length-delimited protobuf field")?;
+                    pos = end;
+                    f(number, wire_type, data)?;
+                }
+                5 => {
+                    let end = pos.checked_add(4).ok_or("protobuf field offset overflow")?;
+                    let data = buf
+                        .get(pos..end)
+                        .ok_or("truncated fixed32 protobuf field")?;
+                    pos = end;
+                    f(number, wire_type, data)?;
+                }
+                other => return Err(format!("unsupported protobuf wire type {other}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn length_fields(buf: &[u8], wanted: u64) -> Result<Vec<&[u8]>, String> {
+        let mut out = Vec::new();
+        for_each_field(buf, |number, wire_type, data| {
+            if number == wanted && wire_type == 2 {
+                out.push(data);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    fn string_field(buf: &[u8], wanted: u64) -> Result<Option<String>, String> {
+        length_fields(buf, wanted)?
+            .into_iter()
+            .next()
+            .map(|bytes| {
+                std::str::from_utf8(bytes)
+                    .map(str::to_string)
+                    .map_err(|err| format!("invalid descriptor string: {err}"))
+            })
+            .transpose()
+    }
+
+    fn http_rule_for_method(method_name: &str) -> HttpRule {
+        const GOOGLE_API_HTTP_EXTENSION_FIELD: u64 = 72_295_728;
+
+        for file in length_fields(crate::generated::FILE_DESCRIPTOR_SET, 1)
+            .expect("descriptor set fields parse")
+        {
+            if string_field(file, 1).expect("file name parses").as_deref()
+                != Some("headscale.proto")
+            {
+                continue;
+            }
+            for service in length_fields(file, 6).expect("service fields parse") {
+                if string_field(service, 1)
+                    .expect("service name parses")
+                    .as_deref()
+                    != Some("HeadscaleService")
+                {
+                    continue;
+                }
+                for method in length_fields(service, 2).expect("method fields parse") {
+                    if string_field(method, 1)
+                        .expect("method name parses")
+                        .as_deref()
+                        != Some(method_name)
+                    {
+                        continue;
+                    }
+                    let options = length_fields(method, 4)
+                        .expect("method options parse")
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| panic!("{method_name} has no method options"));
+                    let http_rule = length_fields(options, GOOGLE_API_HTTP_EXTENSION_FIELD)
+                        .expect("method option extensions parse")
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| panic!("{method_name} has no google.api.http option"));
+                    return HttpRule::decode(http_rule)
+                        .unwrap_or_else(|err| panic!("{method_name} http rule decodes: {err}"));
+                }
+            }
+        }
+
+        panic!("{method_name} not found in headscale service descriptor");
+    }
+
+    fn assert_http_rule(method: &str, expected_pattern: Pattern, expected_body: &str) {
+        let rule = http_rule_for_method(method);
+        assert_eq!(rule.pattern, Some(expected_pattern), "{method} pattern");
+        assert_eq!(rule.body, expected_body, "{method} body");
+        assert!(rule.response_body.is_empty(), "{method} response_body");
+        assert!(
+            rule.additional_bindings.is_empty(),
+            "{method} additional bindings"
+        );
+    }
+
     #[tokio::test]
     async fn upstream_user_grpc_create_list_rename_delete() {
         let service = admin_service().await;
@@ -2302,12 +2454,146 @@ mod upstream_tests {
             .iter()
             .filter_map(|file| file.name.as_deref())
             .collect::<Vec<_>>();
+        assert!(file_names.contains(&"google/api/annotations.proto"));
+        assert!(file_names.contains(&"google/api/http.proto"));
+        assert!(file_names.contains(&"google/protobuf/descriptor.proto"));
         assert!(!file_names.contains(&"resources.proto"));
         assert!(!file_names.contains(&"payments.proto"));
         assert!(!file_names.contains(&"health.proto"));
 
+        let headscale_file = descriptors
+            .file
+            .iter()
+            .find(|file| file.name.as_deref() == Some("headscale.proto"))
+            .expect("headscale.proto present");
+        assert!(
+            headscale_file
+                .dependency
+                .contains(&"google/api/annotations.proto".to_string()),
+            "public descriptor should preserve grpc-gateway annotation dependency"
+        );
+
         let _reflection =
             HeadscaleAdminService::reflection_service().expect("reflection service builds");
+    }
+
+    #[test]
+    fn upstream_grpc_public_descriptor_preserves_http_annotations() {
+        let cases = [
+            ("CreateUser", Pattern::Post("/api/v1/user".into()), "*"),
+            (
+                "RenameUser",
+                Pattern::Post("/api/v1/user/{old_id}/rename/{new_name}".into()),
+                "",
+            ),
+            (
+                "DeleteUser",
+                Pattern::Delete("/api/v1/user/{id}".into()),
+                "",
+            ),
+            ("ListUsers", Pattern::Get("/api/v1/user".into()), ""),
+            (
+                "CreatePreAuthKey",
+                Pattern::Post("/api/v1/preauthkey".into()),
+                "*",
+            ),
+            (
+                "ExpirePreAuthKey",
+                Pattern::Post("/api/v1/preauthkey/expire".into()),
+                "*",
+            ),
+            (
+                "DeletePreAuthKey",
+                Pattern::Delete("/api/v1/preauthkey".into()),
+                "",
+            ),
+            (
+                "ListPreAuthKeys",
+                Pattern::Get("/api/v1/preauthkey".into()),
+                "",
+            ),
+            (
+                "DebugCreateNode",
+                Pattern::Post("/api/v1/debug/node".into()),
+                "*",
+            ),
+            ("GetNode", Pattern::Get("/api/v1/node/{node_id}".into()), ""),
+            (
+                "SetTags",
+                Pattern::Post("/api/v1/node/{node_id}/tags".into()),
+                "*",
+            ),
+            (
+                "SetApprovedRoutes",
+                Pattern::Post("/api/v1/node/{node_id}/approve_routes".into()),
+                "*",
+            ),
+            (
+                "RegisterNode",
+                Pattern::Post("/api/v1/node/register".into()),
+                "",
+            ),
+            (
+                "DeleteNode",
+                Pattern::Delete("/api/v1/node/{node_id}".into()),
+                "",
+            ),
+            (
+                "ExpireNode",
+                Pattern::Post("/api/v1/node/{node_id}/expire".into()),
+                "",
+            ),
+            (
+                "RenameNode",
+                Pattern::Post("/api/v1/node/{node_id}/rename/{new_name}".into()),
+                "",
+            ),
+            ("ListNodes", Pattern::Get("/api/v1/node".into()), ""),
+            (
+                "BackfillNodeIPs",
+                Pattern::Post("/api/v1/node/backfillips".into()),
+                "",
+            ),
+            (
+                "AuthRegister",
+                Pattern::Post("/api/v1/auth/register".into()),
+                "*",
+            ),
+            (
+                "AuthApprove",
+                Pattern::Post("/api/v1/auth/approve".into()),
+                "*",
+            ),
+            (
+                "AuthReject",
+                Pattern::Post("/api/v1/auth/reject".into()),
+                "*",
+            ),
+            ("CreateApiKey", Pattern::Post("/api/v1/apikey".into()), "*"),
+            (
+                "ExpireApiKey",
+                Pattern::Post("/api/v1/apikey/expire".into()),
+                "*",
+            ),
+            ("ListApiKeys", Pattern::Get("/api/v1/apikey".into()), ""),
+            (
+                "DeleteApiKey",
+                Pattern::Delete("/api/v1/apikey/{prefix}".into()),
+                "",
+            ),
+            ("GetPolicy", Pattern::Get("/api/v1/policy".into()), ""),
+            ("SetPolicy", Pattern::Put("/api/v1/policy".into()), "*"),
+            (
+                "CheckPolicy",
+                Pattern::Post("/api/v1/policy/check".into()),
+                "*",
+            ),
+            ("Health", Pattern::Get("/api/v1/health".into()), ""),
+        ];
+
+        for (method, pattern, body) in cases {
+            assert_http_rule(method, pattern, body);
+        }
     }
 
     #[tokio::test]

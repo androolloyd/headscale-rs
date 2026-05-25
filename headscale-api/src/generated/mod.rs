@@ -9,6 +9,13 @@
     clippy::default_trait_access,
     clippy::use_self
 )]
+#[path = "google.api.rs"]
+pub mod google_api;
+#[allow(
+    clippy::derive_partial_eq_without_eq,
+    clippy::default_trait_access,
+    clippy::use_self
+)]
 #[path = "headscale.v1.rs"]
 pub mod headscale_v1;
 

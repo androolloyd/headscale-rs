@@ -297,7 +297,10 @@ covered at the map integration layer; direct Go-vs-Rust
 4via6 host-alias route destinations, upstream `UsePrimary` fallback,
 and lowest-ID multi-router via-tag election; and same-prefix co-router
 primary visibility is covered before broader paired stock-client
-expansion.
+expansion. Public gRPC reflection now preserves the upstream
+`google.api.http` annotations for every implemented `HeadscaleService`
+RPC while still filtering internal Octra services out of the advertised
+descriptor set.
 
 ## Parallel Workstreams
 

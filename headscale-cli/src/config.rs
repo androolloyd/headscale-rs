@@ -19,6 +19,7 @@ const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 const DEFAULT_CLI_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
 const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
+const MISSING_NOISE_PRIVATE_KEY_PATH_ERROR: &str = "Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol";
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -916,6 +917,8 @@ impl CliConfig {
             }
         }
 
+        self.validate_upstream_noise_config()?;
+
         Ok(())
     }
 
@@ -1030,6 +1033,21 @@ impl CliConfig {
             bail!(
                 "Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
             );
+        }
+
+        Ok(())
+    }
+
+    fn validate_upstream_noise_config(&self) -> Result<()> {
+        let Some(private_key_path) = self
+            .noise
+            .as_ref()
+            .and_then(|noise| noise.private_key_path.as_ref())
+        else {
+            bail!(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR);
+        };
+        if private_key_path.as_os_str().is_empty() {
+            bail!(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR);
         }
 
         Ok(())
@@ -3433,6 +3451,21 @@ dns:
         let err = config.validate_for_configtest().unwrap_err();
 
         assert!(format!("{err:#}").contains("dns.nameservers.global"));
+    }
+
+    #[test]
+    fn configtest_rejects_missing_noise_private_key_path() {
+        let source = r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR));
     }
 
     #[test]

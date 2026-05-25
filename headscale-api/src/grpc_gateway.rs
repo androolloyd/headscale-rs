@@ -97,6 +97,7 @@ pub fn router(service: HeadscaleAdminService) -> Router {
             state.clone(),
             http_authentication_middleware,
         ))
+        .layer(middleware::from_fn(crate::tailscale_wire::security_headers))
         .with_state(state)
 }
 

@@ -3919,6 +3919,114 @@ mod tests {
     }
 
     #[test]
+    fn via_routes_regular_overlap_marks_use_primary() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:router-a": ["router@"]
+              },
+              "grants": [
+                {
+                  "src": ["tag:client"],
+                  "dst": ["10.0.0.0/24"],
+                  "ip": ["*"]
+                },
+                {
+                  "src": ["tag:client"],
+                  "dst": ["10.0.0.0/24"],
+                  "ip": ["*"],
+                  "via": ["tag:router-a"]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let client_tags = vec!["tag:client".to_string()];
+        let router_tags = vec!["tag:router-a".to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let router = NodeView::new("100.64.0.1").with_tags(&router_tags);
+        let route = "10.0.0.0/24".to_string();
+        let routes = vec![route.clone()];
+        let candidates = vec![ViaRouteCandidate {
+            id: 1,
+            tags: &router_tags,
+            routes: &routes,
+        }];
+
+        let got =
+            doc.via_routes_for_peer_with_candidates(&client, 10, &router, 1, &routes, &candidates);
+
+        assert_eq!(got.include, vec![route.clone()]);
+        assert!(got.exclude.is_empty());
+        assert_eq!(got.use_primary, vec![route]);
+    }
+
+    #[test]
+    fn via_routes_multi_router_tag_elects_lowest_candidate() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:router-ha": ["router@"]
+              },
+              "grants": [{
+                "src": ["tag:client"],
+                "dst": ["10.0.0.0/24"],
+                "ip": ["*"],
+                "via": ["tag:router-ha"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let client_tags = vec!["tag:client".to_string()];
+        let router_tags = vec!["tag:router-ha".to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let router_a = NodeView::new("100.64.0.1").with_tags(&router_tags);
+        let router_b = NodeView::new("100.64.0.2").with_tags(&router_tags);
+        let route = "10.0.0.0/24".to_string();
+        let routes = vec![route.clone()];
+        let candidates = vec![
+            ViaRouteCandidate {
+                id: 20,
+                tags: &router_tags,
+                routes: &routes,
+            },
+            ViaRouteCandidate {
+                id: 10,
+                tags: &router_tags,
+                routes: &routes,
+            },
+        ];
+
+        let primary = doc.via_routes_for_peer_with_candidates(
+            &client,
+            30,
+            &router_a,
+            10,
+            &routes,
+            &candidates,
+        );
+        let secondary = doc.via_routes_for_peer_with_candidates(
+            &client,
+            30,
+            &router_b,
+            20,
+            &routes,
+            &candidates,
+        );
+
+        assert_eq!(primary.include, vec![route.clone()]);
+        assert!(primary.exclude.is_empty());
+        assert!(primary.use_primary.is_empty());
+        assert!(secondary.include.is_empty());
+        assert_eq!(secondary.exclude, vec![route]);
+        assert!(secondary.use_primary.is_empty());
+    }
+
+    #[test]
     fn hujson_rejects_public_ipsets_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{

@@ -3049,6 +3049,29 @@ mod tests {
         }
     }
 
+    fn assert_security_headers(headers: &HeaderMap) {
+        assert_eq!(
+            headers.get("x-frame-options").and_then(|v| v.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            headers
+                .get("content-security-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("frame-ancestors 'none'")
+        );
+        assert_eq!(
+            headers
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers.get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("no-referrer")
+        );
+    }
+
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let server = Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap());
@@ -3146,6 +3169,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_security_headers(resp.headers());
         assert_eq!(
             resp.headers()
                 .get(header::CONTENT_TYPE)

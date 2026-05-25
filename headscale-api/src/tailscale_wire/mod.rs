@@ -47,6 +47,7 @@ use async_trait::async_trait;
 use axum::{
     Router,
     extract::Request,
+    http::{HeaderMap, HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response as AxumResponse,
     routing::{any, get, head, post},
@@ -4938,7 +4939,7 @@ fn control_router_with_optional_oidc_inner(
             async move { record_http_metrics(metrics_registry, req, next).await }
         }));
 
-    if wrap_knock {
+    let inner = if wrap_knock {
         // PSK-gated handshake — third layer of the active-probe shield.
         // Default-off (KnockConfig::disabled()) → exact pass-through.
         // When enabled, requests must carry a valid knock cookie or get a
@@ -4946,7 +4947,9 @@ fn control_router_with_optional_oidc_inner(
         knock::wrap_router(inner, knock_cfg)
     } else {
         inner
-    }
+    };
+
+    inner.layer(middleware::from_fn(security_headers))
 }
 
 /// Build the metrics/debug listener router.
@@ -5039,6 +5042,34 @@ pub fn metrics_debug_router(state: WireState) -> Router {
             let metrics_registry = Arc::clone(&metrics_registry);
             async move { record_http_metrics(metrics_registry, req, next).await }
         }))
+        .layer(middleware::from_fn(security_headers))
+}
+
+/// Apply the same browser-facing hardening headers that headscale-go attaches
+/// to public HTTP responses.
+pub async fn security_headers(req: Request, next: Next) -> AxumResponse {
+    let mut response = next.run(req).await;
+    apply_security_headers(response.headers_mut());
+    response
+}
+
+pub fn apply_security_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
 }
 
 async fn record_http_metrics(

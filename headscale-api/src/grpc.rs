@@ -153,6 +153,8 @@ pub mod upstream {
     use async_trait::async_trait;
     use chrono::Utc;
     use parking_lot::Mutex;
+    use prost::Message as _;
+    use prost_types::FileDescriptorSet;
     use rand_core::RngCore;
     use tonic::{Request, Response, Status, metadata::MetadataMap};
 
@@ -190,6 +192,17 @@ pub mod upstream {
     use crate::tailscale_wire::{IpAllocator, MachineRecord, MachineRegistry};
 
     const AUTH_PREFIX: &str = "Bearer ";
+    const PUBLIC_HEADSCALE_SERVICE_NAME: &str = "headscale.v1.HeadscaleService";
+    const PUBLIC_HEADSCALE_DESCRIPTOR_FILES: &[&str] = &[
+        "apikey.proto",
+        "auth.proto",
+        "google/protobuf/timestamp.proto",
+        "headscale.proto",
+        "node.proto",
+        "policy.proto",
+        "preauthkey.proto",
+        "user.proto",
+    ];
 
     #[derive(Clone)]
     pub struct HeadscaleAdminService {
@@ -456,8 +469,34 @@ pub mod upstream {
             tonic_reflection::server::Error,
         > {
             tonic_reflection::server::Builder::configure()
-                .register_encoded_file_descriptor_set(crate::generated::FILE_DESCRIPTOR_SET)
+                .register_file_descriptor_set(Self::public_file_descriptor_set()?)
+                .with_service_name(PUBLIC_HEADSCALE_SERVICE_NAME)
                 .build_v1()
+        }
+
+        pub fn public_file_descriptor_set()
+        -> Result<FileDescriptorSet, tonic_reflection::server::Error> {
+            let mut descriptors = FileDescriptorSet::decode(crate::generated::FILE_DESCRIPTOR_SET)?;
+            descriptors.file.retain(|file| {
+                file.name
+                    .as_deref()
+                    .is_some_and(|name| PUBLIC_HEADSCALE_DESCRIPTOR_FILES.contains(&name))
+            });
+
+            let has_headscale_service = descriptors.file.iter().any(|file| {
+                file.package.as_deref() == Some("headscale.v1")
+                    && file
+                        .service
+                        .iter()
+                        .any(|service| service.name.as_deref() == Some("HeadscaleService"))
+            });
+            if !has_headscale_service {
+                return Err(tonic_reflection::server::Error::InvalidFileDescriptorSet(
+                    format!("{PUBLIC_HEADSCALE_SERVICE_NAME} missing from descriptor set"),
+                ));
+            }
+
+            Ok(descriptors)
         }
 
         async fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
@@ -1787,8 +1826,15 @@ mod upstream_tests {
 
     use axum::body::to_bytes;
     use chrono::Utc;
-    use prost::Message as _;
-    use tonic::Request;
+    use futures::{StreamExt as _, stream};
+    use tonic::{
+        Request,
+        transport::{Endpoint, Server},
+    };
+    use tonic_reflection::pb::v1::{
+        ServerReflectionRequest, server_reflection_client::ServerReflectionClient,
+        server_reflection_request::MessageRequest, server_reflection_response::MessageResponse,
+    };
     use tower::ServiceExt;
 
     use super::upstream::{DatabaseHealthCheck, HeadscaleAdminService, apply_requested_tags};
@@ -2218,10 +2264,9 @@ mod upstream_tests {
     }
 
     #[test]
-    fn upstream_grpc_reflection_descriptor_advertises_headscale_service() {
-        let descriptors =
-            prost_types::FileDescriptorSet::decode(crate::generated::FILE_DESCRIPTOR_SET)
-                .expect("generated descriptor set decodes");
+    fn upstream_grpc_public_descriptor_advertises_only_headscale_service() {
+        let descriptors = HeadscaleAdminService::public_file_descriptor_set()
+            .expect("public descriptor set decodes");
         let service = descriptors
             .file
             .iter()
@@ -2243,8 +2288,105 @@ mod upstream_tests {
         assert!(methods.contains(&"Health"));
         assert!(!methods.iter().any(|method| method.contains("Version")));
 
+        let services = descriptors
+            .file
+            .iter()
+            .filter(|file| file.package.as_deref() == Some("headscale.v1"))
+            .flat_map(|file| file.service.iter())
+            .filter_map(|service| service.name.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(services, vec!["HeadscaleService"]);
+
+        let file_names = descriptors
+            .file
+            .iter()
+            .filter_map(|file| file.name.as_deref())
+            .collect::<Vec<_>>();
+        assert!(!file_names.contains(&"resources.proto"));
+        assert!(!file_names.contains(&"payments.proto"));
+        assert!(!file_names.contains(&"health.proto"));
+
         let _reflection =
             HeadscaleAdminService::reflection_service().expect("reflection service builds");
+    }
+
+    #[tokio::test]
+    async fn upstream_grpc_reflection_advertises_only_public_headscale_service() {
+        let reflection =
+            HeadscaleAdminService::reflection_service().expect("reflection service builds");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reflection listener");
+        let local_addr = listener.local_addr().expect("local reflection address");
+        let incoming = stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((socket, _addr)) => Some((Ok::<_, std::io::Error>(socket), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(reflection)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("reflection server exits cleanly");
+        });
+
+        let channel = Endpoint::from_shared(format!("http://{local_addr}"))
+            .expect("reflection endpoint")
+            .connect()
+            .await
+            .expect("connect reflection client");
+        let mut client = ServerReflectionClient::new(channel);
+        let requests = stream::iter([
+            ServerReflectionRequest {
+                host: String::new(),
+                message_request: Some(MessageRequest::ListServices(String::new())),
+            },
+            ServerReflectionRequest {
+                host: String::new(),
+                message_request: Some(MessageRequest::FileByFilename("payments.proto".into())),
+            },
+        ]);
+        let mut responses = client
+            .server_reflection_info(Request::new(requests))
+            .await
+            .expect("reflection request starts")
+            .into_inner();
+
+        let response = responses
+            .next()
+            .await
+            .expect("list services response")
+            .expect("list services succeeds");
+        let service_names = match response
+            .message_response
+            .expect("list services message response")
+        {
+            MessageResponse::ListServicesResponse(response) => response
+                .service
+                .into_iter()
+                .map(|service| service.name)
+                .collect::<Vec<_>>(),
+            other => panic!("unexpected reflection response: {other:?}"),
+        };
+        assert_eq!(service_names, vec!["headscale.v1.HeadscaleService"]);
+
+        let err = responses
+            .next()
+            .await
+            .expect("internal descriptor response")
+            .expect_err("internal Octra descriptor is not served");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(err.message().contains("payments.proto"));
+
+        drop(responses);
+        drop(client);
+        let _ = shutdown_tx.send(());
+        server.await.expect("reflection server task joins");
     }
 
     #[tokio::test]

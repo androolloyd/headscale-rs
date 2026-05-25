@@ -1,0 +1,1 @@
+Error: Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol

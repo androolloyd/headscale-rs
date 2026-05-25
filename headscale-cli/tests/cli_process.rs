@@ -1249,6 +1249,17 @@ database:
 fn configtest_rejects_supported_server_init_validation_errors() {
     assert_configtest_default_config_snapshot(
         r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        include_str!("snapshots/configtest_missing_noise_private_key.stderr"),
+        "configtest missing noise private key",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
 server_url: "headscale.example"
 "#,
         include_str!("snapshots/configtest_bad_server_url_scheme.stderr"),

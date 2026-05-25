@@ -179,6 +179,30 @@ async fn body_json(resp: Response) -> Value {
     })
 }
 
+fn assert_security_headers(resp: &Response) {
+    let headers = resp.headers();
+    assert_eq!(
+        headers.get("x-frame-options").and_then(|v| v.to_str().ok()),
+        Some("DENY")
+    );
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("frame-ancestors 'none'")
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers.get("referrer-policy").and_then(|v| v.to_str().ok()),
+        Some("no-referrer")
+    );
+}
+
 async fn assert_status_json(
     resp: Response,
     expected_http_status: u16,
@@ -417,6 +441,7 @@ async fn grpc_gateway_health_missing_auth_returns_plain_unauthorized() {
         .oneshot(req(Method::GET, "/api/v1/health", None, Body::empty()))
         .await
         .unwrap();
+    assert_security_headers(&resp);
     assert_plain_unauthorized(resp).await;
 
     let resp = app
@@ -429,6 +454,7 @@ async fn grpc_gateway_health_missing_auth_returns_plain_unauthorized() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    assert_security_headers(&resp);
     let body = body_json(resp).await;
     assert_eq!(body["databaseConnectivity"], true);
 }

@@ -11,7 +11,8 @@ use rand_core::RngCore;
 use serde::Deserialize;
 
 use super::{
-    AuthWaitOutcome, MachineRecord, SshCheckBinding, WireState, noise::NoisePeerMachineKey,
+    AuthWaitOutcome, MachineRecord, SshCheckBinding, WireState,
+    noise::{NoisePeerMachineKey, NoiseRequestCancellation},
     wire::SshAction,
 };
 use crate::policy::SshPolicyNode;
@@ -26,11 +27,12 @@ pub struct SshActionQuery {
     auth_id: Option<String>,
 }
 
-pub async fn handle_ssh_action(
+pub(crate) async fn handle_ssh_action(
     State(state): State<WireState>,
     Path((src_node_id, dst_node_id)): Path<(u64, u64)>,
     Query(query): Query<SshActionQuery>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
+    cancellation: Option<Extension<NoiseRequestCancellation>>,
 ) -> Response {
     let Some(Extension(NoisePeerMachineKey(machine_key_hex))) = machine_key else {
         return ssh_error(StatusCode::UNAUTHORIZED, "missing Noise machine key");
@@ -57,7 +59,14 @@ pub async fn handle_ssh_action(
         .ssh_check_period_for(&ssh_nodes, src_node_id, dst_node_id);
 
     if let Some(auth_id) = query.auth_id.as_deref() {
-        return ssh_action_followup(state, auth_id, binding, check_period.is_some()).await;
+        return ssh_action_followup(
+            state,
+            auth_id,
+            binding,
+            check_period.is_some(),
+            cancellation.map(|Extension(cancellation)| cancellation),
+        )
+        .await;
     }
 
     if let Some(period) = check_period
@@ -94,6 +103,7 @@ async fn ssh_action_followup(
     auth_id: &str,
     binding: SshCheckBinding,
     check_found: bool,
+    cancellation: Option<NoiseRequestCancellation>,
 ) -> Response {
     let Some(raw_auth_id) = auth_id_cache_key(auth_id) else {
         return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id");
@@ -108,7 +118,19 @@ async fn ssh_action_followup(
         );
     }
 
-    match state.registration_cache.wait_for_auth(raw_auth_id).await {
+    let wait = state.registration_cache.wait_for_auth(raw_auth_id);
+    let outcome = if let Some(cancellation) = cancellation {
+        tokio::select! {
+            outcome = wait => outcome,
+            () = cancellation.cancelled() => {
+                return ssh_error(StatusCode::UNAUTHORIZED, "ssh action follow-up cancelled");
+            }
+        }
+    } else {
+        wait.await
+    };
+
+    match outcome {
         AuthWaitOutcome::Accepted => {
             if check_found {
                 state.registration_cache.record_ssh_auth(
@@ -386,6 +408,48 @@ mod tests {
         let action: SshAction = serde_json::from_slice(&body).unwrap();
         assert!(action.accept);
         assert!(!action.reject);
+    }
+
+    #[tokio::test]
+    async fn ssh_action_followup_cancellation_returns_upstream_error_without_consuming_session() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+        state.registration_cache.insert_ssh_check(
+            raw_auth_id.into(),
+            SshCheckBinding {
+                src_node_id: src,
+                dst_node_id: dst,
+            },
+        );
+        let cancellation = NoiseRequestCancellation::new();
+
+        let app = inner_router(state.clone());
+        let mut req = request(
+            format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-{raw_auth_id}"),
+            DST_MACHINE_KEY,
+        );
+        req.extensions_mut().insert(cancellation.clone());
+        let waiter = tokio::spawn(async move { app.oneshot(req).await.unwrap() });
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        let resp = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"ssh action follow-up cancelled\n");
+        assert_eq!(
+            state.registration_cache.ssh_binding(raw_auth_id),
+            Some(SshCheckBinding {
+                src_node_id: src,
+                dst_node_id: dst,
+            }),
+            "client cancellation must not remove or reject the auth session"
+        );
     }
 
     #[tokio::test]

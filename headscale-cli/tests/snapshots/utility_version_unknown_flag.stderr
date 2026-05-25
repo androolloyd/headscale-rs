@@ -1,1 +1,1 @@
-Error: unknown command "version --bad" for "headscale"
+Error: unknown flag: --bad

@@ -47,6 +47,10 @@ use std::{
     fs,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use axum::{
@@ -60,6 +64,7 @@ use axum::{
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use snow::{Builder, params::NoiseParams};
+use tokio::sync::Notify;
 
 use super::be_transport::{BeNoiseStream, BeTransport};
 use super::controlbase::{FrameHeader, Framed, MsgType};
@@ -71,6 +76,37 @@ use super::{WireError, WireState};
 /// can persist the real machine identity instead of an empty placeholder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoisePeerMachineKey(pub String);
+
+#[derive(Clone, Debug)]
+pub(crate) struct NoiseRequestCancellation {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl NoiseRequestCancellation {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::SeqCst) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 /// The Tailscale capability version we advertise in the Noise
 /// prologue. Pinned at 39 to match juanfont/headscale upstream
@@ -667,15 +703,38 @@ async fn dispatch_h2_request(
 
     // Build the axum Request to drive through oneshot.
     let axum_body = Body::from(body_bytes);
+    let cancellation = NoiseRequestCancellation::new();
     parts
         .extensions
         .insert(NoisePeerMachineKey(machine_key_hex));
+    parts.extensions.insert(cancellation.clone());
     let axum_req = http::Request::from_parts(parts, axum_body);
 
-    let resp = router
-        .oneshot(axum_req)
-        .await
-        .map_err(|e| WireError::Noise(format!("router oneshot: {e}")))?;
+    let router_response = router.oneshot(axum_req);
+    tokio::pin!(router_response);
+    let reset = std::future::poll_fn(|cx| respond.poll_reset(cx));
+    tokio::pin!(reset);
+
+    let resp = tokio::select! {
+        resp = &mut router_response => {
+            resp.map_err(|e| WireError::Noise(format!("router oneshot: {e}")))?
+        }
+        reset = &mut reset => {
+            cancellation.cancel();
+            match reset {
+                Ok(reason) => {
+                    tracing::debug!(
+                        target = "tailscale_wire::noise",
+                        uri = %req_uri,
+                        reason = ?reason,
+                        "h2 stream reset before response"
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(WireError::Noise(format!("h2 poll_reset: {e}"))),
+            }
+        }
+    };
 
     let (resp_parts, mut resp_body) = resp.into_parts();
     let mut head = http::Response::builder().status(resp_parts.status);

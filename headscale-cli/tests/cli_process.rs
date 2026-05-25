@@ -912,7 +912,6 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         &["dumpConfig", "bad"][..],
         &["mockoidc", "bad"][..],
         &["completion", "bash", "bad"][..],
-        &["completion", "bash", "--bad"][..],
         &["generate", "private-key", "bad"][..],
         &["gen", "private-key", "bad"][..],
         &["help", "version", "bad"][..],
@@ -1193,7 +1192,7 @@ fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
         format!(
             r#"
 server_url: "http://127.0.0.1:8080"
-listen_addr: "127.0.0.1:0"
+listen_addr: "not-a-socket"
 noise:
   private_key_path: "noise_private.key"
 dns:
@@ -1235,7 +1234,7 @@ fn serve_rejects_unsupported_acme_before_state_startup() {
         format!(
             r#"
 server_url: "https://headscale.example"
-listen_addr: "127.0.0.1:0"
+listen_addr: "not-a-socket"
 noise:
   private_key_path: "noise_private.key"
 dns:

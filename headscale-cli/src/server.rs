@@ -182,6 +182,7 @@ pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
 }
 
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
+    validate_unsupported_runtime_boundaries(&cfg)?;
     let public_listeners = public_listener_plan(&cfg)?;
     validate_supported_runtime_config(&cfg)?;
     tracing::info!("Starting headscale-compatible Tailscale control plane");
@@ -813,6 +814,14 @@ fn registration_cache_from_runtime_config(config: &RuntimeConfigSnapshot) -> Reg
 }
 
 fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
+    validate_unsupported_runtime_boundaries(cfg)?;
+    if let (Some(server_url), Some(dns)) = (cfg.server_url.as_deref(), cfg.dns.as_ref()) {
+        validate_server_url_base_domain(server_url, &dns.base_domain)?;
+    }
+    Ok(())
+}
+
+fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> {
     if cfg
         .database
         .as_ref()
@@ -824,9 +833,6 @@ fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
     }
     if cfg.tls.letsencrypt_enabled() {
         anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
-    }
-    if let (Some(server_url), Some(dns)) = (cfg.server_url.as_deref(), cfg.dns.as_ref()) {
-        validate_server_url_base_domain(server_url, &dns.base_domain)?;
     }
     Ok(())
 }

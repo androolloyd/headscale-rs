@@ -829,6 +829,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         parts.push(arg.as_ref().to_str()?);
     }
 
+    if let Some(flag) = upstream_unknown_utility_flag(parts.as_slice()) {
+        return Some(format!("Error: unknown flag: {flag}\n"));
+    }
+
     let command_is_unknown = match parts.as_slice() {
         ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => true,
         ["health" | "configtest", tail @ ..]
@@ -857,6 +861,31 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             parts.join(" ")
         )
     })
+}
+
+fn upstream_unknown_utility_flag<'a>(parts: &'a [&str]) -> Option<&'a str> {
+    match parts {
+        ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => {
+            first_unknown_long_flag(tail)
+        }
+        [
+            "completion",
+            "bash" | "fish" | "powershell" | "zsh",
+            tail @ ..,
+        ] if !tail.is_empty() && !completion_tail_is_supported(tail) => {
+            first_unknown_long_flag(tail)
+        }
+        ["generate" | "gen", "private-key", tail @ ..]
+            if !tail.is_empty() && !tail_is_help(tail) =>
+        {
+            first_unknown_long_flag(tail)
+        }
+        _ => None,
+    }
+}
+
+fn first_unknown_long_flag<'a>(tail: &'a [&str]) -> Option<&'a str> {
+    tail.iter().copied().find(|arg| arg.starts_with("--"))
 }
 
 fn tail_is_help(tail: &[&str]) -> bool {

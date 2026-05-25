@@ -116,7 +116,9 @@ Current-head audit overlay, refreshed 2026-05-24:
   loaded runtime DNS config through both headscale-go and headscale-rs and
   proves MagicDNS peer names are not synthesized into operator
   `DNSConfig.ExtraRecords`; live local-gRPC CLI tests now snapshot exact
-  normalized API-key and preauth-key human list table output.
+  normalized API-key and preauth-key human list table output, and
+  `serve` now runs the same startup validation gate as `configtest`
+  before opening SQLite state.
 - Active P0 implementation lanes against the current-head executable baseline:
   none known from the 2026-05-23 audit; current-head parity still has
   upgrade-track gaps, led by canonical map/NodeStore churn, route
@@ -284,7 +286,9 @@ certificate-related DNS lane is HTTPS/ACME serving behavior; runtime DNS
 golden coverage now proves MagicDNS peers are not serialized as operator
 extra records; SSH OIDC checkPeriod cache reuse has opt-in Rust/headscale-go
 smoke coverage; normalized exact API-key/preauth-key list snapshots now guard
-human CLI table shape; and the `grants[].via` plus exit-route interaction is
+human CLI table shape; `serve` now reuses the `configtest` validation gate
+before opening SQLite and has process snapshots for invalid policy mode and
+unsafe trusted proxies; and the `grants[].via` plus exit-route interaction is
 covered at the map integration layer before broader paired stock-client
 expansion.
 

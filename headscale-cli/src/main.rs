@@ -379,6 +379,9 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             mesh_cidr,
             mesh_cidr_v6,
         } => {
+            if let Some(config) = config.as_ref() {
+                config.validate_for_configtest().map_err(MainError::Other)?;
+            }
             let server_config = config.as_ref().and_then(|c| c.server.as_ref());
             let defaults = ServerConfig::default();
             let node_expiry = config

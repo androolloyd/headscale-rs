@@ -1199,6 +1199,34 @@ fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label
     assert_process_stderr_snapshot(&output, 1, expected, label);
 }
 
+fn assert_serve_default_config_snapshot(config: &str, expected: &str, label: &str) {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let db_path = cwd.path().join("should-not-exist.sqlite");
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"{config}
+database:
+  type: sqlite
+  sqlite:
+    path: "{}"
+"#,
+            db_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in(&["serve"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(&output, 1, expected, label);
+    assert!(
+        !db_path.exists(),
+        "invalid serve config should fail before opening SQLite at {}",
+        db_path.display()
+    );
+}
+
 #[test]
 fn configtest_rejects_supported_server_init_validation_errors() {
     assert_configtest_default_config_snapshot(
@@ -1313,6 +1341,29 @@ trusted_proxies:
 "#,
         include_str!("snapshots/configtest_unsafe_trusted_proxy.stderr"),
         "configtest unsafe trusted proxy",
+    );
+}
+
+#[test]
+fn serve_rejects_supported_server_init_validation_before_state_startup() {
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+policy:
+  mode: consul
+"#,
+        include_str!("snapshots/serve_invalid_policy_mode.stderr"),
+        "serve invalid policy mode",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+trusted_proxies:
+  - "0.0.0.0/0"
+"#,
+        include_str!("snapshots/serve_unsafe_trusted_proxy.stderr"),
+        "serve unsafe trusted proxy",
     );
 }
 

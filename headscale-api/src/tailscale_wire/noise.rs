@@ -78,7 +78,7 @@ use super::{WireError, WireState};
 pub struct NoisePeerMachineKey(pub String);
 
 #[derive(Clone, Debug)]
-pub(crate) struct NoiseRequestCancellation {
+pub struct NoiseRequestCancellation {
     cancelled: Arc<AtomicBool>,
     notify: Arc<Notify>,
 }

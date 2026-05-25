@@ -979,6 +979,48 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             Err(crate::oidc::OidcRegistrationError::SessionExpired)
         }
     }
+
+    async fn complete_oidc_auth_request(
+        &self,
+        auth_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+    ) -> Result<(), crate::oidc::OidcAuthError> {
+        let Some(binding) = self.registration_cache.ssh_binding(auth_id) else {
+            if self.registration_cache.get(auth_id).is_some() {
+                return Err(crate::oidc::OidcAuthError::NotSshCheck);
+            }
+            return Err(crate::oidc::OidcAuthError::SessionExpired);
+        };
+        let src_node_id = i64::try_from(binding.src_node_id)
+            .map_err(|_| crate::oidc::OidcAuthError::Store("src node id out of range".into()))?;
+        let source = match headscale_db::headscale_nodes::get_by_id(
+            &self.machines.pool,
+            src_node_id,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(headscale_db::DbError::NotFound(_)) => {
+                return Err(crate::oidc::OidcAuthError::SourceNodeMissing);
+            }
+            Err(err) => return Err(crate::oidc::OidcAuthError::Store(err.to_string())),
+        };
+
+        if !source.tag_list().is_empty() || source.user_id.is_none() {
+            return Err(crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
+        }
+        let user_id = i64::try_from(user.id)
+            .map_err(|_| crate::oidc::OidcAuthError::Store("OIDC user id out of range".into()))?;
+        if source.user_id != Some(user_id) {
+            return Err(crate::oidc::OidcAuthError::UserNotSourceOwner);
+        }
+
+        if self.registration_cache.approve_without_node(auth_id) {
+            Ok(())
+        } else {
+            Err(crate::oidc::OidcAuthError::SessionExpired)
+        }
+    }
 }
 
 #[async_trait]
@@ -1919,7 +1961,7 @@ mod tests {
     use super::*;
     use crate::oidc::OidcRegistrationHandler;
     use crate::policy::parse_hujson_policy;
-    use crate::tailscale_wire::{AllocError, MachineRecord, MachineRegistry};
+    use crate::tailscale_wire::{AllocError, MachineRecord, MachineRegistry, SshCheckBinding};
     use chrono::TimeZone;
     use headscale_db::Database;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -3135,6 +3177,128 @@ mod tests {
             }
             other => panic!("unexpected registration outcome: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_auth_request_approves_owned_ssh_check() {
+        let (admin, _db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let user = create_oidc_test_user(&users).await;
+        let mut source = persistent_record();
+        source.id = "31".repeat(32);
+        source.machine_key_hex = "32".repeat(32);
+        source.name = "alice-ssh-source".into();
+        source.user = "alice@example.com".into();
+        source.ipv4 = "100.64.0.31".into();
+        let source = admin.create(source).await.unwrap();
+
+        let cache = Arc::new(RegistrationCache::new());
+        let auth_id = "a".repeat(24);
+        cache.insert_ssh_check(
+            auth_id.clone(),
+            SshCheckBinding {
+                src_node_id: source.node_id,
+                dst_node_id: source.node_id,
+            },
+        );
+        let waiter = {
+            let cache = cache.clone();
+            let auth_id = auth_id.clone();
+            tokio::spawn(async move { cache.wait_for_auth(&auth_id).await })
+        };
+        tokio::task::yield_now().await;
+
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin,
+            Arc::new(PolicyStore::new()),
+        );
+        handler
+            .complete_oidc_auth_request(&auth_id, &user)
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, crate::tailscale_wire::AuthWaitOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_auth_request_rejects_wrong_source_owner() {
+        let (admin, _db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let user = create_oidc_test_user(&users).await;
+        users.create("bob").await.unwrap();
+        let mut source = persistent_record();
+        source.id = "33".repeat(32);
+        source.machine_key_hex = "34".repeat(32);
+        source.name = "local-user-ssh-source".into();
+        source.user = "bob".into();
+        source.ipv4 = "100.64.0.33".into();
+        let source = admin.create(source).await.unwrap();
+
+        let cache = Arc::new(RegistrationCache::new());
+        let auth_id = "b".repeat(24);
+        cache.insert_ssh_check(
+            auth_id.clone(),
+            SshCheckBinding {
+                src_node_id: source.node_id,
+                dst_node_id: source.node_id,
+            },
+        );
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin,
+            Arc::new(PolicyStore::new()),
+        );
+
+        let err = handler
+            .complete_oidc_auth_request(&auth_id, &user)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, crate::oidc::OidcAuthError::UserNotSourceOwner);
+        assert!(cache.ssh_binding(&auth_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_auth_request_rejects_tagged_source_node() {
+        let (admin, _db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let user = create_oidc_test_user(&users).await;
+        let mut source = persistent_record();
+        source.id = "35".repeat(32);
+        source.machine_key_hex = "36".repeat(32);
+        source.name = "tagged-ssh-source".into();
+        source.user = "alice@example.com".into();
+        source.ipv4 = "100.64.0.35".into();
+        source.tags = vec!["tag:server".into()];
+        let source = admin.create(source).await.unwrap();
+
+        let cache = Arc::new(RegistrationCache::new());
+        let auth_id = "c".repeat(24);
+        cache.insert_ssh_check(
+            auth_id.clone(),
+            SshCheckBinding {
+                src_node_id: source.node_id,
+                dst_node_id: source.node_id,
+            },
+        );
+        let handler = PersistentOidcRegistrationHandler::new(
+            cache.clone(),
+            admin,
+            Arc::new(PolicyStore::new()),
+        );
+
+        let err = handler
+            .complete_oidc_auth_request(&auth_id, &user)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
+        assert!(cache.ssh_binding(&auth_id).is_some());
     }
 
     #[tokio::test]

@@ -75,7 +75,7 @@ fn parse_register_or_go_error(raw: &[u8]) -> Result<RegisterRequest, axum::respo
     }
 }
 
-use super::noise::NoisePeerMachineKey;
+use super::noise::{NoisePeerMachineKey, NoiseRequestCancellation};
 use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
@@ -103,6 +103,7 @@ struct ErrorBody {
 pub async fn handle_register(
     State(state): State<WireState>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
+    cancellation: Option<Extension<NoiseRequestCancellation>>,
     Path(node_key_path): Path<String>,
     raw: Bytes,
 ) -> axum::response::Response {
@@ -135,7 +136,14 @@ pub async fn handle_register(
         )
             .into_response();
     }
-    register_inner(state, body_node_key_hex, machine_key, body).await
+    register_inner(
+        state,
+        body_node_key_hex,
+        machine_key,
+        body,
+        cancellation.map(|Extension(cancellation)| cancellation),
+    )
+    .await
 }
 
 /// `POST /machine/register` (v1.78+ flat path).
@@ -148,6 +156,7 @@ pub async fn handle_register(
 pub async fn handle_register_flat(
     State(state): State<WireState>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
+    cancellation: Option<Extension<NoiseRequestCancellation>>,
     raw: Bytes,
 ) -> axum::response::Response {
     let machine_key = match require_noise_machine_key(machine_key) {
@@ -165,7 +174,14 @@ pub async fn handle_register_flat(
         Some(h) => h.to_string(),
         None => body.node_key.clone(),
     };
-    register_inner(state, body_node_key_hex, machine_key, body).await
+    register_inner(
+        state,
+        body_node_key_hex,
+        machine_key,
+        body,
+        cancellation.map(|Extension(cancellation)| cancellation),
+    )
+    .await
 }
 
 /// Shared logic between the keyed and flat register handlers.
@@ -180,6 +196,7 @@ async fn register_inner(
     node_key_hex: String,
     machine_key_hex: String,
     body: RegisterRequest,
+    cancellation: Option<NoiseRequestCancellation>,
 ) -> axum::response::Response {
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     let requested_tags = requested_tags_for_body(&body);
@@ -243,11 +260,23 @@ async fn register_inner(
                 }
             };
 
-            match state
-                .registration_cache
-                .wait_for_registration(&registration_id)
-                .await
-            {
+            let outcome = {
+                let registration_cache = state.registration_cache.clone();
+                let wait = registration_cache.wait_for_registration(&registration_id);
+                tokio::pin!(wait);
+                if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        outcome = &mut wait => outcome,
+                        () = cancellation.cancelled() => {
+                            return register_error_response("registration timed out");
+                        }
+                    }
+                } else {
+                    wait.await
+                }
+            };
+
+            match outcome {
                 RegistrationWaitOutcome::Registered(record) => {
                     return Json(register_response_for_record(&record)).into_response();
                 }
@@ -2719,6 +2748,69 @@ mod tests {
                 .registration_cache
                 .get(refreshed_registration_id)
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_followup_returns_timeout_without_consuming_pending_registration() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        let app = router(state.clone());
+        let node_key_hex = "cf".repeat(32);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "cancelled-followup" },
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let first: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let auth_id = first
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .unwrap();
+        let registration_id = auth_id.strip_prefix(AUTH_ID_PREFIX).unwrap();
+
+        let followup_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": first.auth_url,
+            "Hostinfo": { "Hostname": "cancelled-followup" },
+        });
+        let cancellation = NoiseRequestCancellation::new();
+        cancellation.cancel();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&followup_body).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut().insert(cancellation);
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let timed_out: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(timed_out.error, "registration timed out");
+        assert!(timed_out.auth_url.is_empty());
+        assert!(
+            state.registration_cache.get(registration_id).is_some(),
+            "cancelled follow-up must not consume the pending auth session"
         );
     }
 

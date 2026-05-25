@@ -920,6 +920,22 @@ fn generate_private_key_outputs_tailscale_machine_private_key() {
 }
 
 #[test]
+fn version_human_uses_upstream_headscale_label() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+    let output = headscale_in(&["version"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.starts_with("headscale version "), "stdout: {out}");
+    assert!(out.contains("\ncommit: "), "stdout: {out}");
+    assert!(out.contains("\nbuild time: "), "stdout: {out}");
+    assert!(out.contains("\nbuilt with: "), "stdout: {out}");
+    assert!(!out.contains("headscale-rs version"), "stdout: {out}");
+}
+
+#[test]
 fn version_json_line_is_machine_readable() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -930,8 +946,9 @@ fn version_json_line_is_machine_readable() {
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("version json-line");
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
-    assert!(value["rust"]["os"].is_string());
-    assert!(value["rust"]["arch"].is_string());
+    assert!(value["go"]["os"].is_string());
+    assert!(value["go"]["arch"].is_string());
+    assert!(value.get("rust").is_none());
 }
 
 #[test]

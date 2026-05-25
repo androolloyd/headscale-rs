@@ -287,9 +287,11 @@ certificate-related DNS lane is HTTPS/ACME serving behavior; runtime DNS
 golden coverage now proves MagicDNS peers are not serialized as operator
 extra records; SSH OIDC checkPeriod cache reuse has opt-in Rust/headscale-go
 smoke coverage; normalized exact API-key/preauth-key list snapshots now guard
-human CLI table shape; `serve` now reuses the `configtest` validation gate
-before opening SQLite and has process snapshots for invalid policy mode and
-unsafe trusted proxies; `grants[].via` plus exit-route interaction is
+human CLI table shape; `version` now uses the upstream `headscale version`
+human label and `go` structured runtime object shape; `serve` now reuses the
+`configtest` validation gate before opening SQLite and has process snapshots
+for invalid policy mode and unsafe trusted proxies; `grants[].via` plus
+exit-route interaction is
 covered at the map integration layer; direct Go-vs-Rust
 `ViaRoutesForPeer` checks cover broader, narrower, disjoint, and IPv6
 4via6 host-alias route destinations, upstream `UsePrimary` fallback,

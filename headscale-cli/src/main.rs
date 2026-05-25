@@ -1893,12 +1893,12 @@ struct VersionInfo {
     commit: &'static str,
     #[serde(rename = "buildTime")]
     build_time: &'static str,
-    rust: RustInfo,
+    go: BuildRuntimeInfo,
     dirty: bool,
 }
 
 #[derive(serde::Serialize)]
-struct RustInfo {
+struct BuildRuntimeInfo {
     version: &'static str,
     os: &'static str,
     arch: &'static str,
@@ -1910,7 +1910,7 @@ impl VersionInfo {
             version: env!("CARGO_PKG_VERSION"),
             commit: option_env!("HEADSCALE_RS_COMMIT").unwrap_or("unknown"),
             build_time: option_env!("HEADSCALE_RS_BUILD_TIME").unwrap_or("unknown"),
-            rust: RustInfo {
+            go: BuildRuntimeInfo {
                 version: option_env!("RUSTC_VERSION").unwrap_or("unknown"),
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
@@ -1920,14 +1920,14 @@ impl VersionInfo {
     }
 
     fn human(&self) -> String {
+        let mut version = self.version.to_string();
+        if self.dirty && !version.contains("dirty") {
+            version.push_str("-dirty");
+        }
+
         format!(
-            "headscale-rs version {}\ncommit: {}\nbuild time: {}\nbuilt with: rust {} {}/{}\n",
-            self.version,
-            self.commit,
-            self.build_time,
-            self.rust.version,
-            self.rust.os,
-            self.rust.arch
+            "headscale version {}\ncommit: {}\nbuild time: {}\nbuilt with: {} {}/{}\n",
+            version, self.commit, self.build_time, self.go.version, self.go.os, self.go.arch
         )
     }
 }
@@ -2434,14 +2434,15 @@ mod tests {
     }
 
     #[test]
-    fn version_output_matches_rust_runtime_shape() {
+    fn version_output_matches_upstream_runtime_shape() {
         let version = VersionInfo::current();
 
         assert_eq!(version.version, env!("CARGO_PKG_VERSION"));
         assert!(!version.commit.is_empty());
         assert!(!version.build_time.is_empty());
-        assert_eq!(version.rust.os, std::env::consts::OS);
-        assert!(version.human().contains("headscale-rs version"));
+        assert_eq!(version.go.os, std::env::consts::OS);
+        assert!(version.human().contains("headscale version"));
+        assert!(!version.human().contains("headscale-rs version"));
     }
 
     #[test]

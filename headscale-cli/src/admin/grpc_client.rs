@@ -33,6 +33,7 @@ use tower::service_fn;
 
 use super::AdminError;
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_UNIX_SOCKET: &str = "/var/run/headscale/headscale.sock";
 
 #[derive(Clone)]
@@ -47,17 +48,21 @@ impl GrpcAdminClient {
         api_key: Option<&str>,
         unix_socket: Option<&Path>,
         insecure: bool,
+        timeout: Option<Duration>,
     ) -> Result<Self, AdminError> {
+        let timeout = timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
         if let Some(address) = address.filter(|value| !value.trim().is_empty()) {
-            let api_key = api_key
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| AdminError::Local("--api-key is required for remote gRPC".into()))?;
-            let channel = remote_channel(address, insecure).await?;
+            let api_key = api_key.filter(|value| !value.is_empty()).ok_or_else(|| {
+                AdminError::Local(
+                    "HEADSCALE_CLI_API_KEY environment variable needs to be set".into(),
+                )
+            })?;
+            let channel = remote_channel(address, insecure, timeout).await?;
             Ok(Self::from_channel(channel, Some(api_key.to_string())))
         } else {
             let socket =
                 unix_socket.map_or_else(|| PathBuf::from(DEFAULT_UNIX_SOCKET), Path::to_path_buf);
-            let channel = unix_channel(socket).await?;
+            let channel = unix_channel(socket, timeout).await?;
             Ok(Self::from_channel(channel, None))
         }
     }
@@ -490,10 +495,10 @@ pub struct UserSelector<'a> {
     pub email: Option<&'a str>,
 }
 
-async fn unix_channel(path: PathBuf) -> Result<Channel, AdminError> {
+async fn unix_channel(path: PathBuf, timeout: Duration) -> Result<Channel, AdminError> {
     Endpoint::try_from("http://[::]:50051")
         .map_err(|e| AdminError::Connection(e.to_string()))?
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .connect_with_connector(service_fn(move |_: Uri| {
             let path = path.clone();
             async move {
@@ -505,20 +510,24 @@ async fn unix_channel(path: PathBuf) -> Result<Channel, AdminError> {
         .map_err(|e| AdminError::Connection(e.to_string()))
 }
 
-fn remote_endpoint(uri: Uri) -> Result<Endpoint, AdminError> {
+fn remote_endpoint(uri: Uri, timeout: Duration) -> Result<Endpoint, AdminError> {
     ensure_rustls_provider();
     Endpoint::new(uri)
-        .map(|endpoint| endpoint.timeout(Duration::from_secs(10)))
+        .map(|endpoint| endpoint.timeout(timeout))
         .map_err(|e| AdminError::Connection(e.to_string()))
 }
 
-async fn remote_channel(address: &str, insecure: bool) -> Result<Channel, AdminError> {
+async fn remote_channel(
+    address: &str,
+    insecure: bool,
+    timeout: Duration,
+) -> Result<Channel, AdminError> {
     let uri = remote_uri(address)?;
     if insecure && uri.scheme_str() == Some("https") {
-        return insecure_tls_channel(uri).await;
+        return insecure_tls_channel(uri, timeout).await;
     }
 
-    remote_endpoint(uri)?
+    remote_endpoint(uri, timeout)?
         .connect()
         .await
         .map_err(|e| AdminError::Connection(e.to_string()))
@@ -541,11 +550,11 @@ fn remote_uri(address: &str) -> Result<Uri, AdminError> {
     Ok(uri)
 }
 
-async fn insecure_tls_channel(origin: Uri) -> Result<Channel, AdminError> {
+async fn insecure_tls_channel(origin: Uri, timeout: Duration) -> Result<Channel, AdminError> {
     let connector_uri = connector_uri_for_tls_origin(&origin)?;
     Endpoint::from(connector_uri)
         .origin(origin)
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .connect_with_connector(service_fn(insecure_tls_stream))
         .await
         .map_err(|e| AdminError::Connection(e.to_string()))
@@ -741,7 +750,7 @@ mod tests {
                 .await
         });
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         let created = client
@@ -807,7 +816,7 @@ mod tests {
                 .await
         });
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         let expiration = current_unix_i64() + 3600;
@@ -862,7 +871,7 @@ mod tests {
                 .await
         });
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         let user = client.create_user("alice", "", "", "").await.unwrap();
@@ -913,7 +922,7 @@ mod tests {
                 .await
         });
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         let raw = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#.to_string();
@@ -941,7 +950,7 @@ mod tests {
         );
         let (_dir, socket, handle) = spawn_unix_service(service);
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         client.create_user("alice", "", "", "").await.unwrap();
@@ -1071,7 +1080,7 @@ mod tests {
         );
         let (_dir, socket, handle) = spawn_unix_service(service);
 
-        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false)
+        let mut client = GrpcAdminClient::connect(None, None, Some(&socket), false, None)
             .await
             .unwrap();
         let health = client.health().await.unwrap();
@@ -1123,10 +1132,15 @@ mod tests {
                 .await
         });
 
-        let mut client =
-            GrpcAdminClient::connect(Some(&addr.to_string()), Some("test-api-key"), None, true)
-                .await
-                .unwrap();
+        let mut client = GrpcAdminClient::connect(
+            Some(&addr.to_string()),
+            Some("test-api-key"),
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let created = client.create_user("remote", "", "", "").await.unwrap();
         assert_eq!(created.name, "remote");
 

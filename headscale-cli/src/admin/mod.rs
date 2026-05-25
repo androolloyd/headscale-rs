@@ -38,6 +38,7 @@ pub mod tailnet;
 pub mod users;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -160,6 +161,10 @@ pub struct ConnectArgs {
     /// match upstream's config-driven recovery path.
     #[arg(skip)]
     pub direct_database_path: Option<PathBuf>,
+    /// Upstream `cli.timeout`, populated from config or
+    /// `HEADSCALE_CLI_TIMEOUT`; this is not a Rust-only CLI flag.
+    #[arg(skip)]
+    pub timeout_secs: Option<u64>,
 }
 
 impl ConnectArgs {
@@ -181,6 +186,7 @@ impl ConnectArgs {
             self.api_key.as_deref(),
             self.unix_socket.as_deref(),
             self.insecure,
+            self.timeout_secs.map(Duration::from_secs),
         )
         .await
     }
@@ -1050,6 +1056,7 @@ mod tests {
             output: None,
             force: false,
             direct_database_path: None,
+            timeout_secs: None,
         };
         let e = conn.build_client().unwrap_err();
         assert!(matches!(e, AdminError::Local(_)));
@@ -1067,6 +1074,7 @@ mod tests {
             output: None,
             force: false,
             direct_database_path: None,
+            timeout_secs: None,
         };
         assert!(conn.build_client().is_ok());
     }
@@ -1083,6 +1091,7 @@ mod tests {
             output: Some("json-line".into()),
             force: false,
             direct_database_path: None,
+            timeout_secs: None,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
     }
@@ -1099,6 +1108,7 @@ mod tests {
             output: None,
             force: false,
             direct_database_path: None,
+            timeout_secs: None,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());
     }

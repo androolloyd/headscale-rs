@@ -35,6 +35,7 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_CLI_API_KEY",
     "HEADSCALE_UNIX_SOCKET",
     "HEADSCALE_CLI_INSECURE",
+    "HEADSCALE_CLI_TIMEOUT",
 ];
 
 const MOCKOIDC_ENV: &[&str] = &[

@@ -598,6 +598,11 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
     if !merged.insecure {
         merged.insecure = cli_config.and_then(|cli| cli.insecure).unwrap_or(false);
     }
+    if merged.timeout_secs.is_none() {
+        merged.timeout_secs = cli_config
+            .and_then(|cli| cli.timeout)
+            .or(Some(config::default_cli_timeout_secs()));
+    }
     if merged.unix_socket.is_none() {
         merged.unix_socket = config.unix_socket.clone().or_else(|| {
             config
@@ -2508,12 +2513,14 @@ mod tests {
             output: None,
             force: false,
             direct_database_path: None,
+            timeout_secs: None,
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {
                 address: Some("headscale.example:50443".into()),
                 api_key: Some("hskey-api-abcdefghijkl-secret".into()),
                 insecure: Some(true),
+                timeout: Some(3),
             }),
             unix_socket: Some(PathBuf::from("/run/headscale/admin.sock")),
             ..CliConfig::default()
@@ -2527,6 +2534,7 @@ mod tests {
             Some("hskey-api-abcdefghijkl-secret")
         );
         assert!(merged.insecure);
+        assert_eq!(merged.timeout_secs, Some(3));
         assert_eq!(
             merged.unix_socket.as_deref(),
             Some(PathBuf::from("/run/headscale/admin.sock").as_path())
@@ -2545,12 +2553,14 @@ mod tests {
             output: None,
             force: false,
             direct_database_path: None,
+            timeout_secs: Some(11),
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {
                 address: Some("config.example:50443".into()),
                 api_key: Some("config-key".into()),
                 insecure: Some(false),
+                timeout: Some(3),
             }),
             unix_socket: Some(PathBuf::from("/tmp/config.sock")),
             ..CliConfig::default()
@@ -2565,5 +2575,6 @@ mod tests {
             Some(PathBuf::from("/tmp/flag.sock").as_path())
         );
         assert!(merged.insecure);
+        assert_eq!(merged.timeout_secs, Some(11));
     }
 }

@@ -1,1 +1,1 @@
-Error: --api-key is required for remote gRPC
+Error: HEADSCALE_CLI_API_KEY environment variable needs to be set

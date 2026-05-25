@@ -16,6 +16,7 @@ const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
 const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
 const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
+const DEFAULT_CLI_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
 const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
 
@@ -147,6 +148,13 @@ pub(crate) struct AdminCliConfig {
     /// Disable TLS certificate verification for remote gRPC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure: Option<bool>,
+    /// Upstream operator CLI request timeout in seconds.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<u64>,
 }
 
 /// Server (control plane) configuration.
@@ -522,6 +530,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -554,6 +563,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -615,6 +625,40 @@ impl CliConfig {
                 let expiry = parse_duration_secs_str(value.as_ref())
                     .map_err(|err| anyhow::anyhow!("invalid {}: {err}", key.as_ref()))?;
                 self.node.get_or_insert_with(NodeConfig::default).expiry = Some(expiry);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            match key.as_ref() {
+                "HEADSCALE_CLI_TIMEOUT" => {
+                    let timeout = parse_duration_secs_str(value.as_ref())
+                        .map_err(|err| anyhow::anyhow!("invalid {}: {err}", key.as_ref()))?;
+                    self.cli.get_or_insert_with(AdminCliConfig::default).timeout = Some(timeout);
+                }
+                "HEADSCALE_CLI_ADDRESS" => {
+                    self.cli.get_or_insert_with(AdminCliConfig::default).address =
+                        Some(value.as_ref().to_string());
+                }
+                "HEADSCALE_CLI_API_KEY" => {
+                    self.cli.get_or_insert_with(AdminCliConfig::default).api_key =
+                        Some(value.as_ref().to_string());
+                }
+                "HEADSCALE_CLI_INSECURE" => {
+                    let insecure = parse_env_bool(value.as_ref())
+                        .with_context(|| format!("invalid {}", key.as_ref()))?;
+                    self.cli
+                        .get_or_insert_with(AdminCliConfig::default)
+                        .insecure = Some(insecure);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1716,7 +1760,7 @@ fn parse_duration_nanos_str(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("duration {trimmed:?} overflows u64 nanoseconds"))
 }
 
-fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
+pub(crate) fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("duration cannot be empty".into());
@@ -1829,6 +1873,10 @@ fn default_metrics_listen_addr() -> Option<String> {
 
 fn default_ephemeral_node_inactivity_timeout_secs() -> u64 {
     120
+}
+
+pub(crate) fn default_cli_timeout_secs() -> u64 {
+    DEFAULT_CLI_TIMEOUT_SECS
 }
 
 fn default_mesh_cidr() -> String {
@@ -2836,6 +2884,7 @@ ephemeral_node_inactivity_timeout: "65s"
 address = "headscale.example:50443"
 api_key = "hskey-api-abcdefghijkl-secret"
 insecure = true
+timeout = "7s"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -2847,6 +2896,38 @@ insecure = true
             Some("hskey-api-abcdefghijkl-secret")
         );
         assert_eq!(cli.insecure, Some(true));
+        assert_eq!(cli.timeout, Some(7));
+    }
+
+    #[test]
+    fn applies_headscale_cli_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_cli_env_overrides_from([
+                ("HEADSCALE_CLI_ADDRESS", "env.example:50443"),
+                ("HEADSCALE_CLI_API_KEY", "hskey-api-env-secret"),
+                ("HEADSCALE_CLI_INSECURE", "true"),
+                ("HEADSCALE_CLI_TIMEOUT", "9s"),
+            ])
+            .unwrap();
+
+        let cli = config.cli.unwrap();
+        assert_eq!(cli.address.as_deref(), Some("env.example:50443"));
+        assert_eq!(cli.api_key.as_deref(), Some("hskey-api-env-secret"));
+        assert_eq!(cli.insecure, Some(true));
+        assert_eq!(cli.timeout, Some(9));
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_cli_timeout_env_override() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_cli_env_overrides_from([("HEADSCALE_CLI_TIMEOUT", "1500ms")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_CLI_TIMEOUT"));
     }
 
     #[test]

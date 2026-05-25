@@ -58,7 +58,6 @@ use std::{
     io,
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -74,6 +73,7 @@ use tower::ServiceExt;
 
 use super::WireState;
 use super::noise::{UPGRADE_PROTOCOL, drive_ts2021_be_with_init};
+use super::tls::ReloadableServerConfig;
 
 /// HTTP header carrying a base64-encoded controlbase Initiation
 /// frame. Stock Tailscale clients (v1.42+) populate this on the
@@ -105,7 +105,7 @@ const PEEK_BUFFER_BYTES: usize = 1024;
 /// dropped.
 pub async fn serve_raw_tls(
     addr: SocketAddr,
-    tls: Arc<rustls::ServerConfig>,
+    tls: ReloadableServerConfig,
     router: Router,
     wire_state: WireState,
 ) -> io::Result<()> {
@@ -116,7 +116,6 @@ pub async fn serve_raw_tls(
         "raw rustls listener bound"
     );
 
-    let acceptor = TlsAcceptor::from(tls);
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(pair) => pair,
@@ -130,7 +129,7 @@ pub async fn serve_raw_tls(
                 continue;
             }
         };
-        let acceptor = acceptor.clone();
+        let acceptor = TlsAcceptor::from(tls.current());
         let router = router.clone();
         let wire_state = wire_state.clone();
         tokio::spawn(async move {
@@ -489,6 +488,8 @@ pub struct TlsRequest;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::tailscale_wire::noise::drive_ts2021;
     use crate::tailscale_wire::{
         MachineRegistry, WireState,

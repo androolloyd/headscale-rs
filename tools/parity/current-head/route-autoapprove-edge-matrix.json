@@ -1,0 +1,128 @@
+{
+  "name": "route-autoapprove-edge-matrix",
+  "policy": {
+    "groups": {
+      "group:admins": ["alice@"],
+      "group:netadmin": ["alice@"],
+      "group:ops": ["bob@"]
+    },
+    "tagOwners": {
+      "tag:router": ["bob@"],
+      "tag:server": ["bob@"]
+    },
+    "acls": [
+      { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "0.0.0.0/0": ["bob@"],
+        "2001:db8::/32": ["alice@"],
+        "203.0.113.0/24": ["group:admins"],
+        "192.168.1.0/24": ["group:netadmin"],
+        "10.10.0.0/16": ["tag:router"],
+        "10.30.0.0/16": ["group:ops"]
+      },
+      "exitNode": ["group:admins", "tag:server"]
+    }
+  },
+  "users": [
+    { "id": 1, "name": "alice" },
+    { "id": 2, "name": "bob" }
+  ],
+  "nodes": [
+    { "id": 1, "user_id": 1, "hostname": "alice-admin", "ipv4": "100.64.0.1" },
+    { "id": 2, "user_id": 2, "hostname": "bob-router", "ipv4": "100.64.0.2" },
+    {
+      "id": 3,
+      "user_id": 2,
+      "hostname": "tagged-router",
+      "ipv4": "100.64.0.3",
+      "tags": ["tag:router"]
+    },
+    {
+      "id": 4,
+      "user_id": 2,
+      "hostname": "multi-tagged",
+      "ipv4": "100.64.0.4",
+      "tags": ["tag:router", "tag:server"]
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "all-v4-policy-approves-specific-v4",
+      "node_id": 2,
+      "announced_routes": ["10.0.0.0/8"]
+    },
+    {
+      "name": "all-v4-policy-rejects-default-v4-without-exitnode",
+      "node_id": 2,
+      "announced_routes": ["0.0.0.0/0"]
+    },
+    {
+      "name": "all-v4-policy-does-not-approve-v6",
+      "node_id": 2,
+      "announced_routes": ["fd00::/8"]
+    },
+    {
+      "name": "exitnode-group-approves-both-defaults",
+      "node_id": 1,
+      "announced_routes": ["0.0.0.0/0", "::/0"]
+    },
+    {
+      "name": "tag-exitnode-approves-both-defaults",
+      "node_id": 4,
+      "announced_routes": ["0.0.0.0/0", "::/0"]
+    },
+    {
+      "name": "exitnode-approver-does-not-approve-specific-route",
+      "node_id": 4,
+      "announced_routes": ["192.168.99.0/24"]
+    },
+    {
+      "name": "exact-prefix-match",
+      "node_id": 1,
+      "announced_routes": ["203.0.113.0/24"]
+    },
+    {
+      "name": "narrower-prefix-match",
+      "node_id": 1,
+      "announced_routes": ["203.0.113.0/26"]
+    },
+    {
+      "name": "wider-prefix-rejected",
+      "node_id": 1,
+      "announced_routes": ["203.0.113.0/23"]
+    },
+    {
+      "name": "adjacent-prefix-rejected",
+      "node_id": 1,
+      "announced_routes": ["203.0.114.0/24"]
+    },
+    {
+      "name": "v6-specific-route-approved-by-v6-policy",
+      "node_id": 1,
+      "announced_routes": ["2001:db8::1/128"]
+    },
+    {
+      "name": "current-approved-is-preserved",
+      "node_id": 1,
+      "current_approved": ["198.51.100.0/24"],
+      "announced_routes": ["203.0.113.0/24"]
+    },
+    {
+      "name": "tagged-node-uses-tag-autoapprover",
+      "node_id": 3,
+      "announced_routes": ["10.10.0.0/16"]
+    },
+    {
+      "name": "tagged-node-does-not-inherit-user-group-autoapprover",
+      "node_id": 3,
+      "announced_routes": ["10.30.0.0/16"]
+    },
+    {
+      "name": "multi-tagged-node-one-matching-tag-is-sufficient",
+      "node_id": 4,
+      "announced_routes": ["10.10.0.0/16"]
+    }
+  ]
+}

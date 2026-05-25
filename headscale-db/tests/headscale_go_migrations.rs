@@ -1,5 +1,5 @@
 use headscale_db::{
-    DATABASE_BACKEND_MATRIX, Database, DbError, HEADSCALE_GO_CURRENT_VERSION,
+    DATABASE_BACKEND_MATRIX, Database, DatabaseBackend, DbError, HEADSCALE_GO_CURRENT_VERSION,
     HeadscaleGoImportCompatibility, api_keys, headscale_nodes,
     preauth_keys::{self, CreateParams as PreauthCreateParams},
     users::{self, CreateParams as UserCreateParams},
@@ -307,6 +307,10 @@ async fn database_backend_matrix_is_sqlite_only_for_headscale_db() {
     assert!(sqlite.headscale_db_supported);
     assert!(sqlite.sqlite_import_supported);
     assert_eq!(sqlite.url_schemes, &["sqlite"]);
+    assert_eq!(
+        DatabaseBackend::from_url_scheme(sqlite.url_schemes[0]),
+        Some(DatabaseBackend::Sqlite)
+    );
 
     let postgres = DATABASE_BACKEND_MATRIX
         .iter()
@@ -320,6 +324,7 @@ async fn database_backend_matrix_is_sqlite_only_for_headscale_db() {
     let db = Database::new("sqlite::memory:")
         .await
         .expect("sqlite URL is supported");
+    assert_eq!(db.backend(), DatabaseBackend::Sqlite);
     db.close().await;
 
     let Err(postgres_err) = Database::new("postgres://localhost/headscale").await else {

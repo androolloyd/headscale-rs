@@ -30,9 +30,10 @@ use std::{
     fs,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
+use chrono::{DateTime, Utc};
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -65,6 +66,38 @@ pub struct TlsMaterial {
     /// Ready-to-use rustls config for the raw-tls listener in
     /// `raw_tls::serve_raw_tls`.
     pub server_config: Arc<ServerConfig>,
+    /// Expiry of the first certificate in `cert_pem`, which is the served
+    /// leaf certificate.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Thread-safe holder for TLS server configuration that can be swapped after
+/// ACME renewal without dropping the listener.
+#[derive(Clone)]
+pub struct ReloadableServerConfig {
+    current: Arc<RwLock<Arc<ServerConfig>>>,
+}
+
+impl ReloadableServerConfig {
+    pub fn new(config: Arc<ServerConfig>) -> Self {
+        Self {
+            current: Arc::new(RwLock::new(config)),
+        }
+    }
+
+    pub fn current(&self) -> Arc<ServerConfig> {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn replace(&self, config: Arc<ServerConfig>) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+    }
 }
 
 /// Source for public-control TLS material.
@@ -165,6 +198,7 @@ pub fn load_or_generate(
         _ => mint_and_persist(&cert_path, &key_path, sans)?,
     };
 
+    let expires_at = leaf_certificate_not_after(&cert_pem)?;
     let server_config = build_server_config(&cert_pem, &key_pem)?;
     Ok(TlsMaterial {
         cert_pem,
@@ -172,6 +206,7 @@ pub fn load_or_generate(
         cert_path,
         key_path,
         server_config: Arc::new(server_config),
+        expires_at,
     })
 }
 
@@ -184,6 +219,7 @@ pub fn load_from_files(
     let key_path = key_path.as_ref().to_path_buf();
     let cert_pem = read_pem(&cert_path)?;
     let key_pem = read_pem(&key_path)?;
+    let expires_at = leaf_certificate_not_after(&cert_pem)?;
     let server_config = build_server_config(&cert_pem, &key_pem)?;
     Ok(TlsMaterial {
         cert_pem,
@@ -191,6 +227,7 @@ pub fn load_from_files(
         cert_path,
         key_path,
         server_config: Arc::new(server_config),
+        expires_at,
     })
 }
 
@@ -209,7 +246,7 @@ pub fn load_from_autocert_cache(
     let cache_path = autocert_cache_path(&cache_dir, hostname);
     let combined_pem = read_pem(&cache_path).map_err(|err| {
         WireError::Internal(format!(
-            "load ACME cache entry {} for hostname {hostname}: {err}; online ACME issuance is not implemented yet",
+            "load ACME cache entry {} for hostname {hostname}: {err}",
             cache_path.display()
         ))
     })?;
@@ -219,6 +256,7 @@ pub fn load_from_autocert_cache(
             cache_path.display()
         ))
     })?;
+    let expires_at = leaf_certificate_not_after(&cert_pem)?;
     let server_config = build_server_config(&cert_pem, &key_pem)?;
     Ok(TlsMaterial {
         cert_pem,
@@ -226,6 +264,23 @@ pub fn load_from_autocert_cache(
         cert_path: cache_path.clone(),
         key_path: cache_path,
         server_config: Arc::new(server_config),
+        expires_at,
+    })
+}
+
+/// Parse the `notAfter` timestamp from the first certificate PEM block.
+pub fn leaf_certificate_not_after(cert_pem: &str) -> Result<DateTime<Utc>, WireError> {
+    let leaf = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .next()
+        .ok_or_else(|| WireError::Internal("no certificates in cert pem".into()))?
+        .map_err(|e| WireError::Internal(format!("parse leaf certificate pem: {e}")))?;
+    let (_remaining, cert) = x509_parser::parse_x509_certificate(leaf.as_ref())
+        .map_err(|e| WireError::Internal(format!("parse leaf certificate x509: {e}")))?;
+    let timestamp = cert.validity().not_after.timestamp();
+    DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+        WireError::Internal(format!(
+            "leaf certificate notAfter is out of range: {timestamp}"
+        ))
     })
 }
 
@@ -471,20 +526,48 @@ mod tests {
         assert_eq!(loaded.key_pem, generated.key_pem);
         assert_eq!(loaded.cert_path, cache_dir.join("headscale.example"));
         assert_eq!(loaded.key_path, cache_dir.join("headscale.example"));
+        assert_eq!(loaded.expires_at, generated.expires_at);
     }
 
     #[test]
-    fn load_from_autocert_cache_reports_missing_entry_as_unimplemented_issuance() {
+    fn load_from_autocert_cache_reports_missing_entry() {
         let dir = tempdir().unwrap();
 
         let Err(err) = load_from_autocert_cache(dir.path(), "headscale.example") else {
             panic!("expected missing ACME cache entry to fail");
         };
 
-        assert!(
-            err.to_string()
-                .contains("online ACME issuance is not implemented yet")
+        assert!(err.to_string().contains("load ACME cache entry"));
+    }
+
+    #[test]
+    fn leaf_certificate_not_after_parses_first_certificate() {
+        let (leaf_pem, leaf_not_after) = test_cert_pem("leaf.example", 2030, 1, 2);
+        let (issuer_pem, _issuer_not_after) = test_cert_pem("issuer.example", 2040, 1, 2);
+
+        let parsed = leaf_certificate_not_after(&format!("{leaf_pem}{issuer_pem}")).unwrap();
+
+        assert_eq!(parsed.timestamp(), leaf_not_after);
+    }
+
+    #[test]
+    fn reloadable_server_config_swaps_current_config() {
+        let dir = tempdir().unwrap();
+        let sans = SanConfig::with_hostname("reload.example");
+        let generated = load_or_generate(dir.path(), &sans).unwrap();
+        let http = Arc::clone(&generated.server_config);
+        let grpc = Arc::new(
+            build_grpc_server_config(&generated.cert_pem, &generated.key_pem)
+                .expect("gRPC TLS config"),
         );
+        let reloadable = ReloadableServerConfig::new(http);
+
+        assert_eq!(
+            reloadable.current().alpn_protocols,
+            vec![b"http/1.1".to_vec()]
+        );
+        reloadable.replace(grpc);
+        assert_eq!(reloadable.current().alpn_protocols, vec![b"h2".to_vec()]);
     }
 
     #[test]
@@ -497,5 +580,16 @@ mod tests {
             .expect("ACME TLS-ALPN rustls config");
 
         assert_eq!(cfg.alpn_protocols, vec![ACME_TLS_ALPN_PROTOCOL.to_vec()]);
+    }
+
+    fn test_cert_pem(dns_name: &str, year: i32, month: u8, day: u8) -> (String, i64) {
+        let not_after = rcgen::date_time_ymd(year, month, day);
+        let mut params = rcgen::CertificateParams::new(vec![dns_name.to_string()]).unwrap();
+        params.not_after = not_after;
+        let key = rcgen::KeyPair::generate().unwrap();
+        (
+            params.self_signed(&key).unwrap().pem(),
+            not_after.unix_timestamp(),
+        )
     }
 }

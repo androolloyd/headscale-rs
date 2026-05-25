@@ -3,8 +3,8 @@
 //! This crate provides SQLite-based persistence for nodes, transactions,
 //! resources, and sessions using sqlx for connection pooling and migrations.
 
+use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Pool, Sqlite, SqlitePool};
 use std::time::Duration;
 
 pub mod api_keys;
@@ -119,7 +119,52 @@ impl DatabaseBackend {
 
 /// Database connection pool and operations.
 pub struct Database {
-    pool: Pool<Sqlite>,
+    pool: DatabasePool,
+}
+
+enum DatabasePool {
+    Sqlite(SqlitePool),
+}
+
+impl DatabasePool {
+    const fn backend(&self) -> DatabaseBackend {
+        match self {
+            Self::Sqlite(_) => DatabaseBackend::Sqlite,
+        }
+    }
+
+    fn sqlite(&self) -> &SqlitePool {
+        match self {
+            Self::Sqlite(pool) => pool,
+        }
+    }
+
+    async fn migrate(&self) -> Result<()> {
+        match self {
+            Self::Sqlite(pool) => {
+                version_guard::check_headscale_go_import_compatibility(pool).await?;
+                sqlx::migrate!("./migrations").run(pool).await?;
+                version_guard::stamp_rust_managed_database_version(pool).await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn check_headscale_go_import_compatibility(
+        &self,
+    ) -> Result<HeadscaleGoImportCompatibility> {
+        match self {
+            Self::Sqlite(pool) => {
+                version_guard::check_headscale_go_import_compatibility(pool).await
+            }
+        }
+    }
+
+    async fn close(self) {
+        match self {
+            Self::Sqlite(pool) => pool.close().await,
+        }
+    }
 }
 
 impl Database {
@@ -179,7 +224,9 @@ impl Database {
             .connect(url)
             .await?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool: DatabasePool::Sqlite(pool),
+        })
     }
 
     /// Create a new in-memory database (useful for testing).
@@ -189,10 +236,7 @@ impl Database {
 
     /// Run database migrations.
     pub async fn migrate(&self) -> Result<()> {
-        version_guard::check_headscale_go_import_compatibility(&self.pool).await?;
-        sqlx::migrate!("./migrations").run(&self.pool).await?;
-        version_guard::stamp_rust_managed_database_version(&self.pool).await?;
-        Ok(())
+        self.pool.migrate().await
     }
 
     /// Check whether an existing SQLite database is within the
@@ -200,12 +244,17 @@ impl Database {
     pub async fn check_headscale_go_import_compatibility(
         &self,
     ) -> Result<HeadscaleGoImportCompatibility> {
-        version_guard::check_headscale_go_import_compatibility(&self.pool).await
+        self.pool.check_headscale_go_import_compatibility().await
     }
 
     /// Get a reference to the connection pool.
     pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+        self.pool.sqlite()
+    }
+
+    /// Get the runtime database backend.
+    pub fn backend(&self) -> DatabaseBackend {
+        self.pool.backend()
     }
 
     /// Close the database connection pool.
@@ -221,6 +270,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_creation() {
         let db = Database::in_memory().await.unwrap();
+        assert_eq!(db.backend(), DatabaseBackend::Sqlite);
         db.migrate().await.unwrap();
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(db.pool())

@@ -2538,18 +2538,21 @@ mod tests {
         assert!(configtest(None).is_err());
         assert!(configtest(Some(&CliConfig::default())).is_err());
 
-        let config = CliConfig {
-            server: Some(ServerConfig {
-                server_url: Some("https://headscale.example".into()),
-                ..ServerConfig::default()
-            }),
-            dns: Some(headscale_api::dns::DnsConfigSpec {
-                magic_dns: false,
-                override_local_dns: false,
-                ..Default::default()
-            }),
-            ..CliConfig::default()
-        };
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        )
+        .unwrap();
+        let config = CliConfig::load(&config_path).unwrap();
         assert!(configtest(Some(&config)).is_ok());
     }
 

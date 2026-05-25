@@ -3,11 +3,13 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore;
-use headscale_api::tailscale_wire::tls;
+use headscale_api::tailscale_wire::tls::{self, ReloadableServerConfig};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
@@ -18,6 +20,9 @@ use sha2::{Digest, Sha256};
 const ACCOUNT_CACHE_SUFFIX: &str = "instant-acme-account.json";
 const ORDER_POLL_TIMEOUT: Duration = Duration::from_secs(90);
 const CERTIFICATE_POLL_TIMEOUT: Duration = Duration::from_secs(90);
+const CERTIFICATE_RENEWAL_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
+const CERTIFICATE_RENEWAL_CHECK_MIN: Duration = Duration::from_secs(30 * 60);
+const CERTIFICATE_RENEWAL_CHECK_MAX: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone)]
 pub(crate) struct AcmeHttp01IssuerConfig {
@@ -33,23 +38,46 @@ pub(crate) struct AcmeHttp01CertificateOutcome {
     pub issued: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct AcmeTlsReloaders {
+    pub public_tls: ReloadableServerConfig,
+    pub remote_grpc_tls: Option<ReloadableServerConfig>,
+}
+
 pub(crate) async fn ensure_http01_certificate(
     config: &AcmeHttp01IssuerConfig,
     store: &AcmeHttp01ChallengeStore,
 ) -> Result<AcmeHttp01CertificateOutcome> {
     let cache_path = autocert_cache_path(&config.cache_dir, &config.hostname);
-    if tls::load_from_autocert_cache(&config.cache_dir, &config.hostname).is_ok() {
-        return Ok(AcmeHttp01CertificateOutcome {
-            cache_path,
-            issued: false,
-        });
+    match tls::load_from_autocert_cache(&config.cache_dir, &config.hostname) {
+        Ok(material) if !certificate_is_expired(material.expires_at, Utc::now()) => {
+            return Ok(AcmeHttp01CertificateOutcome {
+                cache_path,
+                issued: false,
+            });
+        }
+        Ok(material) => {
+            tracing::info!(
+                hostname = %config.hostname,
+                expires_at = %material.expires_at,
+                "ACME HTTP-01 cached certificate is expired; starting online issuance"
+            );
+        }
+        Err(err) => {
+            tracing::info!(
+                hostname = %config.hostname,
+                cache_dir = %config.cache_dir.display(),
+                error = %err,
+                "ACME HTTP-01 cached certificate missing or invalid; starting online issuance"
+            );
+        }
     }
 
     tracing::info!(
         hostname = %config.hostname,
         cache_dir = %config.cache_dir.display(),
         directory_url = %config.directory_url,
-        "ACME HTTP-01 cached certificate missing or invalid; starting online issuance"
+        "ACME HTTP-01 online issuance started"
     );
     let (key_pem, certificate_pem) = issue_http01_certificate(config, store).await?;
     write_autocert_cache_entry(
@@ -75,6 +103,136 @@ pub(crate) async fn ensure_http01_certificate(
         cache_path,
         issued: true,
     })
+}
+
+pub(crate) fn spawn_http01_renewal_task(
+    config: AcmeHttp01IssuerConfig,
+    store: AcmeHttp01ChallengeStore,
+    reloaders: AcmeTlsReloaders,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!(
+            hostname = %config.hostname,
+            cache_dir = %config.cache_dir.display(),
+            "ACME HTTP-01 live renewal and TLS reload task started"
+        );
+        loop {
+            match renew_http01_certificate_once(&config, &store, &reloaders).await {
+                Ok(outcome) if outcome.issued => {
+                    tracing::info!(
+                        path = %outcome.cache_path.display(),
+                        hostname = %config.hostname,
+                        "ACME HTTP-01 certificate renewed and TLS configs reloaded"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = ?err,
+                        hostname = %config.hostname,
+                        "ACME HTTP-01 renewal failed; keeping existing TLS material"
+                    );
+                }
+            }
+
+            let expires_at = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname)
+                .ok()
+                .map(|material| material.expires_at);
+            tokio::time::sleep(next_renewal_check_delay(expires_at, Utc::now())).await;
+        }
+    })
+}
+
+pub(crate) async fn renew_http01_certificate_once(
+    config: &AcmeHttp01IssuerConfig,
+    store: &AcmeHttp01ChallengeStore,
+    reloaders: &AcmeTlsReloaders,
+) -> Result<AcmeHttp01CertificateOutcome> {
+    let cache_path = autocert_cache_path(&config.cache_dir, &config.hostname);
+    let Ok(material) = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname) else {
+        let outcome = ensure_http01_certificate(config, store).await?;
+        if outcome.issued {
+            reload_acme_tls_material(config, reloaders)?;
+        }
+        return Ok(outcome);
+    };
+
+    if !certificate_renewal_due(material.expires_at, Utc::now()) {
+        return Ok(AcmeHttp01CertificateOutcome {
+            cache_path,
+            issued: false,
+        });
+    }
+
+    tracing::info!(
+        hostname = %config.hostname,
+        expires_at = %material.expires_at,
+        "ACME HTTP-01 cached certificate reached renewal window; starting online renewal"
+    );
+    let (key_pem, certificate_pem) = issue_http01_certificate(config, store).await?;
+    write_autocert_cache_entry(
+        &config.cache_dir,
+        &config.hostname,
+        &key_pem,
+        &certificate_pem,
+    )
+    .with_context(|| {
+        format!(
+            "write renewed ACME cache entry {} for hostname {}",
+            cache_path.display(),
+            config.hostname
+        )
+    })?;
+    reload_acme_tls_material(config, reloaders)?;
+    Ok(AcmeHttp01CertificateOutcome {
+        cache_path,
+        issued: true,
+    })
+}
+
+fn reload_acme_tls_material(
+    config: &AcmeHttp01IssuerConfig,
+    reloaders: &AcmeTlsReloaders,
+) -> Result<tls::TlsMaterial> {
+    let material = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname)
+        .with_context(|| {
+            format!(
+                "load renewed ACME cache entry for hostname {} from {}",
+                config.hostname,
+                config.cache_dir.display()
+            )
+        })?;
+    reloaders
+        .public_tls
+        .replace(Arc::clone(&material.server_config));
+    if let Some(remote_grpc_tls) = &reloaders.remote_grpc_tls {
+        let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
+            .context("build renewed remote gRPC TLS config")?;
+        remote_grpc_tls.replace(Arc::new(grpc_tls));
+    }
+    Ok(material)
+}
+
+fn certificate_is_expired(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    expires_at <= now
+}
+
+fn certificate_renewal_due(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    expires_at <= now + chrono::Duration::seconds(CERTIFICATE_RENEWAL_WINDOW_SECS)
+}
+
+fn next_renewal_check_delay(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration {
+    let Some(expires_at) = expires_at else {
+        return CERTIFICATE_RENEWAL_CHECK_MIN;
+    };
+    let renewal_at = expires_at - chrono::Duration::seconds(CERTIFICATE_RENEWAL_WINDOW_SECS);
+    let seconds_until_renewal = (renewal_at - now).num_seconds();
+    if seconds_until_renewal <= 0 {
+        return CERTIFICATE_RENEWAL_CHECK_MIN;
+    }
+
+    let candidate = Duration::from_secs(seconds_until_renewal as u64);
+    candidate.clamp(CERTIFICATE_RENEWAL_CHECK_MIN, CERTIFICATE_RENEWAL_CHECK_MAX)
 }
 
 async fn issue_http01_certificate(
@@ -387,5 +545,81 @@ mod tests {
         }
 
         assert_eq!(store.get("token"), None);
+    }
+
+    #[test]
+    fn certificate_renewal_due_uses_thirty_day_window() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        assert!(certificate_is_expired(now, now));
+        assert!(certificate_renewal_due(
+            now + chrono::Duration::days(29),
+            now
+        ));
+        assert!(certificate_renewal_due(
+            now + chrono::Duration::days(30),
+            now
+        ));
+        assert!(!certificate_renewal_due(
+            now + chrono::Duration::days(31),
+            now
+        ));
+    }
+
+    #[test]
+    fn next_renewal_check_delay_is_clamped() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        assert_eq!(
+            next_renewal_check_delay(None, now),
+            CERTIFICATE_RENEWAL_CHECK_MIN
+        );
+        assert_eq!(
+            next_renewal_check_delay(Some(now + chrono::Duration::days(1)), now),
+            CERTIFICATE_RENEWAL_CHECK_MIN
+        );
+        assert_eq!(
+            next_renewal_check_delay(
+                Some(now + chrono::Duration::days(30) + chrono::Duration::minutes(45)),
+                now
+            ),
+            Duration::from_secs(45 * 60)
+        );
+        assert_eq!(
+            next_renewal_check_delay(Some(now + chrono::Duration::days(90)), now),
+            CERTIFICATE_RENEWAL_CHECK_MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_http01_certificate_reuses_valid_cached_material() {
+        let dir = tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let cache_dir = dir.path().join("cache");
+        let generated = tls::load_or_generate(
+            &source_dir,
+            &tls::SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        write_autocert_cache_entry(
+            &cache_dir,
+            "headscale.example",
+            &generated.key_pem,
+            &generated.cert_pem,
+        )
+        .unwrap();
+        let config = AcmeHttp01IssuerConfig {
+            directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory".into(),
+            email: None,
+            hostname: "headscale.example".into(),
+            cache_dir: cache_dir.clone(),
+        };
+
+        let outcome = ensure_http01_certificate(&config, &AcmeHttp01ChallengeStore::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.cache_path, cache_dir.join("headscale.example"));
+        assert!(!outcome.issued);
     }
 }

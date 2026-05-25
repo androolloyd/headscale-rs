@@ -33,7 +33,7 @@ use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
 use headscale_api::tailscale_wire::tls;
-use headscale_api::tailscale_wire::tls::{SanConfig, TlsMaterialSource};
+use headscale_api::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
     DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
@@ -45,7 +45,9 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
-use crate::acme_issuer::{AcmeHttp01IssuerConfig, ensure_http01_certificate};
+use crate::acme_issuer::{
+    AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate, spawn_http01_renewal_task,
+};
 use crate::config::{
     PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname,
     validate_server_url_base_domain,
@@ -408,8 +410,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
                 "ACME HTTP-01 cached certificate reused"
             );
         }
-        tracing::warn!(
-            "ACME live renewal is not implemented yet; restart headscale-rs after replacing or renewing cached certificate material"
+        tracing::info!(
+            hostname = %runtime.issuer_config.hostname,
+            "ACME HTTP-01 live renewal and TLS reload will be enabled after listeners start"
         );
     }
     let tls_source = tls_material_source(&cfg, &sans)?;
@@ -442,6 +445,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
     let remote_grpc_security = remote_grpc_security(&cfg, &tls_source)?;
+    let remote_grpc_tls_reloader = remote_grpc_security
+        .as_ref()
+        .and_then(RemoteGrpcSecurity::tls_reloader);
     let remote_grpc_listener = match remote_grpc_security {
         Some(security) => Some((
             bind_tcp_grpc_listener(grpc_addr).await?,
@@ -459,6 +465,17 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
+    let acme_renewal = acme_http01_runtime.as_ref().and_then(|runtime| {
+        let public_tls = handle.tls_reloader.clone()?;
+        Some(spawn_http01_renewal_task(
+            runtime.issuer_config.clone(),
+            runtime.store.clone(),
+            AcmeTlsReloaders {
+                public_tls,
+                remote_grpc_tls: remote_grpc_tls_reloader.clone(),
+            },
+        ))
+    });
     let dns_extra_records_watcher = dns_extra_records_path.map(|path| {
         tracing::info!(path = %path.display(), "watching DNS extra-records file");
         spawn_extra_records_watcher((*dns_store).clone(), path, None)
@@ -479,6 +496,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let serve_result =
         await_serve_handle(handle, local_grpc, remote_grpc, external_acme_http01).await;
     if let Some(handle) = policy_reload {
+        handle.abort();
+    }
+    if let Some(handle) = acme_renewal {
         handle.abort();
     }
     node_expiry_waker.abort();
@@ -1293,7 +1313,16 @@ fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
 #[derive(Clone)]
 enum RemoteGrpcSecurity {
     Insecure,
-    Tls(TlsAcceptor),
+    Tls(ReloadableServerConfig),
+}
+
+impl RemoteGrpcSecurity {
+    fn tls_reloader(&self) -> Option<ReloadableServerConfig> {
+        match self {
+            Self::Tls(reloader) => Some(reloader.clone()),
+            Self::Insecure => None,
+        }
+    }
 }
 
 struct ConnectedTlsStream(TlsStream<TcpStream>);
@@ -1352,9 +1381,9 @@ fn remote_grpc_security(
             .context("load TLS material for remote gRPC")?;
         let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
             .context("build remote gRPC TLS config")?;
-        return Ok(Some(RemoteGrpcSecurity::Tls(TlsAcceptor::from(Arc::new(
-            grpc_tls,
-        )))));
+        return Ok(Some(RemoteGrpcSecurity::Tls(ReloadableServerConfig::new(
+            Arc::new(grpc_tls),
+        ))));
     }
     if cfg.grpc_allow_insecure {
         return Ok(Some(RemoteGrpcSecurity::Insecure));
@@ -1431,11 +1460,12 @@ fn spawn_remote_grpc_listener(
                     .await
                     .with_context(|| format!("serve remote gRPC TCP listener {addr}"))
             }
-            RemoteGrpcSecurity::Tls(acceptor) => {
+            RemoteGrpcSecurity::Tls(reloader) => {
                 let incoming = TcpListenerStream::new(listener).then(move |accepted| {
-                    let acceptor = acceptor.clone();
+                    let reloader = reloader.clone();
                     async move {
                         let stream = accepted?;
+                        let acceptor = TlsAcceptor::from(reloader.current());
                         acceptor
                             .accept(stream)
                             .await
@@ -3008,16 +3038,7 @@ regions:
         assert!(response.database_connectivity);
 
         let services = reflected_service_names(channel).await;
-        assert!(
-            services
-                .iter()
-                .any(|s| s == "headscale.v1.HeadscaleService")
-        );
-        assert!(
-            services
-                .iter()
-                .any(|s| s == "grpc.reflection.v1.ServerReflection")
-        );
+        assert_eq!(services, vec!["headscale.v1.HeadscaleService"]);
 
         handle.abort();
         let _ = handle.await;
@@ -3537,6 +3558,8 @@ database:
             &config_path,
             r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 trusted_proxies:
   - "127.0.0.1/32"
 disable_check_updates: true

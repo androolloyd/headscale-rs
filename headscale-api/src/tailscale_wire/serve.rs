@@ -52,7 +52,7 @@ use tokio::task::JoinHandle;
 
 use super::acme::AcmeHttp01ChallengeStore;
 use super::raw_tls;
-use super::tls::{SanConfig, TlsMaterial, TlsMaterialSource};
+use super::tls::{ReloadableServerConfig, SanConfig, TlsMaterial, TlsMaterialSource};
 use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
 
 /// Configuration for [`serve`].
@@ -135,6 +135,8 @@ pub struct ServeHandle {
     /// harness install script) can copy the cert into peer trust
     /// stores. `None` when `https_addr` is unset.
     pub tls: Option<TlsMaterial>,
+    /// Live TLS config reloader used by the raw HTTPS listener.
+    pub tls_reloader: Option<ReloadableServerConfig>,
 }
 
 /// Trusted reverse-proxy CIDRs for forwarding headers.
@@ -325,7 +327,7 @@ pub async fn serve(
     // hands the unbuffered `TlsStream` straight to
     // `noise::drive_ts2021` for the upgrade path; everything else
     // still flows through the same axum router via hyper http1.
-    let (https, tls) = if let Some(https_addr) = cfg.https_addr {
+    let (https, tls, tls_reloader) = if let Some(https_addr) = cfg.https_addr {
         let material = tls_material.expect("validated TLS material");
         tracing::info!(
             target = "tailscale_wire::serve",
@@ -333,15 +335,16 @@ pub async fn serve(
             cert_path = %material.cert_path.display(),
             "wire surface listening (HTTPS, raw rustls)"
         );
-        let server_config = Arc::clone(&material.server_config);
+        let server_config = ReloadableServerConfig::new(Arc::clone(&material.server_config));
         let https_app = app.clone();
         let wire_state = state.clone();
+        let reloader = server_config.clone();
         let handle = tokio::spawn(async move {
             raw_tls::serve_raw_tls(https_addr, server_config, https_app, wire_state).await
         });
-        (Some(handle), Some(material))
+        (Some(handle), Some(material), Some(reloader))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     Ok(ServeHandle {
@@ -352,6 +355,7 @@ pub async fn serve(
         metrics_addr,
         acme_http01_addr,
         tls,
+        tls_reloader,
     })
 }
 

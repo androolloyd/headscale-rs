@@ -127,13 +127,15 @@ impl TlsRuntimeConfig {
     }
 
     fn cache_dir_string(&self) -> String {
+        self.cache_dir_path().display().to_string()
+    }
+
+    fn cache_dir_path(&self) -> PathBuf {
         self.letsencrypt_cache_dir
             .as_ref()
             .filter(|path| !path.as_os_str().is_empty())
-            .map_or_else(
-                || DEFAULT_LETSENCRYPT_CACHE_DIR.to_string(),
-                |path| path.display().to_string(),
-            )
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_LETSENCRYPT_CACHE_DIR))
     }
 
     fn letsencrypt_listen_string(&self) -> String {
@@ -184,30 +186,9 @@ impl TlsRuntimeConfig {
         Ok(Some(AcmeRuntimePlan {
             hostname: hostname.to_string(),
             acme_url: self.acme_url_string(),
-            cache_dir: self.cache_dir_string(),
+            cache_dir: self.cache_dir_path(),
             challenge_listener,
         }))
-    }
-
-    fn unsupported_acme_message(&self) -> String {
-        let challenge = self.challenge_type_string();
-        let challenge_context = match challenge.as_str() {
-            "HTTP-01" => format!(
-                "HTTP-01 challenge listener {}",
-                self.letsencrypt_listen_string()
-            ),
-            "TLS-ALPN-01" => "TLS-ALPN-01 on the public TLS listener".to_string(),
-            other => format!(
-                "challenge {other} with challenge listener {}",
-                self.letsencrypt_listen_string()
-            ),
-        };
-        format!(
-            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {} would require ACME certificate issuance using acme_url {} and cache_dir {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
-            challenge_context,
-            self.acme_url_string(),
-            self.cache_dir_string()
-        )
     }
 }
 
@@ -215,18 +196,18 @@ impl TlsRuntimeConfig {
 struct AcmeRuntimePlan {
     hostname: String,
     acme_url: String,
-    cache_dir: String,
+    cache_dir: PathBuf,
     challenge_listener: AcmeChallengeListener,
 }
 
 impl AcmeRuntimePlan {
-    fn unsupported_message(&self) -> String {
+    fn unsupported_tls_alpn_message(&self) -> String {
         format!(
-            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {} for hostname {} would require ACME certificate issuance using acme_url {} and cache_dir {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
+            "tls_letsencrypt_hostname/ACME TLS-ALPN-01 is not implemented in headscale-rs yet; configured {} for hostname {} would require dynamic ACME challenge certificate selection using acme_url {} and cache_dir {}. Use HTTP-01, tls_cert_path/tls_key_path, or terminate TLS before headscale-rs.",
             self.challenge_listener.context(),
             self.hostname,
             self.acme_url,
-            self.cache_dir
+            self.cache_dir.display()
         )
     }
 }
@@ -258,6 +239,7 @@ pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     validate_unsupported_runtime_boundaries(&cfg)?;
     let public_listeners = public_listener_plan(&cfg)?;
+    let acme_runtime = cfg.tls.acme_runtime_plan(public_listeners)?;
     validate_supported_runtime_config(&cfg)?;
     tracing::info!("Starting headscale-compatible Tailscale control plane");
     tracing::info!(
@@ -288,6 +270,16 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     }
     tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
     tracing::info!("  Remote gRPC: {}", remote_grpc_status(&cfg));
+    if let Some(plan) = &acme_runtime {
+        tracing::info!(
+            hostname = %plan.hostname,
+            cache_dir = %plan.cache_dir.display(),
+            "ACME HTTP-01 cache-backed TLS configured"
+        );
+        tracing::warn!(
+            "ACME online issuance/renewal is not implemented yet; startup requires a valid cached autocert certificate"
+        );
+    }
 
     let server_url = cfg.server_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -377,6 +369,18 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .unwrap_or_else(|| hostname_from_server_url(server_url));
     let sans = SanConfig::with_hostname(tls_hostname);
     let tls_source = tls_material_source(&cfg, &sans)?;
+    let (acme_http01, acme_http01_host, acme_http01_addr) = match acme_runtime.as_ref() {
+        Some(AcmeRuntimePlan {
+            hostname,
+            challenge_listener: AcmeChallengeListener::Http01 { addr, .. },
+            ..
+        }) => (
+            Some(headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore::new()),
+            Some(hostname.clone()),
+            Some(*addr),
+        ),
+        _ => (None, None, None),
+    };
     let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
         http_addr: public_listeners.http_addr,
@@ -389,9 +393,9 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             .context("parse trusted_proxies")?,
         oidc: runtime.oidc,
         metrics_addr,
-        acme_http01: None,
-        acme_http01_host: None,
-        acme_http01_addr: None,
+        acme_http01,
+        acme_http01_host,
+        acme_http01_addr,
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
@@ -910,8 +914,13 @@ fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> 
         );
     }
     let public_listeners = public_listener_plan(cfg)?;
-    if let Some(plan) = cfg.tls.acme_runtime_plan(public_listeners)? {
-        anyhow::bail!("{}", plan.unsupported_message());
+    if let Some(plan) = cfg.tls.acme_runtime_plan(public_listeners)?
+        && matches!(
+            plan.challenge_listener,
+            AcmeChallengeListener::TlsAlpn01 { .. }
+        )
+    {
+        anyhow::bail!("{}", plan.unsupported_tls_alpn_message());
     }
     Ok(())
 }
@@ -927,10 +936,6 @@ fn u64_nanos_to_i64(value: u64) -> i64 {
 }
 
 fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMaterialSource> {
-    if cfg.tls.letsencrypt_enabled() {
-        anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
-    }
-
     let has_cert = cfg
         .tls
         .cert_path
@@ -943,6 +948,28 @@ fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMat
         .is_some_and(|path| !path.as_os_str().is_empty());
     if has_cert != has_key {
         anyhow::bail!("tls_cert_path and tls_key_path must both be set");
+    }
+
+    if cfg.tls.letsencrypt_enabled() {
+        if has_cert || has_key {
+            anyhow::bail!(
+                "set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both"
+            );
+        }
+        let public_listeners = public_listener_plan(cfg)?;
+        let plan = cfg
+            .tls
+            .acme_runtime_plan(public_listeners)?
+            .expect("letsencrypt_enabled produced an ACME runtime plan");
+        return match plan.challenge_listener {
+            AcmeChallengeListener::Http01 { .. } => Ok(TlsMaterialSource::AcmeAutocertCache {
+                cache_dir: plan.cache_dir,
+                hostname: plan.hostname,
+            }),
+            AcmeChallengeListener::TlsAlpn01 { .. } => {
+                anyhow::bail!("{}", plan.unsupported_tls_alpn_message())
+            }
+        };
     }
 
     if let Some((cert_path, key_path)) = cfg.tls.manual_paths() {
@@ -1223,7 +1250,7 @@ fn remote_grpc_security(
     cfg: &RunServerConfig,
     tls_source: &TlsMaterialSource,
 ) -> Result<Option<RemoteGrpcSecurity>> {
-    if cfg.tls.has_manual_tls() || cfg.https_listen.is_some() {
+    if cfg.tls.has_manual_tls() || cfg.tls.letsencrypt_enabled() || cfg.https_listen.is_some() {
         let material = tls_source
             .load()
             .context("load TLS material for remote gRPC")?;
@@ -1440,12 +1467,14 @@ async fn await_serve_handle(
         http,
         https,
         metrics,
+        acme_http01,
         ..
     } = handle;
     tokio::select! {
         result = await_optional_listener_result(http, "http") => result,
         result = await_optional_listener_result(https, "https") => result,
         result = await_optional_listener_result(metrics, "metrics") => result,
+        result = await_optional_listener_result(acme_http01, "acme http-01") => result,
         result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
         result = await_optional_anyhow_task_result(remote_grpc, "remote grpc") => result,
     }
@@ -3009,7 +3038,9 @@ regions:
                 assert_eq!(cert_path, material.cert_path);
                 assert_eq!(key_path, material.key_path);
             }
-            TlsMaterialSource::SelfSigned { .. } => panic!("expected manual TLS source"),
+            TlsMaterialSource::SelfSigned { .. } | TlsMaterialSource::AcmeAutocertCache { .. } => {
+                panic!("expected manual TLS source")
+            }
         }
     }
 
@@ -3083,7 +3114,7 @@ regions:
 
         assert_eq!(plan.hostname, "headscale.example");
         assert_eq!(plan.acme_url, DEFAULT_ACME_URL);
-        assert_eq!(plan.cache_dir, DEFAULT_LETSENCRYPT_CACHE_DIR);
+        assert_eq!(plan.cache_dir, PathBuf::from(DEFAULT_LETSENCRYPT_CACHE_DIR));
         assert_eq!(
             plan.challenge_listener,
             AcmeChallengeListener::Http01 {
@@ -3116,6 +3147,69 @@ regions:
     }
 
     #[test]
+    fn runtime_config_allows_http01_acme_cache_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_cache_dir = Some(dir.path().join("acme-cache"));
+        cfg.tls.letsencrypt_challenge_type = Some("HTTP-01".into());
+
+        validate_supported_runtime_config(&cfg).unwrap();
+    }
+
+    #[test]
+    fn tls_material_source_uses_go_autocert_cache_for_http01_acme() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_cache_dir = Some(dir.path().join("acme-cache"));
+        cfg.tls.letsencrypt_challenge_type = Some("HTTP-01".into());
+        let sans = SanConfig::with_hostname("headscale.example");
+
+        let source = tls_material_source(&cfg, &sans).unwrap();
+
+        match source {
+            TlsMaterialSource::AcmeAutocertCache {
+                cache_dir,
+                hostname,
+            } => {
+                assert_eq!(cache_dir, dir.path().join("acme-cache"));
+                assert_eq!(hostname, "headscale.example");
+            }
+            other => panic!("expected ACME autocert cache source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_grpc_reuses_http01_acme_cached_tls_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("acme-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let generated = tls::load_or_generate(
+            dir.path().join("generated"),
+            &SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        std::fs::write(
+            cache_dir.join("headscale.example"),
+            format!("{}{}", generated.key_pem, generated.cert_pem),
+        )
+        .unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_cache_dir = Some(cache_dir);
+        cfg.tls.letsencrypt_challenge_type = Some("HTTP-01".into());
+        let sans = SanConfig::with_hostname("headscale.example");
+        let tls_source = tls_material_source(&cfg, &sans).unwrap();
+
+        assert_eq!(remote_grpc_status(&cfg), ":50443 (TLS)");
+        assert!(matches!(
+            remote_grpc_security(&cfg, &tls_source).unwrap(),
+            Some(RemoteGrpcSecurity::Tls(_))
+        ));
+    }
+
+    #[test]
     fn runtime_config_rejects_unsupported_acme_before_serving() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_run_server_config(&dir);
@@ -3126,8 +3220,9 @@ regions:
         let err = validate_supported_runtime_config(&cfg).unwrap_err();
         let err = format!("{err:#}");
 
-        assert!(err.contains("ACME TLS is not implemented"));
+        assert!(err.contains("ACME TLS-ALPN-01 is not implemented"));
         assert!(err.contains("TLS-ALPN-01 on the public TLS listener"));
+        assert!(err.contains("dynamic ACME challenge certificate selection"));
         assert!(err.contains(&format!(
             "cache_dir {}",
             dir.path().join("acme-cache").display()

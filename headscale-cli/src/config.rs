@@ -1152,6 +1152,9 @@ impl CliConfig {
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(DEFAULT_LETSENCRYPT_CHALLENGE_TYPE);
+            if challenge != "TLS-ALPN-01" {
+                return Ok(());
+            }
             let listen = self
                 .tls_letsencrypt_listen
                 .as_deref()
@@ -1178,7 +1181,7 @@ impl CliConfig {
                 other => format!("challenge {other} with challenge listener {listen}"),
             };
             bail!(
-                "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {challenge_context} would require ACME certificate issuance using acme_url {acme_url} and cache_dir {cache_dir}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs."
+                "tls_letsencrypt_hostname/ACME TLS-ALPN-01 is not implemented in headscale-rs yet; configured {challenge_context} would require dynamic ACME challenge certificate selection using acme_url {acme_url} and cache_dir {cache_dir}. Use HTTP-01, tls_cert_path/tls_key_path, or terminate TLS before headscale-rs."
             );
         }
 
@@ -2897,13 +2900,13 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
             Some("TLS-ALPN-01")
         );
         let err = config.validate_for_configtest().unwrap_err();
-        assert!(format!("{err:#}").contains("ACME TLS is not implemented"));
+        assert!(format!("{err:#}").contains("ACME TLS-ALPN-01 is not implemented"));
         assert!(format!("{err:#}").contains("TLS-ALPN-01 on the public TLS listener"));
         assert!(format!("{err:#}").contains("cache_dir /var/lib/headscale/cache"));
     }
 
     #[test]
-    fn configtest_reports_http01_acme_cache_and_listener_context() {
+    fn configtest_accepts_http01_acme_cache_and_listener_context() {
         let source = r#"
 server_url: "https://headscale.example"
 noise:
@@ -2915,11 +2918,7 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
-        let err = format!("{err:#}");
-
-        assert!(err.contains("HTTP-01 challenge listener :http"));
-        assert!(err.contains("cache_dir /var/lib/headscale/acme-cache"));
+        config.validate_for_configtest().unwrap();
     }
 
     #[test]

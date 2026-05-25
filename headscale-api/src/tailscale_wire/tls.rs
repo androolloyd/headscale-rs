@@ -79,6 +79,13 @@ pub enum TlsMaterialSource {
         cert_path: PathBuf,
         key_path: PathBuf,
     },
+    /// ACME/autocert cache mode: load a Go-compatible autocert DirCache entry
+    /// named after the configured Let's Encrypt hostname. The cache file stores
+    /// the private key followed by the certificate chain.
+    AcmeAutocertCache {
+        cache_dir: PathBuf,
+        hostname: String,
+    },
 }
 
 impl TlsMaterialSource {
@@ -89,6 +96,10 @@ impl TlsMaterialSource {
                 cert_path,
                 key_path,
             } => load_from_files(cert_path, key_path),
+            Self::AcmeAutocertCache {
+                cache_dir,
+                hostname,
+            } => load_from_autocert_cache(cache_dir, hostname),
         }
     }
 }
@@ -181,6 +192,86 @@ pub fn load_from_files(
         key_path,
         server_config: Arc::new(server_config),
     })
+}
+
+/// Load a Go `autocert.DirCache` certificate entry for `hostname`.
+///
+/// Go stores the default ECDSA certificate at `<cache_dir>/<hostname>` as a
+/// single PEM blob containing the private key first and then the certificate
+/// chain. This loader lets headscale-rs serve an already-provisioned upstream
+/// cache while full online issuance/renewal is implemented in the server
+/// runtime.
+pub fn load_from_autocert_cache(
+    cache_dir: impl AsRef<Path>,
+    hostname: &str,
+) -> Result<TlsMaterial, WireError> {
+    let cache_dir = cache_dir.as_ref().to_path_buf();
+    let cache_path = autocert_cache_path(&cache_dir, hostname);
+    let combined_pem = read_pem(&cache_path).map_err(|err| {
+        WireError::Internal(format!(
+            "load ACME cache entry {} for hostname {hostname}: {err}; online ACME issuance is not implemented yet",
+            cache_path.display()
+        ))
+    })?;
+    let (key_pem, cert_pem) = split_autocert_pem(&combined_pem).map_err(|err| {
+        WireError::Internal(format!(
+            "parse ACME cache entry {} for hostname {hostname}: {err}",
+            cache_path.display()
+        ))
+    })?;
+    let server_config = build_server_config(&cert_pem, &key_pem)?;
+    Ok(TlsMaterial {
+        cert_pem,
+        key_pem,
+        cert_path: cache_path.clone(),
+        key_path: cache_path,
+        server_config: Arc::new(server_config),
+    })
+}
+
+fn autocert_cache_path(cache_dir: &Path, hostname: &str) -> PathBuf {
+    let clean = hostname
+        .trim()
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect::<Vec<_>>()
+        .join("/");
+    cache_dir.join(clean)
+}
+
+fn split_autocert_pem(combined: &str) -> Result<(String, String), &'static str> {
+    let mut rest = combined;
+    let mut key_pem = String::new();
+    let mut cert_pem = String::new();
+    while let Some(begin) = rest.find("-----BEGIN ") {
+        rest = &rest[begin..];
+        let Some(label_end) = rest["-----BEGIN ".len()..].find("-----") else {
+            return Err("malformed PEM begin marker");
+        };
+        let label = &rest["-----BEGIN ".len().."-----BEGIN ".len() + label_end];
+        let end_marker = format!("-----END {label}-----");
+        let Some(end) = rest.find(&end_marker) else {
+            return Err("missing PEM end marker");
+        };
+        let block_end = end + end_marker.len();
+        let mut block = rest[..block_end].to_string();
+        block.push('\n');
+        if label.contains("PRIVATE KEY") {
+            key_pem.push_str(&block);
+        } else if label == "CERTIFICATE" {
+            cert_pem.push_str(&block);
+        }
+        rest = &rest[block_end..];
+    }
+
+    if key_pem.is_empty() {
+        return Err("missing private key PEM block");
+    }
+    if cert_pem.is_empty() {
+        return Err("missing certificate PEM block");
+    }
+    Ok((key_pem, cert_pem))
 }
 
 fn read_pem(p: &Path) -> Result<String, std::io::Error> {
@@ -358,6 +449,42 @@ mod tests {
         assert_eq!(loaded.key_pem, generated.key_pem);
         assert_eq!(loaded.cert_path, generated.cert_path);
         assert_eq!(loaded.key_path, generated.key_path);
+    }
+
+    #[test]
+    fn load_from_autocert_cache_reads_go_dircache_combined_pem() {
+        let dir = tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let sans = SanConfig::with_hostname("headscale.example");
+        let generated = load_or_generate(&source_dir, &sans).unwrap();
+        std::fs::write(
+            cache_dir.join("headscale.example"),
+            format!("{}{}", generated.key_pem, generated.cert_pem),
+        )
+        .unwrap();
+
+        let loaded = load_from_autocert_cache(&cache_dir, "headscale.example").unwrap();
+
+        assert_eq!(loaded.cert_pem, generated.cert_pem);
+        assert_eq!(loaded.key_pem, generated.key_pem);
+        assert_eq!(loaded.cert_path, cache_dir.join("headscale.example"));
+        assert_eq!(loaded.key_path, cache_dir.join("headscale.example"));
+    }
+
+    #[test]
+    fn load_from_autocert_cache_reports_missing_entry_as_unimplemented_issuance() {
+        let dir = tempdir().unwrap();
+
+        let Err(err) = load_from_autocert_cache(dir.path(), "headscale.example") else {
+            panic!("expected missing ACME cache entry to fail");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("online ACME issuance is not implemented yet")
+        );
     }
 
     #[test]

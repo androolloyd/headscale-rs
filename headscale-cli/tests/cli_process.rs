@@ -1635,7 +1635,7 @@ database:
 }
 
 #[test]
-fn serve_rejects_unsupported_acme_before_state_startup() {
+fn serve_rejects_unsupported_tls_alpn_acme_before_state_startup() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let db_path = cwd.path().join("should-not-exist.sqlite");
@@ -1645,7 +1645,7 @@ fn serve_rejects_unsupported_acme_before_state_startup() {
         format!(
             r#"
 server_url: "https://headscale.example"
-listen_addr: "not-a-socket"
+listen_addr: "127.0.0.1:8443"
 noise:
   private_key_path: "noise_private.key"
 dns:
@@ -1657,8 +1657,7 @@ database:
     path: "{}"
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_cache_dir: "{}"
-tls_letsencrypt_listen: ":http"
-tls_letsencrypt_challenge_type: "HTTP-01"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 "#,
             db_path.display(),
             cache_dir
@@ -1672,7 +1671,7 @@ tls_letsencrypt_challenge_type: "HTTP-01"
         &output,
         1,
         include_str!("snapshots/serve_unsupported_acme.stderr"),
-        "serve unsupported ACME",
+        "serve unsupported TLS-ALPN-01 ACME",
     );
     assert!(
         !db_path.exists(),

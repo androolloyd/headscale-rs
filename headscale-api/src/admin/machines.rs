@@ -1021,6 +1021,31 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             Err(crate::oidc::OidcAuthError::SessionExpired)
         }
     }
+
+    fn oidc_registration_exists(&self, registration_id: &str) -> bool {
+        self.registration_cache.get(registration_id).is_some()
+    }
+
+    fn oidc_registration_confirmation_info(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcRegistrationConfirmInfo> {
+        let record = self.registration_cache.get(registration_id)?;
+        Some(crate::oidc::OidcRegistrationConfirmInfo {
+            hostname: record.hostname,
+            os: record.os,
+            machine_key: short_oidc_machine_key(&record.machine_key_hex),
+        })
+    }
+}
+
+fn short_oidc_machine_key(machine_key_hex: &str) -> String {
+    let short = machine_key_hex.chars().take(12).collect::<String>();
+    if short.is_empty() {
+        "unknown".to_string()
+    } else {
+        format!("[{short}]")
+    }
 }
 
 #[async_trait]

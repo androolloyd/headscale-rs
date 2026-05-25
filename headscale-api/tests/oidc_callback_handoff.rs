@@ -1,3 +1,5 @@
+#![cfg(feature = "full")]
+
 use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
@@ -130,14 +132,45 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         .await
         .unwrap();
     assert_eq!(callback_response.status(), StatusCode::OK);
+    let confirm_cookie_header = single_set_cookie_header(callback_response.headers());
     let callback_body = body_string(callback_response).await;
-    assert!(callback_body.contains("Signed in successfully"));
+    assert!(callback_body.contains("Confirm node registration"));
     assert!(callback_body.contains("User Info Name"));
+    assert!(callback_body.contains("oidc-client"));
+    let confirm_csrf = csrf_from_confirm_body(&callback_body);
+
+    tokio::select! {
+        result = &mut followup => {
+            let response = result.unwrap();
+            panic!("follow-up register completed before OIDC confirmation with {}", response.status());
+        }
+        () = tokio::time::sleep(StdDuration::from_millis(50)) => {}
+    }
+
+    let confirm_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/register/confirm/{auth_id}"))
+                .header(header::COOKIE, confirm_cookie_header)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "headscale_register_confirm={confirm_csrf}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirm_response.status(), StatusCode::OK);
+    let confirm_body = body_string(confirm_response).await;
+    assert!(confirm_body.contains("Signed in successfully"));
+    assert!(confirm_body.contains("User Info Name"));
 
     let completed = decode_register_response(
         tokio::time::timeout(StdDuration::from_secs(2), followup)
             .await
-            .expect("follow-up register should wake after OIDC callback")
+            .expect("follow-up register should wake after OIDC confirmation")
             .expect("follow-up register task should not panic"),
     )
     .await;
@@ -304,6 +337,35 @@ fn callback_cookie_header(headers: &HeaderMap) -> String {
         .collect::<Vec<_>>();
     assert_eq!(cookies.len(), 2);
     cookies.join("; ")
+}
+
+fn single_set_cookie_header(headers: &HeaderMap) -> String {
+    let cookies = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cookies.len(), 1);
+    cookies.join("; ")
+}
+
+fn csrf_from_confirm_body(body: &str) -> String {
+    let marker = "name=\"headscale_register_confirm\" value=\"";
+    let rest = body
+        .split_once(marker)
+        .map(|(_before, after)| after)
+        .expect("confirm form contains CSRF field");
+    rest.split_once('"')
+        .map(|(csrf, _after)| csrf.to_string())
+        .expect("confirm form CSRF field has value")
 }
 
 fn query_params(location: &str) -> BTreeMap<String, String> {

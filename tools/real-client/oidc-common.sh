@@ -157,7 +157,7 @@ write_registration_id() {
   ruby -rjson -e '
     status = JSON.parse(STDIN.read)
     url = status["AuthURL"].to_s
-    match = url.match(%r{/register/(?:hskey-authreq-)?([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    match = url.match(%r{/register/((?:hskey-authreq-)?[A-Za-z0-9_-]{24})(?:\z|[?#])})
     exit 1 unless match
     File.write(ARGV.fetch(0), match[1])
   ' "${output_path}" <<<"${status_json}"
@@ -449,7 +449,23 @@ drive_oidc_login() {
     "${control_url}/register/${registration_id}" \
     >"${work_dir}/oidc-callback.html"
   grep -Eiq "Location: .*host\.docker\.internal:${control_port}/oidc/callback\\?" "${work_dir}/oidc-callback.headers"
-  grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-callback.html"
+  grep -Eq "Confirm node registration" "${work_dir}/oidc-callback.html"
+  local confirm_csrf
+  confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${work_dir}/oidc-callback.html" | head -n 1)"
+  if [[ -z "${confirm_csrf}" ]]; then
+    echo "OIDC confirmation page did not contain CSRF token" >&2
+    exit 1
+  fi
+  curl -fsSL \
+    --cacert "${tls_cert_path}" \
+    --resolve "host.docker.internal:${control_port}:127.0.0.1" \
+    -c "${work_dir}/oidc.cookies" \
+    -b "${work_dir}/oidc.cookies" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data "headscale_register_confirm=${confirm_csrf}" \
+    "${control_url}/register/confirm/${registration_id}" \
+    >"${work_dir}/oidc-confirm.html"
+  grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-confirm.html"
 
   if ! wait_pid_with_timeout "tailscale up OIDC" "${up_pid}"; then
     echo "tailscale up returned non-zero; verifying logged-in netmap" >&2

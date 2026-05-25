@@ -182,6 +182,7 @@ maud = { version = "0.27", features = ["axum"], optional = true }
 # knock layer (`tailscale_wire::knock`) needs them in the wire-default
 # feature set. Listing them here would shadow that.
 serde_urlencoded = { version = "0.7", optional = true }
+form_urlencoded = "1"
 # Used by wire web-registration IDs, admin session/preauth secrets,
 # and gRPC debug node keys.
 rand_core = { workspace = true }

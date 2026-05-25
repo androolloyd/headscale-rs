@@ -4774,6 +4774,37 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             Err(crate::oidc::OidcAuthError::SessionExpired)
         }
     }
+
+    fn oidc_registration_exists(&self, registration_id: &str) -> bool {
+        self.state.registration_cache.get(registration_id).is_some()
+    }
+
+    fn oidc_registration_confirmation_info(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcRegistrationConfirmInfo> {
+        let record = self.state.registration_cache.get(registration_id)?;
+        Some(oidc_registration_confirm_info_from_record(&record))
+    }
+}
+
+fn oidc_registration_confirm_info_from_record(
+    record: &MachineRecord,
+) -> crate::oidc::OidcRegistrationConfirmInfo {
+    crate::oidc::OidcRegistrationConfirmInfo {
+        hostname: record.hostname.clone(),
+        os: record.os.clone(),
+        machine_key: short_machine_key(&record.machine_key_hex),
+    }
+}
+
+fn short_machine_key(machine_key_hex: &str) -> String {
+    let short = machine_key_hex.chars().take(12).collect::<String>();
+    if short.is_empty() {
+        "unknown".to_string()
+    } else {
+        format!("[{short}]")
+    }
 }
 
 fn oidc_wire_user_name(user: &crate::oidc::OidcStoredUser) -> String {
@@ -4832,7 +4863,8 @@ fn control_router_with_optional_oidc_inner(
         }));
         let register_oidc = oidc.clone();
         let auth_oidc = oidc.clone();
-        let callback_oidc = oidc;
+        let callback_oidc = oidc.clone();
+        let confirm_oidc = oidc;
         inner
             .route(
                 "/register/:registration_id",
@@ -4852,9 +4884,39 @@ fn control_router_with_optional_oidc_inner(
                 "/oidc/callback",
                 get(
                     move |headers: axum::http::HeaderMap,
+                          tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>,
                           query: axum::extract::Query<crate::oidc::OidcCallbackQuery>| {
                         let oidc = callback_oidc.clone();
-                        async move { crate::oidc::handle_callback(oidc, headers, query).await }
+                        async move {
+                            crate::oidc::handle_callback_with_request_security(
+                                oidc,
+                                headers,
+                                query,
+                                tls.is_some(),
+                            )
+                            .await
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/register/confirm/:auth_id",
+                post(
+                    move |axum::extract::Path(auth_id): axum::extract::Path<String>,
+                          headers: axum::http::HeaderMap,
+                          tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>,
+                          body: axum::body::Bytes| {
+                        let oidc = confirm_oidc.clone();
+                        async move {
+                            crate::oidc::handle_register_confirm_with_request_security(
+                                oidc,
+                                auth_id,
+                                headers,
+                                body,
+                                tls.is_some(),
+                            )
+                            .await
+                        }
                     },
                 ),
             )

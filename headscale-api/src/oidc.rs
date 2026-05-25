@@ -11,6 +11,7 @@ use std::fmt::{self, Write as _};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::Query;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -28,6 +29,8 @@ const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const OIDC_CSRF_TOKEN_LEN: usize = 64;
 const OIDC_COOKIE_MAX_AGE_SECS: u64 = 60 * 60;
 const DEFAULT_OIDC_AUTH_CACHE_EXPIRY: StdDuration = StdDuration::from_secs(15 * 60);
+const REGISTER_CONFIRM_CSRF_COOKIE: &str = "headscale_register_confirm";
+const REGISTER_CONFIRM_BODY_LIMIT: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OidcPolicyConfig {
@@ -103,6 +106,7 @@ pub struct OidcProviderMetadata {
 pub struct OidcAuthRuntime {
     config: Arc<OidcAuthConfig>,
     registrations: Arc<OidcRegistrationCache>,
+    confirmations: Arc<OidcRegistrationConfirmationCache>,
     users: Option<Arc<dyn OidcUserStore>>,
     registration_handler: Option<Arc<dyn OidcRegistrationHandler>>,
 }
@@ -112,6 +116,7 @@ impl fmt::Debug for OidcAuthRuntime {
         f.debug_struct("OidcAuthRuntime")
             .field("config", &self.config)
             .field("registrations", &self.registrations)
+            .field("confirmations", &self.confirmations)
             .field("users", &self.users.as_ref().map(|_| "<configured>"))
             .field(
                 "registration_handler",
@@ -126,6 +131,9 @@ impl OidcAuthRuntime {
         Self {
             config: Arc::new(config),
             registrations: Arc::new(OidcRegistrationCache::new(DEFAULT_OIDC_AUTH_CACHE_EXPIRY)),
+            confirmations: Arc::new(OidcRegistrationConfirmationCache::new(
+                DEFAULT_OIDC_AUTH_CACHE_EXPIRY,
+            )),
             users: None,
             registration_handler: None,
         }
@@ -138,6 +146,9 @@ impl OidcAuthRuntime {
         Self {
             config: Arc::new(config),
             registrations,
+            confirmations: Arc::new(OidcRegistrationConfirmationCache::new(
+                DEFAULT_OIDC_AUTH_CACHE_EXPIRY,
+            )),
             users: None,
             registration_handler: None,
         }
@@ -168,6 +179,13 @@ impl OidcAuthRuntime {
 
     pub fn registration(&self, state: &str) -> Option<OidcRegistrationInfo> {
         self.registrations.get(state)
+    }
+
+    pub fn pending_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<OidcPendingRegistrationConfirmation> {
+        self.confirmations.get(registration_id)
     }
 
     fn begin_registration(&self, registration_id: &str) -> Result<OidcAuthStart, OidcRuntimeError> {
@@ -309,6 +327,90 @@ impl OidcRegistrationCache {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OidcRegistrationConfirmInfo {
+    pub hostname: String,
+    pub os: String,
+    pub machine_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcPendingRegistrationConfirmation {
+    pub registration_id: String,
+    pub user: OidcStoredUser,
+    pub node_expiry: Option<DateTime<Utc>>,
+    pub csrf: String,
+    pub device: OidcRegistrationConfirmInfo,
+}
+
+#[derive(Debug)]
+pub struct OidcRegistrationConfirmationCache {
+    inner: RwLock<BTreeMap<String, OidcRegistrationConfirmationEntry>>,
+    expiry: StdDuration,
+}
+
+#[derive(Debug, Clone)]
+struct OidcRegistrationConfirmationEntry {
+    pending: OidcPendingRegistrationConfirmation,
+    expires_at: Instant,
+}
+
+impl OidcRegistrationConfirmationCache {
+    fn new(expiry: StdDuration) -> Self {
+        Self {
+            inner: RwLock::new(BTreeMap::new()),
+            expiry,
+        }
+    }
+
+    #[cfg_attr(not(feature = "full"), allow(dead_code))]
+    fn insert(&self, pending: OidcPendingRegistrationConfirmation) {
+        self.prune_expired();
+        self.inner.write().insert(
+            pending.registration_id.clone(),
+            OidcRegistrationConfirmationEntry {
+                pending,
+                expires_at: Instant::now() + self.expiry,
+            },
+        );
+    }
+
+    fn get(&self, registration_id: &str) -> Option<OidcPendingRegistrationConfirmation> {
+        self.prune_expired();
+        self.inner
+            .read()
+            .get(registration_id)
+            .map(|entry| entry.pending.clone())
+    }
+
+    fn remove(&self, registration_id: &str) -> Option<OidcPendingRegistrationConfirmation> {
+        self.prune_expired();
+        self.inner
+            .write()
+            .remove(registration_id)
+            .map(|entry| entry.pending)
+    }
+
+    fn prune_expired(&self) -> usize {
+        let now = Instant::now();
+        let expired = self
+            .inner
+            .read()
+            .iter()
+            .filter(|&(_registration_id, entry)| now >= entry.expires_at)
+            .map(|(registration_id, _entry)| registration_id.clone())
+            .collect::<Vec<_>>();
+        let mut inner = self.inner.write();
+        let mut removed = 0;
+        for registration_id in expired {
+            if inner.remove(&registration_id).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OidcAuthStart {
     auth_url: String,
@@ -330,6 +432,20 @@ pub enum OidcRuntimeError {
     StateCookieMismatch,
     #[error("registration not found")]
     RegistrationNotFound,
+    #[error("registration session expired")]
+    RegistrationSessionExpired,
+    #[error("registration not OIDC-authorized")]
+    RegistrationNotOidcAuthorized,
+    #[error("invalid form")]
+    InvalidForm,
+    #[error("missing csrf token")]
+    MissingCsrfToken,
+    #[error("missing csrf cookie")]
+    MissingCsrfCookie,
+    #[error("csrf token mismatch")]
+    CsrfTokenMismatch,
+    #[error("csrf token does not match cached registration")]
+    CsrfTokenCacheMismatch,
     #[error("invalid code")]
     InvalidCode,
     #[error("no id_token")]
@@ -691,6 +807,17 @@ pub trait OidcRegistrationHandler: Send + Sync {
         let _ = (auth_id, user);
         Err(OidcAuthError::NotImplemented)
     }
+
+    fn oidc_registration_exists(&self, _registration_id: &str) -> bool {
+        false
+    }
+
+    fn oidc_registration_confirmation_info(
+        &self,
+        _registration_id: &str,
+    ) -> Option<OidcRegistrationConfirmInfo> {
+        None
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -844,10 +971,129 @@ pub async fn handle_auth(runtime: OidcAuthRuntime, auth_id: String) -> Response 
     response
 }
 
+pub async fn handle_register_confirm(
+    runtime: OidcAuthRuntime,
+    auth_id: String,
+    headers: HeaderMap,
+    raw: Bytes,
+) -> Response {
+    handle_register_confirm_with_request_security(runtime, auth_id, headers, raw, false).await
+}
+
+pub async fn handle_register_confirm_with_request_security(
+    runtime: OidcAuthRuntime,
+    auth_id: String,
+    headers: HeaderMap,
+    raw: Bytes,
+    secure_cookies: bool,
+) -> Response {
+    let Some(registration_id) = registration_id_from_register_path(&auth_id).map(str::to_string)
+    else {
+        return oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            OidcRuntimeError::InvalidRegistrationId.to_string(),
+        );
+    };
+
+    if raw.len() > REGISTER_CONFIRM_BODY_LIMIT {
+        return oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            OidcRuntimeError::InvalidForm.to_string(),
+        );
+    }
+
+    if !is_form_urlencoded_content_type(&headers) {
+        return oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            OidcRuntimeError::MissingCsrfToken.to_string(),
+        );
+    }
+
+    let form_csrf = form_urlencoded::parse(&raw)
+        .find_map(|(key, value)| (key == REGISTER_CONFIRM_CSRF_COOKIE).then(|| value.into_owned()))
+        .filter(|value| !value.is_empty());
+    let Some(form_csrf) = form_csrf else {
+        return oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            OidcRuntimeError::MissingCsrfToken.to_string(),
+        );
+    };
+
+    let Some(cookie_csrf) = cookie_value(&headers, REGISTER_CONFIRM_CSRF_COOKIE) else {
+        return oidc_error_response(
+            StatusCode::FORBIDDEN,
+            OidcRuntimeError::MissingCsrfCookie.to_string(),
+        );
+    };
+    if cookie_csrf != form_csrf {
+        return oidc_error_response(
+            StatusCode::FORBIDDEN,
+            OidcRuntimeError::CsrfTokenMismatch.to_string(),
+        );
+    }
+
+    let Some(registration_handler) = &runtime.registration_handler else {
+        return oidc_error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "OIDC callback completion is not implemented".to_string(),
+        );
+    };
+
+    let Some(pending) = runtime.confirmations.get(&registration_id) else {
+        let err = if registration_handler.oidc_registration_exists(&registration_id) {
+            OidcRuntimeError::RegistrationNotOidcAuthorized
+        } else {
+            OidcRuntimeError::RegistrationSessionExpired
+        };
+        return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+    };
+
+    if pending.csrf != cookie_csrf {
+        return oidc_error_response(
+            StatusCode::FORBIDDEN,
+            OidcRuntimeError::CsrfTokenCacheMismatch.to_string(),
+        );
+    }
+
+    match registration_handler
+        .complete_oidc_registration(&pending.registration_id, &pending.user, pending.node_expiry)
+        .await
+    {
+        Ok(result) => {
+            runtime.confirmations.remove(&registration_id);
+            let mut response = oidc_success_response(
+                &pending.user,
+                if result.new_node {
+                    "Authenticated"
+                } else {
+                    "Reauthenticated"
+                },
+            );
+            clear_register_confirm_cookie(response.headers_mut(), &auth_id, secure_cookies);
+            response
+        }
+        Err(OidcRegistrationError::SessionExpired) => {
+            oidc_error_response(StatusCode::GONE, "registration session expired".to_string())
+        }
+        Err(OidcRegistrationError::Store(err)) => {
+            oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err)
+        }
+    }
+}
+
 pub async fn handle_callback(
     runtime: OidcAuthRuntime,
     headers: HeaderMap,
     Query(query): Query<OidcCallbackQuery>,
+) -> Response {
+    handle_callback_with_request_security(runtime, headers, Query(query), false).await
+}
+
+pub async fn handle_callback_with_request_security(
+    runtime: OidcAuthRuntime,
+    headers: HeaderMap,
+    Query(query): Query<OidcCallbackQuery>,
+    secure_cookies: bool,
 ) -> Response {
     if query.code.is_empty() || query.state.is_empty() {
         return oidc_error_response(
@@ -868,7 +1114,7 @@ pub async fn handle_callback(
         );
     };
     #[cfg(not(feature = "full"))]
-    let _ = registration;
+    let _ = (registration, secure_cookies);
 
     #[cfg(feature = "full")]
     {
@@ -926,30 +1172,25 @@ pub async fn handle_callback(
 
         if let Some(registration_handler) = &runtime.registration_handler {
             if registration.registration {
-                match registration_handler
-                    .complete_oidc_registration(&registration.registration_id, &user, node_expiry)
-                    .await
-                {
-                    Ok(result) => {
-                        return oidc_success_response(
-                            &user,
-                            if result.new_node {
-                                "Authenticated"
-                            } else {
-                                "Reauthenticated"
-                            },
-                        );
-                    }
-                    Err(OidcRegistrationError::SessionExpired) => {
-                        return oidc_error_response(
-                            StatusCode::GONE,
-                            "login session expired, try again".to_string(),
-                        );
-                    }
-                    Err(OidcRegistrationError::Store(err)) => {
-                        return oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
-                    }
+                if !registration_handler.oidc_registration_exists(&registration.registration_id) {
+                    return oidc_error_response(
+                        StatusCode::GONE,
+                        "login session expired, try again".to_string(),
+                    );
                 }
+                let csrf = random_urlsafe(32);
+                let device = registration_handler
+                    .oidc_registration_confirmation_info(&registration.registration_id)
+                    .unwrap_or_default();
+                let pending = OidcPendingRegistrationConfirmation {
+                    registration_id: registration.registration_id.clone(),
+                    user: user.clone(),
+                    node_expiry,
+                    csrf,
+                    device,
+                };
+                runtime.confirmations.insert(pending.clone());
+                return oidc_registration_confirm_response(&pending, secure_cookies);
             }
 
             match registration_handler
@@ -1364,20 +1605,38 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .find_map(|(key, value)| (key == name).then(|| value.to_string()))
 }
 
+fn is_form_urlencoded_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| {
+            mime.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+}
+
 fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
     match err {
         OidcRuntimeError::InvalidRegistrationId
         | OidcRuntimeError::InvalidAuthId
         | OidcRuntimeError::MissingCodeOrState
+        | OidcRuntimeError::InvalidForm
+        | OidcRuntimeError::MissingCsrfToken
         | OidcRuntimeError::StateCookieMissing
         | OidcRuntimeError::MissingIdToken
         | OidcRuntimeError::NonceMissingInToken
         | OidcRuntimeError::NonceCookieMissing => StatusCode::BAD_REQUEST,
         OidcRuntimeError::StateCookieMismatch
+        | OidcRuntimeError::MissingCsrfCookie
+        | OidcRuntimeError::CsrfTokenMismatch
+        | OidcRuntimeError::CsrfTokenCacheMismatch
+        | OidcRuntimeError::RegistrationNotOidcAuthorized
         | OidcRuntimeError::InvalidCode
         | OidcRuntimeError::IdTokenVerificationFailed
         | OidcRuntimeError::NonceCookieMismatch => StatusCode::FORBIDDEN,
         OidcRuntimeError::RegistrationNotFound => StatusCode::NOT_FOUND,
+        OidcRuntimeError::RegistrationSessionExpired => StatusCode::GONE,
         OidcRuntimeError::Authorization(_) => StatusCode::UNAUTHORIZED,
     }
 }
@@ -1405,6 +1664,69 @@ fn oidc_error_response(status: StatusCode, message: String) -> Response {
 }
 
 #[cfg(feature = "full")]
+fn oidc_registration_confirm_response(
+    pending: &OidcPendingRegistrationConfirmation,
+    secure_cookie: bool,
+) -> Response {
+    let auth_id = format!("{}{}", AUTH_ID_PREFIX, pending.registration_id);
+    let cookie = register_confirm_cookie(&auth_id, &pending.csrf, secure_cookie);
+    let mut response = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        oidc_registration_confirm_html(pending),
+    )
+        .into_response();
+    append_cookie(response.headers_mut(), &cookie);
+    response
+}
+
+#[cfg(feature = "full")]
+fn register_confirm_cookie(auth_id: &str, csrf: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}; Path=/register/confirm/{auth_id}; Max-Age={}{}; HttpOnly; SameSite=Strict",
+        DEFAULT_OIDC_AUTH_CACHE_EXPIRY.as_secs(),
+        secure,
+    )
+}
+
+fn clear_register_confirm_cookie(headers: &mut HeaderMap, auth_id: &str, secure: bool) {
+    let secure = if secure { "; Secure" } else { "" };
+    append_cookie(
+        headers,
+        &format!(
+            "{REGISTER_CONFIRM_CSRF_COOKIE}=; Path=/register/confirm/{auth_id}; Max-Age=0{secure}; HttpOnly; SameSite=Strict"
+        ),
+    );
+}
+
+#[cfg(feature = "full")]
+fn oidc_registration_confirm_html(pending: &OidcPendingRegistrationConfirmation) -> String {
+    let auth_id = format!("{}{}", AUTH_ID_PREFIX, pending.registration_id);
+    let user = user_display_name(&pending.user);
+    let hostname = display_or_unknown(&pending.device.hostname);
+    let os = display_or_unknown(&pending.device.os);
+    let machine_key = display_or_unknown(&pending.device.machine_key);
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale - Confirm node registration</title></head><body><main><h1>Confirm node registration</h1><p>A device is asking to be added to your tailnet. Please review the details below and confirm that this device is yours.</p><dl><dt>Hostname</dt><dd>{}</dd><dt>OS</dt><dd>{}</dd><dt>Machine key</dt><dd><code>{}</code></dd><dt>Registered to</dt><dd>{}</dd></dl><form method=\"POST\" action=\"/register/confirm/{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><button type=\"submit\">Confirm registration</button></form><p>If you do not recognise this device, close this window. The registration request will expire automatically.</p></main></body></html>",
+        html_escape(&hostname),
+        html_escape(&os),
+        html_escape(&machine_key),
+        html_escape(&user),
+        html_escape(&auth_id),
+        REGISTER_CONFIRM_CSRF_COOKIE,
+        html_escape(&pending.csrf)
+    )
+}
+
+#[cfg(feature = "full")]
+fn display_or_unknown(value: &str) -> String {
+    if value.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        value.to_string()
+    }
+}
 fn oidc_success_response(user: &OidcStoredUser, verb: &str) -> Response {
     (
         StatusCode::OK,
@@ -1424,7 +1746,6 @@ fn oidc_ssh_success_response(user: &OidcStoredUser) -> Response {
         .into_response()
 }
 
-#[cfg(feature = "full")]
 fn oidc_success_html(user: &str, verb: &str) -> String {
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale Authentication Succeeded</title></head><body><main><h1>Signed in successfully</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
@@ -1462,7 +1783,6 @@ fn stored_user_from_profile(profile: OidcUserProfile) -> OidcStoredUser {
     }
 }
 
-#[cfg(feature = "full")]
 fn user_display_name(user: &OidcStoredUser) -> String {
     if !user.display_name.is_empty() {
         user.display_name.clone()
@@ -1475,7 +1795,6 @@ fn user_display_name(user: &OidcStoredUser) -> String {
     }
 }
 
-#[cfg(feature = "full")]
 fn html_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1650,15 +1969,19 @@ mod tests {
     use chrono::TimeZone;
 
     #[derive(Debug, Default)]
+    #[cfg(feature = "full")]
     struct MockOidcUserStore {
         profiles: RwLock<Vec<OidcUserProfile>>,
         fail: bool,
     }
 
+    #[cfg(feature = "full")]
     type OidcRegistrationCall = (String, OidcStoredUser, Option<DateTime<Utc>>);
+    #[cfg(feature = "full")]
     type OidcAuthCall = (String, OidcStoredUser);
 
     #[derive(Debug, Default)]
+    #[cfg(feature = "full")]
     struct MockOidcRegistrationHandler {
         calls: RwLock<Vec<OidcRegistrationCall>>,
         auth_calls: RwLock<Vec<OidcAuthCall>>,
@@ -1666,6 +1989,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    #[cfg(feature = "full")]
     impl OidcUserStore for MockOidcUserStore {
         async fn create_or_update_oidc_user(
             &self,
@@ -1688,6 +2012,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    #[cfg(feature = "full")]
     impl OidcRegistrationHandler for MockOidcRegistrationHandler {
         async fn complete_oidc_registration(
             &self,
@@ -1716,6 +2041,21 @@ mod tests {
                 .write()
                 .push((auth_id.to_string(), user.clone()));
             Ok(())
+        }
+
+        fn oidc_registration_exists(&self, _registration_id: &str) -> bool {
+            !self.fail_expired
+        }
+
+        fn oidc_registration_confirmation_info(
+            &self,
+            _registration_id: &str,
+        ) -> Option<OidcRegistrationConfirmInfo> {
+            Some(OidcRegistrationConfirmInfo {
+                hostname: "oidc-client".into(),
+                os: "linux".into(),
+                machine_key: "[abcdef]".into(),
+            })
         }
     }
 
@@ -2311,7 +2651,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2366,7 +2706,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2403,7 +2743,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2585,7 +2925,7 @@ mod tests {
 
     #[cfg(feature = "full")]
     #[tokio::test]
-    async fn oidc_callback_completes_registration_and_renders_success_page() {
+    async fn oidc_callback_renders_registration_confirmation_before_completion() {
         let token = Arc::new(RwLock::new(String::new()));
         let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
         let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
@@ -2617,7 +2957,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2631,11 +2971,31 @@ mod tests {
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/html; charset=utf-8"
         );
+        let cookie_header = set_cookie_header(&response);
         let body = response_body(response).await;
-        assert!(body.contains("Headscale Authentication Succeeded"));
-        assert!(body.contains("Authenticated as"));
+        assert!(body.contains("Headscale - Confirm node registration"));
+        assert!(body.contains("Confirm node registration"));
+        assert!(body.contains("Confirm registration"));
         assert!(body.contains("Alice Smith"));
-        assert!(body.contains("You can now close this window"));
+        assert!(body.contains("oidc-client"));
+        assert!(body.contains("[abcdef]"));
+        assert!(registrations.calls.read().is_empty());
+
+        let csrf = csrf_from_confirm_body(&body);
+        let confirm = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{}", "r".repeat(24)),
+            confirm_headers(&cookie_header),
+            Bytes::from(format!("{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}")),
+        )
+        .await;
+
+        assert_eq!(confirm.status(), StatusCode::OK);
+        let success_body = response_body(confirm).await;
+        assert!(success_body.contains("Headscale Authentication Succeeded"));
+        assert!(success_body.contains("Authenticated as"));
+        assert!(success_body.contains("Alice Smith"));
+        assert!(success_body.contains("You can now close this window"));
 
         let calls = registrations.calls.read();
         assert_eq!(calls.len(), 1);
@@ -2681,7 +3041,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2742,7 +3102,7 @@ mod tests {
         );
 
         let response = handle_callback(
-            runtime,
+            runtime.clone(),
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2752,9 +3112,155 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        let cookie_header = set_cookie_header(&response);
+        let body = response_body(response).await;
+        let csrf = csrf_from_confirm_body(&body);
+        assert!(registrations.calls.read().is_empty());
+
+        let confirm = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{}", "r".repeat(24)),
+            confirm_headers(&cookie_header),
+            Bytes::from(format!("{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}")),
+        )
+        .await;
+        assert_eq!(confirm.status(), StatusCode::OK);
         let calls = registrations.calls.read();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, None);
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_rejects_csrf_cookie_form_mismatch() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+        runtime
+            .confirmations
+            .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
+
+        let response = handle_register_confirm(
+            runtime.clone(),
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=expected-csrf"),
+            Bytes::from("headscale_register_confirm=wrong-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response_body(response).await, "csrf token mismatch");
+        assert!(runtime.pending_confirmation(&registration_id).is_some());
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_rejects_without_pending_confirmation() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+
+        let response = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=fake-csrf"),
+            Bytes::from("headscale_register_confirm=fake-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_body(response).await,
+            "registration not OIDC-authorized"
+        );
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_maps_missing_registration_to_gone() {
+        let registrations = Arc::new(MockOidcRegistrationHandler {
+            fail_expired: true,
+            ..MockOidcRegistrationHandler::default()
+        });
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+
+        let response = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=fake-csrf"),
+            Bytes::from("headscale_register_confirm=fake-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert_eq!(
+            response_body(response).await,
+            "registration session expired"
+        );
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_rejects_cached_csrf_mismatch() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+        runtime
+            .confirmations
+            .insert(test_pending_confirmation(&registration_id, "cached-csrf"));
+
+        let response = handle_register_confirm(
+            runtime.clone(),
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=posted-csrf"),
+            Bytes::from("headscale_register_confirm=posted-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_body(response).await,
+            "csrf token does not match cached registration"
+        );
+        assert!(runtime.pending_confirmation(&registration_id).is_some());
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_requires_urlencoded_form_content_type() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+        runtime
+            .confirmations
+            .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "headscale_register_confirm=expected-csrf".parse().unwrap(),
+        );
+
+        let response = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{registration_id}"),
+            headers,
+            Bytes::from("headscale_register_confirm=expected-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response_body(response).await, "missing csrf token");
+        assert!(registrations.calls.read().is_empty());
     }
 
     #[cfg(feature = "full")]
@@ -3278,6 +3784,67 @@ mod tests {
             .await
             .unwrap();
         String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[cfg(feature = "full")]
+    fn set_cookie_header(response: &Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.split_once(';').map(|(cookie, _attrs)| cookie))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    #[cfg(feature = "full")]
+    fn confirm_headers(cookie_header: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, cookie_header.parse().unwrap());
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        headers
+    }
+
+    #[cfg(feature = "full")]
+    fn test_pending_confirmation(
+        registration_id: &str,
+        csrf: &str,
+    ) -> OidcPendingRegistrationConfirmation {
+        OidcPendingRegistrationConfirmation {
+            registration_id: registration_id.to_string(),
+            user: OidcStoredUser {
+                id: 1,
+                name: "alice@example.com".into(),
+                display_name: "Alice Smith".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: "https://issuer.example/subject".into(),
+                provider: REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: String::new(),
+            },
+            node_expiry: None,
+            csrf: csrf.to_string(),
+            device: OidcRegistrationConfirmInfo {
+                hostname: "oidc-client".into(),
+                os: "linux".into(),
+                machine_key: "[abcdef]".into(),
+            },
+        }
+    }
+
+    #[cfg(feature = "full")]
+    fn csrf_from_confirm_body(body: &str) -> String {
+        let marker = format!("name=\"{REGISTER_CONFIRM_CSRF_COOKIE}\" value=\"");
+        let rest = body
+            .split_once(&marker)
+            .map(|(_before, after)| after)
+            .expect("confirm form contains CSRF field");
+        rest.split_once('"')
+            .map(|(csrf, _after)| csrf.to_string())
+            .expect("confirm form CSRF field has value")
     }
 
     #[cfg(feature = "full")]

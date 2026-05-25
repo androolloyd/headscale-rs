@@ -257,6 +257,7 @@ async fn handle_one(
             axum_req
                 .extensions_mut()
                 .insert(axum::extract::ConnectInfo(peer));
+            axum_req.extensions_mut().insert(TlsRequest);
             // `Router::oneshot` makes a fresh service for this request.
             let resp = router
                 .oneshot(axum_req)
@@ -481,6 +482,9 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<T> {
 // caller.
 #[allow(dead_code)]
 type RawTlsStream = TlsStream<TcpStream>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TlsRequest;
 
 #[cfg(test)]
 mod tests {

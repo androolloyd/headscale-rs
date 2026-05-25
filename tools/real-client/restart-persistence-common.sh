@@ -435,6 +435,7 @@ server:
   https_listen: 0.0.0.0:${https_port}
   db_path: ${db_path}
   state_dir: ${work_dir}/state
+  metrics_listen_addr: 127.0.0.1:${metrics_port}
   unix_socket: ${socket_path}
   unix_socket_permission: "0700"
   tls_hostname: host.docker.internal
@@ -759,8 +760,21 @@ login_observer_with_web_registration() {
   fi
   local registration_id
   registration_id="$(cat "${registration_id_path}")"
-  headscale_cmd -o json nodes register "--user=${user}" "--key=${registration_id}" \
-    >"${work_dir}/${client_name}.registered.json"
+  case "${target}" in
+    rust)
+      local auth_id="${registration_id}"
+      case "${auth_id}" in
+        hskey-authreq-*) ;;
+        *) auth_id="hskey-authreq-${auth_id}" ;;
+      esac
+      headscale_cmd -o json auth register "--auth-id=${auth_id}" "--user=${user}" \
+        >"${work_dir}/${client_name}.registered.json"
+      ;;
+    headscale-go)
+      headscale_cmd -o json nodes register "--user=${user}" "--key=${registration_id}" \
+        >"${work_dir}/${client_name}.registered.json"
+      ;;
+  esac
 
   if ! wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}"; then
     echo "tailscale up ${client_name} returned non-zero; verifying logged-in netmap"
@@ -1612,6 +1626,79 @@ wait_for_peer_map() {
     }
 }
 
+debug_batcher_url() {
+  case "${target}" in
+    rust) printf "http://127.0.0.1:%s/debug/batcher\n" "${metrics_port}" ;;
+    headscale-go) printf "http://127.0.0.1:%s/debug/batcher\n" "${metrics_port}" ;;
+  esac
+}
+
+fetch_debug_batcher() {
+  local output_path="$1"
+  local url
+  url="$(debug_batcher_url)"
+  curl -fsS -H "Accept: application/json" "${url}" >"${output_path}"
+}
+
+batcher_nodes_connected() {
+  local router_id="$1"
+  local observer_id="$2"
+  local router_host="$3"
+  local observer_host="$4"
+  local output_path="$5"
+
+  fetch_debug_batcher "${output_path}" &&
+    ruby -rjson -e '
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      expected = [
+        [ARGV.fetch(1), ARGV.fetch(3)],
+        [ARGV.fetch(2), ARGV.fetch(4)],
+      ]
+      nodes = payload["connected_nodes"] || payload["ConnectedNodes"]
+      abort("missing connected_nodes in debug batcher payload #{payload.inspect}") unless nodes.is_a?(Hash)
+
+      observed = expected.map do |node_id, host|
+        node = nodes[node_id.to_s]
+        abort("missing debug batcher node #{node_id.inspect} for #{host.inspect}; got #{nodes.keys.sort.inspect}") unless node
+        connected = node.key?("connected") ? node["connected"] : node["Connected"]
+        active_connections = node.key?("active_connections") ? node["active_connections"] : node["ActiveConnections"]
+        abort("expected debug batcher node #{node_id.inspect} for #{host.inspect} connected=true, got #{connected.inspect} in #{node.inspect}") unless connected == true
+        {
+          node_id: node_id,
+          host: host,
+          connected: connected,
+          active_connections: active_connections,
+        }
+      end
+
+      puts JSON.pretty_generate({
+        total_nodes: payload["total_nodes"] || payload["TotalNodes"],
+        observed: observed,
+      })
+    ' "${output_path}" "${router_id}" "${observer_id}" "${router_host}" "${observer_host}"
+}
+
+wait_for_debug_batcher_nodes() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  local router_id observer_id snapshot_path summary_path
+
+  router_id="$(load_node_id "${router_name}")"
+  observer_id="$(load_node_id "${observer_name}")"
+  snapshot_path="${work_dir}/debug-batcher-${safe_label}.json"
+  summary_path="${work_dir}/debug-batcher-${safe_label}.summary.json"
+
+  echo "::group::assert debug batcher state ${label}"
+  wait_for "${label} debug batcher router and observer connected" \
+    "batcher_nodes_connected '${router_id}' '${observer_id}' '${router_name}' '${observer_name}' '${snapshot_path}' > '${summary_path}'" || {
+      cat "${snapshot_path}" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${summary_path}"
+  echo "::endgroup::"
+}
+
 need curl
 need docker
 need ruby
@@ -1732,6 +1819,7 @@ else
   set_router_routes_and_tag "${initial_tag}"
   login_observer_with_web_registration
   assert_persisted_nodes "${initial_tag}" "before-restart"
+  wait_for_debug_batcher_nodes "before-restart"
 
   stop_server
   start_server
@@ -1739,10 +1827,12 @@ else
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
   assert_persisted_nodes "${initial_tag}" "after-restart"
   wait_for_peer_map "${initial_tag}" "observer sees restarted route and tag"
+  wait_for_debug_batcher_nodes "after-restart"
 
   set_router_routes_and_tag "${mutated_tag}"
   assert_persisted_nodes "${mutated_tag}" "after-post-restart-tag-mutation"
   wait_for_peer_map "${mutated_tag}" "observer sees post-restart tag mutation"
+  wait_for_debug_batcher_nodes "after-post-restart-tag-mutation"
 fi
 
 echo "${target} restart persistence real-client smoke passed"

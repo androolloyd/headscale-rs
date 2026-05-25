@@ -87,7 +87,7 @@ predates the executable PingRequest lifecycle.
 | Lifecycle | `oidc-route-approve-restart` | `oidc-route-approve-restart-smoke.sh` | `oidc-route-approve-restart-headscale-go-smoke.sh` | Production OIDC route approval survives server restart |
 | Lifecycle | `web-register-restart` | `web-register-restart-smoke.sh` | `web-register-restart-headscale-go-smoke.sh` | Production web/CLI registration survives server restart |
 | Lifecycle | `online-lastseen` | `online-lastseen-smoke.sh` | `online-lastseen-headscale-go-smoke.sh` | Production online transition and LastSeen after client disconnect |
-| Lifecycle | `restart-persistence` | `restart-persistence-smoke.sh` | `restart-persistence-headscale-go-smoke.sh` | Production restart persistence and route/tag netmap churn |
+| Lifecycle | `restart-persistence` | `restart-persistence-smoke.sh` | `restart-persistence-headscale-go-smoke.sh` | Production restart persistence, debug batcher state, and route/tag netmap churn |
 | Tags | `tagged-preauth` | `tagged-preauth-smoke.sh` | `tagged-preauth-headscale-go-smoke.sh` | Tagged preauth key with `tagOwners` policy |
 | Tags | `tag-update` | `tag-update-smoke.sh` | `tag-update-headscale-go-smoke.sh` | Post-login forced tag replacement |
 | Tags | `tag-update-invalid` | `tag-update-invalid-smoke.sh` | `tag-update-invalid-headscale-go-smoke.sh` | Invalid tag update rejection |

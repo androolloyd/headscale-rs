@@ -390,6 +390,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         oidc: runtime.oidc,
         metrics_addr,
         acme_http01: None,
+        acme_http01_host: None,
+        acme_http01_addr: None,
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;

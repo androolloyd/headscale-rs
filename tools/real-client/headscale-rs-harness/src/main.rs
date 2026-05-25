@@ -500,6 +500,8 @@ async fn main() -> Result<()> {
         oidc: None,
         metrics_addr: Some(args.metrics),
         acme_http01: None,
+        acme_http01_host: None,
+        acme_http01_addr: None,
     };
     let route_health_probe = spawn_route_health_probe(
         state.clone(),

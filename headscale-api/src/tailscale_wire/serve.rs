@@ -88,6 +88,15 @@ pub struct ServeConfig {
     /// listener serves `/.well-known/acme-challenge/{token}` before the normal
     /// control-router fallback.
     pub acme_http01: Option<AcmeHttp01ChallengeStore>,
+    /// Optional exact Host header allowed to retrieve ACME HTTP-01 tokens.
+    /// This mirrors headscale-go's `autocert.HostWhitelist` behavior and
+    /// should be set to the configured Let's Encrypt hostname when ACME is
+    /// wired into the server runtime.
+    pub acme_http01_host: Option<String>,
+    /// Optional dedicated HTTP-01 listener. When set, only ACME challenge
+    /// tokens are served on this socket; non-challenge requests redirect to the
+    /// configured public control URL when available.
+    pub acme_http01_addr: Option<SocketAddr>,
 }
 
 impl ServeConfig {
@@ -107,6 +116,8 @@ impl ServeConfig {
             oidc: None,
             metrics_addr: None,
             acme_http01: None,
+            acme_http01_host: None,
+            acme_http01_addr: None,
         }
     }
 }
@@ -117,7 +128,9 @@ pub struct ServeHandle {
     pub http: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub https: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub metrics: Option<JoinHandle<Result<(), std::io::Error>>>,
+    pub acme_http01: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub metrics_addr: Option<SocketAddr>,
+    pub acme_http01_addr: Option<SocketAddr>,
     /// The minted TLS material — exposed so callers (e.g. the docker
     /// harness install script) can copy the cert into peer trust
     /// stores. `None` when `https_addr` is unset.
@@ -166,7 +179,14 @@ pub async fn serve(
     extra_routes: Router,
 ) -> Result<ServeHandle, WireError> {
     let oidc = cfg.oidc.clone();
-    let app = extra_routes.merge(public_router(state.clone(), oidc, cfg.acme_http01.clone()));
+    let acme_http01_store = cfg.acme_http01.clone();
+    let acme_http01_host = cfg.acme_http01_host.clone();
+    let app = extra_routes.merge(public_router(
+        state.clone(),
+        oidc,
+        cfg.acme_http01.clone(),
+        cfg.acme_http01_host.clone(),
+    ));
     let app = app.layer(middleware::from_fn_with_state(
         cfg.trusted_proxies.clone(),
         trusted_proxy_headers,
@@ -175,6 +195,16 @@ pub async fn serve(
     if cfg.http_addr.is_none() && cfg.https_addr.is_none() {
         return Err(WireError::Internal(
             "at least one public wire listener must be configured".into(),
+        ));
+    }
+    if cfg.acme_http01_addr.is_some() && cfg.acme_http01.is_none() {
+        return Err(WireError::Internal(
+            "acme_http01_addr requires acme_http01 challenge material".into(),
+        ));
+    }
+    if cfg.acme_http01_addr.is_some() && cfg.acme_http01_host.is_none() {
+        return Err(WireError::Internal(
+            "acme_http01_addr requires acme_http01_host".into(),
         ));
     }
 
@@ -197,15 +227,48 @@ pub async fn serve(
         None
     };
 
-    let http = if let Some(http_addr) = cfg.http_addr {
-        let http_listener = tokio::net::TcpListener::bind(http_addr)
+    let http_listener = if let Some(http_addr) = cfg.http_addr {
+        let listener = tokio::net::TcpListener::bind(http_addr)
             .await
             .map_err(|e| WireError::Internal(format!("bind {http_addr}: {e}")))?;
+        let bound_addr = listener.local_addr().map_err(WireError::Io)?;
         tracing::info!(
             target = "tailscale_wire::serve",
-            addr = %http_addr,
+            addr = %bound_addr,
             "wire surface listening (HTTP)"
         );
+        Some(listener)
+    } else {
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            "wire surface plaintext HTTP listener disabled"
+        );
+        None
+    };
+
+    let acme_http01_listener = if let Some(acme_addr) = cfg.acme_http01_addr {
+        let store = acme_http01_store.expect("validated acme_http01 store");
+        let listener = tokio::net::TcpListener::bind(acme_addr)
+            .await
+            .map_err(|e| WireError::Internal(format!("bind {acme_addr}: {e}")))?;
+        let bound_addr = listener.local_addr().map_err(WireError::Io)?;
+        tracing::info!(
+            target = "tailscale_wire::serve",
+            addr = %bound_addr,
+            "ACME HTTP-01 challenge listener bound"
+        );
+        Some((listener, bound_addr, store))
+    } else {
+        None
+    };
+
+    let tls_material = if cfg.https_addr.is_some() {
+        Some(cfg.tls_source.load()?)
+    } else {
+        None
+    };
+
+    let http = if let Some(http_listener) = http_listener {
         let http_app = app.clone();
         Some(tokio::spawn(async move {
             axum::serve(
@@ -216,10 +279,6 @@ pub async fn serve(
             .map_err(std::io::Error::other)
         }))
     } else {
-        tracing::info!(
-            target = "tailscale_wire::serve",
-            "wire surface plaintext HTTP listener disabled"
-        );
         None
     };
 
@@ -234,6 +293,23 @@ pub async fn serve(
     } else {
         (None, None)
     };
+
+    let (acme_http01, acme_http01_addr) =
+        if let Some((listener, bound_addr, store)) = acme_http01_listener {
+            let app = super::acme::http01_listener_router(
+                store,
+                state.public_control_url.clone(),
+                acme_http01_host,
+            );
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .map_err(std::io::Error::other)
+            });
+            (Some(handle), Some(bound_addr))
+        } else {
+            (None, None)
+        };
 
     // HTTPS branch — only mint TLS material when an https addr is
     // actually configured.
@@ -250,7 +326,7 @@ pub async fn serve(
     // `noise::drive_ts2021` for the upgrade path; everything else
     // still flows through the same axum router via hyper http1.
     let (https, tls) = if let Some(https_addr) = cfg.https_addr {
-        let material = cfg.tls_source.load()?;
+        let material = tls_material.expect("validated TLS material");
         tracing::info!(
             target = "tailscale_wire::serve",
             addr = %https_addr,
@@ -272,7 +348,9 @@ pub async fn serve(
         http,
         https,
         metrics,
+        acme_http01,
         metrics_addr,
+        acme_http01_addr,
         tls,
     })
 }
@@ -307,13 +385,14 @@ fn public_router(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
     acme_http01: Option<AcmeHttp01ChallengeStore>,
+    acme_http01_host: Option<String>,
 ) -> Router {
     let router = match oidc {
         Some(oidc) => control_router_with_oidc(state, oidc),
         None => control_router(state),
     };
     if let Some(store) = acme_http01 {
-        super::acme::http01_router(store).merge(router)
+        super::acme::http01_router_with_host_policy(store, acme_http01_host).merge(router)
     } else {
         router
     }
@@ -413,6 +492,8 @@ mod tests {
             oidc: None,
             metrics_addr: None,
             acme_http01: None,
+            acme_http01_host: None,
+            acme_http01_addr: None,
         };
         // We need the actual bound port; tokio::net::TcpListener::bind
         // returns it via local_addr. Inline the relevant piece of
@@ -450,6 +531,8 @@ mod tests {
                 oidc: None,
                 metrics_addr: None,
                 acme_http01: None,
+                acme_http01_host: None,
+                acme_http01_addr: None,
             },
             Router::new(),
         )
@@ -463,6 +546,121 @@ mod tests {
                 .contains("at least one public wire listener must be configured"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_acme_listener_without_challenge_store() {
+        let (state, dir) = fixture_state();
+        let Err(err) = serve(
+            state,
+            ServeConfig {
+                http_addr: Some("127.0.0.1:0".parse().unwrap()),
+                https_addr: None,
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+                tls_source: TlsMaterialSource::SelfSigned {
+                    state_dir: dir.path().into(),
+                    sans: SanConfig::with_hostname("test-host"),
+                },
+                trusted_proxies: TrustedProxyConfig::default(),
+                oidc: None,
+                metrics_addr: None,
+                acme_http01: None,
+                acme_http01_host: Some("control.example".into()),
+                acme_http01_addr: Some("127.0.0.1:0".parse().unwrap()),
+            },
+            Router::new(),
+        )
+        .await
+        else {
+            panic!("serve unexpectedly accepted an ACME listener without challenge material");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("acme_http01_addr requires acme_http01 challenge material"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_acme_listener_without_host_policy() {
+        let (state, dir) = fixture_state();
+        let Err(err) = serve(
+            state,
+            ServeConfig {
+                http_addr: Some("127.0.0.1:0".parse().unwrap()),
+                https_addr: None,
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+                tls_source: TlsMaterialSource::SelfSigned {
+                    state_dir: dir.path().into(),
+                    sans: SanConfig::with_hostname("test-host"),
+                },
+                trusted_proxies: TrustedProxyConfig::default(),
+                oidc: None,
+                metrics_addr: None,
+                acme_http01: Some(AcmeHttp01ChallengeStore::new()),
+                acme_http01_host: None,
+                acme_http01_addr: Some("127.0.0.1:0".parse().unwrap()),
+            },
+            Router::new(),
+        )
+        .await
+        else {
+            panic!("serve unexpectedly accepted an ACME listener without host policy");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("acme_http01_addr requires acme_http01_host"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_does_not_spawn_public_listener_when_acme_bind_fails() {
+        let (state, dir) = fixture_state();
+        let held_acme = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let acme_addr = held_acme.local_addr().unwrap();
+        let http_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_addr = http_probe.local_addr().unwrap();
+        drop(http_probe);
+
+        let Err(err) = serve(
+            state,
+            ServeConfig {
+                http_addr: Some(http_addr),
+                https_addr: None,
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+                tls_source: TlsMaterialSource::SelfSigned {
+                    state_dir: dir.path().into(),
+                    sans: SanConfig::with_hostname("test-host"),
+                },
+                trusted_proxies: TrustedProxyConfig::default(),
+                oidc: None,
+                metrics_addr: None,
+                acme_http01: Some(AcmeHttp01ChallengeStore::new()),
+                acme_http01_host: Some("control.example".into()),
+                acme_http01_addr: Some(acme_addr),
+            },
+            Router::new(),
+        )
+        .await
+        else {
+            panic!("serve unexpectedly accepted a colliding ACME listener");
+        };
+
+        assert!(
+            err.to_string().contains(&format!("bind {acme_addr}")),
+            "{err}"
+        );
+        let rebound_http = tokio::net::TcpListener::bind(http_addr)
+            .await
+            .expect("public HTTP listener was left running after ACME bind failure");
+        drop(rebound_http);
+        drop(held_acme);
     }
 
     #[tokio::test]
@@ -483,6 +681,8 @@ mod tests {
                 oidc: None,
                 metrics_addr: None,
                 acme_http01: None,
+                acme_http01_host: None,
+                acme_http01_addr: None,
             },
             Router::new(),
         )
@@ -498,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn production_public_router_excludes_metrics_debug_routes() {
         let (state, _dir) = fixture_state();
-        let public_app = public_router(state.clone(), None, None);
+        let public_app = public_router(state.clone(), None, None, None);
 
         let public_metrics = public_app
             .clone()
@@ -555,7 +755,7 @@ mod tests {
         let (state, _dir) = fixture_state();
         let store = AcmeHttp01ChallengeStore::new();
         store.insert("token-123", "token-123.thumbprint");
-        let app = public_router(state, None, Some(store));
+        let app = public_router(state, None, Some(store), None);
 
         let resp = app
             .oneshot(
@@ -587,6 +787,8 @@ mod tests {
             oidc: None,
             metrics_addr: Some("127.0.0.1:0".parse().unwrap()),
             acme_http01: None,
+            acme_http01_host: None,
+            acme_http01_addr: None,
         };
 
         let handle = serve(state, cfg, Router::new()).await.unwrap();
@@ -599,6 +801,65 @@ mod tests {
         if let Some(metrics) = handle.metrics {
             metrics.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn serve_binds_dedicated_acme_http01_listener_without_control_routes() {
+        let (mut state, dir) = fixture_state();
+        state.public_control_url = Some("https://control.example".into());
+        let store = AcmeHttp01ChallengeStore::new();
+        store.insert("token-123", "token-123.thumbprint");
+        let cfg = ServeConfig {
+            http_addr: Some("127.0.0.1:0".parse().unwrap()),
+            https_addr: None,
+            state_dir: dir.path().into(),
+            sans: SanConfig::with_hostname("test-host"),
+            tls_source: TlsMaterialSource::SelfSigned {
+                state_dir: dir.path().into(),
+                sans: SanConfig::with_hostname("test-host"),
+            },
+            trusted_proxies: TrustedProxyConfig::default(),
+            oidc: None,
+            metrics_addr: None,
+            acme_http01: Some(store),
+            acme_http01_host: Some("control.example".into()),
+            acme_http01_addr: Some("127.0.0.1:0".parse().unwrap()),
+        };
+
+        let handle = serve(state, cfg, Router::new()).await.unwrap();
+        let acme_addr = handle.acme_http01_addr.unwrap();
+        let challenge_url = format!("http://{acme_addr}/.well-known/acme-challenge/token-123");
+        let body = reqwest::Client::new()
+            .get(&challenge_url)
+            .header(reqwest::header::HOST, "control.example")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "token-123.thumbprint");
+
+        let no_redirects = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let control_resp = no_redirects
+            .get(format!("http://{acme_addr}/key?v=39"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(control_resp.status(), axum::http::StatusCode::FOUND);
+        assert_eq!(
+            control_resp
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://control.example/key?v=39")
+        );
+
+        handle.http.unwrap().abort();
+        handle.acme_http01.unwrap().abort();
     }
 
     fn oidc_runtime() -> crate::oidc::OidcAuthRuntime {
@@ -622,7 +883,7 @@ mod tests {
     async fn serve_public_router_mounts_oidc_when_configured() {
         let (state, _dir) = fixture_state();
         let oidc = oidc_runtime();
-        let app = public_router(state, Some(oidc), None);
+        let app = public_router(state, Some(oidc), None, None);
 
         let resp = app
             .oneshot(

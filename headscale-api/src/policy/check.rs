@@ -759,6 +759,77 @@ mod tests {
     }
 
     #[test]
+    fn ssh_tests_require_every_resolved_destination_to_match() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {
+                    "tag:server": ["alice@"],
+                    "tag:prod": ["alice@"]
+                },
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server", "tag:prod"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+            node(3, "prod", "bob", "100.64.0.3", &["tag:prod"]),
+        ];
+
+        let err = check_policy_semantics(&doc, &nodes).unwrap_err();
+        assert!(err.contains("alice@"));
+        assert!(err.contains("prod"));
+        assert!(err.contains("root"));
+        assert!(err.contains("cannot SSH to destination"));
+    }
+
+    #[test]
+    fn ssh_tests_do_not_use_acl_packet_filter_rules() {
+        let acl_allows_tcp22_without_ssh = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "acls": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server:22"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+        ];
+
+        let err = check_policy_semantics(&acl_allows_tcp22_without_ssh, &nodes).unwrap_err();
+        assert!(err.contains("cannot SSH to destination"));
+
+        let acl_denies_tcp22_ssh_allows = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "acls": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server:80"]}
+                ],
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        check_policy_semantics(&acl_denies_tcp22_ssh_allows, &nodes).unwrap();
+    }
+
+    #[test]
     fn ssh_tests_report_failed_accept_and_check_assertions() {
         let doc = parse_hujson_policy(
             r#"{

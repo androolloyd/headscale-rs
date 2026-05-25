@@ -324,7 +324,7 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
             .fetch_optional(&mut *tx)
             .await?;
     if user_exists.is_none() {
-        return Err(DbError::NotFound(format!("user id={id}")));
+        return Err(DbError::NotFound("user".into()));
     }
 
     let owned_nodes: i64 =
@@ -469,6 +469,14 @@ mod tests {
 
         destroy(db.pool(), user.id).await.unwrap();
         assert!(list(db.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn destroy_unknown_id_returns_user_not_found() {
+        let db = fresh_db().await;
+        let err = destroy(db.pool(), 99_999).await.unwrap_err();
+
+        assert!(matches!(err, DbError::NotFound(msg) if msg == "user"));
     }
 
     async fn preauth_key_id(db: &Database, user_id: i64) -> i64 {

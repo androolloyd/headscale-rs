@@ -45,6 +45,7 @@ use headscale_api::tailscale_wire::{
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
+use crate::acme_issuer::{AcmeHttp01IssuerConfig, ensure_http01_certificate};
 use crate::config::{
     PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname,
     validate_server_url_base_domain,
@@ -231,6 +232,26 @@ impl AcmeChallengeListener {
     }
 }
 
+struct AcmeHttp01Runtime {
+    issuer_config: AcmeHttp01IssuerConfig,
+    store: headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore,
+    handle: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+}
+
+impl AcmeHttp01Runtime {
+    fn take_handle(&mut self) -> Option<tokio::task::JoinHandle<Result<(), std::io::Error>>> {
+        self.handle.take()
+    }
+}
+
+impl Drop for AcmeHttp01Runtime {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 /// Run the control plane server.
 pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
     run_tailscale_wire_server(cfg).await
@@ -274,10 +295,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         tracing::info!(
             hostname = %plan.hostname,
             cache_dir = %plan.cache_dir.display(),
-            "ACME HTTP-01 cache-backed TLS configured"
-        );
-        tracing::warn!(
-            "ACME online issuance/renewal is not implemented yet; startup requires a valid cached autocert certificate"
+            directory_url = %plan.acme_url,
+            "ACME HTTP-01 TLS configured"
         );
     }
 
@@ -368,19 +387,42 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(|| hostname_from_server_url(server_url));
     let sans = SanConfig::with_hostname(tls_hostname);
+    let mut acme_http01_runtime = start_acme_http01_runtime(
+        acme_runtime.as_ref(),
+        cfg.tls.acme_email.clone(),
+        server_url,
+    )
+    .await?;
+    if let Some(runtime) = acme_http01_runtime.as_ref() {
+        let outcome = ensure_http01_certificate(&runtime.issuer_config, &runtime.store).await?;
+        if outcome.issued {
+            tracing::info!(
+                path = %outcome.cache_path.display(),
+                hostname = %runtime.issuer_config.hostname,
+                "ACME HTTP-01 certificate issued and cached"
+            );
+        } else {
+            tracing::info!(
+                path = %outcome.cache_path.display(),
+                hostname = %runtime.issuer_config.hostname,
+                "ACME HTTP-01 cached certificate reused"
+            );
+        }
+        tracing::warn!(
+            "ACME live renewal is not implemented yet; restart headscale-rs after replacing or renewing cached certificate material"
+        );
+    }
     let tls_source = tls_material_source(&cfg, &sans)?;
-    let (acme_http01, acme_http01_host, acme_http01_addr) = match acme_runtime.as_ref() {
-        Some(AcmeRuntimePlan {
-            hostname,
-            challenge_listener: AcmeChallengeListener::Http01 { addr, .. },
-            ..
-        }) => (
-            Some(headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore::new()),
-            Some(hostname.clone()),
-            Some(*addr),
-        ),
-        _ => (None, None, None),
-    };
+    let (acme_http01, acme_http01_host, acme_http01_addr) =
+        if let Some(runtime) = acme_http01_runtime.as_ref() {
+            (
+                Some(runtime.store.clone()),
+                Some(runtime.issuer_config.hostname.clone()),
+                None,
+            )
+        } else {
+            (None, None, None)
+        };
     let extra_routes = production_extra_routes(&runtime);
     let serve_cfg = serve::ServeConfig {
         http_addr: public_listeners.http_addr,
@@ -431,7 +473,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     });
     let policy_reload = spawn_policy_reload_signal_task(runtime.admin_service.clone());
     tracing::info!("Headscale-compatible Tailscale control plane ready");
-    let serve_result = await_serve_handle(handle, local_grpc, remote_grpc).await;
+    let external_acme_http01 = acme_http01_runtime
+        .as_mut()
+        .and_then(AcmeHttp01Runtime::take_handle);
+    let serve_result =
+        await_serve_handle(handle, local_grpc, remote_grpc, external_acme_http01).await;
     if let Some(handle) = policy_reload {
         handle.abort();
     }
@@ -1019,6 +1065,56 @@ fn public_listener_plan(cfg: &RunServerConfig) -> Result<PublicListenerPlan> {
     })
 }
 
+async fn start_acme_http01_runtime(
+    acme_runtime: Option<&AcmeRuntimePlan>,
+    acme_email: Option<String>,
+    server_url: &str,
+) -> Result<Option<AcmeHttp01Runtime>> {
+    let Some(AcmeRuntimePlan {
+        hostname,
+        acme_url,
+        cache_dir,
+        challenge_listener: AcmeChallengeListener::Http01 { addr, .. },
+    }) = acme_runtime
+    else {
+        return Ok(None);
+    };
+
+    let store = headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore::new();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind ACME HTTP-01 challenge listener {addr}"))?;
+    let bound_addr = listener
+        .local_addr()
+        .context("read ACME HTTP-01 challenge listener address")?;
+    tracing::info!(
+        addr = %bound_addr,
+        hostname = %hostname,
+        "ACME HTTP-01 challenge listener bound"
+    );
+    let app = headscale_api::tailscale_wire::acme::http01_listener_router(
+        store.clone(),
+        Some(server_url.to_string()),
+        Some(hostname.clone()),
+    );
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .map_err(std::io::Error::other)
+    });
+
+    Ok(Some(AcmeHttp01Runtime {
+        issuer_config: AcmeHttp01IssuerConfig {
+            directory_url: acme_url.clone(),
+            email: acme_email,
+            hostname: hostname.clone(),
+            cache_dir: cache_dir.clone(),
+        },
+        store,
+        handle: Some(handle),
+    }))
+}
+
 fn parse_acme_http01_listen_addr(value: &str) -> Result<SocketAddr> {
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case(":http") || trimmed.eq_ignore_ascii_case("http") {
@@ -1462,6 +1558,7 @@ async fn await_serve_handle(
     handle: serve::ServeHandle,
     local_grpc: tokio::task::JoinHandle<Result<()>>,
     remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
+    external_acme_http01: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
 ) -> Result<()> {
     let serve::ServeHandle {
         http,
@@ -1475,6 +1572,7 @@ async fn await_serve_handle(
         result = await_optional_listener_result(https, "https") => result,
         result = await_optional_listener_result(metrics, "metrics") => result,
         result = await_optional_listener_result(acme_http01, "acme http-01") => result,
+        result = await_optional_listener_result(external_acme_http01, "acme http-01") => result,
         result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
         result = await_optional_anyhow_task_result(remote_grpc, "remote grpc") => result,
     }

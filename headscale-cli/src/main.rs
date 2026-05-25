@@ -16,6 +16,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod acme_issuer;
 mod config;
 mod derp_config;
 mod mockoidc;

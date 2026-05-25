@@ -441,6 +441,7 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                 tls: server::TlsRuntimeConfig {
                     acme_url: config.as_ref().and_then(|c| c.acme_url.clone()),
                     acme_email: config.as_ref().and_then(|c| c.acme_email.clone()),
+                    acme_ca_root_path: None,
                     letsencrypt_hostname: config
                         .as_ref()
                         .and_then(|c| c.tls_letsencrypt_hostname.clone()),

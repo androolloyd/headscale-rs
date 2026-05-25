@@ -110,7 +110,7 @@ stock-client smokes, not comments. The current fixtures cover:
   and pinned headscale-go.
 
 The next parity layer should close the remaining paired stock-client and
-serving-topology gaps: live controlled-CA ACME smoke rows beyond the local
-issuer tests, API auth exactness, CLI over upstream gRPC exact snapshots,
-config-driven process wiring, and the remaining DNS/ACL/route edge matrices
-tracked in `docs/headscale-go-parity.md`.
+serving-topology gaps: TLS-ALPN controlled-CA ACME process coverage beyond the
+local issuer tests and HTTP-01 process smoke, API auth exactness, CLI over
+upstream gRPC exact snapshots, config-driven process wiring, and the remaining
+DNS/ACL/route edge matrices tracked in `docs/headscale-go-parity.md`.

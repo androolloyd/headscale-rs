@@ -776,14 +776,15 @@ impl Drop for TlsAlpnChallengeCleanup {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use axum::Json;
     use axum::extract::State;
-    use axum::http::header::{CONTENT_TYPE, LOCATION};
+    use axum::http::header::{CONTENT_TYPE, HOST, LOCATION};
     use axum::http::{HeaderName, HeaderValue, StatusCode};
     use axum::response::{IntoResponse, Response};
     use axum::routing::{get, head, post};
@@ -796,8 +797,8 @@ mod tests {
     use tokio_rustls::rustls;
     use tower::ServiceExt;
 
-    const LOCAL_ACME_HOSTNAME: &str = "headscale.test";
-    const LOCAL_ACME_TOKEN: &str = "hsrs-token";
+    pub(crate) const LOCAL_ACME_HOSTNAME: &str = "headscale.test";
+    pub(crate) const LOCAL_ACME_TOKEN: &str = "hsrs-token";
     const REPLAY_NONCE: HeaderName = HeaderName::from_static("replay-nonce");
 
     #[derive(Clone, Copy)]
@@ -813,6 +814,13 @@ mod tests {
                 Self::TlsAlpn01 => "tls-alpn-01",
             }
         }
+    }
+
+    #[derive(Clone)]
+    enum LocalAcmeValidation {
+        HttpStore(AcmeHttp01ChallengeStore),
+        HttpListener { addr: SocketAddr, host: String },
+        TlsResolver(Arc<AcmeTlsAlpnChallengeResolver>),
     }
 
     struct LocalAcmeCa {
@@ -873,8 +881,7 @@ mod tests {
         base_url: String,
         challenge: LocalAcmeChallenge,
         ca: Arc<LocalAcmeCa>,
-        http_store: Option<AcmeHttp01ChallengeStore>,
-        tls_resolver: Option<Arc<AcmeTlsAlpnChallengeResolver>>,
+        validation: LocalAcmeValidation,
         challenge_seen: Arc<AtomicBool>,
         finalized: Arc<AtomicBool>,
         cert_pem: Arc<Mutex<Option<String>>>,
@@ -914,13 +921,11 @@ mod tests {
             })
         }
 
-        fn validate_challenge_material(&self) -> Result<()> {
-            match self.challenge {
-                LocalAcmeChallenge::Http01 => {
-                    let key_authorization = self
-                        .http_store
-                        .as_ref()
-                        .and_then(|store| store.get(LOCAL_ACME_TOKEN))
+        async fn validate_challenge_material(&self) -> Result<()> {
+            match (&self.challenge, &self.validation) {
+                (LocalAcmeChallenge::Http01, LocalAcmeValidation::HttpStore(store)) => {
+                    let key_authorization = store
+                        .get(LOCAL_ACME_TOKEN)
                         .context("HTTP-01 key authorization was not installed")?;
                     if !key_authorization.starts_with(&format!("{LOCAL_ACME_TOKEN}.")) {
                         bail!(
@@ -928,23 +933,48 @@ mod tests {
                         );
                     }
                 }
-                LocalAcmeChallenge::TlsAlpn01 => {
-                    let resolver = self
-                        .tls_resolver
-                        .as_ref()
-                        .context("TLS-ALPN resolver was not provided")?;
+                (LocalAcmeChallenge::Http01, LocalAcmeValidation::HttpListener { addr, host }) => {
+                    let url =
+                        format!("http://{addr}/.well-known/acme-challenge/{LOCAL_ACME_TOKEN}");
+                    let response = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .context("build HTTP-01 validation client")?
+                        .get(url)
+                        .header(HOST.as_str(), host.as_str())
+                        .send()
+                        .await
+                        .context("fetch HTTP-01 key authorization from production listener")?;
+                    let status = response.status();
+                    let key_authorization = response
+                        .text()
+                        .await
+                        .context("read HTTP-01 validation response body")?;
+                    if status != reqwest::StatusCode::OK {
+                        bail!(
+                            "HTTP-01 production listener returned {status}: {key_authorization:?}"
+                        );
+                    }
+                    if !key_authorization.starts_with(&format!("{LOCAL_ACME_TOKEN}.")) {
+                        bail!(
+                            "HTTP-01 production listener key authorization {key_authorization:?} does not match token"
+                        );
+                    }
+                }
+                (LocalAcmeChallenge::TlsAlpn01, LocalAcmeValidation::TlsResolver(resolver)) => {
                     if !resolver.has_challenge_certificate(LOCAL_ACME_HOSTNAME) {
                         bail!("TLS-ALPN challenge certificate was not installed");
                     }
                 }
+                _ => bail!("ACME local validation target does not match challenge type"),
             }
             Ok(())
         }
     }
 
-    struct LocalAcmeServer {
-        directory_url: String,
-        ca_root_path: PathBuf,
+    pub(crate) struct LocalAcmeServer {
+        pub(crate) directory_url: String,
+        pub(crate) ca_root_path: PathBuf,
         _ca_dir: tempfile::TempDir,
         challenge_seen: Arc<AtomicBool>,
         finalized: Arc<AtomicBool>,
@@ -952,19 +982,37 @@ mod tests {
     }
 
     impl LocalAcmeServer {
-        async fn spawn_http01(store: AcmeHttp01ChallengeStore) -> Self {
-            Self::spawn(LocalAcmeChallenge::Http01, Some(store), None).await
+        pub(crate) async fn spawn_http01(store: AcmeHttp01ChallengeStore) -> Self {
+            Self::spawn(
+                LocalAcmeChallenge::Http01,
+                LocalAcmeValidation::HttpStore(store),
+            )
+            .await
         }
 
-        async fn spawn_tls_alpn(resolver: Arc<AcmeTlsAlpnChallengeResolver>) -> Self {
-            Self::spawn(LocalAcmeChallenge::TlsAlpn01, None, Some(resolver)).await
-        }
-
-        async fn spawn(
-            challenge: LocalAcmeChallenge,
-            http_store: Option<AcmeHttp01ChallengeStore>,
-            tls_resolver: Option<Arc<AcmeTlsAlpnChallengeResolver>>,
+        pub(crate) async fn spawn_http01_listener(
+            addr: SocketAddr,
+            host: impl Into<String>,
         ) -> Self {
+            Self::spawn(
+                LocalAcmeChallenge::Http01,
+                LocalAcmeValidation::HttpListener {
+                    addr,
+                    host: host.into(),
+                },
+            )
+            .await
+        }
+
+        pub(crate) async fn spawn_tls_alpn(resolver: Arc<AcmeTlsAlpnChallengeResolver>) -> Self {
+            Self::spawn(
+                LocalAcmeChallenge::TlsAlpn01,
+                LocalAcmeValidation::TlsResolver(resolver),
+            )
+            .await
+        }
+
+        async fn spawn(challenge: LocalAcmeChallenge, validation: LocalAcmeValidation) -> Self {
             install_test_crypto_provider();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -980,8 +1028,7 @@ mod tests {
                 base_url: base_url.clone(),
                 challenge,
                 ca,
-                http_store,
-                tls_resolver,
+                validation,
                 challenge_seen: challenge_seen.clone(),
                 finalized: finalized.clone(),
                 cert_pem: Arc::new(Mutex::new(None)),
@@ -1010,11 +1057,11 @@ mod tests {
             }
         }
 
-        fn challenge_seen(&self) -> bool {
+        pub(crate) fn challenge_seen(&self) -> bool {
             self.challenge_seen.load(Ordering::SeqCst)
         }
 
-        fn finalized(&self) -> bool {
+        pub(crate) fn finalized(&self) -> bool {
             self.finalized.load(Ordering::SeqCst)
         }
     }
@@ -1122,7 +1169,7 @@ mod tests {
     }
 
     async fn local_acme_challenge_ready(State(state): State<LocalAcmeState>) -> Response {
-        if let Err(err) = state.validate_challenge_material() {
+        if let Err(err) = state.validate_challenge_material().await {
             return problem_response(&format!("{err:#}"));
         }
         state.challenge_seen.store(true, Ordering::SeqCst);

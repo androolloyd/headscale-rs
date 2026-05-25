@@ -102,6 +102,7 @@ pub(crate) struct RunServerConfig {
 pub(crate) struct TlsRuntimeConfig {
     pub acme_url: Option<String>,
     pub acme_email: Option<String>,
+    pub acme_ca_root_path: Option<PathBuf>,
     pub letsencrypt_hostname: Option<String>,
     pub letsencrypt_cache_dir: Option<PathBuf>,
     pub letsencrypt_listen: Option<String>,
@@ -191,6 +192,7 @@ impl TlsRuntimeConfig {
         Ok(Some(AcmeRuntimePlan {
             hostname: hostname.to_string(),
             acme_url: self.acme_url_string(),
+            ca_root_path: self.acme_ca_root_path.clone(),
             cache_dir: self.cache_dir_path(),
             challenge_listener,
         }))
@@ -201,6 +203,7 @@ impl TlsRuntimeConfig {
 struct AcmeRuntimePlan {
     hostname: String,
     acme_url: String,
+    ca_root_path: Option<PathBuf>,
     cache_dir: PathBuf,
     challenge_listener: AcmeChallengeListener,
 }
@@ -1099,6 +1102,7 @@ async fn start_acme_http01_runtime(
     let Some(AcmeRuntimePlan {
         hostname,
         acme_url,
+        ca_root_path,
         cache_dir,
         challenge_listener: AcmeChallengeListener::Http01 { addr, .. },
     }) = acme_runtime
@@ -1135,7 +1139,7 @@ async fn start_acme_http01_runtime(
             email: acme_email,
             hostname: hostname.clone(),
             cache_dir: cache_dir.clone(),
-            ca_root_path: None,
+            ca_root_path: ca_root_path.clone(),
         },
         store,
         handle: Some(handle),
@@ -1150,6 +1154,7 @@ fn acme_tls_alpn_issuer_config(
         Some(AcmeRuntimePlan {
             hostname,
             acme_url,
+            ca_root_path,
             cache_dir,
             challenge_listener: AcmeChallengeListener::TlsAlpn01 { .. },
         }) => Some(AcmeHttp01IssuerConfig {
@@ -1157,7 +1162,7 @@ fn acme_tls_alpn_issuer_config(
             email: acme_email,
             hostname: hostname.clone(),
             cache_dir: cache_dir.clone(),
-            ca_root_path: None,
+            ca_root_path: ca_root_path.clone(),
         }),
         _ => None,
     }
@@ -2078,6 +2083,7 @@ fn is_tailscale_reserved_ipv6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acme_issuer::test_support::{LOCAL_ACME_HOSTNAME, LocalAcmeServer};
     use axum::{
         body::{Body, to_bytes},
         http::{Request as HttpRequest, StatusCode, header},
@@ -2102,6 +2108,7 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
+    use tokio::time::{sleep, timeout};
     use tonic::{
         Request as TonicRequest,
         transport::{Channel, Endpoint, Uri},
@@ -2340,6 +2347,11 @@ mod tests {
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
+    }
+
+    fn unused_loopback_addr() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
     }
 
     #[tokio::test]
@@ -3357,6 +3369,57 @@ regions:
         );
     }
 
+    #[tokio::test]
+    async fn run_server_http01_acme_issues_through_production_challenge_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let challenge_addr = unused_loopback_addr();
+        let cache_dir = dir.path().join("acme-cache");
+        let acme_server =
+            LocalAcmeServer::spawn_http01_listener(challenge_addr, LOCAL_ACME_HOSTNAME).await;
+        let mut cfg = test_run_server_config(&dir);
+        cfg.listen = unused_loopback_addr().to_string();
+        cfg.grpc_listen_addr = unused_loopback_addr().to_string();
+        cfg.metrics_listen_addr = None;
+        cfg.server_url = Some(format!("https://{LOCAL_ACME_HOSTNAME}"));
+        cfg.disable_check_updates = true;
+        cfg.tls = TlsRuntimeConfig {
+            acme_url: Some(acme_server.directory_url.clone()),
+            acme_email: Some("ops@example.com".into()),
+            acme_ca_root_path: Some(acme_server.ca_root_path.clone()),
+            letsencrypt_hostname: Some(LOCAL_ACME_HOSTNAME.into()),
+            letsencrypt_cache_dir: Some(cache_dir.clone()),
+            letsencrypt_listen: Some(challenge_addr.to_string()),
+            letsencrypt_challenge_type: Some("HTTP-01".into()),
+            ..TlsRuntimeConfig::default()
+        };
+
+        let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
+        let mut server_task = tokio::spawn(run_server(cfg));
+        let wait_for_issuance = async {
+            loop {
+                if acme_server.finalized() && cache_path.exists() {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut server_task => {
+                panic!("headscale server exited before HTTP-01 issuance completed: {outcome:?}");
+            }
+            waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
+                waited.expect("HTTP-01 issuance through production challenge listener timed out");
+            }
+        }
+
+        server_task.abort();
+        let _ = server_task.await;
+        assert!(acme_server.challenge_seen());
+        assert!(acme_server.finalized());
+        let material = tls::load_from_autocert_cache(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
+        assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+    }
+
     #[test]
     fn runtime_config_allows_http01_acme_cache_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -3563,6 +3626,7 @@ database:
             tls: TlsRuntimeConfig {
                 acme_url: Some("https://acme.example/directory".into()),
                 acme_email: Some("ops@example.com".into()),
+                acme_ca_root_path: None,
                 letsencrypt_hostname: Some("headscale.example".into()),
                 letsencrypt_cache_dir: Some(dir.path().join("cache")),
                 letsencrypt_listen: Some(":http".into()),

@@ -141,6 +141,16 @@ fn assert_normalized_node_stdout_snapshot(output: &Output, expected: &str, label
     assert_eq!(stderr(output), "", "stderr snapshot for {label}");
 }
 
+fn assert_normalized_secret_stdout_snapshot(output: &Output, expected: &str, label: &str) {
+    assert!(output.status.success(), "stderr: {}", stderr(output));
+    assert_eq!(
+        trim_line_end_spaces(&normalize_generated_secret_stdout(&stdout(output))),
+        trim_line_end_spaces(expected),
+        "stdout snapshot for {label}"
+    );
+    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
+}
+
 fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
     let output = headscale_clean(args);
     assert_eq!(
@@ -434,6 +444,13 @@ fn normalize_generated_node_stdout(text: &str) -> String {
     replace_rfc3339_second_timestamps(&text)
 }
 
+fn normalize_generated_secret_stdout(text: &str) -> String {
+    let text = replace_full_preauth_key_bodies(text);
+    let text = replace_display_token_bodies(&text, "hskey-auth-");
+    let text = replace_display_token_bodies(&text, "hskey-api-");
+    replace_human_second_timestamps(&text)
+}
+
 fn replace_short_key_bodies(text: &str, prefix: &str) -> String {
     let mut normalized = text.to_string();
     let mut start = 0;
@@ -455,6 +472,61 @@ fn replace_short_key_bodies(text: &str, prefix: &str) -> String {
         }
     }
     normalized
+}
+
+fn replace_full_preauth_key_bodies(text: &str) -> String {
+    const PREFIX: &str = "hskey-auth-";
+    const PREFIX_PLACEHOLDER: &str = "aaaaaaaaaaaa";
+    const SECRET_PLACEHOLDER: &str =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let mut normalized = text.to_string();
+    let mut start = 0;
+    while let Some(relative) = normalized[start..].find(PREFIX) {
+        let body_start = start + relative + PREFIX.len();
+        let dash = body_start + PREFIX_PLACEHOLDER.len();
+        let secret_start = dash + 1;
+        let secret_end = secret_start + SECRET_PLACEHOLDER.len();
+        if secret_end <= normalized.len()
+            && normalized.as_bytes().get(dash) == Some(&b'-')
+            && is_urlsafe_token_body(&normalized[body_start..dash])
+            && is_urlsafe_token_body(&normalized[secret_start..secret_end])
+        {
+            normalized.replace_range(secret_start..secret_end, SECRET_PLACEHOLDER);
+            normalized.replace_range(body_start..dash, PREFIX_PLACEHOLDER);
+            start = secret_end;
+        } else {
+            start = body_start;
+        }
+    }
+    normalized
+}
+
+fn replace_display_token_bodies(text: &str, prefix: &str) -> String {
+    const PREFIX_PLACEHOLDER: &str = "aaaaaaaaaaaa";
+    const DISPLAY_SUFFIX: &str = "-***";
+
+    let mut normalized = text.to_string();
+    let mut start = 0;
+    while let Some(relative) = normalized[start..].find(prefix) {
+        let body_start = start + relative + prefix.len();
+        let body_end = body_start + PREFIX_PLACEHOLDER.len();
+        if body_end <= normalized.len()
+            && normalized[body_end..].starts_with(DISPLAY_SUFFIX)
+            && is_urlsafe_token_body(&normalized[body_start..body_end])
+        {
+            normalized.replace_range(body_start..body_end, PREFIX_PLACEHOLDER);
+            start = body_end + DISPLAY_SUFFIX.len();
+        } else {
+            start = body_start;
+        }
+    }
+    normalized
+}
+
+fn is_urlsafe_token_body(text: &str) -> bool {
+    text.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 fn replace_rfc3339_second_timestamps(text: &str) -> String {
@@ -499,6 +571,49 @@ fn is_rfc3339_second_timestamp_at(bytes: &[u8], i: usize) -> bool {
         && digit(bytes, i + 17)
         && digit(bytes, i + 18)
         && bytes.get(i + 19) == Some(&b'Z')
+}
+
+fn replace_human_second_timestamps(text: &str) -> String {
+    const PLACEHOLDER: &str = "0000-00-00 00:00:00";
+    let mut normalized = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i + PLACEHOLDER.len() <= text.len() {
+        if is_human_second_timestamp_at(bytes, i) {
+            normalized.push_str(&text[last..i]);
+            normalized.push_str(PLACEHOLDER);
+            i += PLACEHOLDER.len();
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    normalized.push_str(&text[last..]);
+    normalized
+}
+
+fn is_human_second_timestamp_at(bytes: &[u8], i: usize) -> bool {
+    fn digit(bytes: &[u8], idx: usize) -> bool {
+        bytes.get(idx).is_some_and(u8::is_ascii_digit)
+    }
+
+    (0..4).all(|offset| digit(bytes, i + offset))
+        && bytes.get(i + 4) == Some(&b'-')
+        && digit(bytes, i + 5)
+        && digit(bytes, i + 6)
+        && bytes.get(i + 7) == Some(&b'-')
+        && digit(bytes, i + 8)
+        && digit(bytes, i + 9)
+        && bytes.get(i + 10) == Some(&b' ')
+        && digit(bytes, i + 11)
+        && digit(bytes, i + 12)
+        && bytes.get(i + 13) == Some(&b':')
+        && digit(bytes, i + 14)
+        && digit(bytes, i + 15)
+        && bytes.get(i + 16) == Some(&b':')
+        && digit(bytes, i + 17)
+        && digit(bytes, i + 18)
 }
 
 fn display_prefix(secret: &str, token_prefix: &str) -> String {
@@ -2094,18 +2209,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&list_preauth)
     );
-    let list_preauth_stdout = stdout(&list_preauth);
-    assert!(list_preauth_stdout.contains("ID  Key/Prefix"));
-    assert!(list_preauth_stdout.contains("Reusable"));
-    assert!(list_preauth_stdout.contains("Ephemeral"));
-    assert!(list_preauth_stdout.contains("Used"));
-    assert!(list_preauth_stdout.contains("Expiration"));
-    assert!(list_preauth_stdout.contains("Created"));
-    assert!(list_preauth_stdout.contains("Owner"));
-    assert!(list_preauth_stdout.contains(&preauth_key));
-    assert!(list_preauth_stdout.contains("alice"));
-    assert!(list_preauth_stdout.contains("true"));
-    assert_eq!(stderr(&list_preauth), "");
+    assert_normalized_secret_stdout_snapshot(
+        &list_preauth,
+        include_str!("snapshots/preauthkeys_list_success.stdout"),
+        "preauthkeys list populated",
+    );
 
     let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
     let preauth_json = json_output(&preauth_json);
@@ -2146,9 +2254,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&empty_preauth)
     );
-    assert!(stdout(&empty_preauth).starts_with("ID  Key/Prefix"));
-    assert!(!stdout(&empty_preauth).contains("No preauth keys."));
-    assert_eq!(stderr(&empty_preauth), "");
+    assert_normalized_secret_stdout_snapshot(
+        &empty_preauth,
+        include_str!("snapshots/preauthkeys_list_empty.stdout"),
+        "preauthkeys list empty",
+    );
 
     let create_preauth_json = headscale_with_config(
         &config,
@@ -2458,13 +2568,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&list_api_keys)
     );
-    let list_api_stdout = stdout(&list_api_keys);
-    assert!(list_api_stdout.contains("ID  Prefix"));
-    assert!(list_api_stdout.contains("Expiration"));
-    assert!(list_api_stdout.contains("Created"));
-    assert!(!list_api_stdout.contains("LAST_SEEN"));
-    assert!(list_api_stdout.contains(&api_prefix));
-    assert_eq!(stderr(&list_api_keys), "");
+    assert!(stdout(&list_api_keys).contains(&api_prefix));
+    assert_normalized_secret_stdout_snapshot(
+        &list_api_keys,
+        include_str!("snapshots/apikeys_list_success.stdout"),
+        "apikeys list populated",
+    );
 
     let api_json = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
     let api_id = json_output(&api_json)[0]["id"]
@@ -2493,9 +2602,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "stderr: {}",
         stderr(&empty_api_keys)
     );
-    assert!(stdout(&empty_api_keys).starts_with("ID  Prefix"));
-    assert!(!stdout(&empty_api_keys).contains("No API keys."));
-    assert_eq!(stderr(&empty_api_keys), "");
+    assert_normalized_secret_stdout_snapshot(
+        &empty_api_keys,
+        include_str!("snapshots/apikeys_list_empty.stdout"),
+        "apikeys list empty",
+    );
 
     let create_api_key_json = headscale_with_config(
         &config,

@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use headscale_api::{
+    dns::{DnsConfigSpec, DnsStore, MachineDnsRecord},
     policy::{
         NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, build_peer_map_for_doc,
         compile_ssh_policy_with_base_url, parse_hujson_policy,
@@ -107,6 +108,8 @@ struct WireScenario {
     #[serde(default)]
     dns_config: Option<Value>,
     #[serde(default)]
+    runtime_dns_config: Option<Value>,
+    #[serde(default)]
     derp_map: Option<Value>,
     #[serde(default)]
     register_request: Option<Value>,
@@ -195,6 +198,8 @@ struct SshActionOut {
 struct WireOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     dns_config: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_dns_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     derp_map: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -710,7 +715,7 @@ fn main() -> Result<()> {
             route_approvals: run_route_checks(&scenario, &doc)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
-            wire: normalize_wire(scenario.wire)?,
+            wire: normalize_wire(scenario.wire, &scenario.nodes)?,
         });
     }
 
@@ -1023,13 +1028,8 @@ fn compile_filter_rules(
                 append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
             }
         } else {
-            let dst_ips = resolve_principals(
-                doc,
-                &rule.dst,
-                nodes,
-                None,
-                PrincipalPosition::Destination,
-            );
+            let dst_ips =
+                resolve_principals(doc, &rule.dst, nodes, None, PrincipalPosition::Destination);
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
     }
@@ -1275,7 +1275,9 @@ fn reduce_filter_rules_for_node(
                     .iter()
                     .any(|route| prefixes_overlap(&dst.ip, route))
                 || (node.routes.iter().any(|route| is_exit_route(route))
-                    && internet_filter_cidrs().iter().any(|prefix| prefix == &dst.ip))
+                    && internet_filter_cidrs()
+                        .iter()
+                        .any(|prefix| prefix == &dst.ip))
         });
         if rule.dst_ports.is_empty() {
             continue;
@@ -1865,7 +1867,10 @@ fn is_default_route(route: &str) -> Result<bool> {
     Ok(parsed.prefix_len() == 0)
 }
 
-fn normalize_wire(wire: Option<WireScenario>) -> Result<Option<WireOutput>> {
+fn normalize_wire(
+    wire: Option<WireScenario>,
+    nodes: &[ScenarioNode],
+) -> Result<Option<WireOutput>> {
     let Some(wire) = wire else {
         return Ok(None);
     };
@@ -1873,6 +1878,24 @@ fn normalize_wire(wire: Option<WireScenario>) -> Result<Option<WireOutput>> {
     if let Some(value) = wire.dns_config {
         let parsed: DnsConfig = serde_json::from_value(value)?;
         out.dns_config = Some(serde_json::to_value(parsed)?);
+    }
+    if let Some(value) = wire.runtime_dns_config {
+        let spec: DnsConfigSpec = serde_json::from_value(value)?;
+        let machines = nodes
+            .iter()
+            .map(|node| MachineDnsRecord {
+                hostname: format!("node-{}", node.id),
+                ipv4: node.ipv4.parse().ok(),
+                ipv6: if node.ipv6.is_empty() {
+                    None
+                } else {
+                    node.ipv6.parse().ok()
+                },
+                node_id: node.id,
+            })
+            .collect::<Vec<_>>();
+        let config = DnsStore::from_spec(spec).build(&machines);
+        out.runtime_dns_config = Some(serde_json::to_value(config)?);
     }
     if let Some(value) = wire.derp_map {
         let parsed: DerpMap = serde_json::from_value(value)?;

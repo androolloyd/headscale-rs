@@ -1,0 +1,30 @@
+{
+  "name": "wire-dns-runtime-magic-extra-records",
+  "policy": {
+    "acls": []
+  },
+  "users": [
+    { "id": 1, "name": "alice" }
+  ],
+  "nodes": [
+    { "id": 101, "user_id": 1, "ipv4": "100.64.0.101" },
+    { "id": 102, "user_id": 1, "ipv4": "100.64.0.102" }
+  ],
+  "wire": {
+    "runtime_dns_config": {
+      "magic_dns": true,
+      "base_domain": "tail.example",
+      "override_local_dns": false,
+      "nameservers": {
+        "global": ["1.1.1.1"],
+        "split": {
+          "corp.example": ["10.0.0.53"]
+        }
+      },
+      "search_domains": ["corp.example"],
+      "extra_records": [
+        { "name": "ops.tail.example", "type": "A", "value": "100.64.0.50" }
+      ]
+    }
+  }
+}

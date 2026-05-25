@@ -1539,6 +1539,41 @@
   },
   {
     "engine": "headscale",
+    "name": "wire-dns-runtime-magic-extra-records",
+    "filter": [
+
+    ],
+    "wire": {
+      "runtime_dns_config": {
+        "Routes": {
+          "corp.example": [
+            {
+              "Addr": "10.0.0.53"
+            }
+          ]
+        },
+        "FallbackResolvers": [
+          {
+            "Addr": "1.1.1.1"
+          }
+        ],
+        "Domains": [
+          "tail.example",
+          "corp.example"
+        ],
+        "Proxied": true,
+        "ExtraRecords": [
+          {
+            "Name": "ops.tail.example",
+            "Type": "A",
+            "Value": "100.64.0.50"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "engine": "headscale",
     "name": "wire-hostinfo-netinfo-metadata",
     "filter": [
 

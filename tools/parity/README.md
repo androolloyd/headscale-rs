@@ -39,6 +39,10 @@ Scenarios may also include:
   response summaries. The Go side round-trips these through
   `tailscale.com/tailcfg`; the Rust side round-trips through
   `headscale-api::tailscale_wire::wire`.
+- `wire.runtime_dns_config`: upstream-shaped DNS config input that both
+  harnesses render through their runtime DNS builders. Use this for behavior
+  that comes from config loading and map-time DNS construction, such as keeping
+  MagicDNS peer names out of `DNSConfig.ExtraRecords`.
 
 Add scenarios here when closing parity gaps. Keep the default scenario set green;
 put known divergences in separate local files until the implementation catches up.

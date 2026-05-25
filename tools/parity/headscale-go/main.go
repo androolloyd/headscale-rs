@@ -14,6 +14,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/rs/zerolog"
+	"github.com/spf13/viper"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
 )
@@ -135,6 +136,7 @@ type sshActionOut struct {
 
 type wireScenario struct {
 	DNSConfig        json.RawMessage `json:"dns_config,omitempty"`
+	RuntimeDNSConfig json.RawMessage `json:"runtime_dns_config,omitempty"`
 	DERPMap          json.RawMessage `json:"derp_map,omitempty"`
 	RegisterRequest  json.RawMessage `json:"register_request,omitempty"`
 	RegisterResponse json.RawMessage `json:"register_response,omitempty"`
@@ -144,6 +146,7 @@ type wireScenario struct {
 
 type wireOutput struct {
 	DNSConfig        json.RawMessage          `json:"dns_config,omitempty"`
+	RuntimeDNSConfig json.RawMessage          `json:"runtime_dns_config,omitempty"`
 	DERPMap          json.RawMessage          `json:"derp_map,omitempty"`
 	RegisterRequest  *registerRequestSummary  `json:"register_request,omitempty"`
 	RegisterResponse *registerResponseSummary `json:"register_response,omitempty"`
@@ -797,6 +800,13 @@ func normalizeWire(in *wireScenario) (*wireOutput, error) {
 		}
 		out.DNSConfig = raw
 	}
+	if len(in.RuntimeDNSConfig) > 0 {
+		raw, err := normalizeRuntimeDNSConfig(in.RuntimeDNSConfig)
+		if err != nil {
+			return nil, err
+		}
+		out.RuntimeDNSConfig = raw
+	}
 	if len(in.DERPMap) > 0 {
 		var v tailcfg.DERPMap
 		if err := json.Unmarshal(in.DERPMap, &v); err != nil {
@@ -841,6 +851,57 @@ func normalizeWire(in *wireScenario) (*wireOutput, error) {
 		out.MapResponse = summary
 	}
 	return out, nil
+}
+
+func normalizeRuntimeDNSConfig(raw json.RawMessage) (json.RawMessage, error) {
+	var dnsConfig map[string]any
+	if err := json.Unmarshal(raw, &dnsConfig); err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config: %w", err)
+	}
+
+	config := map[string]any{
+		"server_url": "https://derp.no",
+		"noise": map[string]any{
+			"private_key_path": "private_key.pem",
+		},
+		"prefixes": map[string]any{
+			"v4":         "100.64.0.0/10",
+			"v6":         "fd7a:115c:a1e0::/48",
+			"allocation": "sequential",
+		},
+		"database": map[string]any{
+			"type": "sqlite3",
+		},
+		"dns": dnsConfig,
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config config marshal: %w", err)
+	}
+
+	tmp, err := os.CreateTemp("", "headscale-parity-dns-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config temp file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(configJSON); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("wire runtime_dns_config temp write: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config temp close: %w", err)
+	}
+
+	viper.Reset()
+	defer viper.Reset()
+	if err := types.LoadConfig(tmp.Name(), true); err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config load config: %w", err)
+	}
+	cfg, err := types.LoadServerConfig()
+	if err != nil {
+		return nil, fmt.Errorf("wire runtime_dns_config server config: %w", err)
+	}
+	return marshalRaw(cfg.TailcfgDNSConfig)
 }
 
 func marshalRaw(v any) (json.RawMessage, error) {

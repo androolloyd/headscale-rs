@@ -1,0 +1,3 @@
+ID  Key/Prefix                                                                                Reusable  Ephemeral  Used   Expiration           Created              Owner
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+1   hskey-auth-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  true      true       false  0000-00-00 00:00:00  0000-00-00 00:00:00  alice

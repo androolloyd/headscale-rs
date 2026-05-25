@@ -44,6 +44,8 @@ use super::WireError;
 pub const TLS_CERT_FILENAME: &str = "tls.crt";
 /// Filename for the persisted private key (PEM).
 pub const TLS_KEY_FILENAME: &str = "tls.key";
+/// ALPN protocol required by ACME TLS-ALPN-01 challenge handshakes.
+pub const ACME_TLS_ALPN_PROTOCOL: &[u8] = b"acme-tls/1";
 
 /// Materialized TLS material — the PEM-encoded cert + key (so callers
 /// can copy them into a peer's trust store) plus a ready-to-bind
@@ -257,6 +259,18 @@ pub fn build_grpc_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerC
     build_server_config_with_alpn(cert_pem, key_pem, vec![b"h2".to_vec()])
 }
 
+/// Build a TLS config for an ACME TLS-ALPN-01 challenge certificate.
+///
+/// This does not issue or select challenge certificates by SNI; it is the
+/// rustls capability ACME issuance will need once certificate provisioning is
+/// wired in.
+pub fn build_acme_tls_alpn_server_config(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<ServerConfig, WireError> {
+    build_server_config_with_alpn(cert_pem, key_pem, vec![ACME_TLS_ALPN_PROTOCOL.to_vec()])
+}
+
 fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, WireError> {
     build_server_config_with_alpn(cert_pem, key_pem, vec![b"http/1.1".to_vec()])
 }
@@ -344,5 +358,17 @@ mod tests {
         assert_eq!(loaded.key_pem, generated.key_pem);
         assert_eq!(loaded.cert_path, generated.cert_path);
         assert_eq!(loaded.key_path, generated.key_path);
+    }
+
+    #[test]
+    fn acme_tls_alpn_config_advertises_acme_protocol_only() {
+        let dir = tempdir().unwrap();
+        let sans = SanConfig::with_hostname("acme.example");
+        let generated = load_or_generate(dir.path(), &sans).unwrap();
+
+        let cfg = build_acme_tls_alpn_server_config(&generated.cert_pem, &generated.key_pem)
+            .expect("ACME TLS-ALPN rustls config");
+
+        assert_eq!(cfg.alpn_protocols, vec![ACME_TLS_ALPN_PROTOCOL.to_vec()]);
     }
 }

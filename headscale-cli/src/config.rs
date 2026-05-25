@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use headscale_api::dns::DnsConfigSpec;
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
+use headscale_db::DatabaseBackend;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::derp_config::DerpConfig;
@@ -1186,8 +1187,12 @@ impl CliConfig {
 }
 
 impl UpstreamDatabaseConfig {
-    pub(crate) fn is_postgres(&self) -> bool {
-        self.database_type.as_deref() == Some("postgres")
+    pub(crate) fn runtime_backend(&self) -> Option<DatabaseBackend> {
+        match self.database_type.as_deref() {
+            Some("sqlite" | "sqlite3") => Some(DatabaseBackend::Sqlite),
+            Some("postgres") => Some(DatabaseBackend::Postgres),
+            _ => None,
+        }
     }
 
     fn sqlite_path(&self) -> Option<PathBuf> {
@@ -2266,6 +2271,7 @@ database:
         assert_eq!(config.tuning.node_store_batch_timeout, 250_000_000);
 
         let database = config.database.as_ref().unwrap();
+        assert_eq!(database.runtime_backend(), Some(DatabaseBackend::Sqlite));
         assert_eq!(database.debug_type(), "sqlite3");
         assert!(database.debug_enabled());
         assert_eq!(database.debug_gorm().slow_threshold_nanos(), 1_000_000_000);
@@ -2770,8 +2776,38 @@ database:
 
         config.validate_for_configtest().unwrap();
         assert_eq!(
+            config.database.as_ref().unwrap().runtime_backend(),
+            Some(DatabaseBackend::Sqlite)
+        );
+        assert_eq!(
             config.database.unwrap().debug_sqlite().wal_autocheckpoint(),
             -1
+        );
+    }
+
+    #[test]
+    fn postgres_database_config_maps_to_runtime_backend_without_serving_it() {
+        let source = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+database:
+  type: postgres
+  postgres:
+    host: localhost
+    port: 5432
+    name: headscale
+    user: foo
+    pass: bar
+    ssl: false
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        assert_eq!(
+            config.database.as_ref().unwrap().runtime_backend(),
+            Some(DatabaseBackend::Postgres)
         );
     }
 

@@ -50,7 +50,7 @@ use crate::config::{
     validate_server_url_base_domain,
 };
 use crate::derp_config::DerpConfig;
-use headscale_db::{Database, SqliteOpenOptions};
+use headscale_db::{Database, DatabaseBackend, SqliteOpenOptions};
 
 const NODE_EXPIRY_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -154,6 +154,41 @@ impl TlsRuntimeConfig {
             .to_string()
     }
 
+    fn acme_runtime_plan(
+        &self,
+        public_listeners: PublicListenerPlan,
+    ) -> Result<Option<AcmeRuntimePlan>> {
+        let Some(hostname) = non_empty_str(self.letsencrypt_hostname.as_deref()) else {
+            return Ok(None);
+        };
+        let challenge_type = self.challenge_type_string();
+        let challenge_listener = match challenge_type.as_str() {
+            "HTTP-01" => {
+                let listen = self.letsencrypt_listen_string();
+                AcmeChallengeListener::Http01 {
+                    listen: listen.clone(),
+                    addr: parse_acme_http01_listen_addr(&listen)?,
+                }
+            }
+            "TLS-ALPN-01" => AcmeChallengeListener::TlsAlpn01 {
+                addr: public_listeners.https_addr.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "TLS-ALPN-01 ACME requires a public TLS listener on listen_addr"
+                    )
+                })?,
+            },
+            other => anyhow::bail!(
+                "unsupported tls_letsencrypt_challenge_type {other:?}; supported values are HTTP-01 and TLS-ALPN-01"
+            ),
+        };
+        Ok(Some(AcmeRuntimePlan {
+            hostname: hostname.to_string(),
+            acme_url: self.acme_url_string(),
+            cache_dir: self.cache_dir_string(),
+            challenge_listener,
+        }))
+    }
+
     fn unsupported_acme_message(&self) -> String {
         let challenge = self.challenge_type_string();
         let challenge_context = match challenge.as_str() {
@@ -173,6 +208,45 @@ impl TlsRuntimeConfig {
             self.acme_url_string(),
             self.cache_dir_string()
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcmeRuntimePlan {
+    hostname: String,
+    acme_url: String,
+    cache_dir: String,
+    challenge_listener: AcmeChallengeListener,
+}
+
+impl AcmeRuntimePlan {
+    fn unsupported_message(&self) -> String {
+        format!(
+            "tls_letsencrypt_hostname/ACME TLS is not implemented in headscale-rs yet; configured {} for hostname {} would require ACME certificate issuance using acme_url {} and cache_dir {}. Use tls_cert_path/tls_key_path or terminate TLS before headscale-rs.",
+            self.challenge_listener.context(),
+            self.hostname,
+            self.acme_url,
+            self.cache_dir
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AcmeChallengeListener {
+    Http01 { listen: String, addr: SocketAddr },
+    TlsAlpn01 { addr: SocketAddr },
+}
+
+impl AcmeChallengeListener {
+    fn context(&self) -> String {
+        match self {
+            Self::Http01 { listen, addr } => {
+                format!("HTTP-01 challenge listener {listen} ({addr})")
+            }
+            Self::TlsAlpn01 { addr } => {
+                format!("TLS-ALPN-01 on the public TLS listener {addr}")
+            }
+        }
     }
 }
 
@@ -825,14 +899,16 @@ fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> 
     if cfg
         .database
         .as_ref()
-        .is_some_and(UpstreamDatabaseConfig::is_postgres)
+        .and_then(UpstreamDatabaseConfig::runtime_backend)
+        == Some(DatabaseBackend::Postgres)
     {
         anyhow::bail!(
             "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
         );
     }
-    if cfg.tls.letsencrypt_enabled() {
-        anyhow::bail!("{}", cfg.tls.unsupported_acme_message());
+    let public_listeners = public_listener_plan(cfg)?;
+    if let Some(plan) = cfg.tls.acme_runtime_plan(public_listeners)? {
+        anyhow::bail!("{}", plan.unsupported_message());
     }
     Ok(())
 }
@@ -911,6 +987,14 @@ fn public_listener_plan(cfg: &RunServerConfig) -> Result<PublicListenerPlan> {
         http_addr: Some(listen_addr),
         https_addr: None,
     })
+}
+
+fn parse_acme_http01_listen_addr(value: &str) -> Result<SocketAddr> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case(":http") || trimmed.eq_ignore_ascii_case("http") {
+        return Ok(SocketAddr::from(([0, 0, 0, 0], 80)));
+    }
+    parse_socket_addr(trimmed, "tls_letsencrypt_listen")
 }
 
 fn optional_addr_status(addr: Option<SocketAddr>) -> String {
@@ -2980,6 +3064,55 @@ regions:
     }
 
     #[test]
+    fn acme_runtime_plan_resolves_http01_challenge_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_challenge_type = Some("HTTP-01".into());
+        cfg.tls.letsencrypt_listen = Some(":http".into());
+
+        let public_listeners = public_listener_plan(&cfg).unwrap();
+        let plan = cfg
+            .tls
+            .acme_runtime_plan(public_listeners)
+            .unwrap()
+            .expect("ACME plan");
+
+        assert_eq!(plan.hostname, "headscale.example");
+        assert_eq!(plan.acme_url, DEFAULT_ACME_URL);
+        assert_eq!(plan.cache_dir, DEFAULT_LETSENCRYPT_CACHE_DIR);
+        assert_eq!(
+            plan.challenge_listener,
+            AcmeChallengeListener::Http01 {
+                listen: ":http".into(),
+                addr: "0.0.0.0:80".parse().unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn acme_runtime_plan_uses_public_tls_listener_for_tls_alpn01() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_challenge_type = Some("TLS-ALPN-01".into());
+
+        let public_listeners = public_listener_plan(&cfg).unwrap();
+        let plan = cfg
+            .tls
+            .acme_runtime_plan(public_listeners)
+            .unwrap()
+            .expect("ACME plan");
+
+        assert_eq!(
+            plan.challenge_listener,
+            AcmeChallengeListener::TlsAlpn01 {
+                addr: "127.0.0.1:8080".parse().unwrap(),
+            }
+        );
+    }
+
+    #[test]
     fn runtime_config_rejects_unsupported_acme_before_serving() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_run_server_config(&dir);
@@ -3044,6 +3177,14 @@ database:
         assert_eq!(
             parse_socket_addr(":50443", "grpc_listen_addr").unwrap(),
             "0.0.0.0:50443".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn acme_http01_listener_parser_accepts_upstream_http_service_name() {
+        assert_eq!(
+            parse_acme_http01_listen_addr(":http").unwrap(),
+            "0.0.0.0:80".parse::<SocketAddr>().unwrap()
         );
     }
 

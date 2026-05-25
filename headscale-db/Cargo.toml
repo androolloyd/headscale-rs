@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# Compile SQLx's Postgres driver for parity work without enabling
+# Postgres runtime use in `Database`, which remains SQLite-only.
+postgres-sqlx = ["sqlx/postgres"]
+
 [dependencies]
 # Workspace dependencies
 tokio.workspace = true

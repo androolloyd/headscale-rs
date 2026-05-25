@@ -64,18 +64,56 @@ pub struct SqliteOpenOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DatabaseBackend {
+pub enum DatabaseBackend {
     Sqlite,
     Postgres,
-    Unknown,
 }
 
-fn classify_database_url(url: &str) -> DatabaseBackend {
-    let scheme = url.split_once(':').map(|(scheme, _)| scheme);
-    match scheme {
-        Some("sqlite") => DatabaseBackend::Sqlite,
-        Some("postgres" | "postgresql") => DatabaseBackend::Postgres,
-        _ => DatabaseBackend::Unknown,
+impl DatabaseBackend {
+    pub fn from_url(url: &str) -> Option<Self> {
+        url.split_once(':')
+            .and_then(|(scheme, _)| Self::from_url_scheme(scheme))
+    }
+
+    pub fn from_url_scheme(scheme: &str) -> Option<Self> {
+        match scheme {
+            "sqlite" => Some(Self::Sqlite),
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            _ => None,
+        }
+    }
+
+    pub const fn upstream_name(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite3",
+            Self::Postgres => "postgres",
+        }
+    }
+
+    pub const fn url_schemes(self) -> &'static [&'static str] {
+        match self {
+            Self::Sqlite => &["sqlite"],
+            Self::Postgres => &["postgres", "postgresql"],
+        }
+    }
+
+    pub const fn headscale_go_supported(self) -> bool {
+        true
+    }
+
+    pub const fn headscale_db_supported(self) -> bool {
+        matches!(self, Self::Sqlite)
+    }
+
+    pub const fn sqlite_import_supported(self) -> bool {
+        matches!(self, Self::Sqlite)
+    }
+
+    pub const fn sqlx_driver_compiled(self) -> bool {
+        match self {
+            Self::Sqlite => true,
+            Self::Postgres => cfg!(feature = "postgres-sqlx"),
+        }
     }
 }
 
@@ -95,14 +133,14 @@ impl Database {
 
     /// Create a new SQLite database connection with runtime PRAGMA options.
     pub async fn new_with_sqlite_options(url: &str, options: SqliteOpenOptions) -> Result<Self> {
-        match classify_database_url(url) {
-            DatabaseBackend::Sqlite => {}
-            DatabaseBackend::Postgres => {
+        match DatabaseBackend::from_url(url) {
+            Some(DatabaseBackend::Sqlite) => {}
+            Some(DatabaseBackend::Postgres) => {
                 return Err(DbError::UnsupportedDatabaseBackend(
                     "postgres is supported by headscale-go, but headscale-db currently supports SQLite URLs only".into(),
                 ));
             }
-            DatabaseBackend::Unknown => {
+            None => {
                 return Err(DbError::UnsupportedDatabaseBackend(
                     "expected a sqlite: URL; supported headscale-db backend matrix is SQLite only"
                         .into(),
@@ -239,5 +277,41 @@ mod tests {
             assert!(err.to_string().contains("postgres"));
             assert!(err.to_string().contains("SQLite URLs only"));
         }
+    }
+
+    #[test]
+    fn database_backend_classifies_supported_url_schemes_without_enabling_postgres_runtime() {
+        assert_eq!(
+            DatabaseBackend::from_url("sqlite::memory:"),
+            Some(DatabaseBackend::Sqlite)
+        );
+        assert_eq!(
+            DatabaseBackend::from_url("postgres://localhost/headscale"),
+            Some(DatabaseBackend::Postgres)
+        );
+        assert_eq!(
+            DatabaseBackend::from_url("postgresql://localhost/headscale"),
+            Some(DatabaseBackend::Postgres)
+        );
+        assert_eq!(
+            DatabaseBackend::from_url("mysql://localhost/headscale"),
+            None
+        );
+
+        assert!(DatabaseBackend::Sqlite.headscale_go_supported());
+        assert!(DatabaseBackend::Sqlite.headscale_db_supported());
+        assert!(DatabaseBackend::Sqlite.sqlite_import_supported());
+        assert!(DatabaseBackend::Sqlite.sqlx_driver_compiled());
+        assert_eq!(DatabaseBackend::Sqlite.upstream_name(), "sqlite3");
+        assert_eq!(DatabaseBackend::Sqlite.url_schemes(), &["sqlite"]);
+
+        assert!(DatabaseBackend::Postgres.headscale_go_supported());
+        assert!(!DatabaseBackend::Postgres.headscale_db_supported());
+        assert!(!DatabaseBackend::Postgres.sqlite_import_supported());
+        assert_eq!(DatabaseBackend::Postgres.upstream_name(), "postgres");
+        assert_eq!(
+            DatabaseBackend::Postgres.url_schemes(),
+            &["postgres", "postgresql"]
+        );
     }
 }

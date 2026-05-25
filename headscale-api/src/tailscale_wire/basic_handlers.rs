@@ -3122,6 +3122,27 @@ mod tests {
         rec
     }
 
+    async fn debug_batcher_text(state: &WireState) -> String {
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/batcher")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
     fn derp_fixture() -> DerpMap {
         DerpMap {
             home_params: None,
@@ -5103,6 +5124,54 @@ mod tests {
         assert_eq!(
             &body[..],
             b"=== Batcher Connected Nodes ===\n\n\nSummary: 0 connected, 0 total\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_batcher_text_tracks_parallel_stream_churn() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-batcher-churn-node";
+        let node_id = stable_id_from_key(node_key);
+        state
+            .machines
+            .upsert(node_key.to_string(), record(node_key, 32, &[], &[]));
+
+        let first = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+        let second = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+        let body = debug_batcher_text(&state).await;
+        assert!(
+            body.contains(&format!("Node {node_id}:\tconnected (2 connections)\n")),
+            "{body}"
+        );
+        assert!(
+            body.ends_with("\nSummary: 1 connected, 1 total\n"),
+            "{body}"
+        );
+
+        drop(first);
+        let body = debug_batcher_text(&state).await;
+        assert!(
+            body.contains(&format!("Node {node_id}:\tconnected (1 connections)\n")),
+            "{body}"
+        );
+        assert!(
+            body.ends_with("\nSummary: 1 connected, 1 total\n"),
+            "{body}"
+        );
+
+        drop(second);
+        let body = debug_batcher_text(&state).await;
+        assert!(
+            body.contains(&format!("Node {node_id}:\tdisconnected\n")),
+            "{body}"
+        );
+        assert!(
+            body.ends_with("\nSummary: 0 connected, 1 total\n"),
+            "{body}"
+        );
+        assert_eq!(
+            state.machines.mapresponse_ended_metrics().get("done"),
+            Some(&2)
         );
     }
 

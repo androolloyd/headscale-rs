@@ -1461,6 +1461,82 @@ fn serve_rejects_supported_server_init_validation_before_state_startup() {
     assert_serve_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        include_str!("snapshots/configtest_missing_noise_private_key.stderr"),
+        "serve missing noise private key",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "headscale.example"
+"#,
+        include_str!("snapshots/configtest_bad_server_url_scheme.stderr"),
+        "serve bad server_url scheme",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://login.tail.example.org"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: true
+  override_local_dns: false
+  base_domain: "tail.example.org"
+"#,
+        include_str!("snapshots/configtest_server_url_under_base_domain.stderr"),
+        "serve server_url under DNS base_domain",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#,
+        include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
+        "serve incomplete manual TLS",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+tls_letsencrypt_hostname: "headscale.example"
+tls_cert_path: "/etc/headscale/cert.pem"
+"#,
+        include_str!("snapshots/configtest_tls_conflict.stderr"),
+        "serve TLS conflict",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+metrics_listen_addr: "not-a-socket"
+"#,
+        include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
+        "serve invalid metrics listener",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+grpc_listen_addr: "not-a-socket"
+"#,
+        include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
+        "serve invalid gRPC listener",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
 policy:
   mode: consul
 "#,

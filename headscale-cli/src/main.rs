@@ -75,6 +75,8 @@ enum Commands {
         /// Optional IPv6 mesh network CIDR.
         #[arg(long)]
         mesh_cidr_v6: Option<String>,
+        #[arg(hide = true)]
+        _ignored_args: Vec<String>,
     },
 
     /// Run as a mesh node (connects to a control plane).
@@ -378,6 +380,7 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             db_path,
             mesh_cidr,
             mesh_cidr_v6,
+            _ignored_args: _,
         } => {
             if let Some(config) = config.as_ref() {
                 config.validate_for_configtest().map_err(MainError::Other)?;
@@ -649,6 +652,7 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
 
     match parts.as_slice() {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
+        ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
@@ -851,8 +855,8 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some("Error: unknown flag: --json\n".into());
     }
 
-    if let Some(flag) = upstream_unknown_utility_flag(parts.as_slice()) {
-        return Some(format!("Error: unknown flag: {flag}\n"));
+    if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
     }
 
     let command_is_unknown = match parts.as_slice() {
@@ -869,7 +873,7 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             tail @ ..,
         ] if !tail.is_empty() && !completion_tail_is_supported(tail) => true,
         ["generate" | "gen", "private-key", tail @ ..]
-            if !tail.is_empty() && !tail_is_help(tail) =>
+            if !tail.is_empty() && !tail_is_help_or_force(tail) =>
         {
             true
         }
@@ -885,33 +889,97 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     })
 }
 
-fn upstream_unknown_utility_flag<'a>(parts: &'a [&str]) -> Option<&'a str> {
+fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
     match parts {
         ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => {
-            first_unknown_long_flag(tail)
+            first_unknown_flag(tail, UtilityFlagScope::Version)
+        }
+        ["serve", tail @ ..] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
+            first_unknown_flag(tail, UtilityFlagScope::Serve)
         }
         [
             "completion",
             "bash" | "fish" | "powershell" | "zsh",
             tail @ ..,
         ] if !tail.is_empty() && !completion_tail_is_supported(tail) => {
-            first_unknown_long_flag(tail)
+            first_unknown_flag(tail, UtilityFlagScope::CompletionShell)
         }
         ["generate" | "gen", "private-key", tail @ ..]
-            if !tail.is_empty() && !tail_is_help(tail) =>
+            if !tail.is_empty() && !tail_is_help_or_force(tail) =>
         {
-            first_unknown_long_flag(tail)
+            first_unknown_flag(tail, UtilityFlagScope::HelpOnly)
         }
         _ => None,
     }
 }
 
-fn first_unknown_long_flag<'a>(tail: &'a [&str]) -> Option<&'a str> {
-    tail.iter().copied().find(|arg| arg.starts_with("--"))
+#[derive(Clone, Copy)]
+enum UtilityFlagScope {
+    Version,
+    Serve,
+    CompletionShell,
+    HelpOnly,
+}
+
+fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> {
+    let mut i = 0;
+    while i < tail.len() {
+        let arg = tail[i];
+        match (scope, arg) {
+            (_, "-h" | "--help")
+            | (UtilityFlagScope::Serve | UtilityFlagScope::HelpOnly, "--force")
+            | (UtilityFlagScope::CompletionShell, "--no-descriptions") => {
+                i += 1;
+                continue;
+            }
+            (UtilityFlagScope::Version | UtilityFlagScope::Serve, "-o" | "--output")
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+                continue;
+            }
+            (UtilityFlagScope::Version | UtilityFlagScope::Serve, value)
+                if value.starts_with("--output=") =>
+            {
+                i += 1;
+                continue;
+            }
+            (UtilityFlagScope::Version | UtilityFlagScope::Serve, value)
+                if value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+                continue;
+            }
+            (UtilityFlagScope::Serve, "-c" | "--config") if i + 1 < tail.len() => {
+                i += 2;
+                continue;
+            }
+            (UtilityFlagScope::Serve, value) if value.starts_with("--config=") => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if arg.starts_with("--") {
+            return Some(format!("unknown flag: {arg}"));
+        } else if let Some(shorthand) = arg.strip_prefix('-') {
+            return shorthand
+                .chars()
+                .next()
+                .map(|flag| format!("unknown shorthand flag: '{flag}' in {arg}"));
+        }
+        i += 1;
+    }
+    None
 }
 
 fn tail_is_help(tail: &[&str]) -> bool {
     matches!(tail, ["-h" | "--help"])
+}
+
+fn tail_is_help_or_force(tail: &[&str]) -> bool {
+    matches!(tail, ["-h" | "--help" | "--force"])
 }
 
 fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
@@ -1015,6 +1083,20 @@ Usage:
 
 Flags:
   -h, --help            help for version
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_SERVE_HELP: &str = r"Launches the headscale server
+
+Usage:
+  headscale serve [flags]
+
+Flags:
+  -h, --help   help for serve
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
 

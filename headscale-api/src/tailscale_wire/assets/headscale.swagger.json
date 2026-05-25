@@ -517,6 +517,12 @@
             "required": false,
             "type": "string",
             "format": "date-time"
+          },
+          {
+            "name": "disableExpiry",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           }
         ],
         "tags": [

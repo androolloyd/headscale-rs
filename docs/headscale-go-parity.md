@@ -304,7 +304,11 @@ descriptor set; `configtest` now accumulates current-upstream fatal
 server-init validation errors for TLS conflict, missing
 `noise.private_key_path`, invalid challenge type, unsafe `server_url`,
 DNS override, route HA timing, and NodeStore tuning instead of stopping
-at the first one.
+at the first one; `serve --help` and utility-command unknown shorthand
+flag errors now match current-upstream Cobra output, `serve` tolerates
+ignored positional args before startup validation like upstream, and
+the checked-in OpenAPI JSON now advertises the implemented
+`disableExpiry` node-expiry query parameter.
 
 ## Parallel Workstreams
 

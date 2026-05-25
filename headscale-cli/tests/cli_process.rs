@@ -1020,9 +1020,24 @@ fn utility_fallback_flags_match_upstream_help_snapshots() {
 #[test]
 fn utility_unknown_flags_match_upstream_stderr_snapshots() {
     assert_stderr_snapshot(
+        &["serve", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["serve", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["version", "--bad"],
         1,
         include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["version", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
         &["completion", "bash", "--bad"],
@@ -1030,9 +1045,19 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_completion_bash_unknown_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["completion", "bash", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["generate", "private-key", "--bad"],
         1,
         include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "private-key", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
 }
 
@@ -1427,6 +1452,44 @@ trusted_proxies:
 }
 
 #[test]
+fn serve_ignores_extra_positional_args_like_upstream_before_validation() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let db_path = cwd.path().join("should-not-exist.sqlite");
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: "{}"
+"#,
+            db_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in(&["serve", "ignored"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_missing_noise_private_key.stderr"),
+        "serve ignores extra positional args",
+    );
+    assert!(
+        !db_path.exists(),
+        "invalid serve config should fail before opening SQLite at {}",
+        db_path.display()
+    );
+}
+
+#[test]
 fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -1662,6 +1725,14 @@ fn implemented_admin_command_help_matches_snapshots() {
 fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["serve", "--help"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["serve", "-h"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "serve"],
         include_str!("snapshots/serve_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -1989,7 +2060,7 @@ fn implemented_admin_errors_follow_output_format() {
     assert_eq!(stdout(&remote), "");
     assert_eq!(
         stderr(&remote),
-        "{\n\t\"error\": \"--api-key is required for remote gRPC\"\n}\n"
+        "{\n\t\"error\": \"HEADSCALE_CLI_API_KEY environment variable needs to be set\"\n}\n"
     );
 }
 

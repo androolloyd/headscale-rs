@@ -3944,6 +3944,15 @@ mod tests {
         assert!(parsed["paths"].get("/api/v1/auth/register").is_some());
         assert!(parsed["paths"].get("/api/v1/auth/approve").is_some());
         assert!(parsed["paths"].get("/api/v1/auth/reject").is_some());
+        let expire_params = parsed["paths"]["/api/v1/node/{nodeId}/expire"]["post"]["parameters"]
+            .as_array()
+            .unwrap();
+        assert!(expire_params.iter().any(|param| {
+            param["name"] == "disableExpiry"
+                && param["in"] == "query"
+                && param["required"] == false
+                && param["type"] == "boolean"
+        }));
         assert_eq!(
             parsed["paths"]["/api/v1/policy/check"]["post"]["operationId"],
             "HeadscaleService_CheckPolicy"

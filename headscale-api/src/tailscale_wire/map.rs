@@ -309,6 +309,43 @@ fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str, rec: &Machi
     }
 }
 
+fn add_co_router_primary_peer_ids(
+    allowed_ids: &mut Option<BTreeSet<u64>>,
+    snapshot: &HashMap<String, MachineRecord>,
+    self_node_key: &str,
+    primary_routes: &HashMap<String, Vec<String>>,
+    served_routes: &HashMap<String, Vec<String>>,
+) {
+    let Some(allowed_ids) = allowed_ids else {
+        return;
+    };
+    let Some(viewer_routes) = served_routes.get(self_node_key) else {
+        return;
+    };
+    let viewer_subnet_routes = viewer_routes
+        .iter()
+        .filter(|route| !route_is_exit_default(route))
+        .collect::<BTreeSet<_>>();
+    if viewer_subnet_routes.is_empty() {
+        return;
+    }
+
+    for (node_key, routes) in primary_routes {
+        if node_key == self_node_key {
+            continue;
+        }
+        if !routes
+            .iter()
+            .any(|route| viewer_subnet_routes.contains(route))
+        {
+            continue;
+        }
+        if let Some(rec) = snapshot.get(node_key) {
+            allowed_ids.insert(rec.stable_node_id_for_key(node_key));
+        }
+    }
+}
+
 fn select_routes_for_viewer(
     policy: &PolicyStore,
     snapshot: &HashMap<String, MachineRecord>,
@@ -337,6 +374,28 @@ fn select_routes_for_viewer(
                 let use_primary = via.use_primary.contains(&route);
                 if !use_primary || selected_primary.contains(&route) {
                     allowed_routes.push(route);
+                }
+            }
+        }
+    }
+
+    if let Some(viewer_routes) = served_routes.get(self_node_key) {
+        let viewer_subnet_routes = viewer_routes
+            .iter()
+            .filter(|route| !route_is_exit_default(route))
+            .collect::<BTreeSet<_>>();
+        if !viewer_subnet_routes.is_empty() {
+            for route in primary_routes
+                .get(peer_node_key)
+                .into_iter()
+                .flatten()
+                .filter(|route| viewer_subnet_routes.contains(route))
+            {
+                if !selected_primary.contains(route) {
+                    selected_primary.push(route.clone());
+                }
+                if !allowed_routes.contains(route) {
+                    allowed_routes.push(route.clone());
                 }
             }
         }
@@ -446,8 +505,15 @@ fn visible_peer_state_for_registry(
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let allowed_peer_ids =
+    let mut allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
+    add_co_router_primary_peer_ids(
+        &mut allowed_peer_ids,
+        &snapshot,
+        self_node_key,
+        &primary_routes,
+        &served_routes,
+    );
     let peers = visible_peer_map_nodes(
         &snapshot,
         self_node_key,
@@ -1024,8 +1090,15 @@ async fn map_inner(
     let online_states = state.machines.online_states();
     let taildrop_enabled = state.runtime_config.taildrop.enabled;
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let allowed_peer_ids =
+    let mut allowed_peer_ids =
         allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &served_routes);
+    add_co_router_primary_peer_ids(
+        &mut allowed_peer_ids,
+        &snapshot,
+        &node_key_hex,
+        &primary_routes,
+        &served_routes,
+    );
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
         &snapshot,
@@ -1540,7 +1613,7 @@ fn rebuild_peer_delta_chunk(
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let allowed_peer_ids = if options.use_incremental_empty_acl_semantics {
+    let mut allowed_peer_ids = if options.use_incremental_empty_acl_semantics {
         incremental_allowed_peer_ids_for_snapshot(
             policy,
             &snapshot,
@@ -1552,6 +1625,13 @@ fn rebuild_peer_delta_chunk(
     } else {
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes)
     };
+    add_co_router_primary_peer_ids(
+        &mut allowed_peer_ids,
+        &snapshot,
+        self_node_key,
+        &primary_routes,
+        &served_routes,
+    );
     let self_node_id = node_id_for_key(&snapshot, self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let current_self_node = self_map_node_from_snapshot(
@@ -1724,8 +1804,15 @@ fn rebuild_map_chunk(
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let allowed_peer_ids =
+    let mut allowed_peer_ids =
         allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
+    add_co_router_primary_peer_ids(
+        &mut allowed_peer_ids,
+        &snapshot,
+        self_node_key,
+        &primary_routes,
+        &served_routes,
+    );
     let self_node_id = node_id_for_key(&snapshot, self_node_key);
     let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
@@ -3419,6 +3506,58 @@ mod tests {
 
     fn changed_peer<'a>(mr: &'a MapResponse, name: &str) -> Option<&'a MapNode> {
         mr.peers_changed.iter().find(|peer| peer.name == name)
+    }
+
+    #[tokio::test]
+    async fn map_response_shows_global_primary_to_same_prefix_secondary_under_deny_policy() {
+        let (state, _dir) = fixture();
+        let route = "10.80.0.0/24";
+        let router_a = "71".repeat(32);
+        let router_b = "72".repeat(32);
+        let mut guards = Vec::new();
+        for (node_key, host, octet) in [(&router_a, "router-a", 71), (&router_b, "router-b", 72)] {
+            state.machines.upsert(
+                node_key.clone(),
+                routed_record(node_key, host, octet, vec![route.to_string()]),
+            );
+            guards.push(MachineRegistry::track_stream_connection(
+                state.machines.clone(),
+                stable_id_from_key(node_key),
+            ));
+        }
+        assert_eq!(guards.len(), 2);
+        let deny_policy = r#"{"acls":[]}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(deny_policy).unwrap(),
+            deny_policy.to_string(),
+        );
+        let snapshot = state.machines.snapshot();
+        let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
+        let primary = owner_for_route(&primary_routes, route).expect("global primary");
+        let (primary_name, secondary) = if primary == router_a {
+            ("router-a", router_b)
+        } else {
+            ("router-b", router_a)
+        };
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{secondary}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let primary_peer =
+            peer_route(&mr, primary_name, route).expect("secondary sees global primary route");
+        assert_eq!(primary_peer.primary_routes, vec![route.to_string()]);
     }
 
     #[tokio::test]

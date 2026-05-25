@@ -291,7 +291,8 @@ before opening SQLite and has process snapshots for invalid policy mode and
 unsafe trusted proxies; `grants[].via` plus exit-route interaction is
 covered at the map integration layer; and `grants[].via` now carries
 upstream `UsePrimary` fallback plus lowest-ID multi-router via-tag election
-before broader paired stock-client expansion.
+and same-prefix co-router primary visibility before broader paired
+stock-client expansion.
 
 ## Parallel Workstreams
 

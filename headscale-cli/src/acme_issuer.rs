@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use headscale_api::tailscale_wire::acme::AcmeHttp01ChallengeStore;
-use headscale_api::tailscale_wire::tls::{self, ReloadableServerConfig};
+use headscale_api::tailscale_wire::tls::{
+    self, AcmeTlsAlpnChallengeResolver, ReloadableServerConfig,
+};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
@@ -105,6 +107,69 @@ pub(crate) async fn ensure_http01_certificate(
     })
 }
 
+pub(crate) async fn ensure_tls_alpn_certificate(
+    config: &AcmeHttp01IssuerConfig,
+    resolver: &Arc<AcmeTlsAlpnChallengeResolver>,
+) -> Result<AcmeHttp01CertificateOutcome> {
+    let cache_path = autocert_cache_path(&config.cache_dir, &config.hostname);
+    match tls::load_from_autocert_cache(&config.cache_dir, &config.hostname) {
+        Ok(material) if !certificate_is_expired(material.expires_at, Utc::now()) => {
+            return Ok(AcmeHttp01CertificateOutcome {
+                cache_path,
+                issued: false,
+            });
+        }
+        Ok(material) => {
+            tracing::info!(
+                hostname = %config.hostname,
+                expires_at = %material.expires_at,
+                "ACME TLS-ALPN-01 cached certificate is expired; starting online issuance"
+            );
+        }
+        Err(err) => {
+            tracing::info!(
+                hostname = %config.hostname,
+                cache_dir = %config.cache_dir.display(),
+                error = %err,
+                "ACME TLS-ALPN-01 cached certificate missing or invalid; starting online issuance"
+            );
+        }
+    }
+
+    tracing::info!(
+        hostname = %config.hostname,
+        cache_dir = %config.cache_dir.display(),
+        directory_url = %config.directory_url,
+        "ACME TLS-ALPN-01 online issuance started"
+    );
+    let (key_pem, certificate_pem) = issue_tls_alpn_certificate(config, resolver).await?;
+    write_autocert_cache_entry(
+        &config.cache_dir,
+        &config.hostname,
+        &key_pem,
+        &certificate_pem,
+    )
+    .with_context(|| {
+        format!(
+            "write ACME cache entry {} for hostname {}",
+            cache_path.display(),
+            config.hostname
+        )
+    })?;
+    tls::load_from_autocert_cache_with_tls_alpn(&config.cache_dir, &config.hostname).with_context(
+        || {
+            format!(
+                "validate ACME TLS-ALPN cache entry {} after online issuance",
+                cache_path.display()
+            )
+        },
+    )?;
+    Ok(AcmeHttp01CertificateOutcome {
+        cache_path,
+        issued: true,
+    })
+}
+
 pub(crate) fn spawn_http01_renewal_task(
     config: AcmeHttp01IssuerConfig,
     store: AcmeHttp01ChallengeStore,
@@ -131,6 +196,44 @@ pub(crate) fn spawn_http01_renewal_task(
                         error = ?err,
                         hostname = %config.hostname,
                         "ACME HTTP-01 renewal failed; keeping existing TLS material"
+                    );
+                }
+            }
+
+            let expires_at = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname)
+                .ok()
+                .map(|material| material.expires_at);
+            tokio::time::sleep(next_renewal_check_delay(expires_at, Utc::now())).await;
+        }
+    })
+}
+
+pub(crate) fn spawn_tls_alpn_renewal_task(
+    config: AcmeHttp01IssuerConfig,
+    resolver: Arc<AcmeTlsAlpnChallengeResolver>,
+    reloaders: AcmeTlsReloaders,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!(
+            hostname = %config.hostname,
+            cache_dir = %config.cache_dir.display(),
+            "ACME TLS-ALPN-01 live renewal and TLS reload task started"
+        );
+        loop {
+            match renew_tls_alpn_certificate_once(&config, &resolver, &reloaders).await {
+                Ok(outcome) if outcome.issued => {
+                    tracing::info!(
+                        path = %outcome.cache_path.display(),
+                        hostname = %config.hostname,
+                        "ACME TLS-ALPN-01 certificate renewed and TLS configs reloaded"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = ?err,
+                        hostname = %config.hostname,
+                        "ACME TLS-ALPN-01 renewal failed; keeping existing TLS material"
                     );
                 }
             }
@@ -190,6 +293,53 @@ pub(crate) async fn renew_http01_certificate_once(
     })
 }
 
+pub(crate) async fn renew_tls_alpn_certificate_once(
+    config: &AcmeHttp01IssuerConfig,
+    resolver: &Arc<AcmeTlsAlpnChallengeResolver>,
+    reloaders: &AcmeTlsReloaders,
+) -> Result<AcmeHttp01CertificateOutcome> {
+    let cache_path = autocert_cache_path(&config.cache_dir, &config.hostname);
+    let Ok(material) = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname) else {
+        let outcome = ensure_tls_alpn_certificate(config, resolver).await?;
+        if outcome.issued {
+            reload_acme_tls_alpn_material(config, resolver, reloaders)?;
+        }
+        return Ok(outcome);
+    };
+
+    if !certificate_renewal_due(material.expires_at, Utc::now()) {
+        return Ok(AcmeHttp01CertificateOutcome {
+            cache_path,
+            issued: false,
+        });
+    }
+
+    tracing::info!(
+        hostname = %config.hostname,
+        expires_at = %material.expires_at,
+        "ACME TLS-ALPN-01 cached certificate reached renewal window; starting online renewal"
+    );
+    let (key_pem, certificate_pem) = issue_tls_alpn_certificate(config, resolver).await?;
+    write_autocert_cache_entry(
+        &config.cache_dir,
+        &config.hostname,
+        &key_pem,
+        &certificate_pem,
+    )
+    .with_context(|| {
+        format!(
+            "write renewed ACME cache entry {} for hostname {}",
+            cache_path.display(),
+            config.hostname
+        )
+    })?;
+    reload_acme_tls_alpn_material(config, resolver, reloaders)?;
+    Ok(AcmeHttp01CertificateOutcome {
+        cache_path,
+        issued: true,
+    })
+}
+
 fn reload_acme_tls_material(
     config: &AcmeHttp01IssuerConfig,
     reloaders: &AcmeTlsReloaders,
@@ -205,6 +355,34 @@ fn reload_acme_tls_material(
     reloaders
         .public_tls
         .replace(Arc::clone(&material.server_config));
+    if let Some(remote_grpc_tls) = &reloaders.remote_grpc_tls {
+        let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
+            .context("build renewed remote gRPC TLS config")?;
+        remote_grpc_tls.replace(Arc::new(grpc_tls));
+    }
+    Ok(material)
+}
+
+pub(crate) fn reload_acme_tls_alpn_material(
+    config: &AcmeHttp01IssuerConfig,
+    resolver: &Arc<AcmeTlsAlpnChallengeResolver>,
+    reloaders: &AcmeTlsReloaders,
+) -> Result<tls::TlsMaterial> {
+    let material = tls::load_from_autocert_cache(&config.cache_dir, &config.hostname)
+        .with_context(|| {
+            format!(
+                "load renewed ACME TLS-ALPN cache entry for hostname {} from {}",
+                config.hostname,
+                config.cache_dir.display()
+            )
+        })?;
+    let (public_tls, _) = tls::build_server_config_with_existing_acme_tls_alpn_resolver(
+        &material.cert_pem,
+        &material.key_pem,
+        resolver.clone(),
+    )
+    .context("build renewed public TLS config with ACME TLS-ALPN resolver")?;
+    reloaders.public_tls.replace(Arc::new(public_tls));
     if let Some(remote_grpc_tls) = &reloaders.remote_grpc_tls {
         let grpc_tls = tls::build_grpc_server_config(&material.cert_pem, &material.key_pem)
             .context("build renewed remote gRPC TLS config")?;
@@ -281,6 +459,100 @@ async fn issue_http01_certificate(
             cleanup.track(token);
             challenge.set_ready().await.with_context(|| {
                 format!("mark ACME HTTP-01 challenge ready for {}", config.hostname)
+            })?;
+        }
+    }
+
+    match order
+        .poll_ready(&RetryPolicy::new().timeout(ORDER_POLL_TIMEOUT))
+        .await
+        .with_context(|| format!("wait for ACME order readiness for {}", config.hostname))?
+    {
+        OrderStatus::Ready | OrderStatus::Valid => {}
+        status => bail!(
+            "ACME order for {} reached {:?}, expected ready",
+            config.hostname,
+            status
+        ),
+    }
+
+    let key_pem = order
+        .finalize()
+        .await
+        .with_context(|| format!("finalize ACME order for {}", config.hostname))?;
+    let certificate_pem = order
+        .poll_certificate(&RetryPolicy::new().timeout(CERTIFICATE_POLL_TIMEOUT))
+        .await
+        .with_context(|| format!("retrieve ACME certificate for {}", config.hostname))?;
+    Ok((key_pem, certificate_pem))
+}
+
+async fn issue_tls_alpn_certificate(
+    config: &AcmeHttp01IssuerConfig,
+    resolver: &Arc<AcmeTlsAlpnChallengeResolver>,
+) -> Result<(String, String)> {
+    let account = load_or_create_account(config).await?;
+    let identifiers = [Identifier::Dns(config.hostname.clone())];
+    let mut order = account
+        .new_order(&NewOrder::new(&identifiers))
+        .await
+        .with_context(|| format!("create ACME order for {}", config.hostname))?;
+    let mut cleanup = TlsAlpnChallengeCleanup::new(resolver.clone());
+
+    {
+        let mut authorizations = order.authorizations();
+        while let Some(authorization) = authorizations.next().await {
+            let mut authorization = authorization
+                .with_context(|| format!("fetch ACME authorization for {}", config.hostname))?;
+            if authorization.status == AuthorizationStatus::Valid {
+                continue;
+            }
+            if authorization.status != AuthorizationStatus::Pending {
+                bail!(
+                    "ACME authorization for {} is {:?}, expected pending or valid",
+                    config.hostname,
+                    authorization.status
+                );
+            }
+
+            let mut challenge = authorization
+                .challenge(ChallengeType::TlsAlpn01)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ACME server did not offer TLS-ALPN-01 for {}",
+                        config.hostname
+                    )
+                })?;
+            let key_authorization = challenge.key_authorization().as_str().to_string();
+            let (challenge_cert_pem, challenge_key_pem) =
+                tls::build_acme_tls_alpn_challenge_certificate(
+                    &config.hostname,
+                    &key_authorization,
+                )
+                .with_context(|| {
+                    format!(
+                        "build ACME TLS-ALPN-01 challenge certificate for {}",
+                        config.hostname
+                    )
+                })?;
+            resolver
+                .set_challenge_certificate(
+                    config.hostname.clone(),
+                    &challenge_cert_pem,
+                    &challenge_key_pem,
+                )
+                .with_context(|| {
+                    format!(
+                        "install ACME TLS-ALPN-01 challenge certificate for {}",
+                        config.hostname
+                    )
+                })?;
+            cleanup.track(config.hostname.clone());
+            challenge.set_ready().await.with_context(|| {
+                format!(
+                    "mark ACME TLS-ALPN-01 challenge ready for {}",
+                    config.hostname
+                )
             })?;
         }
     }
@@ -473,6 +745,32 @@ impl Drop for ChallengeCleanup {
     }
 }
 
+struct TlsAlpnChallengeCleanup {
+    resolver: Arc<AcmeTlsAlpnChallengeResolver>,
+    hostnames: Vec<String>,
+}
+
+impl TlsAlpnChallengeCleanup {
+    fn new(resolver: Arc<AcmeTlsAlpnChallengeResolver>) -> Self {
+        Self {
+            resolver,
+            hostnames: Vec::new(),
+        }
+    }
+
+    fn track(&mut self, hostname: String) {
+        self.hostnames.push(hostname);
+    }
+}
+
+impl Drop for TlsAlpnChallengeCleanup {
+    fn drop(&mut self) {
+        for hostname in &self.hostnames {
+            self.resolver.clear_challenge_certificate(hostname);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +846,35 @@ mod tests {
     }
 
     #[test]
+    fn tls_alpn_challenge_cleanup_removes_tracked_hostnames() {
+        let dir = tempdir().unwrap();
+        let generated = tls::load_or_generate(
+            dir.path().join("generated"),
+            &tls::SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        let challenge = tls::load_or_generate(
+            dir.path().join("challenge"),
+            &tls::SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        let (_server_config, resolver) = tls::build_server_config_with_acme_tls_alpn_resolver(
+            &generated.cert_pem,
+            &generated.key_pem,
+        )
+        .unwrap();
+        resolver
+            .set_challenge_certificate("headscale.example", &challenge.cert_pem, &challenge.key_pem)
+            .unwrap();
+        {
+            let mut cleanup = TlsAlpnChallengeCleanup::new(resolver.clone());
+            cleanup.track("headscale.example".to_string());
+        }
+
+        assert!(!resolver.has_challenge_certificate("headscale.example"));
+    }
+
+    #[test]
     fn certificate_renewal_due_uses_thirty_day_window() {
         let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
 
@@ -616,6 +943,43 @@ mod tests {
         };
 
         let outcome = ensure_http01_certificate(&config, &AcmeHttp01ChallengeStore::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.cache_path, cache_dir.join("headscale.example"));
+        assert!(!outcome.issued);
+    }
+
+    #[tokio::test]
+    async fn ensure_tls_alpn_certificate_reuses_valid_cached_material() {
+        let dir = tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let cache_dir = dir.path().join("cache");
+        let generated = tls::load_or_generate(
+            &source_dir,
+            &tls::SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        write_autocert_cache_entry(
+            &cache_dir,
+            "headscale.example",
+            &generated.key_pem,
+            &generated.cert_pem,
+        )
+        .unwrap();
+        let (_server_config, resolver) = tls::build_server_config_with_acme_tls_alpn_resolver(
+            &generated.cert_pem,
+            &generated.key_pem,
+        )
+        .unwrap();
+        let config = AcmeHttp01IssuerConfig {
+            directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory".into(),
+            email: None,
+            hostname: "headscale.example".into(),
+            cache_dir: cache_dir.clone(),
+        };
+
+        let outcome = ensure_tls_alpn_certificate(&config, &resolver)
             .await
             .unwrap();
 

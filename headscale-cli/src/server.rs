@@ -46,7 +46,9 @@ use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
 
 use crate::acme_issuer::{
-    AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate, spawn_http01_renewal_task,
+    AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate,
+    ensure_tls_alpn_certificate, reload_acme_tls_alpn_material, spawn_http01_renewal_task,
+    spawn_tls_alpn_renewal_task,
 };
 use crate::config::{
     PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname,
@@ -269,11 +271,16 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
     tracing::info!("  Remote gRPC: {}", remote_grpc_status(&cfg));
     if let Some(plan) = &acme_runtime {
+        let challenge_type = match plan.challenge_listener {
+            AcmeChallengeListener::Http01 { .. } => "HTTP-01",
+            AcmeChallengeListener::TlsAlpn01 { .. } => "TLS-ALPN-01",
+        };
         tracing::info!(
             hostname = %plan.hostname,
             cache_dir = %plan.cache_dir.display(),
             directory_url = %plan.acme_url,
-            "ACME HTTP-01 TLS configured"
+            challenge_type,
+            "ACME TLS configured"
         );
     }
 
@@ -370,6 +377,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         server_url,
     )
     .await?;
+    let acme_tls_alpn_issuer_config =
+        acme_tls_alpn_issuer_config(acme_runtime.as_ref(), cfg.tls.acme_email.clone());
     if let Some(runtime) = acme_http01_runtime.as_ref() {
         let outcome = ensure_http01_certificate(&runtime.issuer_config, &runtime.store).await?;
         if outcome.issued {
@@ -440,7 +449,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
-    let acme_renewal = acme_http01_runtime.as_ref().and_then(|runtime| {
+    let acme_http01_renewal = acme_http01_runtime.as_ref().and_then(|runtime| {
         let public_tls = handle.tls_reloader.clone()?;
         Some(spawn_http01_renewal_task(
             runtime.issuer_config.clone(),
@@ -451,6 +460,31 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             },
         ))
     });
+    let acme_tls_alpn_renewal = match start_acme_tls_alpn_after_public_listener(
+        acme_tls_alpn_issuer_config,
+        &handle,
+        remote_grpc_tls_reloader.clone(),
+    )
+    .await
+    {
+        Ok(renewal) => renewal,
+        Err(err) => {
+            abort_serve_handle(&handle);
+            if let Some(handle) = &acme_http01_renewal {
+                handle.abort();
+            }
+            node_expiry_waker.abort();
+            if let Some(handle) = &route_health_probe {
+                handle.abort();
+            }
+            offline_connection_cleanup.abort();
+            if let Some(handle) = &derp_auto_update {
+                handle.abort();
+            }
+            drop(embedded_derp_runtime);
+            return Err(err);
+        }
+    };
     let dns_extra_records_watcher = dns_extra_records_path.map(|path| {
         tracing::info!(path = %path.display(), "watching DNS extra-records file");
         spawn_extra_records_watcher((*dns_store).clone(), path, None)
@@ -473,7 +507,10 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(handle) = policy_reload {
         handle.abort();
     }
-    if let Some(handle) = acme_renewal {
+    if let Some(handle) = acme_http01_renewal {
+        handle.abort();
+    }
+    if let Some(handle) = acme_tls_alpn_renewal {
         handle.abort();
     }
     node_expiry_waker.abort();
@@ -1102,6 +1139,88 @@ async fn start_acme_http01_runtime(
         store,
         handle: Some(handle),
     }))
+}
+
+fn acme_tls_alpn_issuer_config(
+    acme_runtime: Option<&AcmeRuntimePlan>,
+    acme_email: Option<String>,
+) -> Option<AcmeHttp01IssuerConfig> {
+    match acme_runtime {
+        Some(AcmeRuntimePlan {
+            hostname,
+            acme_url,
+            cache_dir,
+            challenge_listener: AcmeChallengeListener::TlsAlpn01 { .. },
+        }) => Some(AcmeHttp01IssuerConfig {
+            directory_url: acme_url.clone(),
+            email: acme_email,
+            hostname: hostname.clone(),
+            cache_dir: cache_dir.clone(),
+        }),
+        _ => None,
+    }
+}
+
+async fn start_acme_tls_alpn_after_public_listener(
+    issuer_config: Option<AcmeHttp01IssuerConfig>,
+    handle: &serve::ServeHandle,
+    remote_grpc_tls_reloader: Option<ReloadableServerConfig>,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some(issuer_config) = issuer_config else {
+        return Ok(None);
+    };
+    let public_tls = handle
+        .tls_reloader
+        .clone()
+        .context("ACME TLS-ALPN-01 requires a public TLS reloader")?;
+    let resolver = handle
+        .tls
+        .as_ref()
+        .and_then(|material| material.acme_tls_alpn_resolver.clone())
+        .context("ACME TLS-ALPN-01 requires a public TLS challenge resolver")?;
+    let reloaders = AcmeTlsReloaders {
+        public_tls,
+        remote_grpc_tls: remote_grpc_tls_reloader,
+    };
+    let outcome = ensure_tls_alpn_certificate(&issuer_config, &resolver).await?;
+    if outcome.issued {
+        reload_acme_tls_alpn_material(&issuer_config, &resolver, &reloaders)?;
+        tracing::info!(
+            path = %outcome.cache_path.display(),
+            hostname = %issuer_config.hostname,
+            "ACME TLS-ALPN-01 certificate issued, cached, and loaded"
+        );
+    } else {
+        tracing::info!(
+            path = %outcome.cache_path.display(),
+            hostname = %issuer_config.hostname,
+            "ACME TLS-ALPN-01 cached certificate reused"
+        );
+    }
+    tracing::info!(
+        hostname = %issuer_config.hostname,
+        "ACME TLS-ALPN-01 live renewal and TLS reload enabled"
+    );
+    Ok(Some(spawn_tls_alpn_renewal_task(
+        issuer_config,
+        resolver,
+        reloaders,
+    )))
+}
+
+fn abort_serve_handle(handle: &serve::ServeHandle) {
+    if let Some(task) = &handle.http {
+        task.abort();
+    }
+    if let Some(task) = &handle.https {
+        task.abort();
+    }
+    if let Some(task) = &handle.metrics {
+        task.abort();
+    }
+    if let Some(task) = &handle.acme_http01 {
+        task.abort();
+    }
 }
 
 fn parse_acme_http01_listen_addr(value: &str) -> Result<SocketAddr> {

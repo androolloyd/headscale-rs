@@ -13,10 +13,6 @@ use crate::derp_config::DerpConfig;
 
 const DEFAULT_CONFIG_FILENAMES: &[&str] =
     &["config.yaml", "config.yml", "config.json", "config.toml"];
-const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
-const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
-const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
-const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 const DEFAULT_CLI_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
 const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
@@ -864,7 +860,6 @@ impl CliConfig {
             )?;
         self.validate_upstream_fatal_config(server, server_url)?;
         self.validate_manual_tls_paths()?;
-        self.validate_unsupported_runtime_features()?;
         parse_server_url_parts(server_url)?;
         validate_socket_addr(&server.listen, "listen_addr")?;
         if let Some(https_listen) = server.https_listen.as_deref() {
@@ -1136,53 +1131,6 @@ impl CliConfig {
             .is_some_and(|value| !value.as_os_str().is_empty());
         if cert_path != key_path {
             bail!("tls_cert_path and tls_key_path must both be set");
-        }
-
-        Ok(())
-    }
-
-    fn validate_unsupported_runtime_features(&self) -> Result<()> {
-        if self
-            .tls_letsencrypt_hostname
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            let challenge = self
-                .tls_letsencrypt_challenge_type
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(DEFAULT_LETSENCRYPT_CHALLENGE_TYPE);
-            if challenge != "TLS-ALPN-01" {
-                return Ok(());
-            }
-            let listen = self
-                .tls_letsencrypt_listen
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(DEFAULT_LETSENCRYPT_LISTEN);
-            let acme_url = self
-                .acme_url
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(DEFAULT_ACME_URL);
-            let cache_dir = self
-                .tls_letsencrypt_cache_dir
-                .as_ref()
-                .filter(|value| !value.as_os_str().is_empty())
-                .map_or_else(
-                    || DEFAULT_LETSENCRYPT_CACHE_DIR.to_string(),
-                    |path| path.display().to_string(),
-                );
-            let challenge_context = match challenge {
-                "HTTP-01" => {
-                    format!("HTTP-01 challenge listener {listen}")
-                }
-                "TLS-ALPN-01" => "TLS-ALPN-01 on the public TLS listener".to_string(),
-                other => format!("challenge {other} with challenge listener {listen}"),
-            };
-            bail!(
-                "tls_letsencrypt_hostname/ACME TLS-ALPN-01 is not implemented in headscale-rs yet; configured {challenge_context} would require dynamic ACME challenge certificate selection using acme_url {acme_url} and cache_dir {cache_dir}. Use HTTP-01, tls_cert_path/tls_key_path, or terminate TLS before headscale-rs."
-            );
         }
 
         Ok(())
@@ -2899,10 +2847,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
             config.tls_letsencrypt_challenge_type.as_deref(),
             Some("TLS-ALPN-01")
         );
-        let err = config.validate_for_configtest().unwrap_err();
-        assert!(format!("{err:#}").contains("ACME TLS-ALPN-01 is not implemented"));
-        assert!(format!("{err:#}").contains("TLS-ALPN-01 on the public TLS listener"));
-        assert!(format!("{err:#}").contains("cache_dir /var/lib/headscale/cache"));
+        config.validate_for_configtest().unwrap();
     }
 
     #[test]

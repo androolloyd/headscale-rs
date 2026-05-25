@@ -41,6 +41,7 @@ use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
+use sha2::{Digest, Sha256};
 
 use super::WireError;
 
@@ -113,16 +114,29 @@ impl ReloadableServerConfig {
 /// hostname matches an installed challenge and the client offers `acme-tls/1`.
 #[derive(Debug)]
 pub struct AcmeTlsAlpnChallengeResolver {
-    default_cert: Arc<CertifiedKey>,
+    default_cert: RwLock<Arc<CertifiedKey>>,
     challenges: RwLock<HashMap<String, Arc<CertifiedKey>>>,
 }
 
 impl AcmeTlsAlpnChallengeResolver {
     pub fn new(default_cert: Arc<CertifiedKey>) -> Arc<Self> {
         Arc::new(Self {
-            default_cert,
+            default_cert: RwLock::new(default_cert),
             challenges: RwLock::new(HashMap::new()),
         })
+    }
+
+    pub fn replace_default_certificate(
+        &self,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Result<(), WireError> {
+        let cert = Arc::new(certified_key_from_pem(cert_pem, key_pem)?);
+        *self
+            .default_cert
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cert;
+        Ok(())
     }
 
     pub fn set_challenge_certificate(
@@ -131,7 +145,9 @@ impl AcmeTlsAlpnChallengeResolver {
         cert_pem: &str,
         key_pem: &str,
     ) -> Result<(), WireError> {
-        let cert = Arc::new(certified_key_from_pem(cert_pem, key_pem)?);
+        let cert = Arc::new(certified_key_from_pem_without_webpki_checks(
+            cert_pem, key_pem,
+        )?);
         self.challenges
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -165,7 +181,12 @@ impl ResolvesServerCert for AcmeTlsAlpnChallengeResolver {
                 .get(hostname)
                 .cloned();
         }
-        Some(Arc::clone(&self.default_cert))
+        Some(
+            self.default_cert
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
     }
 }
 
@@ -211,7 +232,7 @@ impl TlsMaterialSource {
             Self::AcmeAutocertCacheWithTlsAlpn {
                 cache_dir,
                 hostname,
-            } => load_from_autocert_cache_with_tls_alpn(cache_dir, hostname),
+            } => load_from_autocert_cache_with_tls_alpn_or_bootstrap(cache_dir, hostname),
         }
     }
 }
@@ -335,6 +356,28 @@ pub fn load_from_autocert_cache_with_tls_alpn(
     load_from_autocert_cache_inner(cache_dir, hostname, true)
 }
 
+/// Load an ACME cache entry for TLS-ALPN mode, or bootstrap with an in-memory
+/// self-signed cert so the public TLS listener can come up and answer the ACME
+/// validation handshake that produces the real cache entry.
+pub fn load_from_autocert_cache_with_tls_alpn_or_bootstrap(
+    cache_dir: impl AsRef<Path>,
+    hostname: &str,
+) -> Result<TlsMaterial, WireError> {
+    let cache_dir = cache_dir.as_ref().to_path_buf();
+    match load_from_autocert_cache_with_tls_alpn(&cache_dir, hostname) {
+        Ok(material) => Ok(material),
+        Err(err) => {
+            tracing::info!(
+                hostname = %hostname,
+                cache_dir = %cache_dir.display(),
+                error = %err,
+                "ACME TLS-ALPN cache entry missing or invalid; bootstrapping listener with temporary self-signed material"
+            );
+            bootstrap_tls_alpn_material(&cache_dir, hostname)
+        }
+    }
+}
+
 fn load_from_autocert_cache_inner(
     cache_dir: impl AsRef<Path>,
     hostname: &str,
@@ -369,6 +412,24 @@ fn load_from_autocert_cache_inner(
         key_path: cache_path,
         server_config: Arc::new(server_config),
         acme_tls_alpn_resolver,
+        expires_at,
+    })
+}
+
+fn bootstrap_tls_alpn_material(cache_dir: &Path, hostname: &str) -> Result<TlsMaterial, WireError> {
+    let cache_path = autocert_cache_path(cache_dir, hostname);
+    let sans = SanConfig::with_hostname(hostname);
+    let (cert_pem, key_pem) = mint_self_signed(&sans)?;
+    let expires_at = leaf_certificate_not_after(&cert_pem)?;
+    let (server_config, resolver) =
+        build_server_config_with_acme_tls_alpn_resolver(&cert_pem, &key_pem)?;
+    Ok(TlsMaterial {
+        cert_pem,
+        key_pem,
+        cert_path: cache_path.clone(),
+        key_path: cache_path,
+        server_config: Arc::new(server_config),
+        acme_tls_alpn_resolver: Some(resolver),
         expires_at,
     })
 }
@@ -452,6 +513,16 @@ fn mint_and_persist(
     key_path: &Path,
     sans: &SanConfig,
 ) -> Result<(String, String), WireError> {
+    let (cert_pem, key_pem) = mint_self_signed(sans)?;
+
+    // Atomic-ish writes — tmp + rename. Avoids partial files mid-crash.
+    write_atomic(cert_path, cert_pem.as_bytes(), 0o644)?;
+    write_atomic(key_path, key_pem.as_bytes(), 0o600)?;
+
+    Ok((cert_pem, key_pem))
+}
+
+fn mint_self_signed(sans: &SanConfig) -> Result<(String, String), WireError> {
     let mut params = rcgen::CertificateParams::new(sans.all_dns())
         .map_err(|e| WireError::Internal(format!("rcgen params: {e}")))?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -471,14 +542,7 @@ fn mint_and_persist(
     let cert = params
         .self_signed(&key)
         .map_err(|e| WireError::Internal(format!("rcgen self_signed: {e}")))?;
-    let cert_pem = cert.pem();
-    let key_pem = key.serialize_pem();
-
-    // Atomic-ish writes — tmp + rename. Avoids partial files mid-crash.
-    write_atomic(cert_path, cert_pem.as_bytes(), 0o644)?;
-    write_atomic(key_path, key_pem.as_bytes(), 0o600)?;
-
-    Ok((cert_pem, key_pem))
+    Ok((cert.pem(), key.serialize_pem()))
 }
 
 fn write_atomic(p: &Path, bytes: &[u8], mode: u32) -> Result<(), WireError> {
@@ -528,11 +592,42 @@ pub fn build_server_config_with_acme_tls_alpn_resolver(
 ) -> Result<(ServerConfig, Arc<AcmeTlsAlpnChallengeResolver>), WireError> {
     let default_cert = Arc::new(certified_key_from_pem(cert_pem, key_pem)?);
     let resolver = AcmeTlsAlpnChallengeResolver::new(default_cert);
+    build_server_config_with_existing_acme_tls_alpn_resolver(cert_pem, key_pem, resolver)
+}
+
+pub fn build_server_config_with_existing_acme_tls_alpn_resolver(
+    cert_pem: &str,
+    key_pem: &str,
+    resolver: Arc<AcmeTlsAlpnChallengeResolver>,
+) -> Result<(ServerConfig, Arc<AcmeTlsAlpnChallengeResolver>), WireError> {
+    resolver.replace_default_certificate(cert_pem, key_pem)?;
     let mut cfg = ServerConfig::builder()
         .with_no_client_auth()
         .with_cert_resolver(resolver.clone());
     cfg.alpn_protocols = vec![b"http/1.1".to_vec(), ACME_TLS_ALPN_PROTOCOL.to_vec()];
     Ok((cfg, resolver))
+}
+
+pub fn build_acme_tls_alpn_challenge_certificate(
+    hostname: &str,
+    key_authorization: &str,
+) -> Result<(String, String), WireError> {
+    let digest = Sha256::digest(key_authorization.as_bytes());
+    let mut params = rcgen::CertificateParams::new(vec![hostname.to_string()])
+        .map_err(|e| WireError::Internal(format!("rcgen params: {e}")))?;
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, hostname);
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::new_acme_identifier(&digest));
+    let key = rcgen::KeyPair::generate()
+        .map_err(|e| WireError::Internal(format!("rcgen keypair: {e}")))?;
+    let cert = params
+        .self_signed(&key)
+        .map_err(|e| WireError::Internal(format!("rcgen self_signed: {e}")))?;
+    Ok((cert.pem(), key.serialize_pem()))
 }
 
 fn build_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig, WireError> {
@@ -547,6 +642,22 @@ fn certified_key_from_pem(cert_pem: &str, key_pem: &str) -> Result<CertifiedKey,
     let _ = provider.clone().install_default();
     CertifiedKey::from_der(certs, key, &provider)
         .map_err(|e| WireError::Internal(format!("rustls certified key: {e}")))
+}
+
+fn certified_key_from_pem_without_webpki_checks(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<CertifiedKey, WireError> {
+    let certs = certificates_from_pem(cert_pem)?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| WireError::Internal(format!("parse key pem: {e}")))?;
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let _ = provider.clone().install_default();
+    let signing_key = provider
+        .key_provider
+        .load_private_key(key)
+        .map_err(|e| WireError::Internal(format!("rustls signing key: {e}")))?;
+    Ok(CertifiedKey::new(certs, signing_key))
 }
 
 fn certificates_from_pem(cert_pem: &str) -> Result<Vec<CertificateDer<'static>>, WireError> {
@@ -747,6 +858,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn acme_tls_alpn_bootstrap_material_does_not_create_cache_entry() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let loaded =
+            load_from_autocert_cache_with_tls_alpn_or_bootstrap(&cache_dir, "headscale.example")
+                .unwrap();
+
+        assert!(loaded.acme_tls_alpn_resolver.is_some());
+        assert_eq!(loaded.cert_path, cache_dir.join("headscale.example"));
+        assert_eq!(loaded.key_path, cache_dir.join("headscale.example"));
+        assert!(!cache_dir.join("headscale.example").exists());
+        assert_eq!(
+            loaded.server_config.alpn_protocols,
+            vec![b"http/1.1".to_vec(), ACME_TLS_ALPN_PROTOCOL.to_vec()]
+        );
+    }
+
+    #[test]
+    fn acme_tls_alpn_challenge_certificate_has_required_identifier_extension() {
+        let key_authorization = "token.example-thumbprint";
+        let (cert_pem, key_pem) =
+            build_acme_tls_alpn_challenge_certificate("headscale.example", key_authorization)
+                .unwrap();
+        let default = load_or_generate(
+            tempdir().unwrap().path(),
+            &SanConfig::with_hostname("headscale.example"),
+        )
+        .unwrap();
+        let (_server_config, resolver) =
+            build_server_config_with_acme_tls_alpn_resolver(&default.cert_pem, &default.key_pem)
+                .unwrap();
+
+        resolver
+            .set_challenge_certificate("headscale.example", &cert_pem, &key_pem)
+            .unwrap();
+        assert!(resolver.has_challenge_certificate("headscale.example"));
+        let leaf = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref()).unwrap();
+        let extension = cert
+            .extensions()
+            .iter()
+            .find(|extension| extension.oid.to_id_string() == "1.3.6.1.5.5.7.1.31")
+            .expect("acmeIdentifier extension");
+        let digest = Sha256::digest(key_authorization.as_bytes());
+        let mut expected = vec![0x04, 0x20];
+        expected.extend_from_slice(&digest);
+
+        assert!(extension.critical);
+        assert_eq!(extension.value, expected.as_slice());
+    }
+
     #[tokio::test]
     async fn acme_tls_alpn_resolver_selects_challenge_cert_for_matching_sni_and_alpn() {
         let dir = tempdir().unwrap();
@@ -810,6 +978,66 @@ mod tests {
         .await;
 
         assert_eq!(peer_cert, first_certificate_der_for_test(&normal.cert_pem));
+    }
+
+    #[tokio::test]
+    async fn acme_tls_alpn_resolver_replaces_default_cert_without_losing_challenge_cert() {
+        let dir = tempdir().unwrap();
+        let normal = load_or_generate(
+            dir.path().join("normal"),
+            &SanConfig::with_hostname("acme.example"),
+        )
+        .unwrap();
+        let renewed = load_or_generate(
+            dir.path().join("renewed"),
+            &SanConfig::with_hostname("acme.example"),
+        )
+        .unwrap();
+        let challenge = load_or_generate(
+            dir.path().join("challenge"),
+            &SanConfig::with_hostname("acme.example"),
+        )
+        .unwrap();
+        let (_server_config, resolver) =
+            build_server_config_with_acme_tls_alpn_resolver(&normal.cert_pem, &normal.key_pem)
+                .unwrap();
+        resolver
+            .set_challenge_certificate("acme.example", &challenge.cert_pem, &challenge.key_pem)
+            .unwrap();
+        let (server_config, same_resolver) =
+            build_server_config_with_existing_acme_tls_alpn_resolver(
+                &renewed.cert_pem,
+                &renewed.key_pem,
+                resolver.clone(),
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&resolver, &same_resolver));
+        assert!(resolver.has_challenge_certificate("acme.example"));
+        let server_config = Arc::new(server_config);
+        let normal_peer_cert = tls_peer_leaf_for_test(
+            server_config.clone(),
+            "acme.example",
+            vec![b"http/1.1".to_vec()],
+            &renewed.cert_pem,
+        )
+        .await;
+        let challenge_peer_cert = tls_peer_leaf_for_test(
+            server_config,
+            "acme.example",
+            vec![ACME_TLS_ALPN_PROTOCOL.to_vec()],
+            &challenge.cert_pem,
+        )
+        .await;
+
+        assert_eq!(
+            normal_peer_cert,
+            first_certificate_der_for_test(&renewed.cert_pem)
+        );
+        assert_eq!(
+            challenge_peer_cert,
+            first_certificate_der_for_test(&challenge.cert_pem)
+        );
     }
 
     fn test_cert_pem(dns_name: &str, year: i32, month: u8, day: u8) -> (String, i64) {

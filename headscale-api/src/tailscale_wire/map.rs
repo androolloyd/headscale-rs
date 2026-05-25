@@ -3945,6 +3945,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_policy_change_adds_newly_visible_cross_user_profile() {
+        let (state, _dir) = fixture();
+        let deny_policy = r#"{"acls":[]}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(deny_policy).unwrap(),
+            deny_policy.into(),
+        );
+
+        let alice = "a7".repeat(32);
+        let bob = "b7".repeat(32);
+        let mut alice_record = policy_record(&alice, "alice-node", 10, "alice", Vec::new());
+        alice_record.set_user_identity(
+            Some(1001),
+            "alice".into(),
+            "Alice Example".into(),
+            String::new(),
+        );
+        state.machines.upsert(alice.clone(), alice_record);
+
+        let mut bob_record = policy_record(&bob, "bob-node", 11, "bob", Vec::new());
+        bob_record.set_user_identity(
+            Some(1002),
+            "bob".into(),
+            "Bob Example".into(),
+            String::new(),
+        );
+        state.machines.upsert(bob.clone(), bob_record);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &alice).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert!(
+            first
+                .peers
+                .iter()
+                .all(|peer| peer.id != stable_id_from_key(&bob)),
+            "deny-all initial stream should not include Bob as a peer"
+        );
+        assert!(
+            first
+                .user_profiles
+                .iter()
+                .all(|profile| profile.id != 1002 && profile.login_name != "bob"),
+            "deny-all initial stream should not include Bob's UserProfile"
+        );
+
+        let allow_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["bob@:*"]}
+            ]
+        }"#;
+        let policy_update = tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::parse_hujson_policy(allow_policy).unwrap(),
+                    allow_policy.into(),
+                );
+            }
+        });
+
+        let updated =
+            tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut body))
+                .await
+                .expect("policy update map chunk");
+        policy_update.await.expect("policy update task");
+
+        assert!(
+            updated.peers.is_empty(),
+            "policy wake should use incremental peer deltas"
+        );
+        assert!(updated.peers_removed.is_empty());
+        let bob_peer = changed_peer(&updated, "bob-node").expect("Bob peer changed");
+        assert_eq!(bob_peer.id, stable_id_from_key(&bob));
+        let bob_profile = updated
+            .user_profiles
+            .iter()
+            .find(|profile| profile.id == 1002)
+            .expect("Bob UserProfile present");
+        assert_eq!(bob_profile.login_name, "bob");
+        assert!(
+            updated.dns_config.is_some(),
+            "policy deltas carry policy-derived DNSConfig updates"
+        );
+    }
+
+    #[tokio::test]
     async fn map_response_keeps_exit_routes_out_of_primary_routes() {
         let (state, _dir) = fixture();
         let a = "41".repeat(32);

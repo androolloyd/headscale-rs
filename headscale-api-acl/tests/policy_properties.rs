@@ -287,3 +287,70 @@ fn via_routes_regular_overlap_clears_non_via_exclude() {
     assert!(got.exclude.is_empty());
     assert!(got.use_primary.is_empty());
 }
+
+#[test]
+fn via_routes_autogroup_internet_matches_exit_defaults_only_for_via_tag() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "tagOwners": {
+            "tag:client": ["client@"],
+            "tag:exit-a": ["router@"],
+            "tag:exit-b": ["router@"]
+          },
+          "grants": [{
+            "src": ["tag:client"],
+            "dst": ["autogroup:internet"],
+            "ip": ["*"],
+            "via": ["tag:exit-a"]
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    let client_tags = vec!["tag:client".to_string()];
+    let exit_a_tags = vec!["tag:exit-a".to_string()];
+    let exit_b_tags = vec!["tag:exit-b".to_string()];
+    let client = NodeView::new("100.64.0.14").with_tags(&client_tags);
+    let exit_a = NodeView::new("100.64.0.12").with_tags(&exit_a_tags);
+    let exit_b = NodeView::new("100.64.0.13").with_tags(&exit_b_tags);
+    let routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+
+    let included = doc.via_routes_for_peer(&client, &exit_a, &routes);
+    let excluded = doc.via_routes_for_peer(&client, &exit_b, &routes);
+
+    assert_eq!(included.include, routes);
+    assert!(included.exclude.is_empty());
+    assert_eq!(excluded.exclude, routes);
+    assert!(excluded.include.is_empty());
+}
+
+#[test]
+fn via_routes_specific_subnet_does_not_match_exit_defaults() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "tagOwners": {
+            "tag:client": ["client@"],
+            "tag:exit": ["router@"]
+          },
+          "grants": [{
+            "src": ["tag:client"],
+            "dst": ["10.55.0.0/24"],
+            "ip": ["*"],
+            "via": ["tag:exit"]
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    let client_tags = vec!["tag:client".to_string()];
+    let exit_tags = vec!["tag:exit".to_string()];
+    let client = NodeView::new("100.64.0.14").with_tags(&client_tags);
+    let exit = NodeView::new("100.64.0.12").with_tags(&exit_tags);
+    let routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+
+    let got = doc.via_routes_for_peer(&client, &exit, &routes);
+
+    assert!(got.include.is_empty());
+    assert!(got.exclude.is_empty());
+    assert!(got.use_primary.is_empty());
+}

@@ -1685,6 +1685,12 @@ impl AclDoc {
         let Some(route) = parse_cidr(route) else {
             return false;
         };
+        if is_default_route(&route) {
+            return grant
+                .dst
+                .iter()
+                .any(|dst| dst == "*" || dst == "autogroup:internet");
+        }
         grant.dst.iter().any(|dst| {
             self.expand_principal(dst).iter().any(|expanded| {
                 parse_cidr(expanded).is_some_and(|allowed| nets_overlap(&allowed, &route))

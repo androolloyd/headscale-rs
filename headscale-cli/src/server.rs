@@ -203,35 +203,10 @@ struct AcmeRuntimePlan {
     challenge_listener: AcmeChallengeListener,
 }
 
-impl AcmeRuntimePlan {
-    fn unsupported_tls_alpn_message(&self) -> String {
-        format!(
-            "tls_letsencrypt_hostname/ACME TLS-ALPN-01 is not implemented in headscale-rs yet; configured {} for hostname {} would require dynamic ACME challenge certificate selection using acme_url {} and cache_dir {}. Use HTTP-01, tls_cert_path/tls_key_path, or terminate TLS before headscale-rs.",
-            self.challenge_listener.context(),
-            self.hostname,
-            self.acme_url,
-            self.cache_dir.display()
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AcmeChallengeListener {
     Http01 { listen: String, addr: SocketAddr },
     TlsAlpn01 { addr: SocketAddr },
-}
-
-impl AcmeChallengeListener {
-    fn context(&self) -> String {
-        match self {
-            Self::Http01 { listen, addr } => {
-                format!("HTTP-01 challenge listener {listen} ({addr})")
-            }
-            Self::TlsAlpn01 { addr } => {
-                format!("TLS-ALPN-01 on the public TLS listener {addr}")
-            }
-        }
-    }
 }
 
 struct AcmeHttp01Runtime {
@@ -979,15 +954,6 @@ fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> 
             "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
         );
     }
-    let public_listeners = public_listener_plan(cfg)?;
-    if let Some(plan) = cfg.tls.acme_runtime_plan(public_listeners)?
-        && matches!(
-            plan.challenge_listener,
-            AcmeChallengeListener::TlsAlpn01 { .. }
-        )
-    {
-        anyhow::bail!("{}", plan.unsupported_tls_alpn_message());
-    }
     Ok(())
 }
 
@@ -1033,7 +999,10 @@ fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMat
                 hostname: plan.hostname,
             }),
             AcmeChallengeListener::TlsAlpn01 { .. } => {
-                anyhow::bail!("{}", plan.unsupported_tls_alpn_message())
+                Ok(TlsMaterialSource::AcmeAutocertCacheWithTlsAlpn {
+                    cache_dir: plan.cache_dir,
+                    hostname: plan.hostname,
+                })
             }
         };
     }
@@ -3157,7 +3126,9 @@ regions:
                 assert_eq!(cert_path, material.cert_path);
                 assert_eq!(key_path, material.key_path);
             }
-            TlsMaterialSource::SelfSigned { .. } | TlsMaterialSource::AcmeAutocertCache { .. } => {
+            TlsMaterialSource::SelfSigned { .. }
+            | TlsMaterialSource::AcmeAutocertCache { .. }
+            | TlsMaterialSource::AcmeAutocertCacheWithTlsAlpn { .. } => {
                 panic!("expected manual TLS source")
             }
         }
@@ -3329,23 +3300,37 @@ regions:
     }
 
     #[test]
-    fn runtime_config_rejects_unsupported_acme_before_serving() {
+    fn runtime_config_allows_tls_alpn_acme_cache_mode() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_run_server_config(&dir);
         cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
         cfg.tls.letsencrypt_cache_dir = Some(dir.path().join("acme-cache"));
         cfg.tls.letsencrypt_challenge_type = Some("TLS-ALPN-01".into());
 
-        let err = validate_supported_runtime_config(&cfg).unwrap_err();
-        let err = format!("{err:#}");
+        validate_supported_runtime_config(&cfg).unwrap();
+    }
 
-        assert!(err.contains("ACME TLS-ALPN-01 is not implemented"));
-        assert!(err.contains("TLS-ALPN-01 on the public TLS listener"));
-        assert!(err.contains("dynamic ACME challenge certificate selection"));
-        assert!(err.contains(&format!(
-            "cache_dir {}",
-            dir.path().join("acme-cache").display()
-        )));
+    #[test]
+    fn tls_material_source_uses_tls_alpn_acme_cache_with_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.tls.letsencrypt_hostname = Some("headscale.example".into());
+        cfg.tls.letsencrypt_cache_dir = Some(dir.path().join("acme-cache"));
+        cfg.tls.letsencrypt_challenge_type = Some("TLS-ALPN-01".into());
+        let sans = SanConfig::with_hostname("headscale.example");
+
+        let source = tls_material_source(&cfg, &sans).unwrap();
+
+        match source {
+            TlsMaterialSource::AcmeAutocertCacheWithTlsAlpn {
+                cache_dir,
+                hostname,
+            } => {
+                assert_eq!(cache_dir, dir.path().join("acme-cache"));
+                assert_eq!(hostname, "headscale.example");
+            }
+            other => panic!("expected ACME TLS-ALPN autocert cache source, got {other:?}"),
+        }
     }
 
     #[test]

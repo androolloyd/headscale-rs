@@ -224,26 +224,6 @@ fn route_is_exit_default(route: &str) -> bool {
     matches!(route, "0.0.0.0/0" | "::/0")
 }
 
-fn served_subnet_routes_for_via(
-    served_routes: &HashMap<String, Vec<String>>,
-) -> HashMap<String, Vec<String>> {
-    served_routes
-        .iter()
-        .filter_map(|(node_key, routes)| {
-            let routes = routes
-                .iter()
-                .filter(|route| !route_is_exit_default(route))
-                .cloned()
-                .collect::<Vec<_>>();
-            if routes.is_empty() {
-                None
-            } else {
-                Some((node_key.clone(), routes))
-            }
-        })
-        .collect()
-}
-
 fn peer_map_nodes_from_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
     served_routes: &HashMap<String, Vec<String>>,
@@ -362,8 +342,7 @@ fn select_routes_for_viewer(
     let mut allowed_routes = selected_primary.clone();
     allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
 
-    let via_served_routes = served_subnet_routes_for_via(served_routes);
-    let nodes = peer_map_nodes_from_snapshot(snapshot, &via_served_routes);
+    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
     let viewer_id = node_id_for_key(snapshot, self_node_key);
     let peer_id = node_id_for_key(snapshot, peer_node_key);
     if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
@@ -3498,6 +3477,70 @@ mod tests {
         )
     }
 
+    fn via_steering_policy_with_exit_node_via() -> &'static str {
+        r#"{
+            "tagOwners": {
+                "tag:router-a": ["router@"],
+                "tag:router-b": ["router@"],
+                "tag:group-a": ["client@"]
+            },
+            "grants": [
+                {
+                    "src": ["tag:router-a", "tag:router-b", "tag:group-a"],
+                    "dst": ["tag:router-a", "tag:router-b", "tag:group-a"],
+                    "ip": ["*"]
+                },
+                {
+                    "src": ["tag:group-a"],
+                    "dst": ["autogroup:internet"],
+                    "ip": ["*"],
+                    "via": ["tag:router-a"]
+                }
+            ]
+        }"#
+    }
+
+    fn insert_via_exit_nodes(state: &WireState) -> (String, String, String) {
+        let router_a = "65".repeat(32);
+        let router_b = "66".repeat(32);
+        let client_a = "67".repeat(32);
+        let exit_routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+
+        for (node_key, host, octet, user, tags, routes) in [
+            (
+                &router_a,
+                "router-a",
+                65,
+                "router",
+                vec!["tag:router-a".to_string()],
+                exit_routes.clone(),
+            ),
+            (
+                &router_b,
+                "router-b",
+                66,
+                "router",
+                vec!["tag:router-b".to_string()],
+                exit_routes,
+            ),
+            (
+                &client_a,
+                "client-a",
+                67,
+                "client",
+                vec!["tag:group-a".to_string()],
+                Vec::new(),
+            ),
+        ] {
+            let mut rec = policy_record(node_key, host, octet, user, tags);
+            rec.available_routes = routes.clone();
+            rec.approved_routes = routes;
+            state.machines.upsert(node_key.clone(), rec);
+        }
+
+        (router_a, router_b, client_a)
+    }
+
     fn peer_route<'a>(mr: &'a MapResponse, name: &str, route: &str) -> Option<&'a MapNode> {
         mr.peers.iter().find(|peer| {
             peer.name == name && peer.allowed_ips.iter().any(|allowed| allowed == route)
@@ -3679,6 +3722,79 @@ mod tests {
                 .allowed_ips
                 .iter()
                 .any(|allowed| allowed == "::/0")
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_via_exit_node_keeps_matching_defaults_and_strips_non_matching() {
+        let (state, _dir) = fixture();
+        let policy = via_steering_policy_with_exit_node_via();
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.to_string(),
+        );
+        let (router_a, router_b, client_a) = insert_via_exit_nodes(&state);
+        let _router_a_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_a),
+        );
+        let _router_b_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_b),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        let router_a_node = mr
+            .peers
+            .iter()
+            .find(|peer| peer.name == "router-a")
+            .expect("matching via exit node remains visible");
+        assert!(
+            router_a_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "0.0.0.0/0")
+        );
+        assert!(
+            router_a_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "::/0")
+        );
+
+        let router_b_node = mr
+            .peers
+            .iter()
+            .find(|peer| peer.name == "router-b")
+            .expect("non-matching exit node remains visible through node ACLs");
+        assert!(
+            !router_b_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "0.0.0.0/0"),
+            "via should remove router-b's IPv4 default route"
+        );
+        assert!(
+            !router_b_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "::/0"),
+            "via should remove router-b's IPv6 default route"
         );
     }
 

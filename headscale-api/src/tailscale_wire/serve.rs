@@ -50,6 +50,7 @@ use axum::{
 use ipnet::IpNet;
 use tokio::task::JoinHandle;
 
+use super::acme::AcmeHttp01ChallengeStore;
 use super::raw_tls;
 use super::tls::{SanConfig, TlsMaterial, TlsMaterialSource};
 use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
@@ -83,6 +84,10 @@ pub struct ServeConfig {
     /// Optional metrics/debug bind address. `None` disables the
     /// dedicated operator diagnostics listener.
     pub metrics_addr: Option<SocketAddr>,
+    /// Optional ACME HTTP-01 challenge material. When present, the public
+    /// listener serves `/.well-known/acme-challenge/{token}` before the normal
+    /// control-router fallback.
+    pub acme_http01: Option<AcmeHttp01ChallengeStore>,
 }
 
 impl ServeConfig {
@@ -101,6 +106,7 @@ impl ServeConfig {
             trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: None,
+            acme_http01: None,
         }
     }
 }
@@ -160,7 +166,7 @@ pub async fn serve(
     extra_routes: Router,
 ) -> Result<ServeHandle, WireError> {
     let oidc = cfg.oidc.clone();
-    let app = extra_routes.merge(public_router(state.clone(), oidc));
+    let app = extra_routes.merge(public_router(state.clone(), oidc, cfg.acme_http01.clone()));
     let app = app.layer(middleware::from_fn_with_state(
         cfg.trusted_proxies.clone(),
         trusted_proxy_headers,
@@ -297,10 +303,19 @@ fn sanitize_forwarded_headers(
     headers.remove("x-real-ip");
 }
 
-fn public_router(state: WireState, oidc: Option<crate::oidc::OidcAuthRuntime>) -> Router {
-    match oidc {
+fn public_router(
+    state: WireState,
+    oidc: Option<crate::oidc::OidcAuthRuntime>,
+    acme_http01: Option<AcmeHttp01ChallengeStore>,
+) -> Router {
+    let router = match oidc {
         Some(oidc) => control_router_with_oidc(state, oidc),
         None => control_router(state),
+    };
+    if let Some(store) = acme_http01 {
+        super::acme::http01_router(store).merge(router)
+    } else {
+        router
     }
 }
 
@@ -397,6 +412,7 @@ mod tests {
             trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: None,
+            acme_http01: None,
         };
         // We need the actual bound port; tokio::net::TcpListener::bind
         // returns it via local_addr. Inline the relevant piece of
@@ -433,6 +449,7 @@ mod tests {
                 trusted_proxies: TrustedProxyConfig::default(),
                 oidc: None,
                 metrics_addr: None,
+                acme_http01: None,
             },
             Router::new(),
         )
@@ -465,6 +482,7 @@ mod tests {
                 trusted_proxies: TrustedProxyConfig::default(),
                 oidc: None,
                 metrics_addr: None,
+                acme_http01: None,
             },
             Router::new(),
         )
@@ -480,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn production_public_router_excludes_metrics_debug_routes() {
         let (state, _dir) = fixture_state();
-        let public_app = public_router(state.clone(), None);
+        let public_app = public_router(state.clone(), None, None);
 
         let public_metrics = public_app
             .clone()
@@ -533,6 +551,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_router_serves_acme_http01_before_control_fallback() {
+        let (state, _dir) = fixture_state();
+        let store = AcmeHttp01ChallengeStore::new();
+        store.insert("token-123", "token-123.thumbprint");
+        let app = public_router(state, None, Some(store));
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/.well-known/acme-challenge/token-123")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), b"token-123.thumbprint");
+    }
+
+    #[tokio::test]
     async fn serve_binds_optional_metrics_debug_listener() {
         let (state, dir) = fixture_state();
         let cfg = ServeConfig {
@@ -547,6 +586,7 @@ mod tests {
             trusted_proxies: TrustedProxyConfig::default(),
             oidc: None,
             metrics_addr: Some("127.0.0.1:0".parse().unwrap()),
+            acme_http01: None,
         };
 
         let handle = serve(state, cfg, Router::new()).await.unwrap();
@@ -582,7 +622,7 @@ mod tests {
     async fn serve_public_router_mounts_oidc_when_configured() {
         let (state, _dir) = fixture_state();
         let oidc = oidc_runtime();
-        let app = public_router(state, Some(oidc));
+        let app = public_router(state, Some(oidc), None);
 
         let resp = app
             .oneshot(

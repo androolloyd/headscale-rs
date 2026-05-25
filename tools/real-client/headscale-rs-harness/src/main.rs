@@ -499,6 +499,7 @@ async fn main() -> Result<()> {
         trusted_proxies: serve::TrustedProxyConfig::default(),
         oidc: None,
         metrics_addr: Some(args.metrics),
+        acme_http01: None,
     };
     let route_health_probe = spawn_route_health_probe(
         state.clone(),

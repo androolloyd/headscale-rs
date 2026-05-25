@@ -81,6 +81,7 @@ pub const BATCHER_OFFLINE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 6
 /// Headscale-go retains disconnected batcher entries for rapid reconnects.
 pub const BATCHER_OFFLINE_CLEANUP_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
+pub mod acme;
 pub mod basic_handlers;
 pub mod be_transport;
 pub mod controlbase;

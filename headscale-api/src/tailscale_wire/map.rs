@@ -334,7 +334,10 @@ fn select_routes_for_viewer(
         allowed_routes.retain(|route| !via.exclude.contains(route));
         for route in via.include {
             if !allowed_routes.contains(&route) {
-                allowed_routes.push(route);
+                let use_primary = via.use_primary.contains(&route);
+                if !use_primary || selected_primary.contains(&route) {
+                    allowed_routes.push(route);
+                }
             }
         }
     }
@@ -3364,6 +3367,50 @@ mod tests {
         )
     }
 
+    fn via_steering_policy_with_regular_overlap(route: &str, via_tag: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-a": ["router@"],
+                    "tag:router-b": ["router@"],
+                    "tag:group-a": ["client@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"]
+                    }},
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"],
+                        "via": ["{via_tag}"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
+    fn via_steering_policy_with_multi_router_via(route: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-ha": ["router@"],
+                    "tag:group-a": ["client@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-ha"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
     fn peer_route<'a>(mr: &'a MapResponse, name: &str, route: &str) -> Option<&'a MapNode> {
         mr.peers.iter().find(|peer| {
             peer.name == name && peer.allowed_ips.iter().any(|allowed| allowed == route)
@@ -3493,6 +3540,108 @@ mod tests {
                 .allowed_ips
                 .iter()
                 .any(|allowed| allowed == "::/0")
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_via_regular_overlap_uses_global_primary_route() {
+        let (state, _dir) = fixture();
+        let route = "10.78.0.0/24";
+        let (router_a, router_b, client_a, _client_b) =
+            insert_via_steering_nodes_for_route(&state, route, Vec::new());
+        let _router_a_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_a),
+        );
+        let _router_b_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_b),
+        );
+        let snapshot = state.machines.snapshot();
+        let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
+        let global_primary = owner_for_route(&primary_routes, route).expect("global primary");
+        let (primary_name, non_primary_name, non_primary_via_tag) = if global_primary == router_a {
+            ("router-a", "router-b", "tag:router-b")
+        } else {
+            ("router-b", "router-a", "tag:router-a")
+        };
+        let policy = via_steering_policy_with_regular_overlap(route, non_primary_via_tag);
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        assert!(
+            peer_route(&mr, primary_name, route).is_some(),
+            "regular grant overlap should defer via steering to the global primary"
+        );
+        assert!(
+            peer_route(&mr, non_primary_name, route).is_none(),
+            "non-primary via router should not receive the duplicate route when UsePrimary applies"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_via_multi_router_tag_elects_one_router() {
+        let (state, _dir) = fixture();
+        let route = "10.79.0.0/24";
+        let policy = via_steering_policy_with_multi_router_via(route);
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+        let (router_a, router_b, client_a, _client_b) =
+            insert_via_steering_nodes_for_route(&state, route, Vec::new());
+        for router in [&router_a, &router_b] {
+            let mut rec = state.machines.get(router).expect("router record");
+            rec.forced_tags = vec!["tag:router-ha".to_string()];
+            state.machines.upsert(router.clone(), rec);
+        }
+
+        let (expected, unexpected) =
+            if stable_id_from_key(&router_a) < stable_id_from_key(&router_b) {
+                ("router-a", "router-b")
+            } else {
+                ("router-b", "router-a")
+            };
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        assert!(
+            peer_route(&mr, expected, route).is_some(),
+            "lowest-ID via router should keep the steered route"
+        );
+        assert!(
+            peer_route(&mr, unexpected, route).is_none(),
+            "non-primary via router should be excluded for the same prefix"
         );
     }
 

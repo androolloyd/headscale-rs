@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 pub use check::{PolicyCheckNode, check_policy_semantics};
 pub use doc::{
     AutoApprovers, CapabilityMap, GrantRule, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc,
-    PolicyRule, PortRef, SshRule, ViaRouteGrantResult,
+    PolicyRule, PortRef, SshRule, ViaRouteCandidate, ViaRouteGrantResult,
 };
 pub use filter::{
     PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node, allow_all_filter_rules,
@@ -299,7 +299,22 @@ impl PolicyStore {
         let doc = state.doc.as_ref()?;
         let viewer = nodes.iter().find(|node| node.id == viewer_id)?;
         let peer = nodes.iter().find(|node| node.id == peer_id)?;
-        Some(doc.via_routes_for_peer(&viewer.view(), &peer.view(), &peer.routes))
+        let candidates = nodes
+            .iter()
+            .map(|node| ViaRouteCandidate {
+                id: node.id,
+                tags: &node.tags,
+                routes: &node.routes,
+            })
+            .collect::<Vec<_>>();
+        Some(doc.via_routes_for_peer_with_candidates(
+            &viewer.view(),
+            viewer.id,
+            &peer.view(),
+            peer.id,
+            &peer.routes,
+            &candidates,
+        ))
     }
 
     /// Wake every parked `/map` long-poller without changing the

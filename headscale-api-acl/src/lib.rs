@@ -1522,7 +1522,26 @@ impl AclDoc {
         peer: &NodeView<'_>,
         peer_routes: &[String],
     ) -> ViaRouteGrantResult {
+        self.via_routes_for_peer_with_candidates(viewer, 0, peer, 0, peer_routes, &[])
+    }
+
+    /// Return the routes that `peer` should include, exclude, or defer
+    /// to global primary-route election for `viewer` because of upstream
+    /// `grants[*].via` route steering.
+    pub fn via_routes_for_peer_with_candidates(
+        &self,
+        viewer: &NodeView<'_>,
+        viewer_id: u64,
+        peer: &NodeView<'_>,
+        peer_id: u64,
+        peer_routes: &[String],
+        candidates: &[ViaRouteCandidate<'_>],
+    ) -> ViaRouteGrantResult {
         let mut result = ViaRouteGrantResult::default();
+        if viewer_id != 0 && viewer_id == peer_id {
+            return result;
+        }
+
         for grant in &self.grants {
             if grant.via.is_empty()
                 || !self.grant_src_matches(grant, viewer)
@@ -1556,9 +1575,81 @@ impl AclDoc {
             }
         }
 
+        if !result.include.is_empty() || !result.exclude.is_empty() {
+            for grant in &self.grants {
+                if grant.via.is_empty()
+                    || !self.grant_src_matches(grant, viewer)
+                    || !grant_port_matches(grant, PortRef::any())
+                {
+                    continue;
+                }
+
+                for included in result.include.clone() {
+                    if !self.grant_dsts_overlap_route(grant, &included) {
+                        continue;
+                    }
+
+                    let via_primary_id = candidates
+                        .iter()
+                        .filter(|node| {
+                            grant.via.iter().any(|via| {
+                                via.strip_prefix("tag:").is_some_and(|tag| {
+                                    node.tags.iter().any(|node_tag| tag_matches(node_tag, tag))
+                                })
+                            }) && node.routes.iter().any(|route| route == &included)
+                        })
+                        .map(|node| node.id)
+                        .min();
+
+                    if via_primary_id.is_some_and(|id| id != peer_id) {
+                        result.include.retain(|route| route != &included);
+                        push_unique(&mut result.exclude, included);
+                    }
+                }
+            }
+
+            for route in result.include.clone() {
+                if self.regular_policy_allows_route(viewer, peer, &route) {
+                    push_unique(&mut result.use_primary, route);
+                }
+            }
+
+            result
+                .exclude
+                .retain(|route| !self.regular_policy_allows_route(viewer, peer, route));
+        }
+
         result.include.sort();
+        result.include.dedup();
         result.exclude.sort();
+        result.exclude.dedup();
+        result.use_primary.sort();
+        result.use_primary.dedup();
         result
+    }
+
+    fn regular_policy_allows_route(
+        &self,
+        viewer: &NodeView<'_>,
+        peer: &NodeView<'_>,
+        route: &str,
+    ) -> bool {
+        let routes = vec![route.to_string()];
+        for rule in &self.rules {
+            if self.principal_matches(&rule.src, viewer, Some(peer))
+                && self.principals_overlap_routes(&rule.dst, &routes)
+                && (rule.ports.is_empty()
+                    || rule.ports.iter().any(|p| port_matches(p, PortRef::any())))
+            {
+                return rule.action == AclAction::Accept;
+            }
+        }
+        self.grants.iter().any(|grant| {
+            grant.via.is_empty()
+                && self.grant_src_matches(grant, viewer)
+                && grant_port_matches(grant, PortRef::any())
+                && self.principals_overlap_routes(&grant.dst, &routes)
+        })
     }
 
     fn grant_matches_node_or_route(
@@ -1888,6 +1979,22 @@ impl AclDoc {
 pub struct ViaRouteGrantResult {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    pub use_primary: Vec<String>,
+}
+
+/// Candidate route advertiser used for upstream `grants[*].via`
+/// primary election.
+#[derive(Clone, Copy, Debug)]
+pub struct ViaRouteCandidate<'a> {
+    pub id: u64,
+    pub tags: &'a [String],
+    pub routes: &'a [String],
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
 }
 
 pub fn wildcard_filter_cidrs() -> Vec<String> {

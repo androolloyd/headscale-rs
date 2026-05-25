@@ -288,9 +288,10 @@ extra records; SSH OIDC checkPeriod cache reuse has opt-in Rust/headscale-go
 smoke coverage; normalized exact API-key/preauth-key list snapshots now guard
 human CLI table shape; `serve` now reuses the `configtest` validation gate
 before opening SQLite and has process snapshots for invalid policy mode and
-unsafe trusted proxies; and the `grants[].via` plus exit-route interaction is
-covered at the map integration layer before broader paired stock-client
-expansion.
+unsafe trusted proxies; `grants[].via` plus exit-route interaction is
+covered at the map integration layer; and `grants[].via` now carries
+upstream `UsePrimary` fallback plus lowest-ID multi-router via-tag election
+before broader paired stock-client expansion.
 
 ## Parallel Workstreams
 

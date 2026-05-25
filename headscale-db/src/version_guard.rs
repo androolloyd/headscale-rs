@@ -8,6 +8,7 @@ use crate::{DbError, Result};
 use sqlx::SqlitePool;
 
 pub const HEADSCALE_GO_IMPORT_BASELINE: &str = "v0.28.0";
+pub const HEADSCALE_GO_CURRENT_VERSION: &str = "v0.29.0-beta.1.0.20260522122924-4483fd0cad38";
 
 const SUPPORTED_MAJOR: u64 = 0;
 const SUPPORTED_MINOR: u64 = 28;
@@ -82,6 +83,21 @@ pub async fn check_headscale_go_import_compatibility(
     }
 
     Ok(HeadscaleGoImportCompatibility::Fresh)
+}
+
+pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT INTO database_versions (id, version, updated_at)
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO NOTHING
+        ",
+    )
+    .bind(HEADSCALE_GO_CURRENT_VERSION)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 async fn check_database_versions_table(

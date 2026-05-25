@@ -1,6 +1,6 @@
 use headscale_db::{
-    DATABASE_BACKEND_MATRIX, Database, DbError, HeadscaleGoImportCompatibility, api_keys,
-    headscale_nodes,
+    DATABASE_BACKEND_MATRIX, Database, DbError, HEADSCALE_GO_CURRENT_VERSION,
+    HeadscaleGoImportCompatibility, api_keys, headscale_nodes,
     preauth_keys::{self, CreateParams as PreauthCreateParams},
     users::{self, CreateParams as UserCreateParams},
 };
@@ -638,6 +638,13 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
         .await
         .expect("v0.28 database_versions row is accepted");
 
+    let stored_version: String =
+        sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("query preserved database_versions row");
+    assert_eq!(stored_version, "v0.28.1-beta.1");
+
     let after = db
         .check_headscale_go_import_compatibility()
         .await
@@ -903,16 +910,21 @@ async fn node_address_uniqueness_indexes_are_partial() {
 }
 
 #[tokio::test]
-async fn fresh_rust_migration_creates_empty_database_versions_table() {
-    let db = Database::in_memory().await.expect("open db");
+async fn fresh_rust_migration_stamps_current_database_versions_row() {
+    let (_dir, db) = file_db().await;
     db.migrate().await.expect("migrate");
 
     assert!(sqlite_table_exists(&db, "database_versions").await);
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM database_versions")
-        .fetch_one(db.pool())
-        .await
-        .expect("count database_versions");
-    assert_eq!(count, 0);
+    let row: (i64, String, i64) = sqlx::query_as(
+        "
+        SELECT id, version, updated_at IS NOT NULL
+        FROM database_versions
+        ",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("query database_versions");
+    assert_eq!(row, (1, HEADSCALE_GO_CURRENT_VERSION.to_string(), 1));
 }
 
 #[tokio::test]

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use headscale_api_acl::{AclAction, AclDoc, AclRule, NodeView, PortRef};
+use headscale_api_acl::{
+    AclAction, AclDoc, AclRule, NodeView, PortRef, ViaRouteCandidate, parse_hujson_policy,
+};
 
 fn ip_string(bytes: [u8; 4]) -> String {
     Ipv4Addr::from(bytes).to_string()
@@ -138,4 +140,150 @@ fn first_match_deny_remains_authoritative() {
         doc.evaluate_with(&alice, &db, PortRef::new("tcp", 443)),
         AclAction::Accept
     );
+}
+
+#[test]
+fn via_routes_include_overlapping_advertised_prefixes() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "tagOwners": {
+            "tag:router-broad": ["router@"],
+            "tag:router-narrow": ["router@"],
+            "tag:router-disjoint": ["router@"],
+            "tag:router-v6": ["router@"],
+            "tag:client-broad": ["client@"],
+            "tag:client-narrow": ["client@"],
+            "tag:client-disjoint": ["client@"],
+            "tag:client-v6": ["client@"]
+          },
+          "hosts": {
+            "office": "10.33.0.0/16",
+            "office-narrow": "10.66.5.128/25",
+            "office-disjoint": "10.77.0.0/24",
+            "office-4via6": "fd7a:115c:a1e0:b1a::/64"
+          },
+          "grants": [
+            {
+              "src": ["tag:client-broad"],
+              "dst": ["office"],
+              "ip": ["*"],
+              "via": ["tag:router-broad"]
+            },
+            {
+              "src": ["tag:client-narrow"],
+              "dst": ["office-narrow"],
+              "ip": ["*"],
+              "via": ["tag:router-narrow"]
+            },
+            {
+              "src": ["tag:client-disjoint"],
+              "dst": ["office-disjoint"],
+              "ip": ["*"],
+              "via": ["tag:router-disjoint"]
+            },
+            {
+              "src": ["tag:client-v6"],
+              "dst": ["office-4via6"],
+              "ip": ["*"],
+              "via": ["tag:router-v6"]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    for (client_tag, router_tag, route, expect_include) in [
+        ("tag:client-broad", "tag:router-broad", "10.33.5.0/24", true),
+        (
+            "tag:client-narrow",
+            "tag:router-narrow",
+            "10.66.5.0/24",
+            true,
+        ),
+        (
+            "tag:client-disjoint",
+            "tag:router-disjoint",
+            "10.77.1.0/24",
+            false,
+        ),
+        (
+            "tag:client-v6",
+            "tag:router-v6",
+            "fd7a:115c:a1e0:b1a:0:13:ad2:7300/120",
+            true,
+        ),
+    ] {
+        let client_tags = vec![client_tag.to_string()];
+        let router_tags = vec![router_tag.to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let router = NodeView::new("100.64.0.1").with_tags(&router_tags);
+        let routes = vec![route.to_string()];
+
+        let got = doc.via_routes_for_peer(&client, &router, &routes);
+
+        if expect_include {
+            assert_eq!(got.include, routes, "{client_tag} should include {route}");
+        } else {
+            assert!(
+                got.include.is_empty(),
+                "{client_tag} should not include disjoint {route}"
+            );
+        }
+        assert!(got.exclude.is_empty());
+        assert!(got.use_primary.is_empty());
+    }
+}
+
+#[test]
+fn via_routes_regular_overlap_clears_non_via_exclude() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "tagOwners": {
+            "tag:client": ["client@"],
+            "tag:primary": ["router@"],
+            "tag:secondary": ["router@"]
+          },
+          "grants": [
+            {
+              "src": ["tag:client"],
+              "dst": ["10.55.0.0/24"],
+              "ip": ["*"],
+              "via": ["tag:secondary"]
+            },
+            {
+              "src": ["tag:client"],
+              "dst": ["10.55.0.0/24"],
+              "ip": ["*"]
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let client_tags = vec!["tag:client".to_string()];
+    let primary_tags = vec!["tag:primary".to_string()];
+    let secondary_tags = vec!["tag:secondary".to_string()];
+    let client = NodeView::new("100.64.0.14").with_tags(&client_tags);
+    let primary = NodeView::new("100.64.0.12").with_tags(&primary_tags);
+    let route = "10.55.0.0/24".to_string();
+    let routes = vec![route];
+    let candidates = vec![
+        ViaRouteCandidate {
+            id: 12,
+            tags: &primary_tags,
+            routes: &routes,
+        },
+        ViaRouteCandidate {
+            id: 13,
+            tags: &secondary_tags,
+            routes: &routes,
+        },
+    ];
+
+    let got =
+        doc.via_routes_for_peer_with_candidates(&client, 14, &primary, 12, &routes, &candidates);
+
+    assert!(got.include.is_empty());
+    assert!(got.exclude.is_empty());
+    assert!(got.use_primary.is_empty());
 }

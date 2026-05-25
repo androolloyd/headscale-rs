@@ -21,7 +21,9 @@ pub mod users;
 mod version_guard;
 
 pub use error::{DbError, Result};
-pub use version_guard::{HEADSCALE_GO_IMPORT_BASELINE, HeadscaleGoImportCompatibility};
+pub use version_guard::{
+    HEADSCALE_GO_CURRENT_VERSION, HEADSCALE_GO_IMPORT_BASELINE, HeadscaleGoImportCompatibility,
+};
 
 /// Supported database-backend matrix for headscale-db.
 ///
@@ -151,6 +153,7 @@ impl Database {
     pub async fn migrate(&self) -> Result<()> {
         version_guard::check_headscale_go_import_compatibility(&self.pool).await?;
         sqlx::migrate!("./migrations").run(&self.pool).await?;
+        version_guard::stamp_rust_managed_database_version(&self.pool).await?;
         Ok(())
     }
 

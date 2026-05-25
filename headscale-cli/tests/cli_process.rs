@@ -1204,7 +1204,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 }
 
 #[test]
-fn configtest_rejects_unsupported_postgres_runtime() {
+fn configtest_accepts_postgres_config() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     fs::write(
@@ -1224,11 +1224,39 @@ database:
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_rejects_invalid_postgres_pool_config() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: postgres
+  postgres:
+    max_open_conns: -1
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+
     assert_process_stderr_snapshot(
         &output,
         1,
-        include_str!("snapshots/configtest_unsupported_postgres.stderr"),
-        "configtest unsupported postgres",
+        include_str!("snapshots/configtest_invalid_postgres_pool.stderr"),
+        "configtest invalid postgres pool",
     );
 }
 
@@ -1499,7 +1527,7 @@ fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
         format!(
             r#"
 server_url: "http://127.0.0.1:8080"
-listen_addr: "not-a-socket"
+listen_addr: "127.0.0.1:0"
 noise:
   private_key_path: "noise_private.key"
 dns:

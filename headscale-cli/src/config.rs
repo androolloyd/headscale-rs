@@ -989,9 +989,7 @@ impl CliConfig {
                 {
                     bail!("database.postgres connection pool fields must be >= 0");
                 }
-                bail!(
-                    "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
-                );
+                Ok(())
             }
             other => bail!(
                 "database.type {other:?} is invalid; supported values are sqlite, sqlite3, postgres"
@@ -2719,17 +2717,41 @@ prefixes:
     }
 
     #[test]
-    fn configtest_rejects_unsupported_postgres_config() {
+    fn configtest_accepts_postgres_config() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   type: postgres
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_postgres_pool_config() {
+        let source = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+database:
+  type: postgres
+  postgres:
+    max_open_conns: -1
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
         let err = config.validate_for_configtest().unwrap_err();
 
-        assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+        assert!(
+            format!("{err:#}").contains("database.postgres connection pool fields must be >= 0")
+        );
     }
 
     #[test]

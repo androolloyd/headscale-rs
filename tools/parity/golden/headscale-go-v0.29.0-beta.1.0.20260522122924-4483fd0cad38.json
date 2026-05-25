@@ -968,6 +968,124 @@
   },
   {
     "engine": "headscale",
+    "name": "route-via-grant-effects",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.14"
+        ],
+        "DstPorts": [
+          {
+            "IP": "10.55.0.0/24",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "broader-destination-includes-advertised-prefix",
+        "include": [
+          "10.33.5.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "narrower-destination-includes-advertised-prefix",
+        "include": [
+          "10.66.5.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "disjoint-destination-does-not-include-advertised-prefix",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "ipv6-broader-destination-includes-4via6-advertised-prefix",
+        "include": [
+          "fd7a:115c:a1e0:b1a:0:13:ad2:7300/120"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "multi-router-low-id-keeps-include",
+        "include": [
+          "10.44.0.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "multi-router-high-id-is-excluded",
+        "include": [
+
+        ],
+        "exclude": [
+          "10.44.0.0/24"
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "regular-overlap-uses-primary",
+        "include": [
+          "10.55.0.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+          "10.55.0.0/24"
+        ]
+      },
+      {
+        "name": "regular-overlap-clears-non-via-exclude",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "ssh-policy-matrix",
     "filter": [
 

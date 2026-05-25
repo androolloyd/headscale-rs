@@ -191,6 +191,7 @@ Current executable coverage:
 | Peer map / matcher visibility | Done | `peer-map-symmetric-one-way`, `peer-map-route-visibility`, and `acl-autogroup-self-per-node` `peer_map_checks` cover `PolicyManager.BuildPeerMap` symmetric one-way ACL visibility, active approved route visibility, unapproved route exclusion, and per-node `autogroup:self` peer maps |
 | `tagOwners` authorization | Done | `tag-owners-matrix`, `tagowners-nested-tag-owner`, `tagowners-validation-circular-tag-owner` |
 | `autoApprovers` route and exit-node checks | Done | `route-autoapprove*` scenarios, including default-route, IP-family, prefix-containment, current-approved preservation, and tagged-node identity edge cases |
+| `grants[].via` policy effects | Done | `route-via-grant-effects` `via_route_checks` compare Rust against `PolicyManager.ViaRoutesForPeer` for broader/narrower/disjoint host-alias destinations, IPv6 4via6 advertised-prefix inclusion, same-tag multi-router election, regular-grant overlap `UsePrimary`, and non-via exclusion clearing |
 | SSH policy compilation and validation | Done | `ssh-policy-matrix`, `ssh-validation-*` scenarios |
 | Tailcfg DNS, DERP, register, map, SSHPolicy JSON summaries | Partial | `wire-*` scenarios, including `RegisterRequest` capability version, old-node-key rotation, network-lock key, tailnet/follow-up/ephemeral/expiry fields, register node-key/device signature fields, `RegisterResponse.NodeKeySignature`, upstream `RegisterResponse.User`/`Login` profile fields, extended `Hostinfo`/`NetInfo` client metadata including routable IPs, services, Tailscale SSH host keys, location, TPM metadata, and DERP latency, `MapRequest` session/debug/connection-handle/hardware-attestation fields, broad `MapNode` metadata/CapMap/Cap/lifecycle timestamps including key-expiry/expired state, `MapResponse` peer/filter deltas, health/display/debug/control fields, `UserProfiles`, `SSHPolicy`, extended `DNSConfig` fields (`Nameservers`, `CertDomains`, resolver bootstrap addresses, `TempCorpIssue13969`), and extended `DERPMap` fields (`HomeParams`, region coordinates/selection flags, node cert/STUN/port-80 metadata); runtime map node names/domains now derive from the configured DNS base domain instead of an Octra-specific core default, streaming `/map` registry wakes now emit incremental `PeersChanged`/`PeersRemoved` updates, self key-expiry wakes now emit an updated self `Node`, route, disco-key, and SSH host-key updates that change full peer state emit full `PeersChanged` entries, endpoint/DERP-only updates emit `PeersChangedPatch` entries, `/map` emits headscale-go-style `PacketFilters["base"]` reduced for the receiving node, `/map` stamps requester capability version into self and peer `MapNode.Cap`, self/peer `MapNode.CapMap` now seeds upstream default admin, SSH, and file-sharing capabilities before applying policy node attrs, and full map responses stamp upstream builder fields such as `ControlTime`, `CollectServices=false`, and `Debug.DisableLogTail=true` |
 | Public control HTTP basics | Partial | `tailscale_wire::basic_handlers::tests::*` covers headscale-go-compatible `/robots.txt`, `/health`, `/version`, `/windows`, `/apple`, `/apple/{platform}`, `/swagger`, `/swagger/v1/openapiv2.json`, `/verify`, `/register/{auth_id}`, `/auth/{auth_id}`, `/favicon.ico`, and blank fallback response shapes on the unauthenticated control listener; `/register` and `/auth` require the current-upstream prefixed `hskey-authreq-<24 byte id>` auth ID shape. Apple/Windows profile URLs prefer `WireState.public_control_url` to mirror headscale-go `cfg.ServerURL`, with request-derived fallback until full config loading supplies it |
@@ -289,10 +290,12 @@ smoke coverage; normalized exact API-key/preauth-key list snapshots now guard
 human CLI table shape; `serve` now reuses the `configtest` validation gate
 before opening SQLite and has process snapshots for invalid policy mode and
 unsafe trusted proxies; `grants[].via` plus exit-route interaction is
-covered at the map integration layer; and `grants[].via` now carries
-upstream `UsePrimary` fallback plus lowest-ID multi-router via-tag election
-and same-prefix co-router primary visibility before broader paired
-stock-client expansion.
+covered at the map integration layer; direct Go-vs-Rust
+`ViaRoutesForPeer` checks cover broader, narrower, disjoint, and IPv6
+4via6 host-alias route destinations, upstream `UsePrimary` fallback,
+and lowest-ID multi-router via-tag election; and same-prefix co-router
+primary visibility is covered before broader paired stock-client
+expansion.
 
 ## Parallel Workstreams
 

@@ -25,6 +25,9 @@ Scenarios may also include:
 
 - `route_checks`: node route auto-approval checks compared against
   `headscale-go`'s `ApproveRoutesWithPolicy`.
+- `via_route_checks`: viewer/peer `grants[].via` route-steering checks
+  compared against `headscale-go`'s `PolicyManager.ViaRoutesForPeer`,
+  including include, exclude, and `UsePrimary` route decisions.
 - `filter_node_checks`: per-node `FilterForNode` checks, including
   `autogroup:self` reduction.
 - `peer_map_checks`: per-node peer visibility checks compared against

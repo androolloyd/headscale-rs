@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use headscale_api::{
     dns::{DnsConfigSpec, DnsStore, MachineDnsRecord},
     policy::{
-        NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, build_peer_map_for_doc,
-        compile_ssh_policy_with_base_url, parse_hujson_policy,
+        NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, ViaRouteCandidate,
+        build_peer_map_for_doc, compile_ssh_policy_with_base_url, parse_hujson_policy,
     },
     tailscale_wire::wire::{
         DerpMap, DnsConfig, HostInfo, MapNode, MapRequest, MapResponse, RegisterRequest,
@@ -35,6 +35,8 @@ struct Scenario {
     peer_map_checks: Vec<PeerMapCheck>,
     #[serde(default)]
     route_checks: Vec<RouteCheck>,
+    #[serde(default)]
+    via_route_checks: Vec<ViaRouteCheck>,
     #[serde(default)]
     tag_checks: Vec<TagCheck>,
     #[serde(default)]
@@ -91,6 +93,13 @@ struct RouteCheck {
 }
 
 #[derive(Debug, Deserialize)]
+struct ViaRouteCheck {
+    name: String,
+    viewer_id: u64,
+    peer_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct TagCheck {
     name: String,
     node_id: u64,
@@ -135,6 +144,8 @@ struct ScenarioOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     route_approvals: Vec<RouteApprovalOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    via_routes: Vec<ViaRouteOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tag_checks: Vec<TagCheckOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ssh_policies: Vec<SshPolicyOut>,
@@ -159,6 +170,14 @@ struct RouteApprovalOut {
     name: String,
     approved_routes: Vec<String>,
     changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ViaRouteOut {
+    name: String,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    use_primary: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -684,6 +703,7 @@ fn main() -> Result<()> {
                         filter_for_nodes: Vec::new(),
                         peer_maps: Vec::new(),
                         route_approvals: Vec::new(),
+                        via_routes: Vec::new(),
                         tag_checks: Vec::new(),
                         ssh_policies: Vec::new(),
                         wire: None,
@@ -713,6 +733,7 @@ fn main() -> Result<()> {
             )?,
             peer_maps: run_peer_map_checks(&scenario, &doc, &filter_nodes)?,
             route_approvals: run_route_checks(&scenario, &doc)?,
+            via_routes: run_via_route_checks(&scenario, &doc, &filter_nodes)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
             wire: normalize_wire(scenario.wire, &scenario.nodes)?,
@@ -1841,6 +1862,79 @@ fn run_route_checks(
             name: check.name.clone(),
             changed: approved != before,
             approved_routes: approved,
+        });
+    }
+
+    Ok(out)
+}
+
+fn run_via_route_checks(
+    scenario: &Scenario,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+) -> Result<Vec<ViaRouteOut>> {
+    if scenario.via_route_checks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let candidates = nodes
+        .iter()
+        .map(|node| ViaRouteCandidate {
+            id: node.id,
+            tags: &node.tags,
+            routes: &node.routes,
+        })
+        .collect::<Vec<_>>();
+
+    let mut out = Vec::with_capacity(scenario.via_route_checks.len());
+    for check in &scenario.via_route_checks {
+        let viewer = nodes
+            .iter()
+            .find(|node| node.id == check.viewer_id)
+            .with_context(|| {
+                format!(
+                    "via route check {} references unknown viewer node {}",
+                    check.name, check.viewer_id
+                )
+            })?;
+        let peer = nodes
+            .iter()
+            .find(|node| node.id == check.peer_id)
+            .with_context(|| {
+                format!(
+                    "via route check {} references unknown peer node {}",
+                    check.name, check.peer_id
+                )
+            })?;
+        let viewer_view = NodeView {
+            addr: viewer.addrs.first().map(String::as_str),
+            user: viewer.user.as_deref(),
+            tags: &viewer.tags,
+        };
+        let peer_view = NodeView {
+            addr: peer.addrs.first().map(String::as_str),
+            user: peer.user.as_deref(),
+            tags: &peer.tags,
+        };
+        let result = doc.via_routes_for_peer_with_candidates(
+            &viewer_view,
+            viewer.id,
+            &peer_view,
+            peer.id,
+            &peer.routes,
+            &candidates,
+        );
+        let mut include = result.include;
+        let mut exclude = result.exclude;
+        let mut use_primary = result.use_primary;
+        include.sort();
+        exclude.sort();
+        use_primary.sort();
+        out.push(ViaRouteOut {
+            name: check.name.clone(),
+            include,
+            exclude,
+            use_primary,
         });
     }
 

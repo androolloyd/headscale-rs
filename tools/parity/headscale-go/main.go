@@ -27,6 +27,7 @@ type scenario struct {
 	FilterNodeChecks []filterNodeCheck `json:"filter_node_checks,omitempty"`
 	PeerMapChecks    []peerMapCheck    `json:"peer_map_checks,omitempty"`
 	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
+	ViaRouteChecks   []viaRouteCheck   `json:"via_route_checks,omitempty"`
 	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
 	SSHChecks        []sshCheck        `json:"ssh_checks,omitempty"`
 	ExpectPolicyErr  string            `json:"expect_policy_error,omitempty"`
@@ -58,6 +59,7 @@ type scenarioOutput struct {
 	FilterForNodes []filterForNodeOut `json:"filter_for_nodes,omitempty"`
 	PeerMaps       []peerMapOut       `json:"peer_maps,omitempty"`
 	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
+	ViaRoutes      []viaRouteOut      `json:"via_routes,omitempty"`
 	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
 	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
 	Wire           *wireOutput        `json:"wire,omitempty"`
@@ -94,6 +96,19 @@ type routeApprovalOut struct {
 	Name           string   `json:"name"`
 	ApprovedRoutes []string `json:"approved_routes"`
 	Changed        bool     `json:"changed"`
+}
+
+type viaRouteCheck struct {
+	Name     string `json:"name"`
+	ViewerID uint64 `json:"viewer_id"`
+	PeerID   uint64 `json:"peer_id"`
+}
+
+type viaRouteOut struct {
+	Name       string   `json:"name"`
+	Include    []string `json:"include"`
+	Exclude    []string `json:"exclude"`
+	UsePrimary []string `json:"use_primary"`
 }
 
 type tagCheck struct {
@@ -469,6 +484,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
+	viaRoutes, err := runViaRouteChecks(sc.ViaRouteChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	tagChecks, err := runTagChecks(sc.TagChecks, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
@@ -488,6 +507,7 @@ func runScenario(path string) (scenarioOutput, error) {
 		FilterForNodes: filterForNodes,
 		PeerMaps:       peerMaps,
 		RouteApprovals: routeApprovals,
+		ViaRoutes:      viaRoutes,
 		TagChecks:      tagChecks,
 		SSHPolicies:    sshPolicies,
 		Wire:           wire,
@@ -668,6 +688,31 @@ func runRouteChecks(checks []routeCheck, pm policy.PolicyManager, nodes types.No
 			Name:           check.Name,
 			ApprovedRoutes: prefixStrings(approved),
 			Changed:        changed,
+		})
+	}
+	return out, nil
+}
+
+func runViaRouteChecks(checks []viaRouteCheck, pm policy.PolicyManager, nodes types.Nodes) ([]viaRouteOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	out := make([]viaRouteOut, 0, len(checks))
+	for _, check := range checks {
+		viewer := findNode(nodes, check.ViewerID)
+		if viewer == nil {
+			return nil, fmt.Errorf("via route check %q references unknown viewer node %d", check.Name, check.ViewerID)
+		}
+		peer := findNode(nodes, check.PeerID)
+		if peer == nil {
+			return nil, fmt.Errorf("via route check %q references unknown peer node %d", check.Name, check.PeerID)
+		}
+		result := pm.ViaRoutesForPeer(viewer.View(), peer.View())
+		out = append(out, viaRouteOut{
+			Name:       check.Name,
+			Include:    prefixStrings(result.Include),
+			Exclude:    prefixStrings(result.Exclude),
+			UsePrimary: prefixStrings(result.UsePrimary),
 		})
 	}
 	return out, nil

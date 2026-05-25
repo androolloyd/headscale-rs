@@ -1,0 +1,201 @@
+{
+  "name": "route-via-grant-effects",
+  "policy": {
+    "tagOwners": {
+      "tag:router-a": ["router@"],
+      "tag:router-narrow": ["router@"],
+      "tag:router-disjoint": ["router@"],
+      "tag:router-v6": ["router@"],
+      "tag:ha-router": ["router@"],
+      "tag:primary": ["router@"],
+      "tag:secondary": ["router@"],
+      "tag:client-broad": ["client@"],
+      "tag:client-narrow": ["client@"],
+      "tag:client-disjoint": ["client@"],
+      "tag:client-v6": ["client@"],
+      "tag:client-ha": ["client@"],
+      "tag:client-regular": ["client@"]
+    },
+    "hosts": {
+      "office": "10.33.0.0/16",
+      "office-narrow": "10.66.5.128/25",
+      "office-disjoint": "10.77.0.0/24",
+      "office-4via6": "fd7a:115c:a1e0:b1a::/64"
+    },
+    "grants": [
+      {
+        "src": ["tag:client-broad"],
+        "dst": ["office"],
+        "ip": ["*"],
+        "via": ["tag:router-a"]
+      },
+      {
+        "src": ["tag:client-narrow"],
+        "dst": ["office-narrow"],
+        "ip": ["*"],
+        "via": ["tag:router-narrow"]
+      },
+      {
+        "src": ["tag:client-disjoint"],
+        "dst": ["office-disjoint"],
+        "ip": ["*"],
+        "via": ["tag:router-disjoint"]
+      },
+      {
+        "src": ["tag:client-v6"],
+        "dst": ["office-4via6"],
+        "ip": ["*"],
+        "via": ["tag:router-v6"]
+      },
+      {
+        "src": ["tag:client-ha"],
+        "dst": ["10.44.0.0/24"],
+        "ip": ["*"],
+        "via": ["tag:ha-router"]
+      },
+      {
+        "src": ["tag:client-regular"],
+        "dst": ["10.55.0.0/24"],
+        "ip": ["*"],
+        "via": ["tag:secondary"]
+      },
+      {
+        "src": ["tag:client-regular"],
+        "dst": ["10.55.0.0/24"],
+        "ip": ["*"]
+      }
+    ]
+  },
+  "users": [
+    { "id": 1, "name": "router" },
+    { "id": 2, "name": "client" }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "router-broad",
+      "ipv4": "100.64.0.1",
+      "tags": ["tag:router-a"],
+      "routes": ["10.33.5.0/24"],
+      "approved_routes": ["10.33.5.0/24"]
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "client-broad",
+      "ipv4": "100.64.0.2",
+      "tags": ["tag:client-broad"]
+    },
+    {
+      "id": 3,
+      "user_id": 1,
+      "hostname": "router-narrow",
+      "ipv4": "100.64.0.3",
+      "tags": ["tag:router-narrow"],
+      "routes": ["10.66.5.0/24"],
+      "approved_routes": ["10.66.5.0/24"]
+    },
+    {
+      "id": 4,
+      "user_id": 2,
+      "hostname": "client-narrow",
+      "ipv4": "100.64.0.4",
+      "tags": ["tag:client-narrow"]
+    },
+    {
+      "id": 5,
+      "user_id": 1,
+      "hostname": "router-disjoint",
+      "ipv4": "100.64.0.5",
+      "tags": ["tag:router-disjoint"],
+      "routes": ["10.77.1.0/24"],
+      "approved_routes": ["10.77.1.0/24"]
+    },
+    {
+      "id": 6,
+      "user_id": 2,
+      "hostname": "client-disjoint",
+      "ipv4": "100.64.0.6",
+      "tags": ["tag:client-disjoint"]
+    },
+    {
+      "id": 7,
+      "user_id": 1,
+      "hostname": "router-v6",
+      "ipv4": "100.64.0.7",
+      "ipv6": "fd7a:115c:a1e0::7",
+      "tags": ["tag:router-v6"],
+      "routes": ["fd7a:115c:a1e0:b1a:0:13:ad2:7300/120"],
+      "approved_routes": ["fd7a:115c:a1e0:b1a:0:13:ad2:7300/120"]
+    },
+    {
+      "id": 8,
+      "user_id": 2,
+      "hostname": "client-v6",
+      "ipv4": "100.64.0.8",
+      "ipv6": "fd7a:115c:a1e0::8",
+      "tags": ["tag:client-v6"]
+    },
+    {
+      "id": 9,
+      "user_id": 1,
+      "hostname": "ha-router-low",
+      "ipv4": "100.64.0.9",
+      "tags": ["tag:ha-router"],
+      "routes": ["10.44.0.0/24"],
+      "approved_routes": ["10.44.0.0/24"]
+    },
+    {
+      "id": 10,
+      "user_id": 1,
+      "hostname": "ha-router-high",
+      "ipv4": "100.64.0.10",
+      "tags": ["tag:ha-router"],
+      "routes": ["10.44.0.0/24"],
+      "approved_routes": ["10.44.0.0/24"]
+    },
+    {
+      "id": 11,
+      "user_id": 2,
+      "hostname": "client-ha",
+      "ipv4": "100.64.0.11",
+      "tags": ["tag:client-ha"]
+    },
+    {
+      "id": 12,
+      "user_id": 1,
+      "hostname": "regular-primary",
+      "ipv4": "100.64.0.12",
+      "tags": ["tag:primary"],
+      "routes": ["10.55.0.0/24"],
+      "approved_routes": ["10.55.0.0/24"]
+    },
+    {
+      "id": 13,
+      "user_id": 1,
+      "hostname": "regular-secondary",
+      "ipv4": "100.64.0.13",
+      "tags": ["tag:secondary"],
+      "routes": ["10.55.0.0/24"],
+      "approved_routes": ["10.55.0.0/24"]
+    },
+    {
+      "id": 14,
+      "user_id": 2,
+      "hostname": "client-regular",
+      "ipv4": "100.64.0.14",
+      "tags": ["tag:client-regular"]
+    }
+  ],
+  "via_route_checks": [
+    { "name": "broader-destination-includes-advertised-prefix", "viewer_id": 2, "peer_id": 1 },
+    { "name": "narrower-destination-includes-advertised-prefix", "viewer_id": 4, "peer_id": 3 },
+    { "name": "disjoint-destination-does-not-include-advertised-prefix", "viewer_id": 6, "peer_id": 5 },
+    { "name": "ipv6-broader-destination-includes-4via6-advertised-prefix", "viewer_id": 8, "peer_id": 7 },
+    { "name": "multi-router-low-id-keeps-include", "viewer_id": 11, "peer_id": 9 },
+    { "name": "multi-router-high-id-is-excluded", "viewer_id": 11, "peer_id": 10 },
+    { "name": "regular-overlap-uses-primary", "viewer_id": 14, "peer_id": 13 },
+    { "name": "regular-overlap-clears-non-via-exclude", "viewer_id": 14, "peer_id": 12 }
+  ]
+}

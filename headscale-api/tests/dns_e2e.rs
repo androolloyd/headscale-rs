@@ -78,10 +78,32 @@ fn dns_default_matches_headscale_go_and_requires_base_domain_for_magic_dns() {
     let spec = DnsConfigSpec::default();
     assert!(spec.magic_dns);
     assert!(spec.base_domain.is_empty());
+    assert!(spec.cert_domains.is_empty());
     assert!(matches!(
         try_build_dns_config(&spec, &[], &[]),
         Err(DnsConfigError::MissingBaseDomainForMagicDns)
     ));
+}
+
+#[test]
+fn cert_domains_are_explicit_config_only() {
+    let default_cfg = build_dns_config(&magic_spec(), &[], &[]);
+    assert!(default_cfg.cert_domains.is_empty());
+
+    let spec = DnsConfigSpec {
+        cert_domains: vec![
+            "Node.Tail.Example.".into(),
+            "node.tail.example".into(),
+            "Admin.Tail.Example".into(),
+            ".".into(),
+        ],
+        ..magic_spec()
+    };
+    let cfg = build_dns_config(&spec, &[], &[]);
+    assert_eq!(
+        cfg.cert_domains,
+        vec!["node.tail.example", "admin.tail.example"]
+    );
 }
 
 #[test]

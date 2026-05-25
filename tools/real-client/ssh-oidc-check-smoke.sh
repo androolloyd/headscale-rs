@@ -20,17 +20,47 @@ ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
 attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-120}"
 oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
-oidc_subject="${REAL_CLIENT_OIDC_SUBJECT:-alice-subject}"
-oidc_email="${REAL_CLIENT_OIDC_EMAIL:-alice@example.com}"
-oidc_username="${REAL_CLIENT_OIDC_USERNAME:-alice}"
-oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
+check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
-policy_json="${REAL_CLIENT_POLICY_JSON:-$(cat tools/real-client/fixtures/ssh-oidc-check.hujson)}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/ssh-oidc-check-smoke}"
 run_id="hs-ssh-oidc-${target}-$(date +%s)-$$"
 client_one="${REAL_CLIENT_CLIENT_ONE:-${run_id}-one}"
 client_two="${REAL_CLIENT_CLIENT_TWO:-${run_id}-two}"
+
+case "${check_period_cache}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    check_period_cache_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    check_period_cache_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE must be true or false, got ${check_period_cache}" >&2
+    exit 2
+    ;;
+esac
+
+if ((check_period_cache_flag)); then
+  default_policy_path="tools/real-client/fixtures/ssh-check-period.hujson"
+  default_oidc_subject="user1-subject"
+  default_oidc_email="user1"
+  default_oidc_username="user1"
+  default_oidc_allowed_domains=""
+else
+  default_policy_path="tools/real-client/fixtures/ssh-oidc-check.hujson"
+  default_oidc_subject="alice-subject"
+  default_oidc_email="alice@example.com"
+  default_oidc_username="alice"
+  default_oidc_allowed_domains="example.com"
+fi
+
+oidc_subject="${REAL_CLIENT_OIDC_SUBJECT:-${default_oidc_subject}}"
+oidc_email="${REAL_CLIENT_OIDC_EMAIL:-${default_oidc_email}}"
+oidc_username="${REAL_CLIENT_OIDC_USERNAME:-${default_oidc_username}}"
+oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
+oidc_allowed_domains="${REAL_CLIENT_OIDC_ALLOWED_DOMAINS:-${default_oidc_allowed_domains}}"
+policy_json="${REAL_CLIENT_POLICY_JSON:-$(cat "${default_policy_path}")}"
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -131,6 +161,25 @@ html_input_value() {
   ' "${path}" "${name}"
 }
 
+oidc_allowed_domains_toml_items() {
+  ruby -rjson -e '
+    domains = ARGV.fetch(0).split(/[,\s]+/).reject(&:empty?)
+    puts domains.map { |domain| JSON.generate(domain) }.join(", ")
+  ' "${oidc_allowed_domains}"
+}
+
+oidc_allowed_domains_yaml() {
+  ruby -rjson -e '
+    domains = ARGV.fetch(0).split(/[,\s]+/).reject(&:empty?)
+    if domains.empty?
+      puts "  allowed_domains: []"
+    else
+      puts "  allowed_domains:"
+      domains.each { |domain| puts "    - #{JSON.generate(domain)}" }
+    end
+  ' "${oidc_allowed_domains}"
+}
+
 install_headscale_go() {
   if [[ -n "${HEADSCALE_GO_BIN:-}" ]]; then
     return
@@ -217,7 +266,7 @@ path = "${work_dir}/ssh-oidc-check.hujson"
 issuer = "http://127.0.0.1:${oidc_port}/oidc"
 client_id = "${oidc_client_id}"
 client_secret = "${oidc_client_secret}"
-allowed_domains = ["example.com"]
+allowed_domains = [$(oidc_allowed_domains_toml_items)]
 email_verified_required = true
 EOF
 
@@ -332,8 +381,7 @@ oidc:
   issuer: "http://127.0.0.1:${oidc_port}/oidc"
   client_id: "${oidc_client_id}"
   client_secret: "${oidc_client_secret}"
-  allowed_domains:
-    - example.com
+$(oidc_allowed_domains_yaml)
   email_verified_required: true
 EOF
 
@@ -513,6 +561,36 @@ approve_ssh_check_with_oidc() {
   grep -Eq "SSH session authorized|Signed in successfully|Authenticated" "${work_dir}/ssh-check-oidc.html"
 }
 
+ssh_auth_url_present() {
+  local prefix="$1"
+  grep -Eq '/auth/hskey-authreq-[A-Za-z0-9_-]{24}' \
+    "${work_dir}/${prefix}.stdout" \
+    "${work_dir}/${prefix}.stderr"
+}
+
+run_cached_ssh_check() {
+  local target_addr="$1"
+  echo "::group::verify cached Tailscale SSH checkPeriod"
+  if ! docker exec "${client_one}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" hostname' \
+    sh "${attempt_timeout}" "${ssh_user}" "${target_addr}" \
+    >"${work_dir}/ssh-check-cache.stdout" \
+    2>"${work_dir}/ssh-check-cache.stderr"; then
+    echo "cached SSH checkPeriod attempt failed" >&2
+    cat "${work_dir}/ssh-check-cache.stdout" >&2 || true
+    cat "${work_dir}/ssh-check-cache.stderr" >&2 || true
+    exit 1
+  fi
+  grep -Fxq "${client_two}" "${work_dir}/ssh-check-cache.stdout"
+  if ssh_auth_url_present "ssh-check-cache"; then
+    echo "cached SSH checkPeriod attempt unexpectedly emitted a new auth URL" >&2
+    cat "${work_dir}/ssh-check-cache.stdout" >&2 || true
+    cat "${work_dir}/ssh-check-cache.stderr" >&2 || true
+    exit 1
+  fi
+  echo "::endgroup::"
+}
+
 run_ssh_check() {
   echo "::group::approve Tailscale SSH check with OIDC"
   wait_for_ssh_host_keys "${client_one}" "${client_two}"
@@ -545,6 +623,9 @@ run_ssh_check() {
   grep -Fxq "${client_two}" "${work_dir}/ssh-check.stdout"
   echo "approved_auth_id=${auth_id}"
   echo "::endgroup::"
+  if ((check_period_cache_flag)); then
+    run_cached_ssh_check "${target_addr}"
+  fi
 }
 
 need cargo
@@ -577,4 +658,8 @@ drive_oidc_login "${client_one}"
 drive_oidc_login "${client_two}"
 run_ssh_check
 
-echo "${target} OIDC SSH check real-client smoke passed"
+if ((check_period_cache_flag)); then
+  echo "${target} OIDC SSH checkPeriod cache real-client smoke passed"
+else
+  echo "${target} OIDC SSH check real-client smoke passed"
+fi

@@ -220,6 +220,30 @@ fn served_routes_for_snapshot(
         .collect()
 }
 
+fn route_is_exit_default(route: &str) -> bool {
+    matches!(route, "0.0.0.0/0" | "::/0")
+}
+
+fn served_subnet_routes_for_via(
+    served_routes: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
+    served_routes
+        .iter()
+        .filter_map(|(node_key, routes)| {
+            let routes = routes
+                .iter()
+                .filter(|route| !route_is_exit_default(route))
+                .cloned()
+                .collect::<Vec<_>>();
+            if routes.is_empty() {
+                None
+            } else {
+                Some((node_key.clone(), routes))
+            }
+        })
+        .collect()
+}
+
 fn peer_map_nodes_from_snapshot(
     snapshot: &HashMap<String, MachineRecord>,
     served_routes: &HashMap<String, Vec<String>>,
@@ -301,7 +325,8 @@ fn select_routes_for_viewer(
     let mut allowed_routes = selected_primary.clone();
     allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
 
-    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
+    let via_served_routes = served_subnet_routes_for_via(served_routes);
+    let nodes = peer_map_nodes_from_snapshot(snapshot, &via_served_routes);
     let viewer_id = node_id_for_key(snapshot, self_node_key);
     let peer_id = node_id_for_key(snapshot, peer_node_key);
     if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
@@ -3254,7 +3279,18 @@ mod tests {
     }
 
     fn insert_via_steering_nodes(state: &WireState) -> (String, String, String, String) {
-        let route = vec!["10.0.0.0/24".to_string()];
+        insert_via_steering_nodes_for_route(state, "10.0.0.0/24", Vec::new())
+    }
+
+    fn insert_via_steering_nodes_for_route(
+        state: &WireState,
+        route: &str,
+        router_b_extra_routes: Vec<String>,
+    ) -> (String, String, String, String) {
+        let route = route.to_string();
+        let mut router_b_routes = vec![route.clone()];
+        router_b_routes.extend(router_b_extra_routes);
+
         let router_a = "61".repeat(32);
         let router_b = "62".repeat(32);
         let client_a = "63".repeat(32);
@@ -3267,7 +3303,7 @@ mod tests {
                 61,
                 "router",
                 vec!["tag:router-a".to_string()],
-                route.clone(),
+                vec![route],
             ),
             (
                 &router_b,
@@ -3275,7 +3311,7 @@ mod tests {
                 62,
                 "router",
                 vec!["tag:router-b".to_string()],
-                route,
+                router_b_routes,
             ),
             (
                 &client_a,
@@ -3301,6 +3337,31 @@ mod tests {
         }
 
         (router_a, router_b, client_a, client_b)
+    }
+
+    fn via_steering_policy_with_exit_allow(route: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-a": ["router@"],
+                    "tag:router-b": ["router@"],
+                    "tag:group-a": ["client@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-a"]
+                    }},
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["autogroup:internet"],
+                        "ip": ["*"]
+                    }}
+                ]
+            }}"#
+        )
     }
 
     fn peer_route<'a>(mr: &'a MapResponse, name: &str, route: &str) -> Option<&'a MapNode> {
@@ -3347,6 +3408,92 @@ mod tests {
             assert!(peer_route(&mr, expected, route).is_some());
             assert!(peer_route(&mr, unexpected, route).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn map_response_via_subnet_excludes_non_via_peer_but_keeps_exit_routes() {
+        let (state, _dir) = fixture();
+        let route = "10.77.0.0/24";
+        let policy = via_steering_policy_with_exit_allow(route);
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+        let (router_a, router_b, client_a, _client_b) = insert_via_steering_nodes_for_route(
+            &state,
+            route,
+            vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+        );
+        let _router_a_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_a),
+        );
+        let _router_b_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_b),
+        );
+        let snapshot = state.machines.snapshot();
+        let router_b_record = snapshot.get(&router_b).expect("router-b record");
+        assert!(router_b_record.available_routes.iter().any(|r| r == route));
+        assert!(router_b_record.approved_routes.iter().any(|r| r == route));
+        assert_eq!(
+            state
+                .machines
+                .primary_routes_for_snapshot(&snapshot)
+                .get(&router_b)
+                .cloned()
+                .unwrap_or_default(),
+            vec![route.to_string()],
+            "test setup must make router-b the unfiltered primary for the duplicate subnet"
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        assert!(peer_route(&mr, "router-a", route).is_some());
+        let router_b_node = mr
+            .peers
+            .iter()
+            .find(|peer| peer.name == "router-b")
+            .expect("router-b visible through separately allowed exit routes");
+        assert!(
+            !router_b_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == route),
+            "via should remove router-b's duplicate subnet AllowedIP"
+        );
+        assert!(
+            !router_b_node
+                .primary_routes
+                .iter()
+                .any(|primary| primary == route),
+            "via should remove router-b's primary route for the duplicate subnet"
+        );
+        assert!(
+            router_b_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "0.0.0.0/0")
+        );
+        assert!(
+            router_b_node
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == "::/0")
+        );
     }
 
     #[tokio::test]

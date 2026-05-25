@@ -333,7 +333,7 @@ smoke_assertions=(
   "web registration with owned requested tag"
   "web registration rejects unowned requested tag"
   "OIDC callback, node row, and user profile"
-  "OIDC-backed Tailscale SSH check approval"
+  "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
   "Production OIDC registration survives server restart"
   "Production OIDC route approval survives server restart"
   "Production web/CLI registration survives server restart"

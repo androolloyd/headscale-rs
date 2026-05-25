@@ -150,6 +150,11 @@ pub struct DnsConfigSpec {
     /// Structured form of [`Self::fallback_nameservers`], retaining
     /// resolver metadata.
     pub fallback_resolvers: Vec<DnsResolver>,
+    /// Client certificate domains emitted in `DNSConfig.CertDomains`.
+    /// Headscale-go does not derive these from the control-plane HTTPS
+    /// listener, so the runtime only emits explicitly configured
+    /// values.
+    pub cert_domains: Vec<String>,
     /// `ExitNodeFilteredSet` — suffixes the client should not flow
     /// through an exit node.
     pub exit_node_filtered_set: Vec<String>,
@@ -187,6 +192,7 @@ impl Default for DnsConfigSpec {
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
             fallback_resolvers: Vec::new(),
+            cert_domains: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: None,
         }
@@ -241,6 +247,7 @@ impl<'de> Deserialize<'de> for DnsConfigSpec {
             search_domains: raw.search_domains,
             fallback_nameservers,
             fallback_resolvers,
+            cert_domains: raw.cert_domains,
             exit_node_filtered_set: raw.exit_node_filtered_set,
             authoritative_suffixes: raw.authoritative_suffixes,
         })
@@ -259,6 +266,8 @@ struct RawDnsConfigSpec {
     extra_records_path: Option<PathBuf>,
     search_domains: Vec<String>,
     fallback_nameservers: Vec<RawResolver>,
+    #[serde(alias = "CertDomains")]
+    cert_domains: Vec<String>,
     exit_node_filtered_set: Vec<String>,
     authoritative_suffixes: Option<Vec<String>>,
 }
@@ -275,6 +284,7 @@ impl Default for RawDnsConfigSpec {
             extra_records_path: None,
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
+            cert_domains: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: None,
         }
@@ -526,6 +536,7 @@ impl DnsStore {
             search_domains: Vec::new(),
             fallback_nameservers: Vec::new(),
             fallback_resolvers: Vec::new(),
+            cert_domains: Vec::new(),
             exit_node_filtered_set: Vec::new(),
             authoritative_suffixes: Some(Vec::new()),
         })
@@ -692,12 +703,13 @@ impl std::fmt::Debug for DnsStore {
 /// | `Domains`                   | `[base_domain] ++ spec.search_domains` when base is set |
 /// | `Proxied`                   | `spec.magic_dns && base_domain is set`    |
 /// | `ExtraRecords`              | `extra` only (operator-supplied records) |
+/// | `CertDomains`               | `spec.cert_domains` only                  |
 /// | `ExitNodeFilteredSet`       | `spec.exit_node_filtered_set`             |
 /// | `AuthoritativeSuffixes`     | `spec.authoritative_suffixes`, when explicitly set |
 ///
-/// `Nameservers` / `CertDomains` are left empty by the runtime builder:
-/// the former is deprecated, and headscale-go v0.28 does not synthesize
-/// client certificate domains from the control-plane HTTPS listener.
+/// `Nameservers` is left empty by the runtime builder because it is
+/// deprecated. `CertDomains` is not synthesized from the control-plane
+/// HTTPS listener; only explicit config values are emitted.
 pub fn build_dns_config(
     spec: &DnsConfigSpec,
     _machines: &[MachineDnsRecord],
@@ -760,7 +772,7 @@ fn build_dns_config_with_reverse_prefixes(
         domains,
         proxied: magic_dns_enabled,
         nameservers: Vec::new(),
-        cert_domains: Vec::new(),
+        cert_domains: normalise_domain_list(&spec.cert_domains),
         extra_records: extra.to_vec(),
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
         temp_corp_issue_13969: String::new(),
@@ -2107,6 +2119,7 @@ base_domain = "test.example.org"
 override_local_dns = false
 search_domains = ["aux.example.org"]
 exit_node_filtered_set = ["bank.example"]
+cert_domains = ["Node.Test.Example.Org."]
 extra_records = [
   { name = "ops.test.example.org", type = "A", value = "100.64.0.50" },
   { Name = "alias.test.example.org", Type = "CNAME", Value = "ops.test.example.org" },
@@ -2129,6 +2142,7 @@ global = ["1.1.1.1", "8.8.8.8"]
         );
         assert_eq!(spec.search_domains, vec!["aux.example.org"]);
         assert_eq!(spec.exit_node_filtered_set, vec!["bank.example"]);
+        assert_eq!(spec.cert_domains, vec!["Node.Test.Example.Org."]);
         assert_eq!(spec.extra_records.len(), 2);
         assert_eq!(spec.extra_records[0].name, "ops.test.example.org");
         assert_eq!(spec.extra_records[1].record_type, "CNAME");

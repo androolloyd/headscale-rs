@@ -280,7 +280,7 @@ async fn main() -> ExitCode {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    match dispatch(cli, skip_config_load).await {
+    match Box::pin(dispatch(cli, skip_config_load)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(MainError::Admin(e)) => {
             eprint!(

@@ -32,6 +32,7 @@ pub(crate) struct AcmeHttp01IssuerConfig {
     pub email: Option<String>,
     pub hostname: String,
     pub cache_dir: PathBuf,
+    pub ca_root_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,11 +587,7 @@ async fn load_or_create_account(config: &AcmeHttp01IssuerConfig) -> Result<Accou
         account_cache_path(&config.cache_dir, &config.hostname, &config.directory_url);
     if let Ok(bytes) = fs::read(&account_path) {
         match serde_json::from_slice::<AccountCredentials>(&bytes) {
-            Ok(credentials) => match Account::builder()
-                .context("build ACME HTTP client")?
-                .from_credentials(credentials)
-                .await
-            {
+            Ok(credentials) => match account_builder(config)?.from_credentials(credentials).await {
                 Ok(account) => return Ok(account),
                 Err(err) => {
                     tracing::warn!(
@@ -617,8 +614,7 @@ async fn load_or_create_account(config: &AcmeHttp01IssuerConfig) -> Result<Accou
         terms_of_service_agreed: true,
         only_return_existing: false,
     };
-    let (account, credentials) = Account::builder()
-        .context("build ACME HTTP client")?
+    let (account, credentials) = account_builder(config)?
         .create(&new_account, config.directory_url.clone(), None)
         .await
         .with_context(|| format!("create ACME account at {}", config.directory_url))?;
@@ -629,6 +625,14 @@ async fn load_or_create_account(config: &AcmeHttp01IssuerConfig) -> Result<Accou
         )
     })?;
     Ok(account)
+}
+
+fn account_builder(config: &AcmeHttp01IssuerConfig) -> Result<instant_acme::AccountBuilder> {
+    match &config.ca_root_path {
+        Some(path) => Account::builder_with_root(path)
+            .with_context(|| format!("build ACME HTTP client with root {}", path.display())),
+        None => Account::builder().context("build ACME HTTP client"),
+    }
 }
 
 fn acme_contact_uri(email: &str) -> Option<String> {
@@ -774,7 +778,458 @@ impl Drop for TlsAlpnChallengeCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::header::{CONTENT_TYPE, LOCATION};
+    use axum::http::{HeaderName, HeaderValue, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, head, post};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hyper_util::rt::TokioIo;
+    use serde_json::{Value, json};
     use tempfile::tempdir;
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls;
+    use tower::ServiceExt;
+
+    const LOCAL_ACME_HOSTNAME: &str = "headscale.test";
+    const LOCAL_ACME_TOKEN: &str = "hsrs-token";
+    const REPLAY_NONCE: HeaderName = HeaderName::from_static("replay-nonce");
+
+    #[derive(Clone, Copy)]
+    enum LocalAcmeChallenge {
+        Http01,
+        TlsAlpn01,
+    }
+
+    impl LocalAcmeChallenge {
+        fn acme_name(self) -> &'static str {
+            match self {
+                Self::Http01 => "http-01",
+                Self::TlsAlpn01 => "tls-alpn-01",
+            }
+        }
+    }
+
+    struct LocalAcmeCa {
+        cert: rcgen::Certificate,
+        key: rcgen::KeyPair,
+    }
+
+    impl LocalAcmeCa {
+        fn new() -> Self {
+            install_test_crypto_provider();
+            let mut params =
+                rcgen::CertificateParams::new(vec!["headscale-rs test ACME CA".into()]).unwrap();
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            params.distinguished_name = rcgen::DistinguishedName::new();
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, "headscale-rs test ACME CA");
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = params.self_signed(&key).unwrap();
+            Self { cert, key }
+        }
+
+        fn root_pem(&self) -> String {
+            self.cert.pem()
+        }
+
+        fn server_config(&self) -> rustls::ServerConfig {
+            install_test_crypto_provider();
+            let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+            params.distinguished_name = rcgen::DistinguishedName::new();
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, "localhost");
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = params.signed_by(&key, &self.cert, &self.key).unwrap();
+            let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+                rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
+            );
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.der().clone()], key_der)
+                .unwrap()
+        }
+
+        fn sign_csr(&self, csr_der: Vec<u8>) -> Result<String> {
+            let csr_der = rustls_pki_types::CertificateSigningRequestDer::from(csr_der);
+            let csr = rcgen::CertificateSigningRequestParams::from_der(&csr_der)
+                .context("parse ACME finalize CSR")?;
+            let cert = csr
+                .signed_by(&self.cert, &self.key)
+                .context("sign ACME finalize CSR")?;
+            Ok(cert.pem())
+        }
+    }
+
+    #[derive(Clone)]
+    struct LocalAcmeState {
+        base_url: String,
+        challenge: LocalAcmeChallenge,
+        ca: Arc<LocalAcmeCa>,
+        http_store: Option<AcmeHttp01ChallengeStore>,
+        tls_resolver: Option<Arc<AcmeTlsAlpnChallengeResolver>>,
+        challenge_seen: Arc<AtomicBool>,
+        finalized: Arc<AtomicBool>,
+        cert_pem: Arc<Mutex<Option<String>>>,
+    }
+
+    impl LocalAcmeState {
+        fn url(&self, path: &str) -> String {
+            format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        }
+
+        fn order_body(&self, status: &str) -> Value {
+            json!({
+                "status": status,
+                "authorizations": [self.url("authz/1")],
+                "finalize": self.url("finalize/1"),
+                "certificate": if self.finalized.load(Ordering::SeqCst) {
+                    Value::String(self.url("cert/1"))
+                } else {
+                    Value::Null
+                }
+            })
+        }
+
+        fn authorization_body(&self, status: &str) -> Value {
+            json!({
+                "identifier": {
+                    "type": "dns",
+                    "value": LOCAL_ACME_HOSTNAME
+                },
+                "status": status,
+                "challenges": [{
+                    "type": self.challenge.acme_name(),
+                    "url": self.url("challenge/1"),
+                    "token": LOCAL_ACME_TOKEN,
+                    "status": status
+                }]
+            })
+        }
+
+        fn validate_challenge_material(&self) -> Result<()> {
+            match self.challenge {
+                LocalAcmeChallenge::Http01 => {
+                    let key_authorization = self
+                        .http_store
+                        .as_ref()
+                        .and_then(|store| store.get(LOCAL_ACME_TOKEN))
+                        .context("HTTP-01 key authorization was not installed")?;
+                    if !key_authorization.starts_with(&format!("{LOCAL_ACME_TOKEN}.")) {
+                        bail!(
+                            "HTTP-01 key authorization {key_authorization:?} does not match token"
+                        );
+                    }
+                }
+                LocalAcmeChallenge::TlsAlpn01 => {
+                    let resolver = self
+                        .tls_resolver
+                        .as_ref()
+                        .context("TLS-ALPN resolver was not provided")?;
+                    if !resolver.has_challenge_certificate(LOCAL_ACME_HOSTNAME) {
+                        bail!("TLS-ALPN challenge certificate was not installed");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct LocalAcmeServer {
+        directory_url: String,
+        ca_root_path: PathBuf,
+        _ca_dir: tempfile::TempDir,
+        challenge_seen: Arc<AtomicBool>,
+        finalized: Arc<AtomicBool>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl LocalAcmeServer {
+        async fn spawn_http01(store: AcmeHttp01ChallengeStore) -> Self {
+            Self::spawn(LocalAcmeChallenge::Http01, Some(store), None).await
+        }
+
+        async fn spawn_tls_alpn(resolver: Arc<AcmeTlsAlpnChallengeResolver>) -> Self {
+            Self::spawn(LocalAcmeChallenge::TlsAlpn01, None, Some(resolver)).await
+        }
+
+        async fn spawn(
+            challenge: LocalAcmeChallenge,
+            http_store: Option<AcmeHttp01ChallengeStore>,
+            tls_resolver: Option<Arc<AcmeTlsAlpnChallengeResolver>>,
+        ) -> Self {
+            install_test_crypto_provider();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let base_url = format!("https://localhost:{port}");
+            let challenge_seen = Arc::new(AtomicBool::new(false));
+            let finalized = Arc::new(AtomicBool::new(false));
+            let ca = Arc::new(LocalAcmeCa::new());
+            let ca_dir = tempdir().unwrap();
+            let ca_root_path = ca_dir.path().join("root.pem");
+            fs::write(&ca_root_path, ca.root_pem()).unwrap();
+            let tls_config = ca.server_config();
+            let state = LocalAcmeState {
+                base_url: base_url.clone(),
+                challenge,
+                ca,
+                http_store,
+                tls_resolver,
+                challenge_seen: challenge_seen.clone(),
+                finalized: finalized.clone(),
+                cert_pem: Arc::new(Mutex::new(None)),
+            };
+            let app = axum::Router::new()
+                .route("/directory", get(local_acme_directory))
+                .route("/new-nonce", head(local_acme_nonce))
+                .route("/new-account", post(local_acme_new_account))
+                .route("/new-order", post(local_acme_new_order))
+                .route("/authz/1", post(local_acme_authorization))
+                .route("/challenge/1", post(local_acme_challenge_ready))
+                .route("/order/1", post(local_acme_order))
+                .route("/finalize/1", post(local_acme_finalize))
+                .route("/cert/1", post(local_acme_certificate))
+                .with_state(state);
+            let task = tokio::spawn(async move {
+                serve_local_acme_tls(listener, app, tls_config).await;
+            });
+            Self {
+                directory_url: format!("{base_url}/directory"),
+                ca_root_path,
+                _ca_dir: ca_dir,
+                challenge_seen,
+                finalized,
+                task,
+            }
+        }
+
+        fn challenge_seen(&self) -> bool {
+            self.challenge_seen.load(Ordering::SeqCst)
+        }
+
+        fn finalized(&self) -> bool {
+            self.finalized.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn serve_local_acme_tls(
+        listener: tokio::net::TcpListener,
+        app: axum::Router,
+        tls_config: rustls::ServerConfig,
+    ) {
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+        loop {
+            let Ok((tcp, _peer)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let service = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let app = app.clone();
+                        async move {
+                            let (parts, body) = req.into_parts();
+                            let req =
+                                axum::http::Request::from_parts(parts, axum::body::Body::new(body));
+                            app.oneshot(req)
+                                .await
+                                .map_err(|err| std::io::Error::other(err.to_string()))
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(tls), service)
+                    .await;
+            });
+        }
+    }
+
+    impl Drop for LocalAcmeServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn local_acme_directory(State(state): State<LocalAcmeState>) -> Response {
+        json_response(
+            StatusCode::OK,
+            None,
+            json!({
+                "newNonce": state.url("new-nonce"),
+                "newAccount": state.url("new-account"),
+                "newOrder": state.url("new-order"),
+                "revokeCert": state.url("revoke-cert"),
+                "keyChange": state.url("key-change")
+            }),
+        )
+    }
+
+    async fn local_acme_nonce() -> Response {
+        let mut response = StatusCode::OK.into_response();
+        add_replay_nonce(response.headers_mut());
+        response
+    }
+
+    async fn local_acme_new_account(State(state): State<LocalAcmeState>) -> Response {
+        json_response(StatusCode::CREATED, Some(state.url("account/1")), json!({}))
+    }
+
+    async fn local_acme_new_order(
+        State(state): State<LocalAcmeState>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let payload = match decode_jose_payload(&body) {
+            Ok(payload) => payload,
+            Err(err) => return problem_response(&format!("{err:#}")),
+        };
+        let identifier = payload
+            .get("identifiers")
+            .and_then(Value::as_array)
+            .and_then(|identifiers| identifiers.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        if identifier.get("type").and_then(Value::as_str) != Some("dns")
+            || identifier.get("value").and_then(Value::as_str) != Some(LOCAL_ACME_HOSTNAME)
+        {
+            return problem_response(&format!("unexpected ACME identifier payload: {payload:?}"));
+        }
+
+        json_response(
+            StatusCode::CREATED,
+            Some(state.url("order/1")),
+            state.order_body("pending"),
+        )
+    }
+
+    async fn local_acme_authorization(State(state): State<LocalAcmeState>) -> Response {
+        let status = if state.challenge_seen.load(Ordering::SeqCst) {
+            "valid"
+        } else {
+            "pending"
+        };
+        json_response(StatusCode::OK, None, state.authorization_body(status))
+    }
+
+    async fn local_acme_challenge_ready(State(state): State<LocalAcmeState>) -> Response {
+        if let Err(err) = state.validate_challenge_material() {
+            return problem_response(&format!("{err:#}"));
+        }
+        state.challenge_seen.store(true, Ordering::SeqCst);
+        json_response(StatusCode::OK, None, challenge_body(&state, "valid"))
+    }
+
+    async fn local_acme_order(State(state): State<LocalAcmeState>) -> Response {
+        let status = if state.finalized.load(Ordering::SeqCst) {
+            "valid"
+        } else if state.challenge_seen.load(Ordering::SeqCst) {
+            "ready"
+        } else {
+            "pending"
+        };
+        json_response(StatusCode::OK, None, state.order_body(status))
+    }
+
+    async fn local_acme_finalize(
+        State(state): State<LocalAcmeState>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let payload = match decode_jose_payload(&body) {
+            Ok(payload) => payload,
+            Err(err) => return problem_response(&format!("{err:#}")),
+        };
+        let Some(csr) = payload.get("csr").and_then(Value::as_str) else {
+            return problem_response(&format!("missing finalize CSR in payload: {payload:?}"));
+        };
+        let csr_der = match URL_SAFE_NO_PAD.decode(csr.as_bytes()) {
+            Ok(csr_der) => csr_der,
+            Err(err) => return problem_response(&format!("decode finalize CSR: {err}")),
+        };
+        let cert_pem = match state.ca.sign_csr(csr_der) {
+            Ok(cert_pem) => cert_pem,
+            Err(err) => return problem_response(&format!("{err:#}")),
+        };
+        *state.cert_pem.lock().unwrap() = Some(cert_pem);
+        state.finalized.store(true, Ordering::SeqCst);
+        json_response(StatusCode::OK, None, state.order_body("valid"))
+    }
+
+    async fn local_acme_certificate(State(state): State<LocalAcmeState>) -> Response {
+        let Some(cert_pem) = state.cert_pem.lock().unwrap().clone() else {
+            return problem_response("certificate requested before finalize");
+        };
+        let mut response = (StatusCode::OK, cert_pem).into_response();
+        add_replay_nonce(response.headers_mut());
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/pem-certificate-chain"),
+        );
+        response
+    }
+
+    fn challenge_body(state: &LocalAcmeState, status: &str) -> Value {
+        json!({
+            "type": state.challenge.acme_name(),
+            "url": state.url("challenge/1"),
+            "token": LOCAL_ACME_TOKEN,
+            "status": status
+        })
+    }
+
+    fn json_response(status: StatusCode, location: Option<String>, body: Value) -> Response {
+        let mut response = (status, Json(body)).into_response();
+        add_replay_nonce(response.headers_mut());
+        if let Some(location) = location {
+            response
+                .headers_mut()
+                .insert(LOCATION, HeaderValue::from_str(&location).unwrap());
+        }
+        response
+    }
+
+    fn problem_response(detail: &str) -> Response {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            None,
+            json!({
+                "type": "urn:ietf:params:acme:error:malformed",
+                "detail": detail,
+                "status": 400
+            }),
+        )
+    }
+
+    fn add_replay_nonce(headers: &mut axum::http::HeaderMap) {
+        headers.insert(REPLAY_NONCE, HeaderValue::from_static("hsrs-nonce"));
+    }
+
+    fn decode_jose_payload(body: &Value) -> Result<Value> {
+        let payload = body
+            .get("payload")
+            .and_then(Value::as_str)
+            .context("missing JWS payload")?;
+        if payload.is_empty() {
+            return Ok(json!({}));
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(payload.as_bytes())
+            .context("decode JWS payload")?;
+        serde_json::from_slice(&decoded).context("parse JWS payload")
+    }
+
+    fn install_test_crypto_provider() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
 
     #[test]
     fn acme_contact_uri_wraps_plain_email() {
@@ -940,6 +1395,7 @@ mod tests {
             email: None,
             hostname: "headscale.example".into(),
             cache_dir: cache_dir.clone(),
+            ca_root_path: None,
         };
 
         let outcome = ensure_http01_certificate(&config, &AcmeHttp01ChallengeStore::new())
@@ -948,6 +1404,31 @@ mod tests {
 
         assert_eq!(outcome.cache_path, cache_dir.join("headscale.example"));
         assert!(!outcome.issued);
+    }
+
+    #[tokio::test]
+    async fn ensure_http01_certificate_issues_against_local_acme_directory() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let store = AcmeHttp01ChallengeStore::new();
+        let server = LocalAcmeServer::spawn_http01(store.clone()).await;
+        let config = AcmeHttp01IssuerConfig {
+            directory_url: server.directory_url.clone(),
+            email: Some("ops@example.com".into()),
+            hostname: LOCAL_ACME_HOSTNAME.into(),
+            cache_dir: cache_dir.clone(),
+            ca_root_path: Some(server.ca_root_path.clone()),
+        };
+
+        let outcome = ensure_http01_certificate(&config, &store).await.unwrap();
+
+        assert!(outcome.issued);
+        assert_eq!(outcome.cache_path, cache_dir.join(LOCAL_ACME_HOSTNAME));
+        assert!(server.challenge_seen());
+        assert!(server.finalized());
+        assert_eq!(store.get(LOCAL_ACME_TOKEN), None);
+        let material = tls::load_from_autocert_cache(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
+        assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
     }
 
     #[tokio::test]
@@ -977,6 +1458,7 @@ mod tests {
             email: None,
             hostname: "headscale.example".into(),
             cache_dir: cache_dir.clone(),
+            ca_root_path: None,
         };
 
         let outcome = ensure_tls_alpn_certificate(&config, &resolver)
@@ -985,5 +1467,43 @@ mod tests {
 
         assert_eq!(outcome.cache_path, cache_dir.join("headscale.example"));
         assert!(!outcome.issued);
+    }
+
+    #[tokio::test]
+    async fn ensure_tls_alpn_certificate_issues_against_local_acme_directory() {
+        let dir = tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let cache_dir = dir.path().join("cache");
+        let generated = tls::load_or_generate(
+            &source_dir,
+            &tls::SanConfig::with_hostname(LOCAL_ACME_HOSTNAME),
+        )
+        .unwrap();
+        let (_server_config, resolver) = tls::build_server_config_with_acme_tls_alpn_resolver(
+            &generated.cert_pem,
+            &generated.key_pem,
+        )
+        .unwrap();
+        let server = LocalAcmeServer::spawn_tls_alpn(resolver.clone()).await;
+        let config = AcmeHttp01IssuerConfig {
+            directory_url: server.directory_url.clone(),
+            email: Some("ops@example.com".into()),
+            hostname: LOCAL_ACME_HOSTNAME.into(),
+            cache_dir: cache_dir.clone(),
+            ca_root_path: Some(server.ca_root_path.clone()),
+        };
+
+        let outcome = ensure_tls_alpn_certificate(&config, &resolver)
+            .await
+            .unwrap();
+
+        assert!(outcome.issued);
+        assert_eq!(outcome.cache_path, cache_dir.join(LOCAL_ACME_HOSTNAME));
+        assert!(server.challenge_seen());
+        assert!(server.finalized());
+        assert!(!resolver.has_challenge_certificate(LOCAL_ACME_HOSTNAME));
+        let material =
+            tls::load_from_autocert_cache_with_tls_alpn(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
+        assert!(material.acme_tls_alpn_resolver.is_some());
     }
 }

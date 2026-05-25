@@ -75,6 +75,10 @@ local-ip-address = { workspace = true }
 async-trait.workspace = true
 httpmock = "0.8"
 http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service", "http1"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs", "x509-parser"] }
+rustls-pki-types = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 tonic-reflection = "0.14"

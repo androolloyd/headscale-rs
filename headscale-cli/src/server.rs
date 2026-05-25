@@ -1135,6 +1135,7 @@ async fn start_acme_http01_runtime(
             email: acme_email,
             hostname: hostname.clone(),
             cache_dir: cache_dir.clone(),
+            ca_root_path: None,
         },
         store,
         handle: Some(handle),
@@ -1156,6 +1157,7 @@ fn acme_tls_alpn_issuer_config(
             email: acme_email,
             hostname: hostname.clone(),
             cache_dir: cache_dir.clone(),
+            ca_root_path: None,
         }),
         _ => None,
     }

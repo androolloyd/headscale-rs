@@ -4033,6 +4033,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_policy_refresh_after_profile_churn_carries_updated_user_profile() {
+        let (state, _dir) = fixture();
+        let allow_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["bob@:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(allow_policy).unwrap(),
+            allow_policy.into(),
+        );
+
+        let alice = "a8".repeat(32);
+        let bob = "b8".repeat(32);
+        let mut alice_record = policy_record(&alice, "alice-node", 10, "alice", Vec::new());
+        alice_record.set_user_identity(
+            Some(1001),
+            "alice".into(),
+            "Alice Example".into(),
+            String::new(),
+        );
+        state.machines.upsert(alice.clone(), alice_record);
+
+        let mut bob_record = policy_record(&bob, "bob-node", 11, "bob", Vec::new());
+        bob_record.set_user_identity(
+            Some(1002),
+            "bob".into(),
+            "Bob Before".into(),
+            "https://example.com/bob-before.png".into(),
+        );
+        state.machines.upsert(bob.clone(), bob_record);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &alice).await;
+        let first = next_zstd_map_response(&mut body).await;
+        let initial_bob_profile = first
+            .user_profiles
+            .iter()
+            .find(|profile| profile.id == 1002)
+            .expect("initial Bob UserProfile present");
+        assert_eq!(initial_bob_profile.display_name, "Bob Before");
+
+        state.machines.update_with(|records| {
+            let bob_record = records.get_mut(&bob).expect("Bob record present");
+            bob_record.set_user_identity(
+                Some(1002),
+                "bob".into(),
+                "Bob After".into(),
+                "https://example.com/bob-after.png".into(),
+            );
+        });
+
+        let refresh = tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.refresh();
+            }
+        });
+
+        let updated =
+            tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut body))
+                .await
+                .expect("policy refresh map chunk");
+        refresh.await.expect("policy refresh task");
+
+        assert!(
+            updated.peers.is_empty(),
+            "policy refresh should use incremental peer deltas"
+        );
+        assert!(
+            updated.peers_changed.is_empty(),
+            "profile-only churn should not force an unchanged peer node delta"
+        );
+        assert!(updated.peers_removed.is_empty());
+        let bob_profile = updated
+            .user_profiles
+            .iter()
+            .find(|profile| profile.id == 1002)
+            .expect("updated Bob UserProfile present");
+        assert_eq!(bob_profile.login_name, "bob");
+        assert_eq!(bob_profile.display_name, "Bob After");
+        assert_eq!(
+            bob_profile.profile_pic_url,
+            "https://example.com/bob-after.png"
+        );
+        assert!(
+            updated.dns_config.is_some(),
+            "policy refresh deltas carry policy-derived DNSConfig updates"
+        );
+    }
+
+    #[tokio::test]
     async fn map_response_keeps_exit_routes_out_of_primary_routes() {
         let (state, _dir) = fixture();
         let a = "41".repeat(32);

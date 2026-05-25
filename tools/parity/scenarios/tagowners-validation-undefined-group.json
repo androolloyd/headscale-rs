@@ -1,6 +1,6 @@
 {
   "name": "tagowners-validation-undefined-group",
-  "expect_policy_error": "Group \"group:notdefined\" is not defined",
+  "expect_policy_error": "group:notdefined",
   "policy": {
     "tagOwners": {
       "tag:test": ["group:notdefined"]

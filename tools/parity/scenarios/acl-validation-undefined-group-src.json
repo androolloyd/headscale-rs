@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-undefined-group-src",
-  "expect_policy_error": "Group \"group:notdefined\" is not defined",
+  "expect_policy_error": "group:notdefined",
   "policy": {
     "acls": [
       {

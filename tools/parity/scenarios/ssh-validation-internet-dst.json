@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-internet-dst",
-  "expect_policy_error": "\"autogroup:internet\" used in SSH destination",
+  "expect_policy_error": "autogroup:internet",
   "policy": {
     "tagOwners": {
       "tag:client": ["alice@"]

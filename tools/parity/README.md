@@ -3,7 +3,11 @@
 This harness compares observable policy and wire output between:
 
 - `headscale-rs`, via `tools/parity/headscale-rs`
-- `headscale-go` v0.28.0, via `tools/parity/headscale-go`
+- `headscale-go` current head, via `tools/parity/headscale-go`
+
+The checked-in Go harness pins `github.com/juanfont/headscale` to
+`v0.29.0-beta.1.0.20260522122924-4483fd0cad38`, the Go pseudo-version for
+upstream commit `4483fd0cad38717913e7509fc50f9d48c691b02b`.
 
 Run it from the repository root:
 
@@ -13,9 +17,9 @@ Run it from the repository root:
 
 Scenario files for the pinned differential gate live in
 `tools/parity/scenarios/*.json`. Each scenario carries an upstream-shaped HuJSON
-policy object. The checked-in scenarios intentionally use headscale-go v0.28's
-native ACL syntax, where policy files omit `version`, `proto` is per ACL rule,
-and ports are embedded in `dst` entries such as `100.64.0.2/32:22`.
+policy object. The checked-in scenarios use headscale-go's native ACL syntax,
+where policy files omit `version`, `proto` is per ACL rule, and ports are
+embedded in `dst` entries such as `100.64.0.2/32:22`.
 
 Scenarios may also include:
 
@@ -43,13 +47,13 @@ coverage for that field, and do not add positive `ipset:` alias scenarios unless
 a future upstream baseline adds the same surface.
 
 The default differential run also checks
-`tools/parity/golden/headscale-go-v0.28.0.json` after confirming the Rust and Go
-outputs match. Refresh it with `PARITY_UPDATE_GOLDEN=1
-./scripts/headscale_go_diff.sh` only after reviewing the semantic change.
+`tools/parity/golden/headscale-go-v0.29.0-beta.1.0.20260522122924-4483fd0cad38.json`
+after confirming the Rust and Go outputs match. Refresh it with
+`PARITY_UPDATE_GOLDEN=1 ./scripts/headscale_go_diff.sh` only after reviewing the
+semantic change.
 
 Current-head-only scenarios live in `tools/parity/current-head/*.json`. They use
 Rust golden verification through `./scripts/headscale_rs_current_head_golden.sh`
-until `tools/parity/headscale-go` is deliberately rebased to an upstream version
-that can execute the same policy surface. Current-head-only SSH scenarios cover
-fields such as `acceptEnv`, and behavior such as hold-and-delegate SSH checks,
-that the pinned v0.28 policy parser or compiler does not expose.
+until they are promoted into the default differential scenario set. Current-head
+SSH scenarios cover fields such as `acceptEnv`, and behavior such as
+hold-and-delegate SSH checks, that were introduced after the old v0.28 baseline.

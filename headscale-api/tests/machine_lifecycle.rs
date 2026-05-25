@@ -380,7 +380,7 @@ fn assert_policy_filter_mentions_bob(mr: &headscale_api::tailscale_wire::wire::M
     assert!(
         base.iter()
             .flat_map(|rule| &rule.dst_ports)
-            .any(|dst| dst.ip == "100.64.0.11/32"),
+            .any(|dst| dst.ip == "100.64.0.11"),
         "refreshed packet filter should include bob's node: {:?}",
         mr.packet_filters
     );

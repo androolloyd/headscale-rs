@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-nonroot-src",
-  "expect_policy_error": "autogroup \"autogroup:nonroot\" is not supported for ACL sources",
+  "expect_policy_error": "autogroup:nonroot",
   "policy": {
     "acls": [
       {

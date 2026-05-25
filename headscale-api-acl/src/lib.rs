@@ -796,7 +796,6 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
             validate_owner_ref(doc, owner, &mut errs);
         }
     }
-    validate_tag_owner_graph(doc, &mut errs);
     for approvers in doc.auto_approvers.routes.values() {
         for approver in approvers {
             validate_approver_ref(doc, approver, &mut errs);
@@ -980,10 +979,6 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
     for user in &rule.users {
         if matches!(user.as_str(), "" | "*") {
             errs.push(format!("user {user:?} is not a valid SSH user"));
-        } else if user.starts_with("autogroup:") && user != "autogroup:nonroot" {
-            errs.push(format!(
-                "autogroup {user:?} is not supported for SSH user, can be [autogroup:nonroot]"
-            ));
         }
     }
 
@@ -1137,56 +1132,6 @@ fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
     }
 }
 
-fn validate_tag_owner_graph(doc: &AclDoc, errs: &mut Vec<String>) {
-    for tag in doc.tag_owners.keys() {
-        let mut visiting = BTreeSet::new();
-        let mut chain = Vec::new();
-        validate_tag_owner_chain(doc, tag, &mut visiting, &mut chain, errs);
-    }
-}
-
-fn validate_tag_owner_chain(
-    doc: &AclDoc,
-    tag: &str,
-    visiting: &mut BTreeSet<String>,
-    chain: &mut Vec<String>,
-    errs: &mut Vec<String>,
-) {
-    if visiting.contains(tag) {
-        let cycle_start = chain.iter().position(|entry| entry == tag).unwrap_or(0);
-        let mut cycle = chain[cycle_start..].to_vec();
-        cycle.sort();
-        errs.push(format!(
-            "circular reference detected: {}",
-            cycle.join(" -> ")
-        ));
-        return;
-    }
-
-    let Some(owners) = doc.tag_owners.get(tag) else {
-        return;
-    };
-    visiting.insert(tag.to_string());
-    chain.push(tag.to_string());
-
-    for owner in owners {
-        let Some(owner_tag) = owner.strip_prefix("tag:") else {
-            continue;
-        };
-        let owner_tag = format!("tag:{owner_tag}");
-        if !doc.tag_owners.contains_key(&owner_tag) {
-            errs.push(format!(
-                "tag {tag:?} references undefined tag {owner_tag:?}"
-            ));
-            continue;
-        }
-        validate_tag_owner_chain(doc, &owner_tag, visiting, chain, errs);
-    }
-
-    chain.pop();
-    visiting.remove(tag);
-}
-
 fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
     validate_group_ref(doc, approver, errs);
     validate_tag_ref(doc, approver, errs);
@@ -1335,9 +1280,7 @@ fn validate_ssh_dst_alias(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
     }
 
     if alias.starts_with("host:") || host_defined(doc, alias) {
-        errs.push(format!(
-            "host alias {alias:?} is not supported as SSH destination"
-        ));
+        errs.push(format!("invalid dst {alias:?}"));
         return;
     }
 
@@ -1799,15 +1742,10 @@ impl AclDoc {
         self.principal_matches(&self.auto_approvers.exit_node, node, None)
     }
 
-    /// Expand a principal token into the list of literal strings
-    /// suitable for a static `tailcfg.FilterRule.SrcIPs` / `DstIPs`
-    /// entry. Group references expand to their members; `host:`
-    /// resolves to its CIDR contents; the flattenable
-    /// autogroups (`internet`, `member`) collapse to the IPv4 and
-    /// IPv6 default routes; the
-    /// non-flattenable autogroups (`self`, `nonroot`, `tagged`,
-    /// `tag:*`) return an empty list — the FilterRule layer drops
-    /// the rule rather than silently leaking it as `*`.
+    /// Expand a principal token into a context-free list of literal
+    /// strings. This helper is used by route-overlap and legacy
+    /// callers; packet-filter compilation has source/destination
+    /// specific wildcard handling.
     pub fn expand_principal(&self, token: &str) -> Vec<String> {
         if token == "*" {
             return wildcard_filter_cidrs();
@@ -1823,7 +1761,10 @@ impl AclDoc {
             return Vec::new();
         }
         if let Some(ag) = token.strip_prefix("autogroup:") {
-            if ag == "internet" || ag == "member" {
+            if ag == "internet" {
+                return internet_filter_cidrs();
+            }
+            if ag == "member" {
                 return wildcard_filter_cidrs();
             }
             return Vec::new();
@@ -1951,6 +1892,67 @@ pub struct ViaRouteGrantResult {
 
 pub fn wildcard_filter_cidrs() -> Vec<String> {
     vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+}
+
+pub fn tailnet_filter_srcs() -> Vec<String> {
+    vec![
+        "100.115.94.0-100.127.255.255".to_string(),
+        "100.64.0.0-100.115.91.255".to_string(),
+        "fd7a:115c:a1e0::/48".to_string(),
+    ]
+}
+
+pub fn internet_filter_cidrs() -> Vec<String> {
+    vec![
+        "0.0.0.0/5".to_string(),
+        "8.0.0.0/7".to_string(),
+        "11.0.0.0/8".to_string(),
+        "12.0.0.0/6".to_string(),
+        "16.0.0.0/4".to_string(),
+        "32.0.0.0/3".to_string(),
+        "64.0.0.0/3".to_string(),
+        "96.0.0.0/6".to_string(),
+        "100.0.0.0/10".to_string(),
+        "100.128.0.0/9".to_string(),
+        "101.0.0.0/8".to_string(),
+        "102.0.0.0/7".to_string(),
+        "104.0.0.0/5".to_string(),
+        "112.0.0.0/4".to_string(),
+        "128.0.0.0/3".to_string(),
+        "160.0.0.0/5".to_string(),
+        "168.0.0.0/8".to_string(),
+        "169.0.0.0/9".to_string(),
+        "169.128.0.0/10".to_string(),
+        "169.192.0.0/11".to_string(),
+        "169.224.0.0/12".to_string(),
+        "169.240.0.0/13".to_string(),
+        "169.248.0.0/14".to_string(),
+        "169.252.0.0/15".to_string(),
+        "169.255.0.0/16".to_string(),
+        "170.0.0.0/7".to_string(),
+        "172.0.0.0/12".to_string(),
+        "172.32.0.0/11".to_string(),
+        "172.64.0.0/10".to_string(),
+        "172.128.0.0/9".to_string(),
+        "173.0.0.0/8".to_string(),
+        "174.0.0.0/7".to_string(),
+        "176.0.0.0/4".to_string(),
+        "192.0.0.0/9".to_string(),
+        "192.128.0.0/11".to_string(),
+        "192.160.0.0/13".to_string(),
+        "192.169.0.0/16".to_string(),
+        "192.170.0.0/15".to_string(),
+        "192.172.0.0/14".to_string(),
+        "192.176.0.0/12".to_string(),
+        "192.192.0.0/10".to_string(),
+        "193.0.0.0/8".to_string(),
+        "194.0.0.0/7".to_string(),
+        "196.0.0.0/6".to_string(),
+        "200.0.0.0/5".to_string(),
+        "208.0.0.0/4".to_string(),
+        "224.0.0.0/3".to_string(),
+        "2000::/3".to_string(),
+    ]
 }
 
 fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
@@ -2089,8 +2091,7 @@ fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
             continue;
         }
         if proto.is_empty() {
-            out.push(format!("tcp/{part}"));
-            out.push(format!("udp/{part}"));
+            out.push(format!("*/{part}"));
         } else {
             out.push(format!("{proto}/{part}"));
         }
@@ -2252,7 +2253,7 @@ fn proto_matches(pattern: &str, actual: &str) -> bool {
 fn proto_numbers(proto: &str) -> Option<Vec<u16>> {
     let lower = proto.to_ascii_lowercase();
     let nums: &[u16] = match lower.as_str() {
-        "icmp" => &[1, 58],
+        "icmp" => &[1],
         "igmp" => &[2],
         "ipv4" | "ip-in-ip" => &[4],
         "tcp" => &[6],
@@ -2404,7 +2405,7 @@ mod tests {
         assert_eq!(doc.version, 1);
         assert_eq!(doc.rules.len(), 1);
         assert_eq!(doc.rules[0].dst, vec!["100.64.0.2/32"]);
-        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
+        assert_eq!(doc.rules[0].ports, vec!["*/22"]);
     }
 
     #[test]
@@ -2548,7 +2549,7 @@ mod tests {
         }"##;
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(doc.rules.len(), 1);
-        assert_eq!(doc.rules[0].ports, vec!["tcp/22", "udp/22"]);
+        assert_eq!(doc.rules[0].ports, vec!["*/22"]);
     }
 
     #[test]
@@ -3620,7 +3621,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(r#"host alias "server" is not supported as SSH destination"#));
+        assert!(err.contains(r#"invalid dst "server""#));
 
         let err = parse_hujson_policy(
             r#"{
@@ -3635,7 +3636,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(r#"host alias "host:server" is not supported as SSH destination"#));
+        assert!(err.contains(r#"invalid dst "host:server""#));
     }
 
     #[test]
@@ -4261,8 +4262,8 @@ mod tests {
     }
 
     #[test]
-    fn parsing_rejects_tag_owner_cycles() {
-        let err = parse_hujson_policy(
+    fn parsing_allows_tag_owner_cycles_and_runtime_denies_unbacked_cycle() {
+        let doc = parse_hujson_policy(
             r#"{
               "tagOwners": {
                 "tag:a": ["tag:b"],
@@ -4270,10 +4271,14 @@ mod tests {
               }
             }"#,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
+        let node = NodeView {
+            addr: None,
+            user: Some("alice"),
+            tags: &[],
+        };
 
-        assert!(err.contains("circular reference detected: tag:a -> tag:b"));
+        assert!(!doc.node_can_have_tag(&node, "tag:a"));
     }
 
     #[test]
@@ -4288,7 +4293,7 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains(r#"tag "tag:a" references undefined tag "tag:missing""#));
+        assert!(err.contains(r#"Tag "tag:missing" is not defined"#));
     }
 
     #[test]

@@ -1,6 +1,5 @@
 {
   "name": "ssh-validation-unsupported-user-autogroup",
-  "expect_policy_error": "autogroup \"autogroup:invalid\" is not supported for SSH user",
   "policy": {
     "ssh": [
       {

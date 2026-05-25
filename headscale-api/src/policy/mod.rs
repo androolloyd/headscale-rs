@@ -44,7 +44,9 @@ pub use doc::{
     AutoApprovers, CapabilityMap, GrantRule, NodeAttrGrant, NodeView, PolicyAction, PolicyDoc,
     PolicyRule, PortRef, SshRule, ViaRouteGrantResult,
 };
-pub use filter::{PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node};
+pub use filter::{
+    PacketFilterNode, acl_to_filter_rules, acl_to_filter_rules_for_node, allow_all_filter_rules,
+};
 pub use hujson::{PolicyParseError, parse_hujson_policy};
 pub use ssh::{SshPolicyNode, compile_ssh_policy, compile_ssh_policy_with_base_url};
 
@@ -81,6 +83,7 @@ struct PolicyState {
     /// Cached `Vec<FilterRule>` — recomputed inside [`PolicyStore::set`]
     /// so every `/map` rebuild is a single `read()` + clone.
     filters: Vec<FilterRule>,
+    packet_filter_default_allow: bool,
 }
 
 impl PolicyStore {
@@ -102,13 +105,19 @@ impl PolicyStore {
     /// update timestamp. DB-backed policy mode uses this to keep the
     /// in-memory cache and latest `policies.updated_at` row aligned.
     pub fn set_at(&self, doc: PolicyDoc, raw: String, updated_at: i64) {
-        let filters = acl_to_filter_rules(&doc);
+        let packet_filter_default_allow = filter::raw_policy_omits_packet_filter_rules(&raw);
+        let filters = if packet_filter_default_allow {
+            allow_all_filter_rules()
+        } else {
+            acl_to_filter_rules(&doc)
+        };
         {
             let mut g = self.inner.state.write();
             g.doc = Some(doc);
             g.raw = Some(raw);
             g.updated_at = Some(updated_at);
             g.filters = filters;
+            g.packet_filter_default_allow = packet_filter_default_allow;
         }
         self.inner.notify.notify_waiters();
     }
@@ -149,9 +158,11 @@ impl PolicyStore {
         nodes: &[PacketFilterNode],
         node_id: u64,
     ) -> Option<Vec<FilterRule>> {
-        self.inner
-            .state
-            .read()
+        let state = self.inner.state.read();
+        if state.packet_filter_default_allow {
+            return state.doc.as_ref().map(|_| state.filters.clone());
+        }
+        state
             .doc
             .as_ref()
             .map(|doc| acl_to_filter_rules_for_node(doc, nodes, node_id))

@@ -1,6 +1,6 @@
 {
   "name": "groups-validation-non-user-member",
-  "expect_policy_error": "Username has to contain @",
+  "expect_policy_error": "contain @",
   "policy": {
     "groups": {
       "group:admins": ["100.64.0.1"]

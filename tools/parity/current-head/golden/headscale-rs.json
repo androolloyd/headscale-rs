@@ -5,27 +5,32 @@
     "filter": [
       {
         "SrcIPs": [
-          "100.64.0.1/32",
-          "100.64.0.2/31",
-          "100.64.0.4/32"
+          "100.64.0.1-100.64.0.4"
         ],
         "DstPorts": [
           {
-            "IP": "100.64.0.1/32",
+            "IP": "100.64.0.1",
             "Ports": {
               "First": 0,
               "Last": 65535
             }
           },
           {
-            "IP": "100.64.0.2/31",
+            "IP": "100.64.0.2",
             "Ports": {
               "First": 0,
               "Last": 65535
             }
           },
           {
-            "IP": "100.64.0.4/32",
+            "IP": "100.64.0.3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "100.64.0.4",
             "Ports": {
               "First": 0,
               "Last": 65535
@@ -57,7 +62,20 @@
     "engine": "headscale-rs",
     "name": "ssh-accept-env",
     "filter": [
-
+      {
+        "SrcIPs": [
+          "*"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
     ],
     "ssh_policies": [
       {
@@ -91,7 +109,20 @@
     "engine": "headscale-rs",
     "name": "ssh-check-hold-delegate",
     "filter": [
-
+      {
+        "SrcIPs": [
+          "*"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
     ],
     "ssh_policies": [
       {
@@ -102,13 +133,14 @@
               "100.64.0.1"
             ],
             "ssh_users": {
-              "admin": "admin"
+              "admin": "admin",
+              "root": ""
             },
             "action": {
               "accept": false,
               "reject": false,
               "session_duration_nanos": 0,
-              "hold_and_delegate": "/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
               "allow_agent_forwarding": false,
               "allow_local_port_forwarding": false,
               "allow_remote_port_forwarding": false
@@ -124,6 +156,6 @@
     "filter": [
 
     ],
-    "policy_error": "host alias \"server\" is not supported as SSH destination"
+    "policy_error": "invalid dst \"server\""
   }
 ]

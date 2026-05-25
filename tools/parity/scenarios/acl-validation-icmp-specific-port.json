@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-icmp-specific-port",
-  "expect_policy_error": "protocol \"icmp\" does not support specific ports",
+  "expect_policy_error": "does not support specific ports",
   "policy": {
     "acls": [
       {

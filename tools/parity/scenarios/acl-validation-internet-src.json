@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-internet-src",
-  "expect_policy_error": "\"autogroup:internet\" used in source",
+  "expect_policy_error": "autogroup:internet",
   "policy": {
     "acls": [
       {

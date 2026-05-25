@@ -255,7 +255,7 @@ fn expand_principal_handles_autogroup_internet() {
     let raw = load("upstream_acl_a01.hujson");
     let doc = parse_hujson_policy(&raw).unwrap();
     let exp = doc.expand_principal("autogroup:internet");
-    assert_eq!(exp, vec!["0.0.0.0/0", "::/0"]);
+    assert_eq!(exp, headscale_api_acl::internet_filter_cidrs());
 }
 
 #[test]

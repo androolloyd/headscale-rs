@@ -80,15 +80,15 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let direct = acl_to_filter_rules(&doc);
     assert_eq!(store_rules.len(), direct.len());
     assert_eq!(store_rules.len(), 1);
-    assert_eq!(store_rules[0].src_ips, vec!["0.0.0.0/0", "::/0"]);
-    assert_eq!(store_rules[0].dst_ports.len(), 2);
-    assert_eq!(store_rules[0].dst_ports[0].ip, "0.0.0.0/0");
-    assert_eq!(store_rules[0].dst_ports[1].ip, "::/0");
+    assert_eq!(
+        store_rules[0].src_ips,
+        headscale_api_acl::tailnet_filter_srcs()
+    );
+    assert_eq!(store_rules[0].dst_ports.len(), 1);
+    assert_eq!(store_rules[0].dst_ports[0].ip, "*");
     assert_eq!(store_rules[0].dst_ports[0].ports.first, 0);
     assert_eq!(store_rules[0].dst_ports[0].ports.last, 65535);
-    assert_eq!(store_rules[0].dst_ports[1].ports.first, 0);
-    assert_eq!(store_rules[0].dst_ports[1].ports.last, 65535);
-    assert_eq!(store_rules[0].ip_proto, vec![6, 17]);
+    assert!(store_rules[0].ip_proto.is_empty());
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn filter_rules_group_expansion_matches_pre_consolidation() {
     store.set(doc, "programmatic-group-filter".to_string());
     let rules = store.filter_rules();
     assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].src_ips, vec!["100.64.0.10", "100.64.0.11"]);
+    assert_eq!(rules[0].src_ips, vec!["100.64.0.10/31"]);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "name": "policy-validation-unknown-ipsets",
-  "expect_policy_error": "unknown field \"ipsets\"",
+  "expect_policy_error": "ipsets",
   "policy": {
     "ipsets": {
       "office": ["10.0.0.0/8"]

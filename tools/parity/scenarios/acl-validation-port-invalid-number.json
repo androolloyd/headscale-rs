@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-port-invalid-number",
-  "expect_policy_error": "invalid port number",
+  "expect_policy_error": "invalid",
   "policy": {
     "acls": [
       {

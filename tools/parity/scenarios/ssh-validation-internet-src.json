@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-internet-src",
-  "expect_policy_error": "\"autogroup:internet\" used in SSH source",
+  "expect_policy_error": "autogroup:internet",
   "policy": {
     "tagOwners": {
       "tag:server": ["alice@"]

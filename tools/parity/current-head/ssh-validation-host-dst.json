@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-host-dst",
-  "expect_policy_error": "host alias \"server\" is not supported as SSH destination",
+  "expect_policy_error": "invalid dst \"server\"",
   "policy": {
     "hosts": {
       "server": "100.64.0.4/32"

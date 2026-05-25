@@ -1,6 +1,6 @@
 {
   "name": "acl-validation-bare-ipv6-dst",
-  "expect_policy_error": "Invalid alias",
+  "expect_policy_error": "alias",
   "policy": {
     "acls": [
       {

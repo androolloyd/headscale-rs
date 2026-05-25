@@ -337,11 +337,9 @@ fn src_dedupes_repeated_principals() {
     };
     let rs = acl_to_filter_rules(&doc);
     assert_eq!(rs.len(), 1);
-    // 100.64.0.1 appears in both groups; the translator must dedupe.
-    assert_eq!(rs[0].src_ips.len(), 3);
-    assert!(rs[0].src_ips.contains(&"100.64.0.1".to_string()));
-    assert!(rs[0].src_ips.contains(&"100.64.0.2".to_string()));
-    assert!(rs[0].src_ips.contains(&"100.64.0.3".to_string()));
+    // 100.64.0.1 appears in both groups; the translator dedupes then
+    // emits the same minimal IP-set range string as headscale-go.
+    assert_eq!(rs[0].src_ips, vec!["100.64.0.1-100.64.0.3"]);
 }
 
 // ---------------------------------------------------------------------------

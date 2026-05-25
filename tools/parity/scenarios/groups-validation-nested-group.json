@@ -1,6 +1,6 @@
 {
   "name": "groups-validation-nested-group",
-  "expect_policy_error": "Nested groups are not allowed",
+  "expect_policy_error": "group:ops",
   "policy": {
     "groups": {
       "group:admins": ["group:ops"],

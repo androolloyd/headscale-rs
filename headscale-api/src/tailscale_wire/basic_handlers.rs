@@ -4867,11 +4867,9 @@ mod tests {
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 1);
-        assert_eq!(
-            parsed[0]["SrcIPs"],
-            serde_json::json!(["0.0.0.0/0", "::/0"])
-        );
-        assert_eq!(parsed[0]["DstPorts"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed[0]["SrcIPs"], serde_json::json!(["*"]));
+        assert_eq!(parsed[0]["DstPorts"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed[0]["DstPorts"][0]["IP"], "*");
     }
 
     #[tokio::test]
@@ -4911,8 +4909,8 @@ mod tests {
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 1);
-        assert_eq!(parsed[0]["SrcIPs"], serde_json::json!(["100.64.0.1/32"]));
-        assert_eq!(parsed[0]["DstPorts"][0]["IP"], "100.64.0.2/32");
+        assert_eq!(parsed[0]["SrcIPs"], serde_json::json!(["100.64.0.1"]));
+        assert_eq!(parsed[0]["DstPorts"][0]["IP"], "100.64.0.2");
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["First"], 22);
         assert_eq!(parsed[0]["DstPorts"][0]["Ports"]["Last"], 22);
         assert_eq!(parsed[0]["IPProto"], serde_json::json!([6]));

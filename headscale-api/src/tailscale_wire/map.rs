@@ -660,28 +660,18 @@ fn tailnet_domain(dns: &DnsStore) -> String {
 /// deployments derive this list from the ACL surface; the interop
 /// test runs with an open default so the ping assertion lands.
 ///
-/// Headscale-go parity: the bypass uses the same IPv4+IPv6 zero-prefix
-/// pair the ACL translator emits for `*` principals
-/// (`headscale_api_acl::wildcard_filter_cidrs`), and one NetPortRange
-/// per address family. Tailscale clients accept both `*` and the
-/// cidr-pair, but the cidr-pair matches what upstream Go emits —
-/// keeping both code paths in lockstep avoids a class of "works on
-/// our policy path, breaks on the bypass" diff bugs.
+/// Headscale-go parity: this mirrors `tailcfg.FilterAllowAll`, using
+/// literal `*` on both source and destination.
 pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
-    let cidrs = headscale_api_acl::wildcard_filter_cidrs();
-    let dst_ports = cidrs
-        .iter()
-        .map(|ip| NetPortRange {
-            ip: ip.clone(),
+    vec![FilterRule {
+        src_ips: vec!["*".to_string()],
+        dst_ports: vec![NetPortRange {
+            ip: "*".to_string(),
             ports: PortRange {
                 first: 0,
                 last: 65535,
             },
-        })
-        .collect();
-    vec![FilterRule {
-        src_ips: cidrs,
-        dst_ports,
+        }],
         ip_proto: Vec::new(),
     }]
 }
@@ -2466,10 +2456,10 @@ mod tests {
             .and_then(|rules| rules.as_ref())
             .expect("PacketFilters.base present");
         assert_eq!(base.len(), 1);
-        assert_eq!(base[0].src_ips, vec!["100.64.0.10/32"]);
+        assert_eq!(base[0].src_ips, vec!["100.64.0.10"]);
         assert_eq!(base[0].ip_proto, vec![6]);
         assert_eq!(base[0].dst_ports.len(), 1);
-        assert_eq!(base[0].dst_ports[0].ip, "100.64.0.11/32");
+        assert_eq!(base[0].dst_ports[0].ip, "100.64.0.11");
         assert_eq!(base[0].dst_ports[0].ports.first, 22);
         assert_eq!(base[0].dst_ports[0].ports.last, 22);
     }
@@ -2523,7 +2513,7 @@ mod tests {
             .and_then(|rules| rules.as_ref())
             .expect("PacketFilters.base present");
         assert_eq!(base.len(), 1);
-        assert_eq!(base[0].src_ips, vec!["100.64.0.10/32"]);
+        assert_eq!(base[0].src_ips, vec!["100.64.0.10"]);
         assert_eq!(base[0].dst_ports[0].ip, "10.10.0.0/16");
     }
 

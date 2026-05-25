@@ -332,10 +332,11 @@ fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshU
     let mut out = BTreeMap::new();
     if users.iter().any(|user| user == "autogroup:nonroot") {
         out.insert("*".to_string(), "=".to_string());
-        out.insert("root".to_string(), String::new());
     }
     if users.iter().any(|user| user == "root") {
         out.insert("root".to_string(), "root".to_string());
+    } else {
+        out.insert("root".to_string(), String::new());
     }
     for user in users {
         if user == "root" || user == "autogroup:nonroot" {

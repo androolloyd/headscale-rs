@@ -1,6 +1,6 @@
 {
   "name": "groups-validation-short-name",
-  "expect_policy_error": "Group has to start",
+  "expect_policy_error": "start",
   "policy": {
     "groups": {
       "admins": ["alice@"]

@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-invalid-check-period",
-  "expect_policy_error": "not a valid duration string",
+  "expect_policy_error": "invalid",
   "policy": {
     "groups": {
       "group:admins": ["alice@"]

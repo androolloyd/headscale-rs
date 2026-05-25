@@ -4,6 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+# tools/parity/headscale-go/go.mod pins github.com/juanfont/headscale to
+# upstream commit 4483fd0cad38717913e7509fc50f9d48c691b02b through this
+# Go pseudo-version.
+go_baseline_version="v0.29.0-beta.1.0.20260522122924-4483fd0cad38"
+default_golden_path="tools/parity/golden/headscale-go-${go_baseline_version}.json"
+
 out_dir="${OUT_DIR:-target/parity}"
 golden_path="${PARITY_GOLDEN:-}"
 case "${out_dir}" in
@@ -24,7 +30,7 @@ else
 fi
 
 if ((default_scenarios == 1)) && [[ -z "${PARITY_GOLDEN+x}" ]]; then
-  golden_path="tools/parity/golden/headscale-go-v0.28.0.json"
+  golden_path="${default_golden_path}"
 fi
 
 if ((${#scenarios[@]} == 0)); then

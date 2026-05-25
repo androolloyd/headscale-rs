@@ -698,7 +698,7 @@ func runSSHChecks(checks []sshCheck, pm policy.PolicyManager, nodes types.Nodes)
 		if node == nil {
 			return nil, fmt.Errorf("ssh check %q references unknown node %d", check.Name, check.NodeID)
 		}
-		sshPolicy, err := pm.SSHPolicy(node.View())
+		sshPolicy, err := pm.SSHPolicy("https://control.example", node.View())
 		if err != nil {
 			return nil, fmt.Errorf("ssh check %q: %w", check.Name, err)
 		}

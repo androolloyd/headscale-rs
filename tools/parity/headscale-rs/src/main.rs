@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use headscale_api::{
     policy::{
         NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, build_peer_map_for_doc,
-        compile_ssh_policy, parse_hujson_policy,
+        compile_ssh_policy_with_base_url, parse_hujson_policy,
     },
     tailscale_wire::wire::{
         DerpMap, DnsConfig, HostInfo, MapNode, MapRequest, MapResponse, RegisterRequest,
@@ -690,12 +690,22 @@ fn main() -> Result<()> {
         let doc =
             parsed.with_context(|| format!("headscale-rs parsing policy for {}", scenario.name))?;
         let filter_nodes = build_filter_nodes(&scenario)?;
+        let packet_filter_default_allow = policy_omits_packet_filter_rules(&scenario.policy);
         out.push(ScenarioOutput {
             engine: "headscale-rs",
             name: scenario.name.clone(),
-            filter: compile_filter_rules(&doc, &filter_nodes, None),
+            filter: if packet_filter_default_allow {
+                allow_all_filter_rules()
+            } else {
+                compile_filter_rules(&doc, &filter_nodes, None)
+            },
             policy_error: None,
-            filter_for_nodes: run_filter_node_checks(&scenario, &doc, &filter_nodes)?,
+            filter_for_nodes: run_filter_node_checks(
+                &scenario,
+                &doc,
+                &filter_nodes,
+                packet_filter_default_allow,
+            )?,
             peer_maps: run_peer_map_checks(&scenario, &doc, &filter_nodes)?,
             route_approvals: run_route_checks(&scenario, &doc)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
@@ -767,10 +777,37 @@ fn active_routes(node: &ScenarioNode) -> Result<Vec<String>> {
     Ok(out)
 }
 
+fn policy_omits_packet_filter_rules(policy: &Value) -> bool {
+    let Some(object) = policy.as_object() else {
+        return false;
+    };
+    !object.keys().any(|key| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "acls" | "rules" | "grants"
+        )
+    })
+}
+
+fn allow_all_filter_rules() -> Vec<FilterRuleOut> {
+    vec![FilterRuleOut {
+        src_ips: vec!["*".to_string()],
+        dst_ports: vec![NetPortRangeOut {
+            ip: "*".to_string(),
+            ports: PortRangeOut {
+                first: 0,
+                last: 65535,
+            },
+        }],
+        ip_proto: Vec::new(),
+    }]
+}
+
 fn run_filter_node_checks(
     scenario: &Scenario,
     doc: &PolicyDoc,
     nodes: &[FilterNode],
+    packet_filter_default_allow: bool,
 ) -> Result<Vec<FilterForNodeOut>> {
     let mut out = Vec::with_capacity(scenario.filter_node_checks.len());
     for check in &scenario.filter_node_checks {
@@ -785,7 +822,11 @@ fn run_filter_node_checks(
             })?;
         out.push(FilterForNodeOut {
             name: check.name.clone(),
-            rules: compile_filter_rules(doc, nodes, Some(check.node_id)),
+            rules: if packet_filter_default_allow {
+                allow_all_filter_rules()
+            } else {
+                compile_filter_rules(doc, nodes, Some(check.node_id))
+            },
         });
     }
     Ok(out)
@@ -886,7 +927,8 @@ fn run_ssh_checks(
                     check.name, check.node_id
                 )
             })?;
-        let policy = compile_ssh_policy(doc, &ssh_nodes, node.id);
+        let policy =
+            compile_ssh_policy_with_base_url(doc, &ssh_nodes, node.id, "https://control.example");
         out.push(SshPolicyOut {
             name: check.name.clone(),
             rules: normalize_ssh_policy(policy.as_ref()),
@@ -944,7 +986,7 @@ fn compile_filter_rules(
             continue;
         }
 
-        let src_ips = resolve_principals(doc, &rule.src, nodes, None);
+        let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
         if src_ips.is_empty() {
             continue;
         }
@@ -971,19 +1013,31 @@ fn compile_filter_rules(
             }
 
             if !other_dsts.is_empty() {
-                let dst_ips = resolve_principals(doc, &other_dsts, nodes, self_node);
+                let dst_ips = resolve_principals(
+                    doc,
+                    &other_dsts,
+                    nodes,
+                    self_node,
+                    PrincipalPosition::Destination,
+                );
                 append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
             }
         } else {
-            let dst_ips = resolve_principals(doc, &rule.dst, nodes, None);
+            let dst_ips = resolve_principals(
+                doc,
+                &rule.dst,
+                nodes,
+                None,
+                PrincipalPosition::Destination,
+            );
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
     }
 
     if let Some(node) = self_node {
-        reduce_filter_rules_for_node(out, node)
+        coalesce_filter_rules(reduce_filter_rules_for_node(out, node))
     } else {
-        out
+        coalesce_filter_rules(out)
     }
 }
 
@@ -1001,7 +1055,7 @@ fn append_filter_rules(
         for ip in dst_ips {
             for range in &port_ranges {
                 dst_ports.push(NetPortRangeOut {
-                    ip: ip.clone(),
+                    ip: dst_port_ip_string(ip),
                     ports: range.clone(),
                 });
             }
@@ -1012,7 +1066,7 @@ fn append_filter_rules(
             ip_proto,
         };
         normalize_filter_rule(&mut rule);
-        out.push(rule);
+        append_coalesced_filter_rule(out, rule);
     }
 }
 
@@ -1021,14 +1075,38 @@ fn resolve_principals(
     tokens: &[String],
     nodes: &[FilterNode],
     self_node: Option<&FilterNode>,
+    position: PrincipalPosition,
 ) -> Vec<String> {
     let mut out = Vec::new();
     for token in tokens {
-        for value in resolve_principal(doc, token, nodes, self_node) {
+        let resolved = resolve_principal(doc, token, nodes, self_node, position);
+        let normalized = match position {
+            PrincipalPosition::Source => resolved,
+            PrincipalPosition::Destination => aggregate_prefixes_as_cidrs(resolved),
+        };
+        for value in normalized {
             push_unique_string(&mut out, value);
         }
     }
-    aggregate_prefixes(out)
+    if position == PrincipalPosition::Source && tokens.iter().any(|token| token == "*") {
+        for route in approved_subnet_routes(nodes) {
+            push_unique_string(&mut out, route);
+        }
+    }
+    match position {
+        PrincipalPosition::Source => aggregate_prefixes(out),
+        PrincipalPosition::Destination => {
+            out.sort();
+            out.dedup();
+            out
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrincipalPosition {
+    Source,
+    Destination,
 }
 
 fn resolve_principal(
@@ -1036,9 +1114,13 @@ fn resolve_principal(
     token: &str,
     nodes: &[FilterNode],
     self_node: Option<&FilterNode>,
+    position: PrincipalPosition,
 ) -> Vec<String> {
     if token == "*" {
-        return wildcard_filter_cidrs();
+        return match position {
+            PrincipalPosition::Source => tailnet_filter_srcs(),
+            PrincipalPosition::Destination => vec!["*".to_string()],
+        };
     }
     if token.contains('@') {
         return nodes
@@ -1058,7 +1140,7 @@ fn resolve_principal(
         };
         let mut out = Vec::new();
         for member in members {
-            for value in resolve_principal(doc, member, nodes, self_node) {
+            for value in resolve_principal(doc, member, nodes, self_node, position) {
                 push_unique_string(&mut out, value);
             }
         }
@@ -1073,7 +1155,7 @@ fn resolve_principal(
     }
     if let Some(kind) = token.strip_prefix("autogroup:") {
         return match kind {
-            "internet" => wildcard_filter_cidrs(),
+            "internet" => internet_filter_cidrs(),
             "member" => nodes
                 .iter()
                 .filter(|node| node.tags.is_empty())
@@ -1098,11 +1180,11 @@ fn resolve_principal(
         return doc
             .hosts
             .get(host)
-            .map(|prefix| resolve_prefix(prefix, nodes, true))
+            .map(|prefix| resolve_prefix(prefix, nodes, false))
             .unwrap_or_default();
     }
     if let Some(prefix) = doc.hosts.get(token) {
-        return resolve_prefix(prefix, nodes, true);
+        return resolve_prefix(prefix, nodes, false);
     }
     if parse_ip_net(token).is_some() {
         return resolve_prefix(token, nodes, false);
@@ -1124,7 +1206,7 @@ fn nodes_matching_prefixes(nodes: &[&FilterNode], prefixes: &[String]) -> Vec<St
         if node.addrs.iter().any(|addr| {
             prefixes
                 .iter()
-                .any(|prefix| prefix_contains_addr(prefix, addr))
+                .any(|prefix| ipset_string_contains_addr(prefix, addr))
         }) {
             for addr in node_addr_prefixes(node) {
                 push_unique_string(&mut out, addr);
@@ -1141,9 +1223,10 @@ fn resolve_prefix(prefix: &str, nodes: &[FilterNode], include_nodes_inside: bool
     };
     let mut out = vec![net.to_string()];
     for node in nodes {
-        let node_matches = node.addrs.iter().any(|addr| {
-            net_contains_addr(&net, addr) && (include_nodes_inside || is_single_ip(&net))
-        });
+        let node_matches = node
+            .addrs
+            .iter()
+            .any(|addr| net_contains_addr(&net, addr) && include_nodes_inside);
         if node_matches {
             for addr in node_addr_prefixes(node) {
                 push_unique_string(&mut out, addr);
@@ -1151,6 +1234,19 @@ fn resolve_prefix(prefix: &str, nodes: &[FilterNode], include_nodes_inside: bool
         }
     }
     aggregate_prefixes(out)
+}
+
+fn approved_subnet_routes(nodes: &[FilterNode]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        for route in &node.routes {
+            if !is_exit_route(route) {
+                push_unique_string(&mut out, route.clone());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn node_addr_prefixes(node: &FilterNode) -> Vec<String> {
@@ -1168,9 +1264,18 @@ fn reduce_filter_rules_for_node(
     let mut out = Vec::new();
     for mut rule in rules {
         rule.dst_ports.retain(|dst| {
+            if dst.ip == "*" {
+                return true;
+            }
             node.addrs
                 .iter()
-                .any(|addr| prefix_contains_addr(&dst.ip, addr))
+                .any(|addr| ipset_string_contains_addr(&dst.ip, addr))
+                || node
+                    .routes
+                    .iter()
+                    .any(|route| prefixes_overlap(&dst.ip, route))
+                || (node.routes.iter().any(|route| is_exit_route(route))
+                    && internet_filter_cidrs().iter().any(|prefix| prefix == &dst.ip))
         });
         if rule.dst_ports.is_empty() {
             continue;
@@ -1181,8 +1286,78 @@ fn reduce_filter_rules_for_node(
     out
 }
 
-fn wildcard_filter_cidrs() -> Vec<String> {
-    vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+fn tailnet_filter_srcs() -> Vec<String> {
+    vec![
+        "100.115.94.0-100.127.255.255".to_string(),
+        "100.64.0.0-100.115.91.255".to_string(),
+        "fd7a:115c:a1e0::/48".to_string(),
+    ]
+}
+
+fn internet_filter_cidrs() -> Vec<String> {
+    vec![
+        "0.0.0.0/5".to_string(),
+        "8.0.0.0/7".to_string(),
+        "11.0.0.0/8".to_string(),
+        "12.0.0.0/6".to_string(),
+        "16.0.0.0/4".to_string(),
+        "32.0.0.0/3".to_string(),
+        "64.0.0.0/3".to_string(),
+        "96.0.0.0/6".to_string(),
+        "100.0.0.0/10".to_string(),
+        "100.128.0.0/9".to_string(),
+        "101.0.0.0/8".to_string(),
+        "102.0.0.0/7".to_string(),
+        "104.0.0.0/5".to_string(),
+        "112.0.0.0/4".to_string(),
+        "128.0.0.0/3".to_string(),
+        "160.0.0.0/5".to_string(),
+        "168.0.0.0/8".to_string(),
+        "169.0.0.0/9".to_string(),
+        "169.128.0.0/10".to_string(),
+        "169.192.0.0/11".to_string(),
+        "169.224.0.0/12".to_string(),
+        "169.240.0.0/13".to_string(),
+        "169.248.0.0/14".to_string(),
+        "169.252.0.0/15".to_string(),
+        "169.255.0.0/16".to_string(),
+        "170.0.0.0/7".to_string(),
+        "172.0.0.0/12".to_string(),
+        "172.32.0.0/11".to_string(),
+        "172.64.0.0/10".to_string(),
+        "172.128.0.0/9".to_string(),
+        "173.0.0.0/8".to_string(),
+        "174.0.0.0/7".to_string(),
+        "176.0.0.0/4".to_string(),
+        "192.0.0.0/9".to_string(),
+        "192.128.0.0/11".to_string(),
+        "192.160.0.0/13".to_string(),
+        "192.169.0.0/16".to_string(),
+        "192.170.0.0/15".to_string(),
+        "192.172.0.0/14".to_string(),
+        "192.176.0.0/12".to_string(),
+        "192.192.0.0/10".to_string(),
+        "193.0.0.0/8".to_string(),
+        "194.0.0.0/7".to_string(),
+        "196.0.0.0/6".to_string(),
+        "200.0.0.0/5".to_string(),
+        "208.0.0.0/4".to_string(),
+        "224.0.0.0/3".to_string(),
+        "2000::/3".to_string(),
+    ]
+}
+
+fn dst_port_ip_string(ip: &str) -> String {
+    parse_ip_net(ip).map_or_else(
+        || ip.to_string(),
+        |net| {
+            if is_single_ip(&net) {
+                net.addr().to_string()
+            } else {
+                net.to_string()
+            }
+        },
+    )
 }
 
 fn parse_ip_net(s: &str) -> Option<IpNet> {
@@ -1197,6 +1372,35 @@ fn prefix_contains_addr(prefix: &str, addr: &str) -> bool {
     parse_ip_net(prefix).is_some_and(|net| net_contains_addr(&net, addr))
 }
 
+fn ipset_string_contains_addr(ipset: &str, addr: &str) -> bool {
+    if prefix_contains_addr(ipset, addr) {
+        return true;
+    }
+    let Some((start, end)) = ipset.split_once('-') else {
+        return false;
+    };
+    match (
+        start.trim().parse::<IpAddr>(),
+        end.trim().parse::<IpAddr>(),
+        addr.parse::<IpAddr>(),
+    ) {
+        (Ok(IpAddr::V4(start)), Ok(IpAddr::V4(end)), Ok(IpAddr::V4(addr))) => {
+            u32::from(start) <= u32::from(addr) && u32::from(addr) <= u32::from(end)
+        }
+        (Ok(IpAddr::V6(start)), Ok(IpAddr::V6(end)), Ok(IpAddr::V6(addr))) => {
+            u128::from(start) <= u128::from(addr) && u128::from(addr) <= u128::from(end)
+        }
+        _ => false,
+    }
+}
+
+fn prefixes_overlap(a: &str, b: &str) -> bool {
+    match (parse_ip_net(a), parse_ip_net(b)) {
+        (Some(a), Some(b)) => nets_overlap(&a, &b),
+        _ => false,
+    }
+}
+
 fn net_contains_addr(net: &IpNet, addr: &str) -> bool {
     let Ok(addr) = addr.parse::<IpAddr>() else {
         return false;
@@ -1206,6 +1410,16 @@ fn net_contains_addr(net: &IpNet, addr: &str) -> bool {
         (IpNet::V6(v6), IpAddr::V6(addr)) => v6.contains(&addr),
         _ => false,
     }
+}
+
+fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
+    let (a_bits, a_start, a_end) = ipnet_interval(a);
+    let (b_bits, b_start, b_end) = ipnet_interval(b);
+    a_bits == b_bits && a_start <= b_end && b_start <= a_end
+}
+
+fn is_exit_route(route: &str) -> bool {
+    matches!(route, "0.0.0.0/0" | "::/0")
 }
 
 fn is_single_ip(net: &IpNet) -> bool {
@@ -1236,6 +1450,27 @@ fn normalize_filter_rule(rule: &mut FilterRuleOut) {
     rule.ip_proto.dedup();
 }
 
+fn append_coalesced_filter_rule(out: &mut Vec<FilterRuleOut>, mut rule: FilterRuleOut) {
+    normalize_filter_rule(&mut rule);
+    if let Some(existing) = out
+        .iter_mut()
+        .find(|existing| existing.src_ips == rule.src_ips && existing.ip_proto == rule.ip_proto)
+    {
+        existing.dst_ports.extend(rule.dst_ports);
+        normalize_filter_rule(existing);
+    } else {
+        out.push(rule);
+    }
+}
+
+fn coalesce_filter_rules(rules: Vec<FilterRuleOut>) -> Vec<FilterRuleOut> {
+    let mut out = Vec::new();
+    for rule in rules {
+        append_coalesced_filter_rule(&mut out, rule);
+    }
+    out
+}
+
 fn aggregate_prefixes(values: Vec<String>) -> Vec<String> {
     let mut passthrough = Vec::new();
     let mut v4 = Vec::new();
@@ -1254,8 +1489,37 @@ fn aggregate_prefixes(values: Vec<String>) -> Vec<String> {
     }
 
     let mut out = passthrough;
-    out.extend(intervals_to_cidrs(v4, 32));
-    out.extend(intervals_to_cidrs(v6, 128));
+    out.extend(intervals_to_ipset_strings(v4, 32));
+    out.extend(intervals_to_ipset_strings(v6, 128));
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn aggregate_prefixes_as_cidrs(values: Vec<String>) -> Vec<String> {
+    let mut passthrough = Vec::new();
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+
+    for value in values {
+        let Some(net) = parse_ip_net(&value) else {
+            push_unique_string(&mut passthrough, value);
+            continue;
+        };
+        match ipnet_interval(&net) {
+            (32, start, end) => v4.push((start, end)),
+            (128, start, end) => v6.push((start, end)),
+            _ => passthrough.push(value),
+        }
+    }
+
+    let mut out = passthrough;
+    for (start, end) in merged_intervals(v4) {
+        out.extend(cidrs_for_interval(start, end, 32));
+    }
+    for (start, end) in merged_intervals(v6) {
+        out.extend(cidrs_for_interval(start, end, 128));
+    }
     out.sort();
     out.dedup();
     out
@@ -1282,10 +1546,19 @@ fn ipnet_interval(net: &IpNet) -> (u8, u128, u128) {
     }
 }
 
-fn intervals_to_cidrs(mut intervals: Vec<(u128, u128)>, bits: u8) -> Vec<String> {
+fn intervals_to_ipset_strings(intervals: Vec<(u128, u128)>, bits: u8) -> Vec<String> {
     if intervals.is_empty() {
         return Vec::new();
     }
+
+    let mut out = Vec::new();
+    for (start, end) in merged_intervals(intervals) {
+        out.push(interval_ipset_string(start, end, bits));
+    }
+    out
+}
+
+fn merged_intervals(mut intervals: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
     intervals.sort_by_key(|(start, _)| *start);
 
     let mut merged: Vec<(u128, u128)> = Vec::new();
@@ -1300,31 +1573,46 @@ fn intervals_to_cidrs(mut intervals: Vec<(u128, u128)>, bits: u8) -> Vec<String>
         }
         merged.push((start, end));
     }
+    merged
+}
 
+fn interval_ipset_string(start: u128, end: u128, bits: u8) -> String {
+    if start == end {
+        return interval_addr_string(start, bits);
+    }
+    let cidrs = cidrs_for_interval(start, end, bits);
+    if cidrs.len() == 1 {
+        return cidrs.into_iter().next().unwrap();
+    }
+    format!(
+        "{}-{}",
+        interval_addr_string(start, bits),
+        interval_addr_string(end, bits)
+    )
+}
+
+fn cidrs_for_interval(mut start: u128, end: u128, bits: u8) -> Vec<String> {
+    if bits == 128 && start == 0 && end == u128::MAX {
+        return vec!["::/0".to_string()];
+    }
     let mut out = Vec::new();
-    for (mut start, end) in merged {
-        if bits == 128 && start == 0 && end == u128::MAX {
-            out.push("::/0".to_string());
-            continue;
-        }
-        while start <= end {
-            let mut chosen_prefix = bits;
-            for prefix_len in 0..=bits {
-                let Some(size) = block_size(bits, prefix_len) else {
-                    continue;
-                };
-                if start % size == 0 && start.saturating_add(size - 1) <= end {
-                    chosen_prefix = prefix_len;
-                    break;
-                }
-            }
-            let size = block_size(bits, chosen_prefix).unwrap_or(1);
-            out.push(interval_prefix_string(start, bits, chosen_prefix));
-            if end - start < size {
+    while start <= end {
+        let mut chosen_prefix = bits;
+        for prefix_len in 0..=bits {
+            let Some(size) = block_size(bits, prefix_len) else {
+                continue;
+            };
+            if start.is_multiple_of(size) && start.saturating_add(size - 1) <= end {
+                chosen_prefix = prefix_len;
                 break;
             }
-            start += size;
         }
+        let size = block_size(bits, chosen_prefix).unwrap_or(1);
+        out.push(interval_prefix_string(start, bits, chosen_prefix));
+        if end - start < size {
+            break;
+        }
+        start += size;
     }
     out
 }
@@ -1339,14 +1627,22 @@ fn block_size(bits: u8, prefix_len: u8) -> Option<u128> {
 }
 
 fn interval_prefix_string(start: u128, bits: u8, prefix_len: u8) -> String {
-    let addr = if bits == 32 {
-        IpAddr::V4((start as u32).into())
-    } else {
-        IpAddr::V6(start.into())
-    };
+    let addr = interval_addr(start, bits);
     IpNet::new(addr, prefix_len)
         .expect("valid aggregate prefix")
         .to_string()
+}
+
+fn interval_addr_string(value: u128, bits: u8) -> String {
+    interval_addr(value, bits).to_string()
+}
+
+fn interval_addr(value: u128, bits: u8) -> IpAddr {
+    if bits == 32 {
+        IpAddr::V4((value as u32).into())
+    } else {
+        IpAddr::V6(value.into())
+    }
 }
 
 fn push_unique_string(out: &mut Vec<String>, value: String) {
@@ -1434,8 +1730,8 @@ fn ip_proto_for_pattern(pat: &str) -> Option<Vec<i32>> {
 fn append_protocol_numbers(proto: &str, out: &mut Vec<i32>) -> Option<()> {
     let lower = proto.to_ascii_lowercase();
     let nums: &[i32] = match lower.as_str() {
-        "" => &[6, 17],
-        "icmp" => &[1, 58],
+        "" => &[],
+        "icmp" => &[1],
         "igmp" => &[2],
         "ipv4" | "ip-in-ip" => &[4],
         "tcp" => &[6],

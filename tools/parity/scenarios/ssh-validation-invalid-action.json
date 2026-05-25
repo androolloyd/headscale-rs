@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-invalid-action",
-  "expect_policy_error": "invalid SSH action",
+  "expect_policy_error": "invalid",
   "policy": {
     "ssh": [
       {

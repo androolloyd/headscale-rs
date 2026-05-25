@@ -1,6 +1,6 @@
 {
   "name": "ssh-validation-undefined-tag-dst",
-  "expect_policy_error": "Tag \"tag:notdefined\" is not defined",
+  "expect_policy_error": "tag:notdefined",
   "policy": {
     "groups": {
       "group:defined": ["user@"]

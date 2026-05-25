@@ -1518,8 +1518,8 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
         "--config", config, "--force", "-o", "json", "policy", "get", bypass,
     ]);
     assert!(get.status.success(), "stderr: {}", stderr(&get));
-    let get_json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
-    assert_eq!(get_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
+    assert_eq!(stdout(&get), "{\n  // preserved\n  \"acls\": []\n}\n");
+    assert_eq!(stderr(&get), "");
 
     let get_text = headscale_clean(&["--config", config, "--force", "policy", "get", bypass]);
     assert!(get_text.status.success(), "stderr: {}", stderr(&get_text));
@@ -2473,10 +2473,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_json_prefix.as_str())
     );
     assert!(listed_api_key["expiration"]["seconds"].as_i64().is_some());
-    assert!(listed_api_key["createdAt"]["seconds"].as_i64().is_some());
-    assert!(listed_api_key.get("created_at").is_none());
-    assert!(listed_api_key.get("last_seen").is_none());
+    assert!(listed_api_key["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_api_key.get("createdAt").is_none());
     assert!(listed_api_key.get("lastSeen").is_none());
+    assert!(listed_api_key.get("last_seen").is_none());
     let api_json_id = listed_api_key["id"].as_u64().unwrap().to_string();
 
     let expire_api_key_json = headscale_with_config(
@@ -2520,11 +2520,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_json_line_prefix.as_str())
     );
     assert!(
-        listed_api_key_json_line["createdAt"]["seconds"]
+        listed_api_key_json_line["created_at"]["seconds"]
             .as_i64()
             .is_some()
     );
-    assert!(listed_api_key_json_line.get("created_at").is_none());
+    assert!(listed_api_key_json_line.get("createdAt").is_none());
     assert_eq!(stderr(&list_api_keys_json_line), "");
 
     let expire_api_key_json_line = headscale_with_config(
@@ -2587,11 +2587,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_yaml_prefix.as_str())
     );
     assert!(
-        listed_api_key_yaml["createdAt"]["seconds"]
+        listed_api_key_yaml["created_at"]["seconds"]
             .as_i64()
             .is_some()
     );
-    assert!(listed_api_key_yaml.get("created_at").is_none());
+    assert!(listed_api_key_yaml.get("createdAt").is_none());
     assert_eq!(stderr(&list_api_keys_yaml), "");
 
     let expire_api_key_yaml = headscale_with_config(
@@ -2669,10 +2669,18 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&auth_register), "");
 
     let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
-    let node_id = json_output(&nodes_json)[0]["id"]
-        .as_u64()
-        .unwrap()
-        .to_string();
+    let nodes_json_value = json_output(&nodes_json);
+    let listed_node = &nodes_json_value[0];
+    let node_id = listed_node["id"].as_u64().unwrap().to_string();
+    assert_eq!(listed_node["user"]["name"].as_str(), Some("alice"));
+    assert!(listed_node["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_node["last_seen"]["seconds"].as_i64().is_some());
+    assert!(listed_node.get("createdAt").is_none());
+    assert!(listed_node.get("lastSeen").is_none());
+    assert!(listed_node.get("machineKey").is_none());
+    assert!(listed_node.get("preAuthKey").is_none());
+    assert!(listed_node.get("ephemeral").is_none());
+    assert!(listed_node.get("expired").is_none());
 
     let rename_node = headscale_with_config(
         &config,
@@ -2701,6 +2709,18 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(stdout(&set_policy), "Policy updated.\n");
     assert_eq!(stderr(&set_policy), "");
+
+    let get_policy_json = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+    assert!(
+        get_policy_json.status.success(),
+        "stderr: {}",
+        stderr(&get_policy_json)
+    );
+    assert_eq!(
+        stdout(&get_policy_json),
+        "{\"tagOwners\":{\"tag:server\":[\"alice@\"]}}\n"
+    );
+    assert_eq!(stderr(&get_policy_json), "");
 
     let tag_node = headscale_with_config(
         &config,

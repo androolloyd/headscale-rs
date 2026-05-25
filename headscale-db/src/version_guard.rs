@@ -204,6 +204,12 @@ async fn validate_current_upstream_go_shape(pool: &SqlitePool, stored_version: &
 
     let migration_ids = go_migration_ids(pool).await?;
     validate_known_go_migrations(&migration_ids)?;
+    if !migration_ids.iter().any(|id| id == REQUIRED_GO_MIGRATION) {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {REQUIRED_GO_MIGRATION}"
+        ));
+    }
     if !migration_ids
         .iter()
         .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)

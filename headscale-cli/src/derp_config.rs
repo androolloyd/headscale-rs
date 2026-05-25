@@ -6,11 +6,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use headscale_api::tailscale_wire::wire::DerpHomeParams;
 use headscale_api::tailscale_wire::{DerpMap, DerpRegion, DerpRegionNode};
 use serde::{Deserialize, Serialize};
+
+const DERP_MAP_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,9 +89,9 @@ pub(crate) fn load_static_derp_map(
         let Some(bytes) = url_fixtures.get(url) else {
             continue;
         };
-        let source: DerpMap = serde_json::from_slice(bytes)
+        let source: SourceDerpMap = serde_json::from_slice(bytes)
             .with_context(|| format!("parse DERP JSON fixture for {url}"))?;
-        merge_derp_map(&mut map, source);
+        merge_derp_regions(&mut map, source);
     }
 
     for path in &config.paths {
@@ -109,6 +111,10 @@ pub(crate) fn validate_static_derp_config(config: &DerpConfig) -> Result<()> {
 }
 
 fn validate_derp_flags(config: &DerpConfig) -> Result<()> {
+    if config.server.enabled && config.server.stun_listen_addr.is_none() {
+        bail!("derp.server.stun_listen_addr is required when derp.server.enabled=true");
+    }
+
     if config.server.enabled
         && !config.server.automatically_add_embedded_derp_region
         && config.paths.is_empty()
@@ -125,9 +131,15 @@ pub(crate) async fn load_derp_map(config: &DerpConfig) -> Result<DerpMap> {
     validate_derp_flags(config)?;
 
     let mut map = DerpMap::default();
+    let client = reqwest::Client::builder()
+        .timeout(DERP_MAP_FETCH_TIMEOUT)
+        .build()
+        .context("build DERP JSON map HTTP client")?;
 
     for url in &config.urls {
-        let response = reqwest::get(url)
+        let response = client
+            .get(url)
+            .send()
             .await
             .with_context(|| format!("fetch DERP JSON map {url}"))?
             .error_for_status()
@@ -136,9 +148,9 @@ pub(crate) async fn load_derp_map(config: &DerpConfig) -> Result<DerpMap> {
             .bytes()
             .await
             .with_context(|| format!("read DERP JSON map {url}"))?;
-        let source: DerpMap =
+        let source: SourceDerpMap =
             serde_json::from_slice(&bytes).with_context(|| format!("parse DERP JSON map {url}"))?;
-        merge_derp_map(&mut map, source);
+        merge_derp_regions(&mut map, source);
     }
 
     for path in &config.paths {
@@ -157,20 +169,27 @@ fn load_derp_path_map(path: &Path) -> Result<DerpPathMap> {
         .with_context(|| format!("parse DERP YAML path map {}", path.display()))
 }
 
-fn merge_derp_map(dest: &mut DerpMap, source: DerpMap) {
-    if source.home_params.is_some() {
-        dest.home_params = source.home_params;
-    }
-    dest.regions.extend(source.regions);
-    if source.omit_default_regions {
-        dest.omit_default_regions = true;
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SourceDerpMap {
+    #[serde(default)]
+    regions: HashMap<u16, Option<DerpRegion>>,
+}
+
+fn merge_derp_regions(dest: &mut DerpMap, source: SourceDerpMap) {
+    for (region_id, region) in source.regions {
+        match region {
+            Some(region) => {
+                dest.regions.insert(region_id, region);
+            }
+            None => {
+                dest.regions.remove(&region_id);
+            }
+        }
     }
 }
 
 fn apply_path_map(dest: &mut DerpMap, source: DerpPathMap) -> Result<()> {
-    if let Some(home_params) = source.home_params {
-        dest.home_params = Some(home_params.into_wire());
-    }
     for (region_id, region) in source.regions {
         match region {
             None => {
@@ -189,22 +208,6 @@ fn apply_path_map(dest: &mut DerpMap, source: DerpPathMap) -> Result<()> {
 struct DerpPathMap {
     #[serde(default)]
     regions: BTreeMap<u16, Option<PathDerpRegion>>,
-    #[serde(default, alias = "homeParams", alias = "HomeParams")]
-    home_params: Option<PathDerpHomeParams>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PathDerpHomeParams {
-    #[serde(default, alias = "regionScore", alias = "RegionScore")]
-    region_score: HashMap<u16, f64>,
-}
-
-impl PathDerpHomeParams {
-    fn into_wire(self) -> DerpHomeParams {
-        DerpHomeParams {
-            region_score: self.region_score,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +321,11 @@ mod tests {
             "https://derp.example/map.json".to_string(),
             serde_json::to_vec(&serde_json::json!({
                 "omitDefaultRegions": true,
+                "HomeParams": {
+                    "RegionScore": {
+                        "1": 0.5
+                    }
+                },
                 "Regions": {
                     "1": {
                         "RegionID": 1,
@@ -362,7 +370,8 @@ regions:
         };
 
         let map = load_static_derp_map(&config, &fixtures).unwrap();
-        assert!(map.omit_default_regions);
+        assert!(!map.omit_default_regions);
+        assert!(map.home_params.is_none());
         assert!(!map.regions.contains_key(&1));
         let region = map.regions.get(&900).unwrap();
         assert_eq!(region.region_name, "My region east");
@@ -378,6 +387,74 @@ regions:
 
         assert!(map.regions.is_empty());
         assert!(!map.omit_default_regions);
+    }
+
+    #[test]
+    fn url_map_merge_only_regions_and_drops_null_regions() {
+        let mut fixtures = UrlFixtureMap::new();
+        fixtures.insert(
+            "https://derp.example/base.json".to_string(),
+            serde_json::to_vec(&serde_json::json!({
+                "Regions": {
+                    "1": {
+                        "RegionID": 1,
+                        "RegionCode": "default",
+                        "RegionName": "Default",
+                        "Nodes": [{
+                            "Name": "1a",
+                            "RegionID": 1,
+                            "HostName": "derp1.example.com"
+                        }]
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        fixtures.insert(
+            "https://derp.example/override.json".to_string(),
+            serde_json::to_vec(&serde_json::json!({
+                "omitDefaultRegions": true,
+                "HomeParams": {
+                    "RegionScore": {
+                        "902": 1.5
+                    }
+                },
+                "Regions": {
+                    "1": null,
+                    "902": {
+                        "RegionID": 902,
+                        "RegionCode": "url",
+                        "RegionName": "URL DERP",
+                        "Nodes": [{
+                            "Name": "902a",
+                            "RegionID": 902,
+                            "HostName": "url.example.com"
+                        }]
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let config = DerpConfig {
+            urls: vec![
+                "https://derp.example/base.json".to_string(),
+                "https://derp.example/override.json".to_string(),
+            ],
+            ..DerpConfig::default()
+        };
+
+        let map = load_static_derp_map(&config, &fixtures).unwrap();
+
+        assert!(!map.regions.contains_key(&1));
+        assert_eq!(map.regions.get(&902).unwrap().region_code, "url");
+        assert!(!map.omit_default_regions);
+        assert!(map.home_params.is_none());
+    }
+
+    #[test]
+    fn derp_url_fetch_timeout_matches_headscale_go() {
+        assert_eq!(DERP_MAP_FETCH_TIMEOUT, Duration::from_secs(30));
     }
 
     #[tokio::test]
@@ -442,5 +519,16 @@ regions:
 
         let err = load_static_derp_map(&config, &UrlFixtureMap::new()).unwrap_err();
         assert!(format!("{err:#}").contains("does not match"));
+    }
+
+    #[test]
+    fn embedded_derp_server_requires_stun_listen_addr() {
+        let mut config = DerpConfig::default();
+        config.server.enabled = true;
+        config.server.stun_listen_addr = None;
+
+        let err = validate_static_derp_config(&config).unwrap_err();
+
+        assert!(format!("{err:#}").contains("derp.server.stun_listen_addr is required"));
     }
 }

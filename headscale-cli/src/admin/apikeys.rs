@@ -248,10 +248,8 @@ struct ApiKeyOutput {
     prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     expiration: Option<TimestampOutput>,
-    #[serde(rename = "createdAt")]
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<TimestampOutput>,
-    #[serde(rename = "lastSeen")]
     #[serde(skip_serializing_if = "Option::is_none")]
     last_seen: Option<TimestampOutput>,
     #[serde(skip)]
@@ -361,9 +359,9 @@ mod tests {
 
         let value = serde_json::to_value(&out).unwrap();
 
-        assert!(value.get("created_at").is_none());
-        assert!(value.get("last_seen").is_none());
-        assert_eq!(value["createdAt"]["seconds"], 1_704_067_260);
-        assert_eq!(value["lastSeen"]["seconds"], 1_704_067_320);
+        assert!(value.get("createdAt").is_none());
+        assert!(value.get("lastSeen").is_none());
+        assert_eq!(value["created_at"]["seconds"], 1_704_067_260);
+        assert_eq!(value["last_seen"]["seconds"], 1_704_067_320);
     }
 }

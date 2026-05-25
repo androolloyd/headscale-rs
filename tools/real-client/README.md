@@ -82,6 +82,7 @@ predates the executable PingRequest lifecycle.
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
 | Lifecycle | `oidc-restart` | `oidc-restart-smoke.sh` | `oidc-restart-headscale-go-smoke.sh` | Production OIDC registration survives server restart |
 | Lifecycle | `oidc-route-approve-restart` | `oidc-route-approve-restart-smoke.sh` | `oidc-route-approve-restart-headscale-go-smoke.sh` | Production OIDC route approval survives server restart |
 | Lifecycle | `web-register-restart` | `web-register-restart-smoke.sh` | `web-register-restart-headscale-go-smoke.sh` | Production web/CLI registration survives server restart |
@@ -130,6 +131,9 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-health-mixed-exit` | `route-health-mixed-exit-smoke.sh` | `route-health-mixed-exit-headscale-go-smoke.sh` | Current-head route-health ignores exit-only routes during HA failover |
 | Routes | `route-health-mixed-exit-reload` | `route-health-mixed-exit-reload-smoke.sh` | `route-health-mixed-exit-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves exit-node separation |
 | Routes | `route-health-mixed-exit-restart` | `route-health-mixed-exit-restart-smoke.sh` | `route-health-mixed-exit-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node separation survives server restart |
+| Routes | `route-health-mixed-exit-all-unhealthy` | `route-health-mixed-exit-all-unhealthy-smoke.sh` | `route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention |
+| Routes | `route-health-mixed-exit-all-unhealthy-reload` | `route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention |
+| Routes | `route-health-mixed-exit-all-unhealthy-restart` | `route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |

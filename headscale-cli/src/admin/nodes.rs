@@ -10,7 +10,9 @@ use std::io::{self, Write};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::MachineAdminRecord;
-use headscale_api::generated::{BackfillNodeIPsResponse, Node as GrpcNode};
+use headscale_api::generated::{
+    BackfillNodeIPsResponse, Node as GrpcNode, PreAuthKey as GrpcPreAuthKey, User as GrpcUser,
+};
 use headscale_api::tailscale_wire::routes::{active_exit_routes, primary_routes_by_node};
 use headscale_api::tailscale_wire::wire::stable_id_from_key;
 use serde::Serialize;
@@ -576,18 +578,22 @@ fn render_grpc_nodes(nodes: &[NodeOutput]) {
                 n.given_name.clone(),
                 short_key(&n.machine_key),
                 short_key(&n.node_key),
-                n.user.clone(),
+                n.user_name.clone(),
                 n.tags.join("\n"),
                 n.ip_addresses.join("\n"),
-                n.ephemeral.to_string(),
-                n.last_seen.clone().unwrap_or_default(),
-                n.expiry.clone().unwrap_or_else(|| "N/A".into()),
+                n.ephemeral().to_string(),
+                n.last_seen_display.clone().unwrap_or_default(),
+                n.expiry_display.clone().unwrap_or_else(|| "N/A".into()),
                 if n.online {
                     "online".into()
                 } else {
                     "offline".into()
                 },
-                if n.expired { "yes".into() } else { "no".into() },
+                if n.expired() {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
             ]
         })
         .collect();
@@ -618,14 +624,23 @@ fn render_grpc_one(n: &NodeOutput) {
     if !n.given_name.is_empty() && n.given_name != n.name {
         println!("  Given name:   {}", n.given_name);
     }
-    println!("  User:         {}", n.user);
+    println!("  User:         {}", n.user_name);
     println!("  IP addresses: {}", n.ip_addresses.join(", "));
     println!("  Online:       {}", n.online);
-    println!("  Expired:      {}", n.expired);
-    println!("  Ephemeral:    {}", n.ephemeral);
-    println!("  Last seen:    {}", n.last_seen.as_deref().unwrap_or("-"));
-    println!("  Created:      {}", n.created_at.as_deref().unwrap_or("-"));
-    println!("  Expiry:       {}", n.expiry.as_deref().unwrap_or("-"));
+    println!("  Expired:      {}", n.expired());
+    println!("  Ephemeral:    {}", n.ephemeral());
+    println!(
+        "  Last seen:    {}",
+        n.last_seen_display.as_deref().unwrap_or("-")
+    );
+    println!(
+        "  Created:      {}",
+        n.created_at_display.as_deref().unwrap_or("-")
+    );
+    println!(
+        "  Expiry:       {}",
+        n.expiry_display.as_deref().unwrap_or("-")
+    );
     if !n.machine_key.is_empty() {
         println!("  Machine key:  {}", n.machine_key);
     }
@@ -730,60 +745,192 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
     }
 }
 
-fn is_expired(expiry: Option<&prost_types::Timestamp>) -> bool {
-    expiry.is_some_and(|ts| ts.seconds <= current_unix_i64())
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NodeOutput {
     id: u64,
-    pub(crate) name: String,
-    pub(crate) given_name: String,
-    user: String,
     machine_key: String,
     node_key: String,
     disco_key: String,
     ip_addresses: Vec<String>,
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<NodeUserOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_seen: Option<TimestampOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expiry: Option<TimestampOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pre_auth_key: Option<NodePreAuthKeyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<TimestampOutput>,
+    register_method: i32,
+    pub(crate) given_name: String,
     online: bool,
-    tags: Vec<String>,
     approved_routes: Vec<String>,
     available_routes: Vec<String>,
     subnet_routes: Vec<String>,
+    tags: Vec<String>,
+    #[serde(skip)]
+    user_name: String,
+    #[serde(skip)]
+    last_seen_display: Option<String>,
+    #[serde(skip)]
+    expiry_display: Option<String>,
+    #[serde(skip)]
+    created_at_display: Option<String>,
+}
+
+impl NodeOutput {
+    fn ephemeral(&self) -> bool {
+        self.pre_auth_key.as_ref().is_some_and(|key| key.ephemeral)
+    }
+
+    fn expired(&self) -> bool {
+        self.expiry
+            .as_ref()
+            .is_some_and(|ts| ts.seconds <= current_unix_i64())
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NodeUserOutput {
+    id: u64,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<TimestampOutput>,
+    display_name: String,
+    email: String,
+    provider_id: String,
+    provider: String,
+    profile_pic_url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NodePreAuthKeyOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<NodeUserOutput>,
+    id: u64,
+    key: String,
+    reusable: bool,
     ephemeral: bool,
+    used: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_seen: Option<String>,
+    expiration: Option<TimestampOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    expiry: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
-    expired: bool,
-    register_method: i32,
+    created_at: Option<TimestampOutput>,
+    acl_tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TimestampOutput {
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    seconds: i64,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    nanos: i32,
 }
 
 impl From<GrpcNode> for NodeOutput {
     fn from(node: GrpcNode) -> Self {
+        let GrpcNode {
+            id,
+            machine_key,
+            node_key,
+            disco_key,
+            ip_addresses,
+            name,
+            user,
+            last_seen,
+            expiry,
+            pre_auth_key,
+            created_at,
+            register_method,
+            given_name,
+            online,
+            approved_routes,
+            available_routes,
+            subnet_routes,
+            tags,
+        } = node;
+        let user = user.map(NodeUserOutput::from);
+        let user_name = user
+            .as_ref()
+            .map_or_else(String::new, |user| user.name.clone());
+        let last_seen_display = timestamp_rfc3339(last_seen.as_ref());
+        let expiry_display = timestamp_rfc3339(expiry.as_ref());
+        let created_at_display = timestamp_rfc3339(created_at.as_ref());
         Self {
-            id: node.id,
-            name: node.name,
-            given_name: node.given_name,
-            user: node.user.map_or_else(String::new, |user| user.name),
-            machine_key: node.machine_key,
-            node_key: node.node_key,
-            disco_key: node.disco_key,
-            ip_addresses: node.ip_addresses,
-            online: node.online,
-            tags: node.tags,
-            approved_routes: node.approved_routes,
-            available_routes: node.available_routes,
-            subnet_routes: node.subnet_routes,
-            ephemeral: node.pre_auth_key.as_ref().is_some_and(|key| key.ephemeral),
-            last_seen: timestamp_rfc3339(node.last_seen.as_ref()),
-            expiry: timestamp_rfc3339(node.expiry.as_ref()),
-            created_at: timestamp_rfc3339(node.created_at.as_ref()),
-            expired: is_expired(node.expiry.as_ref()),
-            register_method: node.register_method,
+            id,
+            machine_key,
+            node_key,
+            disco_key,
+            ip_addresses,
+            name,
+            user,
+            last_seen: last_seen.map(TimestampOutput::from),
+            expiry: expiry.map(TimestampOutput::from),
+            pre_auth_key: pre_auth_key.map(NodePreAuthKeyOutput::from),
+            created_at: created_at.map(TimestampOutput::from),
+            register_method,
+            given_name,
+            online,
+            approved_routes,
+            available_routes,
+            subnet_routes,
+            tags,
+            user_name,
+            last_seen_display,
+            expiry_display,
+            created_at_display,
         }
     }
+}
+
+impl From<GrpcUser> for NodeUserOutput {
+    fn from(user: GrpcUser) -> Self {
+        Self {
+            id: user.id,
+            name: user.name,
+            created_at: user.created_at.map(TimestampOutput::from),
+            display_name: user.display_name,
+            email: user.email,
+            provider_id: user.provider_id,
+            provider: user.provider,
+            profile_pic_url: user.profile_pic_url,
+        }
+    }
+}
+
+impl From<GrpcPreAuthKey> for NodePreAuthKeyOutput {
+    fn from(key: GrpcPreAuthKey) -> Self {
+        Self {
+            user: key.user.map(NodeUserOutput::from),
+            id: key.id,
+            key: key.key,
+            reusable: key.reusable,
+            ephemeral: key.ephemeral,
+            used: key.used,
+            expiration: key.expiration.map(TimestampOutput::from),
+            created_at: key.created_at.map(TimestampOutput::from),
+            acl_tags: key.acl_tags,
+        }
+    }
+}
+
+impl From<prost_types::Timestamp> for TimestampOutput {
+    fn from(ts: prost_types::Timestamp) -> Self {
+        Self {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        }
+    }
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -842,24 +989,36 @@ mod tests {
     fn route_node(id: u64, routes: &[&str]) -> NodeOutput {
         NodeOutput {
             id,
-            name: format!("node-{id}"),
-            given_name: String::new(),
-            user: "alice".into(),
             machine_key: String::new(),
             node_key: String::new(),
             disco_key: String::new(),
             ip_addresses: Vec::new(),
+            name: format!("node-{id}"),
+            user: Some(NodeUserOutput {
+                id: 1,
+                name: "alice".into(),
+                created_at: None,
+                display_name: String::new(),
+                email: String::new(),
+                provider_id: String::new(),
+                provider: String::new(),
+                profile_pic_url: String::new(),
+            }),
+            last_seen: None,
+            expiry: None,
+            pre_auth_key: None,
+            created_at: None,
+            register_method: 0,
+            given_name: String::new(),
             online: false,
-            tags: Vec::new(),
             approved_routes: routes.iter().map(|route| (*route).to_string()).collect(),
             available_routes: Vec::new(),
             subnet_routes: Vec::new(),
-            ephemeral: false,
-            last_seen: None,
-            expiry: None,
-            created_at: None,
-            expired: false,
-            register_method: 0,
+            tags: Vec::new(),
+            user_name: "alice".into(),
+            last_seen_display: None,
+            expiry_display: None,
+            created_at_display: None,
         }
     }
 
@@ -953,10 +1112,69 @@ mod tests {
         let output = NodeOutput::from(node);
 
         assert_eq!(output.id, 7);
-        assert_eq!(output.user, "alice");
-        assert_eq!(output.created_at.as_deref(), Some("2024-01-01T00:00:00Z"));
-        assert!(output.ephemeral);
-        assert!(output.expired);
+        assert_eq!(output.user.as_ref().unwrap().name, "alice");
+        assert_eq!(output.user_name, "alice");
+        assert_eq!(
+            output.created_at.as_ref().map(|ts| ts.seconds),
+            Some(1_704_067_200)
+        );
+        assert_eq!(
+            output.created_at_display.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert!(output.ephemeral());
+        assert!(output.expired());
+    }
+
+    #[test]
+    fn grpc_node_output_serializes_proto_field_shape() {
+        let output = NodeOutput::from(GrpcNode {
+            id: 7,
+            name: "node-one".into(),
+            machine_key: "mkey:abc".into(),
+            node_key: "nodekey:def".into(),
+            user: Some(headscale_api::generated::User {
+                id: 1,
+                name: "alice".into(),
+                created_at: Some(prost_types::Timestamp {
+                    seconds: 1_704_067_100,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            }),
+            last_seen: Some(prost_types::Timestamp {
+                seconds: 1_704_067_150,
+                nanos: 0,
+            }),
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_704_067_200,
+                nanos: 0,
+            }),
+            pre_auth_key: Some(headscale_api::generated::PreAuthKey {
+                id: 9,
+                ephemeral: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let value = serde_json::to_value(&output).unwrap();
+
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["machine_key"], "mkey:abc");
+        assert_eq!(value["node_key"], "nodekey:def");
+        assert_eq!(value["user"]["name"], "alice");
+        assert_eq!(value["user"]["created_at"]["seconds"], 1_704_067_100);
+        assert_eq!(value["last_seen"]["seconds"], 1_704_067_150);
+        assert_eq!(value["created_at"]["seconds"], 1_704_067_200);
+        assert_eq!(value["pre_auth_key"]["id"], 9);
+        assert_eq!(value["pre_auth_key"]["ephemeral"], true);
+        assert!(value.get("createdAt").is_none());
+        assert!(value.get("lastSeen").is_none());
+        assert!(value.get("machineKey").is_none());
+        assert!(value.get("preAuthKey").is_none());
+        assert!(value.get("ephemeral").is_none());
+        assert!(value.get("expired").is_none());
     }
 
     fn route_record(id: &str, routes: &[&str], approved_routes: &[&str]) -> MachineAdminRecord {

@@ -528,7 +528,7 @@ fn validate_embedded_derp_config(cfg: &EmbeddedDerpConfig) -> Result<(), Embedde
     if cfg.host_name.trim().is_empty() {
         return Err(EmbeddedDerpError::MissingHostName);
     }
-    if cfg.stun_only && cfg.stun_addr.is_none() {
+    if cfg.stun_addr.is_none() {
         return Err(EmbeddedDerpError::MissingStunAddress);
     }
     if cfg.relay_enabled() {
@@ -553,7 +553,7 @@ pub enum EmbeddedDerpError {
     #[error("embedded DERP host_name is required when enabled")]
     MissingHostName,
 
-    #[error("embedded DERP stun_addr is required when stun_only is true")]
+    #[error("embedded DERP stun_addr is required when enabled")]
     MissingStunAddress,
 
     #[error("embedded DERP derper_binary is missing or not a file: {0:?}")]
@@ -777,6 +777,7 @@ mod tests {
         let cfg = EmbeddedDerpConfig {
             enabled: true,
             host_name: "derp.local".to_string(),
+            stun_addr: Some("127.0.0.1:0".parse().unwrap()),
             derper_config_path: "/tmp/headscale-rs-test-derper.key".into(),
             ..EmbeddedDerpConfig::default()
         };
@@ -790,11 +791,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_runtime_requires_stun_addr_for_stun_only_mode() {
+    async fn embedded_runtime_requires_stun_addr_when_enabled() {
         let cfg = EmbeddedDerpConfig {
             enabled: true,
             host_name: "derp.local".to_string(),
-            stun_only: true,
             ..EmbeddedDerpConfig::default()
         };
 
@@ -849,6 +849,7 @@ mod tests {
         let cfg = EmbeddedDerpConfig {
             enabled: true,
             host_name: "derp.local".to_string(),
+            stun_addr: Some("127.0.0.1:0".parse().unwrap()),
             derper_binary: fake_derper,
             derper_listen_addr: "127.0.0.1:0".parse().unwrap(),
             derper_config_path: dir.join("derper.key"),

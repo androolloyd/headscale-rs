@@ -21,40 +21,19 @@ use super::client::AdminClient;
 use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured};
 
-pub async fn get(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+pub async fn get(client: &AdminClient, _fmt: OutputFormat) -> Result<(), AdminError> {
     let value: serde_json::Value = client.get_json("/policy").await?;
-    if fmt.is_structured() {
-        print_structured(fmt, &value)?;
-    } else {
-        let loaded = value
-            .get("loaded")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        println!("Policy loaded: {loaded}");
-        if let Some(p) = value.get("policy")
-            && !p.is_null()
-        {
-            println!("---");
-            println!("{}", serde_json::to_string_pretty(p).unwrap_or_default());
-        }
-    }
+    print_policy_value(&value)?;
     Ok(())
 }
 
-pub async fn get_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+pub async fn get_grpc(client: &mut GrpcAdminClient, _fmt: OutputFormat) -> Result<(), AdminError> {
     let response = PolicyOutput::from(client.get_policy().await?);
-    if fmt.is_structured() {
-        print_structured(fmt, &response)?;
-    } else {
-        print!("{}", response.policy);
-        if !response.policy.ends_with('\n') {
-            println!();
-        }
-    }
+    print_policy_text(&response.policy);
     Ok(())
 }
 
-pub async fn get_direct_db(db_path: &Path, fmt: OutputFormat) -> Result<(), AdminError> {
+pub async fn get_direct_db(db_path: &Path, _fmt: OutputFormat) -> Result<(), AdminError> {
     let db = open_policy_database(db_path).await?;
     let policy = headscale_db::policies::get_latest(db.pool())
         .await
@@ -66,14 +45,7 @@ pub async fn get_direct_db(db_path: &Path, fmt: OutputFormat) -> Result<(), Admi
         policy: policy.data,
         updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
     };
-    if fmt.is_structured() {
-        print_structured(fmt, &response)?;
-    } else {
-        print!("{}", response.policy);
-        if !response.policy.ends_with('\n') {
-            println!();
-        }
-    }
+    print_policy_text(&response.policy);
     Ok(())
 }
 
@@ -194,6 +166,27 @@ fn read_policy_file(path: &Path) -> Result<String, AdminError> {
             path.display()
         ))
     })
+}
+
+fn print_policy_value(value: &serde_json::Value) -> Result<(), AdminError> {
+    let Some(policy) = value.get("policy").filter(|policy| !policy.is_null()) else {
+        return Ok(());
+    };
+    if let Some(policy) = policy.as_str() {
+        print_policy_text(policy);
+    } else {
+        let text = serde_json::to_string_pretty(policy)
+            .map_err(|e| AdminError::Decode(format!("serialise policy output: {e}")))?;
+        print_policy_text(&text);
+    }
+    Ok(())
+}
+
+fn print_policy_text(policy: &str) {
+    print!("{policy}");
+    if !policy.ends_with('\n') {
+        println!();
+    }
 }
 
 async fn validate_policy_with_database(

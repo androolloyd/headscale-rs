@@ -723,6 +723,7 @@ impl CliConfig {
             .database
             .as_ref()
             .and_then(UpstreamDatabaseConfig::sqlite_path)
+            && (!had_server_block || server.db_path == default_db_path())
         {
             server.db_path = sqlite_path;
         }
@@ -914,19 +915,24 @@ impl CliConfig {
             return Ok(());
         };
         let Some(database_type) = database.database_type.as_deref() else {
+            if database.sqlite.is_none() {
+                bail!(
+                    "database.type is required when database is configured; supported values are sqlite, sqlite3, postgres"
+                );
+            }
             return Ok(());
         };
         match database_type {
             "sqlite" | "sqlite3" => {
                 if database.sqlite.as_ref().is_some_and(|sqlite| {
-                    sqlite.wal_autocheckpoint < 0
+                    sqlite.wal_autocheckpoint < -1
                         || sqlite
                             .path
                             .as_ref()
                             .is_some_and(|p| p.as_os_str().is_empty())
                 }) {
                     bail!(
-                        "database.sqlite.path must be non-empty and database.sqlite.wal_autocheckpoint must be >= 0"
+                        "database.sqlite.path must be non-empty and database.sqlite.wal_autocheckpoint must be >= -1"
                     );
                 }
                 Ok(())
@@ -2319,6 +2325,46 @@ database:
     }
 
     #[test]
+    fn server_db_path_overrides_upstream_sqlite_path_alias() {
+        let source = r#"
+server:
+  server_url: "https://headscale.example"
+  db_path: "/srv/headscale/rust.sqlite"
+
+database:
+  type: sqlite
+  sqlite:
+    path: "/srv/headscale/upstream.sqlite"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let server = config.server.unwrap();
+
+        assert_eq!(server.db_path, PathBuf::from("/srv/headscale/rust.sqlite"));
+    }
+
+    #[test]
+    fn upstream_sqlite_path_alias_applies_to_server_block_without_db_path() {
+        let source = r#"
+server:
+  server_url: "https://headscale.example"
+
+database:
+  type: sqlite
+  sqlite:
+    path: "/srv/headscale/upstream.sqlite"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let server = config.server.unwrap();
+
+        assert_eq!(
+            server.db_path,
+            PathBuf::from("/srv/headscale/upstream.sqlite")
+        );
+    }
+
+    #[test]
     fn loads_upstream_policy_yaml_and_resolves_relative_file_path() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -2535,6 +2581,57 @@ database:
         let err = config.validate_for_configtest().unwrap_err();
 
         assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+    }
+
+    #[test]
+    fn configtest_accepts_upstream_sqlite_wal_default_marker() {
+        let source = r#"
+server_url: "https://headscale.example"
+database:
+  type: sqlite
+  sqlite:
+    wal_autocheckpoint: -1
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        assert_eq!(
+            config.database.unwrap().debug_sqlite().wal_autocheckpoint(),
+            -1
+        );
+    }
+
+    #[test]
+    fn configtest_rejects_database_block_without_type() {
+        let source = r#"
+server_url: "https://headscale.example"
+database:
+  postgres:
+    host: localhost
+    port: 5432
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(format!("{err:#}").contains("database.type is required"));
+    }
+
+    #[test]
+    fn configtest_rejects_postgresql_database_type_alias() {
+        let source = r#"
+server_url: "https://headscale.example"
+database:
+  type: postgresql
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+        let message = format!("{err:#}");
+
+        assert!(message.contains("database.type \"postgresql\" is invalid"));
+        assert!(message.contains("sqlite, sqlite3, postgres"));
     }
 
     #[test]

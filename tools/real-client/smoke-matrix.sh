@@ -73,6 +73,7 @@ smoke_ids=(
   web-register-tags
   web-register-unowned-tag
   oidc
+  ssh-oidc-check
   oidc-restart
   oidc-route-approve-restart
   web-register-restart
@@ -137,6 +138,7 @@ smoke_areas=(
   registration
   registration
   registration
+  ssh
   lifecycle
   lifecycle
   lifecycle
@@ -201,6 +203,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-tags-smoke.sh
   tools/real-client/web-register-unowned-tag-smoke.sh
   tools/real-client/oidc-smoke.sh
+  tools/real-client/ssh-oidc-check-smoke.sh
   tools/real-client/oidc-restart-smoke.sh
   tools/real-client/oidc-route-approve-restart-smoke.sh
   tools/real-client/web-register-restart-smoke.sh
@@ -265,6 +268,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-tags-headscale-go-smoke.sh
   tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
+  tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/oidc-restart-headscale-go-smoke.sh
   tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/web-register-restart-headscale-go-smoke.sh
@@ -329,6 +333,7 @@ smoke_assertions=(
   "web registration with owned requested tag"
   "web registration rejects unowned requested tag"
   "OIDC callback, node row, and user profile"
+  "OIDC-backed Tailscale SSH check approval"
   "Production OIDC registration survives server restart"
   "Production OIDC route approval survives server restart"
   "Production web/CLI registration survives server restart"

@@ -1,0 +1,18 @@
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "check",
+      "checkPeriod": "always",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self"],
+      "users": ["ssh-it-user"]
+    }
+  ]
+}

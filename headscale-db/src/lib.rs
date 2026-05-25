@@ -55,6 +55,12 @@ pub const DATABASE_BACKEND_MATRIX: &[DatabaseBackendSupport] = &[
     },
 ];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SqliteOpenOptions {
+    pub write_ahead_log: Option<bool>,
+    pub wal_autocheckpoint: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabaseBackend {
     Sqlite,
@@ -82,6 +88,11 @@ impl Database {
     /// # Arguments
     /// * `url` - Database URL (e.g., "sqlite://headscale.db" or "sqlite::memory:")
     pub async fn new(url: &str) -> Result<Self> {
+        Self::new_with_sqlite_options(url, SqliteOpenOptions::default()).await
+    }
+
+    /// Create a new SQLite database connection with runtime PRAGMA options.
+    pub async fn new_with_sqlite_options(url: &str, options: SqliteOpenOptions) -> Result<Self> {
         match classify_database_url(url) {
             DatabaseBackend::Sqlite => {}
             DatabaseBackend::Postgres => {
@@ -106,10 +117,21 @@ impl Database {
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
             .idle_timeout(Duration::from_secs(300))
-            .after_connect(|conn, _meta| {
+            .after_connect(move |conn, _meta| {
                 Box::pin(async move {
+                    if let Some(write_ahead_log) = options.write_ahead_log {
+                        let journal_mode = if write_ahead_log { "WAL" } else { "DELETE" };
+                        sqlx::query(&format!("PRAGMA journal_mode = {journal_mode}"))
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+                    if let Some(wal_autocheckpoint) = options.wal_autocheckpoint {
+                        sqlx::query(&format!("PRAGMA wal_autocheckpoint = {wal_autocheckpoint}"))
+                            .execute(&mut *conn)
+                            .await?;
+                    }
                     sqlx::query("PRAGMA foreign_keys = ON")
-                        .execute(conn)
+                        .execute(&mut *conn)
                         .await?;
                     Ok(())
                 })
@@ -165,5 +187,54 @@ mod tests {
             .unwrap();
         assert_eq!(foreign_keys, 1);
         db.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_open_options_apply_wal_and_checkpoint_pragmas() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let db = Database::new_with_sqlite_options(
+            &url,
+            SqliteOpenOptions {
+                write_ahead_log: Some(true),
+                wal_autocheckpoint: Some(37),
+            },
+        )
+        .await
+        .unwrap();
+
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let wal_autocheckpoint: i64 = sqlx::query_scalar("PRAGMA wal_autocheckpoint")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(wal_autocheckpoint, 37);
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_urls_are_rejected_clearly() {
+        for url in [
+            "postgres://localhost/headscale",
+            "postgresql://localhost/headscale",
+        ] {
+            let Err(err) = Database::new(url).await else {
+                panic!("{url} should be rejected by headscale-db");
+            };
+
+            assert!(matches!(err, DbError::UnsupportedDatabaseBackend(_)));
+            assert!(err.to_string().contains("postgres"));
+            assert!(err.to_string().contains("SQLite URLs only"));
+        }
     }
 }

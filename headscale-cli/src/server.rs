@@ -50,7 +50,7 @@ use crate::config::{
     validate_server_url_base_domain,
 };
 use crate::derp_config::DerpConfig;
-use headscale_db::Database;
+use headscale_db::{Database, SqliteOpenOptions};
 
 const NODE_EXPIRY_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -228,7 +228,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         )
     })?;
 
-    let db = open_sqlite_database(&cfg.db_path).await?;
+    let db = open_sqlite_database(&cfg.db_path, cfg.database.as_ref()).await?;
     let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
     let oidc = runtime_from_core_oidc(&oidc_config, server_url)
         .await
@@ -1284,15 +1284,36 @@ async fn load_file_policy(config: &PolicyConfig, policy: &PolicyStore) -> Result
     Ok(true)
 }
 
-async fn open_sqlite_database(path: &Path) -> Result<Database> {
+async fn open_sqlite_database(
+    path: &Path,
+    database: Option<&UpstreamDatabaseConfig>,
+) -> Result<Database> {
     let url = sqlite_url_for_path(path);
-    let db = Database::new(&url)
+    let db = Database::new_with_sqlite_options(&url, sqlite_open_options(database)?)
         .await
         .with_context(|| format!("open SQLite database at {}", path.display()))?;
     db.migrate()
         .await
         .with_context(|| format!("migrate SQLite database at {}", path.display()))?;
     Ok(db)
+}
+
+fn sqlite_open_options(database: Option<&UpstreamDatabaseConfig>) -> Result<SqliteOpenOptions> {
+    let Some(database) = database else {
+        return Ok(SqliteOpenOptions::default());
+    };
+
+    let sqlite = database.debug_sqlite();
+    let wal_autocheckpoint = match sqlite.wal_autocheckpoint() {
+        -1 => None,
+        value => Some(u32::try_from(value).with_context(|| {
+            "database.sqlite.path must be non-empty and database.sqlite.wal_autocheckpoint must be >= -1"
+        })?),
+    };
+    Ok(SqliteOpenOptions {
+        write_ahead_log: Some(sqlite.write_ahead_log()),
+        wal_autocheckpoint,
+    })
 }
 
 fn sqlite_url_for_path(path: &Path) -> String {
@@ -1985,6 +2006,42 @@ mod tests {
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
+    }
+
+    #[tokio::test]
+    async fn open_sqlite_database_applies_upstream_wal_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r"
+database:
+  type: sqlite
+  sqlite:
+    write_ahead_log: true
+    wal_autocheckpoint: 41
+",
+        )
+        .unwrap();
+        let config = crate::config::CliConfig::load(&config_path).unwrap();
+        let db = open_sqlite_database(
+            &dir.path().join("headscale.sqlite"),
+            config.database.as_ref(),
+        )
+        .await
+        .unwrap();
+
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let wal_autocheckpoint: i64 = sqlx::query_scalar("PRAGMA wal_autocheckpoint")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(wal_autocheckpoint, 41);
     }
 
     #[test]
@@ -3356,7 +3413,7 @@ database:
     async fn persistent_wire_runtime_registrations_mutations_and_streams_survive_restart() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("db.sqlite");
-        let db = open_sqlite_database(&db_path).await.unwrap();
+        let db = open_sqlite_database(&db_path, None).await.unwrap();
         let state_dir = dir.path().join("state");
 
         let runtime = build_persistent_wire_runtime(
@@ -3548,7 +3605,7 @@ database:
 
         drop(runtime);
         db.close().await;
-        let reopened = open_sqlite_database(&db_path).await.unwrap();
+        let reopened = open_sqlite_database(&db_path, None).await.unwrap();
         let restarted = build_persistent_wire_runtime(
             reopened.pool(),
             &state_dir,

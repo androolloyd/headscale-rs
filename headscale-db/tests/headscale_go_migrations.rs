@@ -715,6 +715,41 @@ async fn rejects_current_database_versions_without_tagged_node_migration_history
 }
 
 #[tokio::test]
+async fn rejects_current_database_versions_without_v028_baseline_history() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.1', '2026-05-22 00:00:00');
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current database_versions without v0.28 baseline migration");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("current Go DB without v0.28 baseline marker is rejected");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("202601121700-migrate-hostinfo-request-tags")
+    );
+}
+
+#[tokio::test]
 async fn database_versions_v028_accepts_current_tagged_node_user_migration() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(

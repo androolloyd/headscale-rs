@@ -1136,6 +1136,7 @@ async fn map_inner(
         let pings = state.pings.clone();
         let ping_rx = state.pings.subscribe();
         let mapresponse_debug = state.mapresponse_debug.clone();
+        let public_control_url = state.public_control_url.clone();
         let connection_guard = stream_connection_guard.expect("stream guard created above");
         let stream = futures_util::stream::unfold(
             (
@@ -1157,6 +1158,7 @@ async fn map_inner(
                 cap_version,
                 taildrop_enabled,
                 compression,
+                public_control_url,
             ),
             move |(
                 first_opt,
@@ -1177,6 +1179,7 @@ async fn map_inner(
                 cap_version,
                 taildrop_enabled,
                 compression,
+                public_control_url,
             )| async move {
                 if let Some(initial) = first_opt {
                     return Some((
@@ -1200,6 +1203,7 @@ async fn map_inner(
                             cap_version,
                             taildrop_enabled,
                             compression,
+                            public_control_url,
                         ),
                     ));
                 }
@@ -1231,6 +1235,7 @@ async fn map_inner(
                             cap_version,
                             taildrop_enabled,
                             compression,
+                            public_control_url,
                         ),
                     ));
                 }
@@ -1244,14 +1249,14 @@ async fn map_inner(
                 // returns immediately rather than parking. That's the
                 // load-bearing property that closes the audit-2 C-1
                 // race — see the registry's `wake_waiters` doc.
-                let (chunk, next_peer_state, next_self_node) = {
+                let (chunk, next_peer_state, next_self_node) = loop {
                     let policy_for_wait = policy.clone();
                     let policy_changed = policy_for_wait.wait_for_change();
                     let dns_for_wait = dns.clone();
                     let dns_changed = dns_for_wait.wait_for_change();
                     tokio::pin!(policy_changed);
                     tokio::pin!(dns_changed);
-                    tokio::select! {
+                    let maybe_chunk = tokio::select! {
                     biased;
                     res = gen_rx.changed() => {
                         // `Err` only happens if every sender has been
@@ -1260,7 +1265,7 @@ async fn map_inner(
                         // keepalive frame and let the next iteration
                         // (or stream end) handle teardown.
                         if res.is_err() {
-                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         } else {
                             rebuild_peer_delta_chunk(
                                 &machines,
@@ -1274,6 +1279,7 @@ async fn map_inner(
                                 &last_peer_state,
                                 &initial_peer_ids,
                                 &mapresponse_debug,
+                                public_control_url.as_deref().unwrap_or(""),
                                 PeerDeltaOptions::registry_change(),
                             )
                         }
@@ -1296,6 +1302,7 @@ async fn map_inner(
                             &last_peer_state,
                             &initial_peer_ids,
                             &mapresponse_debug,
+                            public_control_url.as_deref().unwrap_or(""),
                             PeerDeltaOptions::policy_change(),
                         )
                     }
@@ -1303,7 +1310,7 @@ async fn map_inner(
                         // Extra-records file edited (or DnsStore.set_spec
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
-                        (
+                        Some((
                             rebuild_map_chunk(
                                 &machines,
                                 &policy,
@@ -1316,19 +1323,20 @@ async fn map_inner(
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
+                                public_control_url.as_deref().unwrap_or(""),
                             ),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
-                        )
+                        ))
                     }
                     res = derp_rx.changed() => {
                         // DERP URL/path refresh — wake every parked
                         // poller so the next chunk carries the new
                         // `DERPMap`.
                         if res.is_err() {
-                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         } else {
-                            (
+                            Some((
                             rebuild_map_chunk(
                                 &machines,
                                 &policy,
@@ -1341,28 +1349,29 @@ async fn map_inner(
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
+                                public_control_url.as_deref().unwrap_or(""),
                             ),
                             visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
-                        )
+                        ))
                         }
                     }
                     res = ping_rx.changed() => {
                         if res.is_err() {
-                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         } else if let Some(request) = pings.pop_next_for_node(self_node_id) {
-                            (
+                            Some((
                                 build_ping_request_chunk(
                                     request,
                                     compression,
                                     &mapresponse_debug,
                                     self_node_id,
                                 ),
-                                last_peer_state,
-                                last_self_node,
-                            )
+                                last_peer_state.clone(),
+                                last_self_node.clone(),
+                            ))
                         } else {
-                            (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         }
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
@@ -1371,8 +1380,11 @@ async fn map_inner(
                             "keepalive",
                             machines.stable_node_id_for_key(&self_node_key),
                         );
-                        (build_keepalive_chunk(compression), last_peer_state, last_self_node)
+                        Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                     }
+                    };
+                    if let Some(chunk) = maybe_chunk {
+                        break chunk;
                     }
                 };
                 Some((
@@ -1396,6 +1408,7 @@ async fn map_inner(
                         cap_version,
                         taildrop_enabled,
                         compression,
+                        public_control_url,
                     ),
                 ))
             },
@@ -1469,6 +1482,8 @@ fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
 /// snapshot, then uses `PeersChanged`/`PeersRemoved` for later node
 /// add/remove/update events instead of replacing the full peer list on
 /// every wake.
+type PeerDeltaChunk = (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>);
+
 fn rebuild_peer_delta_chunk(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
     policy: &Arc<crate::policy::PolicyStore>,
@@ -1481,16 +1496,16 @@ fn rebuild_peer_delta_chunk(
     last_peer_state: &BTreeMap<u64, MapNode>,
     initial_peer_ids: &BTreeSet<u64>,
     mapresponse_debug: &MapResponseDebugStore,
+    public_control_url: &str,
     options: PeerDeltaOptions,
-) -> (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>) {
+) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
-        return (
+        return Some((
             build_keepalive_chunk(compression),
             last_peer_state.clone(),
             last_self_node.cloned(),
-        );
+        ));
     }
-    machines.record_mapresponse_generated(options.response_type);
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
@@ -1562,6 +1577,16 @@ fn rebuild_peer_delta_chunk(
         }
     }
 
+    if !options.include_dns_config
+        && !self_node_changed
+        && full_peers_changed.is_empty()
+        && peers_removed.is_empty()
+        && peer_patches.is_empty()
+    {
+        return None;
+    }
+
+    machines.record_mapresponse_generated(options.response_type);
     let mr = MapResponse {
         node: if self_node_changed {
             current_self_node.clone()
@@ -1580,17 +1605,17 @@ fn rebuild_peer_delta_chunk(
             allowed_peer_ids.as_ref(),
         ),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, ""),
+        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
         control_time: Some(chrono::Utc::now()),
         keep_alive: false,
         ..MapResponse::default()
     };
     record_mapresponse_debug(mapresponse_debug, self_node_id, options.debug_type, &mr);
-    (
+    Some((
         build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
         current_peer_state,
         current_self_node,
-    )
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1659,6 +1684,7 @@ fn rebuild_map_chunk(
     response_type: &str,
     mapresponse_debug: &MapResponseDebugStore,
     debug_type: MapResponseDebugType,
+    public_control_url: &str,
 ) -> Vec<u8> {
     if machines.get(self_node_key).is_none() {
         return build_keepalive_chunk(compression);
@@ -1712,7 +1738,7 @@ fn rebuild_map_chunk(
         domain: tailnet_domain,
         collect_services: Some(false),
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, ""),
+        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
         control_time: Some(chrono::Utc::now()),
         debug: Some(DebugConfig {
             disable_log_tail: true,
@@ -4654,15 +4680,7 @@ mod tests {
         assert_eq!(online_delta.peers_changed_patch[0].online, Some(true));
 
         let _a_body_2 = open_zstd_stream(app, &a).await;
-        let second_connect_delta = next_zstd_map_response(&mut b_body).await;
-        assert!(
-            second_connect_delta
-                .peers_changed_patch
-                .iter()
-                .all(|patch| patch.online.is_none()),
-            "second active stream must not emit a duplicate Online=true patch"
-        );
-        assert!(second_connect_delta.peers_changed.is_empty());
+        assert_no_stream_frame(&mut b_body, Duration::from_secs(1)).await;
 
         drop(a_body_1);
         assert_no_stream_frame(&mut b_body, Duration::from_secs(9)).await;
@@ -5302,6 +5320,104 @@ mod tests {
                 .action
                 .hold_and_delegate
                 .contains("/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_policy_update_uses_absolute_ssh_delegate_url_when_configured() {
+        let (mut state, _dir) = fixture();
+        state.public_control_url = Some("https://control.example".into());
+        let server = "ba".repeat(32);
+        let admin = "ca".repeat(32);
+
+        let mut server_rec = MachineRecord::new_at(
+            chrono::Utc::now(),
+            server.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "alice".into(),
+            "server".into(),
+            Ipv4Addr::new(100, 64, 0, 11),
+            false,
+        );
+        server_rec.forced_tags = vec!["tag:server".into()];
+        state.machines.upsert(server.clone(), server_rec);
+        state.machines.upsert(
+            admin,
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                "ca".repeat(32),
+                TEST_MACHINE_KEY_HEX.to_string(),
+                "bob".into(),
+                "admin".into(),
+                Ipv4Addr::new(100, 64, 0, 12),
+                false,
+            ),
+        );
+
+        let app = router(state.clone());
+        let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{server}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = decode_framed(&frame.into_data().unwrap());
+        let first_mr: MapResponse = serde_json::from_slice(&first).unwrap();
+        assert!(first_mr.ssh_policy.is_none());
+
+        let raw_policy = r#"{
+            "groups": {"group:admins": ["bob@"]},
+            "tagOwners": {"tag:server": ["alice@"]},
+            "acls": [],
+            "ssh": [{
+                "action": "check",
+                "src": ["group:admins"],
+                "dst": ["tag:server"],
+                "users": ["root"]
+            }]
+        }"#;
+        let policy_update = tokio::spawn({
+            let policy = state.policy.clone();
+            let raw_policy = raw_policy.to_string();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let doc = crate::policy::parse_hujson_policy(&raw_policy).unwrap();
+                policy.set(doc, raw_policy);
+            }
+        });
+
+        let frame = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("policy update map chunk")
+        .unwrap()
+        .unwrap();
+        policy_update.await.expect("policy update task");
+        let decoded = decode_framed(&frame.into_data().unwrap());
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        let ssh = mr
+            .ssh_policy
+            .expect("SSH policy present after policy update");
+        assert_eq!(
+            ssh.rules[0].action.hold_and_delegate,
+            "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
         );
     }
 

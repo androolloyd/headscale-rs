@@ -1269,6 +1269,8 @@ server_url: "headscale.example"
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://login.tail.example.org"
+noise:
+  private_key_path: "noise_private.key"
 dns:
   magic_dns: true
   override_local_dns: false
@@ -1281,6 +1283,8 @@ dns:
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
         include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
@@ -1300,6 +1304,8 @@ tls_cert_path: "/etc/headscale/cert.pem"
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 metrics_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
@@ -1309,6 +1315,8 @@ metrics_listen_addr: "not-a-socket"
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 grpc_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
@@ -1318,6 +1326,8 @@ grpc_listen_addr: "not-a-socket"
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 derp:
   server:
     enabled: true
@@ -1370,6 +1380,26 @@ trusted_proxies:
 "#,
         include_str!("snapshots/configtest_unsafe_trusted_proxy.stderr"),
         "configtest unsafe trusted proxy",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "headscale.example"
+tls_letsencrypt_challenge_type: "DNS-01"
+dns:
+  magic_dns: false
+  override_local_dns: true
+node:
+  routes:
+    ha:
+      probe_interval: 1s
+      probe_timeout: 0s
+tuning:
+  node_store_batch_size: 0
+  node_store_batch_timeout: 0s
+"#,
+        include_str!("snapshots/configtest_accumulates_upstream_fatal_errors.stderr"),
+        "configtest accumulates upstream fatal errors",
     );
 }
 

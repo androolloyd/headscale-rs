@@ -849,9 +849,6 @@ impl CliConfig {
         self.oidc.validate().context("invalid OIDC configuration")?;
         self.validate_trusted_proxies()?;
         self.validate_upstream_database_config()?;
-        self.validate_upstream_tls_config()?;
-        self.validate_unsupported_runtime_features()?;
-        self.validate_upstream_node_config()?;
         self.validate_policy_config()?;
 
         let server = self.server.as_ref().context(
@@ -864,6 +861,9 @@ impl CliConfig {
             .context(
                 "server.server_url is required so clients receive absolute registration URLs",
             )?;
+        self.validate_upstream_fatal_config(server, server_url)?;
+        self.validate_manual_tls_paths()?;
+        self.validate_unsupported_runtime_features()?;
         parse_server_url_parts(server_url)?;
         validate_socket_addr(&server.listen, "listen_addr")?;
         if let Some(https_listen) = server.https_listen.as_deref() {
@@ -916,8 +916,6 @@ impl CliConfig {
                 );
             }
         }
-
-        self.validate_upstream_noise_config()?;
 
         Ok(())
     }
@@ -1001,7 +999,13 @@ impl CliConfig {
         }
     }
 
-    fn validate_upstream_tls_config(&self) -> Result<()> {
+    fn validate_upstream_fatal_config(
+        &self,
+        server: &ServerConfig,
+        server_url: &str,
+    ) -> Result<()> {
+        let mut errors = Vec::new();
+
         let letsencrypt_hostname = self
             .tls_letsencrypt_hostname
             .as_deref()
@@ -1015,12 +1019,19 @@ impl CliConfig {
             .as_ref()
             .is_some_and(|value| !value.as_os_str().is_empty());
         if letsencrypt_hostname && (cert_path || key_path) {
-            bail!(
+            errors.push(
                 "Fatal config error: set either tls_letsencrypt_hostname or tls_cert_path/tls_key_path, not both"
+                    .to_string(),
             );
         }
-        if cert_path != key_path {
-            bail!("tls_cert_path and tls_key_path must both be set");
+
+        if self
+            .noise
+            .as_ref()
+            .and_then(|noise| noise.private_key_path.as_ref())
+            .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            errors.push(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR.to_string());
         }
 
         if let Some(challenge_type) = self
@@ -1030,24 +1041,102 @@ impl CliConfig {
             && challenge_type != "HTTP-01"
             && challenge_type != "TLS-ALPN-01"
         {
-            bail!(
+            errors.push(
                 "Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
+                    .to_string(),
             );
+        }
+
+        if !server_url.trim().starts_with("http://") && !server_url.trim().starts_with("https://") {
+            errors
+                .push("Fatal config error: server_url must start with https:// or http://".into());
+        }
+
+        if server.ephemeral_node_inactivity_timeout_secs <= 65 {
+            errors.push(format!(
+                "Fatal config error: node.ephemeral.inactivity_timeout ({}s) is set too low, must be more than 65s",
+                server.ephemeral_node_inactivity_timeout_secs
+            ));
+        }
+
+        if let Some(dns) = &self.dns
+            && dns.override_local_dns
+            && dns.nameservers.is_empty()
+            && dns.nameserver_resolvers.is_empty()
+        {
+            errors.push(
+                "Fatal config error: dns.nameservers.global must be set when dns.override_local_dns is true"
+                    .into(),
+            );
+        }
+
+        if let Some(node) = &self.node
+            && (node.routes.ha.probe_interval.is_some() || node.routes.ha.probe_timeout.is_some())
+        {
+            let interval = node
+                .routes
+                .ha
+                .probe_interval
+                .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS);
+            if interval > 0 {
+                if interval < 2 {
+                    errors.push(format!(
+                        "Fatal config error: node.routes.ha.probe_interval ({}) must be >= 2s",
+                        format_go_duration_secs(interval)
+                    ));
+                }
+                let timeout = node
+                    .routes
+                    .ha
+                    .probe_timeout
+                    .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS);
+                if timeout < 1 {
+                    errors.push(format!(
+                        "Fatal config error: node.routes.ha.probe_timeout ({}) must be >= 1s",
+                        format_go_duration_secs(timeout)
+                    ));
+                }
+                if timeout >= interval {
+                    errors.push(format!(
+                        "Fatal config error: node.routes.ha.probe_timeout ({}) must be less than node.routes.ha.probe_interval ({})",
+                        format_go_duration_secs(timeout),
+                        format_go_duration_secs(interval)
+                    ));
+                }
+            }
+        }
+
+        if self.tuning.node_store_batch_size <= 0 {
+            errors.push(format!(
+                "Fatal config error: tuning.node_store_batch_size must be positive, got {}",
+                self.tuning.node_store_batch_size
+            ));
+        }
+        if self.tuning.node_store_batch_timeout == 0 {
+            errors.push(format!(
+                "Fatal config error: tuning.node_store_batch_timeout must be positive, got {}",
+                format_go_duration_nanos(self.tuning.node_store_batch_timeout)
+            ));
+        }
+
+        if !errors.is_empty() {
+            bail!("{}", errors.join("\n"));
         }
 
         Ok(())
     }
 
-    fn validate_upstream_noise_config(&self) -> Result<()> {
-        let Some(private_key_path) = self
-            .noise
+    fn validate_manual_tls_paths(&self) -> Result<()> {
+        let cert_path = self
+            .tls_cert_path
             .as_ref()
-            .and_then(|noise| noise.private_key_path.as_ref())
-        else {
-            bail!(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR);
-        };
-        if private_key_path.as_os_str().is_empty() {
-            bail!(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR);
+            .is_some_and(|value| !value.as_os_str().is_empty());
+        let key_path = self
+            .tls_key_path
+            .as_ref()
+            .is_some_and(|value| !value.as_os_str().is_empty());
+        if cert_path != key_path {
+            bail!("tls_cert_path and tls_key_path must both be set");
         }
 
         Ok(())
@@ -1094,40 +1183,6 @@ impl CliConfig {
             );
         }
 
-        Ok(())
-    }
-
-    fn validate_upstream_node_config(&self) -> Result<()> {
-        let Some(node) = &self.node else {
-            return Ok(());
-        };
-        if node.routes.ha.probe_interval.is_none() && node.routes.ha.probe_timeout.is_none() {
-            return Ok(());
-        }
-        let interval = node
-            .routes
-            .ha
-            .probe_interval
-            .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS);
-        if interval == 0 {
-            return Ok(());
-        }
-        if interval < 2 {
-            bail!("node.routes.ha.probe_interval ({interval}s) must be >= 2s");
-        }
-        let timeout = node
-            .routes
-            .ha
-            .probe_timeout
-            .unwrap_or(DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS);
-        if timeout < 1 {
-            bail!("node.routes.ha.probe_timeout ({timeout}s) must be >= 1s");
-        }
-        if timeout >= interval {
-            bail!(
-                "node.routes.ha.probe_timeout ({timeout}s) must be less than node.routes.ha.probe_interval ({interval}s)"
-            );
-        }
         Ok(())
     }
 }
@@ -1778,6 +1833,23 @@ fn parse_duration_nanos_str(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("duration {trimmed:?} overflows u64 nanoseconds"))
 }
 
+fn format_go_duration_secs(seconds: u64) -> String {
+    format!("{seconds}s")
+}
+
+fn format_go_duration_nanos(nanos: u64) -> String {
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+    if nanos.is_multiple_of(1_000_000_000) {
+        return format!("{}s", nanos / 1_000_000_000);
+    }
+    if nanos.is_multiple_of(1_000_000) {
+        return format!("{}ms", nanos / 1_000_000);
+    }
+    format!("{nanos}ns")
+}
+
 pub(crate) fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2133,6 +2205,8 @@ node:
     fn loads_remaining_current_upstream_schema_fields() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 trusted_proxies:
   - "127.0.0.1/32"
   - "fd7a:115c:a1e0::/48"
@@ -2443,6 +2517,8 @@ database:
             &config_path,
             r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 policy:
   mode: file
   path: policy.hujson
@@ -2461,6 +2537,8 @@ policy:
     fn loads_upstream_database_policy_mode() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 policy:
   mode: database
 "#;
@@ -2606,11 +2684,14 @@ server_url: "https://derp.no"
     fn configtest_rejects_invalid_prefix_allocation_strategy() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 prefixes:
   v4: "100.64.0.0/10"
   allocation: "hash"
 dns:
   magic_dns: false
+  override_local_dns: false
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
@@ -2625,6 +2706,8 @@ dns:
     fn configtest_rejects_config_with_no_prefix_families() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 prefixes:
   v4: ""
 "#;
@@ -2653,6 +2736,8 @@ database:
     fn configtest_accepts_upstream_sqlite_wal_default_marker() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 database:
   type: sqlite
   sqlite:
@@ -2704,6 +2789,8 @@ database:
     fn configtest_rejects_upstream_tls_conflicts() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 tls_letsencrypt_hostname: "headscale.example"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#;
@@ -2721,6 +2808,8 @@ tls_cert_path: "/etc/headscale/cert.pem"
     fn loads_upstream_tls_acme_keys() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 acme_url: "https://acme.example/directory"
 acme_email: "ops@example.com"
 tls_letsencrypt_hostname: "headscale.example"
@@ -2759,6 +2848,8 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
     fn configtest_reports_http01_acme_cache_and_listener_context() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_cache_dir: "/var/lib/headscale/acme-cache"
 tls_letsencrypt_listen: ":http"
@@ -2777,6 +2868,8 @@ tls_letsencrypt_challenge_type: "HTTP-01"
     fn configtest_rejects_incomplete_manual_tls_paths() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#;
 
@@ -2886,13 +2979,15 @@ dns:
     fn configtest_rejects_too_low_ephemeral_timeout() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
 ephemeral_node_inactivity_timeout: "65s"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
         let err = config.validate_for_configtest().unwrap_err();
 
-        assert!(format!("{err:#}").contains("ephemeral_node_inactivity_timeout"));
+        assert!(format!("{err:#}").contains("node.ephemeral.inactivity_timeout"));
     }
 
     #[test]
@@ -3302,6 +3397,9 @@ enabled = true
         let source = r#"
 server_url = "https://headscale.example:notaport"
 
+[noise]
+private_key_path = "noise_private.key"
+
 [derp.server]
 enabled = true
 "#;
@@ -3316,6 +3414,9 @@ enabled = true
     fn configtest_rejects_server_url_matching_dns_base_domain() {
         let source = r#"
 server_url = "https://tail.example.org"
+
+[noise]
+private_key_path = "noise_private.key"
 
 [dns]
 magic_dns = true
@@ -3336,6 +3437,9 @@ base_domain = "tail.example.org"
         let source = r#"
 server_url = "https://login.tail.example.org"
 
+[noise]
+private_key_path = "noise_private.key"
+
 [dns]
 magic_dns = true
 override_local_dns = false
@@ -3355,6 +3459,9 @@ base_domain = "tail.example.org"
         let source = r#"
 server_url = "https://login.tail.example.org:443"
 
+[noise]
+private_key_path = "noise_private.key"
+
 [dns]
 magic_dns = true
 override_local_dns = false
@@ -3370,6 +3477,9 @@ base_domain = "tail.example.org"
     fn configtest_rejects_disabled_embedded_derp_injection_without_path_map() {
         let source = r#"
 server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "noise_private.key"
 
 [derp.server]
 enabled = true

@@ -1,0 +1,8 @@
+Error: Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol
+Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01
+Fatal config error: server_url must start with https:// or http://
+Fatal config error: dns.nameservers.global must be set when dns.override_local_dns is true
+Fatal config error: node.routes.ha.probe_interval (1s) must be >= 2s
+Fatal config error: node.routes.ha.probe_timeout (0s) must be >= 1s
+Fatal config error: tuning.node_store_batch_size must be positive, got 0
+Fatal config error: tuning.node_store_batch_timeout must be positive, got 0s

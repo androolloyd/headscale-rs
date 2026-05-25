@@ -300,7 +300,11 @@ primary visibility is covered before broader paired stock-client
 expansion. Public gRPC reflection now preserves the upstream
 `google.api.http` annotations for every implemented `HeadscaleService`
 RPC while still filtering internal Octra services out of the advertised
-descriptor set.
+descriptor set; `configtest` now accumulates current-upstream fatal
+server-init validation errors for TLS conflict, missing
+`noise.private_key_path`, invalid challenge type, unsafe `server_url`,
+DNS override, route HA timing, and NodeStore tuning instead of stopping
+at the first one.
 
 ## Parallel Workstreams
 

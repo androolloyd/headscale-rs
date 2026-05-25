@@ -1,1 +1,2 @@
-Error: node.routes.ha.probe_timeout (5s) must be less than node.routes.ha.probe_interval (5s)
+Error: Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol
+Fatal config error: node.routes.ha.probe_timeout (5s) must be less than node.routes.ha.probe_interval (5s)

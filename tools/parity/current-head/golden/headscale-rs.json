@@ -284,6 +284,127 @@
   },
   {
     "engine": "headscale-rs",
+    "name": "ssh-policy-matrix",
+    "filter": [
+
+    ],
+    "ssh_policies": [
+      {
+        "name": "alice-laptop",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1",
+              "100.64.0.2",
+              "fd7a:115c:a1e0::1",
+              "fd7a:115c:a1e0::2"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "bob-laptop",
+        "rules": [
+
+        ]
+      },
+      {
+        "name": "server",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "root": "",
+              "ssh-it-user": "ssh-it-user"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "deploy": "deploy",
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "db",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale-rs",
     "name": "ssh-validation-host-dst",
     "filter": [
 

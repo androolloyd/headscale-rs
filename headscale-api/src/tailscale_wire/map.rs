@@ -1291,6 +1291,7 @@ async fn map_inner(
                 if let Some(request) = pings.pop_next_for_node(self_node_id) {
                     return Some((
                         Ok::<_, std::io::Error>(build_ping_request_chunk(
+                            &machines,
                             request,
                             compression,
                             &mapresponse_debug,
@@ -1442,6 +1443,7 @@ async fn map_inner(
                         } else if let Some(request) = pings.pop_next_for_node(self_node_id) {
                             Some((
                                 build_ping_request_chunk(
+                                    &machines,
                                     request,
                                     compression,
                                     &mapresponse_debug,
@@ -1673,7 +1675,6 @@ fn rebuild_peer_delta_chunk(
         return None;
     }
 
-    machines.record_mapresponse_generated(options.response_type);
     let mr = MapResponse {
         node: if self_node_changed {
             current_self_node.clone()
@@ -1697,6 +1698,8 @@ fn rebuild_peer_delta_chunk(
         keep_alive: false,
         ..MapResponse::default()
     };
+    machines
+        .record_mapresponse_generated(classify_incremental_mapresponse(options.response_type, &mr));
     record_mapresponse_debug(mapresponse_debug, self_node_id, options.debug_type, &mr);
     Some((
         build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
@@ -1733,12 +1736,33 @@ impl PeerDeltaOptions {
     }
 }
 
+fn classify_incremental_mapresponse(
+    default_response_type: &'static str,
+    mr: &MapResponse,
+) -> &'static str {
+    if default_response_type == "policy" {
+        return default_response_type;
+    }
+    if mr.node.is_some() {
+        return "self";
+    }
+    if !mr.peers_changed_patch.is_empty() {
+        return "patch";
+    }
+    if !mr.peers_changed.is_empty() || !mr.peers_removed.is_empty() {
+        return "peers";
+    }
+    default_response_type
+}
+
 fn build_ping_request_chunk(
+    machines: &crate::tailscale_wire::MachineRegistry,
     request: PingRequest,
     compression: MapFrameCompression,
     mapresponse_debug: &MapResponseDebugStore,
     node_id: u64,
 ) -> Vec<u8> {
+    machines.record_mapresponse_generated("ping");
     let mr = MapResponse {
         ping_request: Some(request),
         keep_alive: false,
@@ -4780,6 +4804,22 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
 
+        let metrics_resp = public_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics.contains("headscale_mapresponse_generated_total{response_type=\"ping\"} 1\n")
+        );
+
         let resp = public_app
             .oneshot(
                 axum::http::Request::builder()
@@ -5190,6 +5230,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
+        let public_app = public_router(state.clone());
         let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .oneshot(
@@ -5233,6 +5274,21 @@ mod tests {
         assert!(!self_node.machine_authorized);
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
+
+        let metrics_resp = public_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics.contains("headscale_mapresponse_generated_total{response_type=\"self\"} 1\n")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -5654,6 +5710,7 @@ mod tests {
         insert_peer(&state, &b, "peer-b", 11);
 
         let app = router(state.clone());
+        let public_app = public_router(state.clone());
         let stream_req = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
             .clone()
@@ -5721,6 +5778,21 @@ mod tests {
         assert!(patch.disco_key.is_none());
         assert!(patch.online.is_none());
         assert!(patch.last_seen.is_none());
+
+        let metrics_resp = public_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(
+            metrics.contains("headscale_mapresponse_generated_total{response_type=\"patch\"} 1\n")
+        );
     }
 
     #[tokio::test(start_paused = true)]

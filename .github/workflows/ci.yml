@@ -170,7 +170,7 @@ jobs:
         with:
           workspaces: |
             tools/parity/headscale-rs -> target
-      - name: Pinned headscale-go v0.28 differential and golden
+      - name: Pinned headscale-go differential and golden
         run: ./scripts/headscale_go_diff.sh
       - name: Current-head Rust golden scenarios
         run: ./scripts/headscale_rs_current_head_golden.sh

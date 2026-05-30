@@ -126,10 +126,11 @@ Current-head audit overlay, refreshed 2026-05-24:
   `disableExpiry` parity are closed in
   `bd73e18`, and public gRPC reflection filename/dependency parity is
   closed in `0f0b943`.
-- Active P0 implementation lanes against the current-head executable baseline:
-  none known from the 2026-05-23 audit; current-head parity still has
-  upgrade-track gaps, led by canonical map/NodeStore churn, route
-  reload/restart edges, and broader stock-client SSH status coverage.
+- Active P0 default-scenario regressions against the current-head executable
+  baseline: none known from the 2026-05-23 audit. Full replacement parity still
+  has P0 upgrade/drop-in backlog, led by Postgres runtime/import support,
+  canonical map/NodeStore churn, route reload/restart edges, and broader
+  stock-client SSH status coverage.
 - Remaining P1 current-head gaps from the audit: broader paired
   stock-client route-via/route-health edge matrices, broader SSH
   client-facing status/stderr and profile-variant edges beyond the
@@ -357,10 +358,13 @@ file ownership narrow when splitting them across agents.
 
 ## Next Implementation Order
 
-1. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
+1. Finish the Postgres foundation dependency chain: preauth keys first, then
+   nodes/routes, then a shared runtime/import path before removing the explicit
+   Postgres `serve` rejection.
+2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for
    the remaining live-server cases and broader auth/server error variants.
-2. Broaden paired stock-client route reload/restart coverage on top of the
+3. Broaden paired stock-client route reload/restart coverage on top of the
    current-head route-via, route-via-reload, route-via-restart,
    route-via-multiprefix, route-via-multiprefix-reload,
    route-via-multiprefix-restart, route-health, route-health-reload,
@@ -372,12 +376,12 @@ file ownership narrow when splitting them across agents.
    route-health-mixed-exit-all-unhealthy,
    route-health-mixed-exit-all-unhealthy-reload, and
    route-health-mixed-exit-all-unhealthy-restart smokes.
-3. Finish config-runtime gaps: Postgres runtime support; HTTP-01 and
+4. Finish config-runtime gaps: HTTP-01 and
    TLS-ALPN now have production-listener controlled-CA process coverage.
-4. Broaden production-process restart smokes for web/CLI/OIDC policy and
+5. Broaden production-process restart smokes for web/CLI/OIDC policy and
    map churn beyond the auth-key restart-persistence, OIDC route-approval,
    and web/CLI restart rows.
-5. Decide whether native Rust DERP relay is required beyond the
+6. Decide whether native Rust DERP relay is required beyond the
    supported upstream `derper` sidecar boundary; do not claim native
    relay parity unless that product decision changes.
 6. Extend CI/fuzz/golden enforcement: selected real-client rows on PRs,

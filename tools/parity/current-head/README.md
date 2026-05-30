@@ -1,9 +1,10 @@
 # Current-head parity scenarios
 
 Scenarios in this directory exercise behavior observed in upstream headscale
-after the pinned `github.com/juanfont/headscale v0.28.0` baseline. They are not
-part of the default `./scripts/headscale_go_diff.sh` differential run because
-the checked-in Go harness deliberately remains pinned to v0.28.0.
+outside the default scenario set for the pinned
+`github.com/juanfont/headscale v0.29.0-beta.1.0.20260522122924-4483fd0cad38`
+harness. They are tracked by a Rust golden until each scenario is promoted into
+the default `./scripts/headscale_go_diff.sh` differential run.
 
 Run the current-head Rust golden gate from the repository root:
 

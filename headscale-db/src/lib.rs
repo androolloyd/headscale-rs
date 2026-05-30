@@ -34,9 +34,9 @@ pub use version_guard::{
 
 /// Supported database-backend matrix for headscale-db.
 ///
-/// headscale-go v0.28 supports SQLite and Postgres. This crate is
-/// intentionally SQLite-only today because the import/migration guard
-/// validates SQLite migration histories and the compiled sqlx backend is
+/// headscale-go supports SQLite and Postgres. This crate's runtime `Database`
+/// type is intentionally SQLite-only today because the import/migration guard
+/// validates SQLite migration histories and the compiled runtime backend is
 /// `sqlite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatabaseBackendSupport {

@@ -5128,14 +5128,12 @@ pub(crate) fn debug_high_cardinality_metrics_enabled() -> bool {
         return true;
     }
 
-    std::env::var("HEADSCALE_DEBUG_HIGH_CARDINALITY_METRICS")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "t" | "true" | "y" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    std::env::var("HEADSCALE_DEBUG_HIGH_CARDINALITY_METRICS").is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "t" | "true" | "y" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]

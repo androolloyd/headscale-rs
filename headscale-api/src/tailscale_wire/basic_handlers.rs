@@ -372,8 +372,7 @@ pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
             "os": env::consts::OS,
             "arch": env::consts::ARCH,
             "available_parallelism": thread::available_parallelism()
-                .map(std::num::NonZero::get)
-                .unwrap_or(1),
+                .map_or(1, std::num::NonZero::get),
         },
         "headscale": {
             "nodes_registered": snapshot.len(),
@@ -2903,9 +2902,7 @@ fn rust_pprof_profile_text(profile: &str) -> String {
         "profile: {profile}\nruntime: rust\nos: {}\narch: {}\navailable_parallelism: {}\n",
         env::consts::OS,
         env::consts::ARCH,
-        thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(1)
+        thread::available_parallelism().map_or(1, std::num::NonZero::get)
     )
 }
 

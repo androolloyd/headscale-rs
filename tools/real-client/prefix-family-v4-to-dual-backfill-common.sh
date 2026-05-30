@@ -313,7 +313,9 @@ create_user_and_key() {
   case "${target}" in
     rust)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
-      headscale_cmd -o json preauthkeys create --user alice --reusable --expires-in 1h >"${work_dir}/preauth.json"
+      local user_id
+      user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
+      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
       ;;
     headscale-go)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"

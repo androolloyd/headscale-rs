@@ -21,6 +21,7 @@ headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
 attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-120}"
+cancel_timeout="${REAL_CLIENT_OIDC_SSH_CANCEL_TIMEOUT_SECS:-15}"
 oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
@@ -52,9 +53,9 @@ case "${check_period_cache}" in
 esac
 
 case "${check_result}" in
-  approve | expire | wrong-user) ;;
+  approve | expire | wrong-user | cancel) ;;
   *)
-    echo "REAL_CLIENT_OIDC_SSH_CHECK_RESULT must be approve, expire, or wrong-user, got ${check_result}" >&2
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_RESULT must be approve, expire, wrong-user, or cancel, got ${check_result}" >&2
     exit 2
     ;;
 esac
@@ -72,8 +73,22 @@ if [[ "${check_result}" != "approve" && "${check_approval}" != "oidc" ]]; then
   exit 2
 fi
 
+if [[ "${check_result}" == "cancel" ]]; then
+  ssh_deny_status="${REAL_CLIENT_OIDC_SSH_DENY_STATUS:-124}"
+  ssh_deny_stderr_first_line="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_FIRST_LINE:-# Headscale SSH requires an additional check.}"
+  ssh_deny_stderr_regex="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_REGEX:-Headscale SSH requires an additional check}"
+  if [[ ! "${cancel_timeout}" =~ ^[0-9]+$ ]] || ((cancel_timeout <= 0)); then
+    echo "REAL_CLIENT_OIDC_SSH_CANCEL_TIMEOUT_SECS must be a positive integer, got ${cancel_timeout}" >&2
+    exit 2
+  fi
+  attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-${cancel_timeout}}"
+fi
+
 if [[ "${check_result}" == "expire" || "${check_result}" == "wrong-user" ]]; then
   register_cache_expiration="${register_cache_expiration:-10s}"
+fi
+
+if [[ "${check_result}" == "expire" || "${check_result}" == "wrong-user" || "${check_result}" == "cancel" ]]; then
   if ((check_period_cache_flag)); then
     echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE cannot be true when REAL_CLIENT_OIDC_SSH_CHECK_RESULT=${check_result}" >&2
     exit 2
@@ -758,6 +773,8 @@ run_ssh_check() {
     echo "::group::assert expired Tailscale SSH check denial"
   elif [[ "${check_result}" == "wrong-user" ]]; then
     echo "::group::assert wrong-user Tailscale SSH check denial"
+  elif [[ "${check_result}" == "cancel" ]]; then
+    echo "::group::assert cancelled Tailscale SSH check denial"
   elif [[ "${check_approval}" == "cli" ]]; then
     echo "::group::approve Tailscale SSH check with CLI"
   else
@@ -804,6 +821,15 @@ run_ssh_check() {
       ssh_pid=""
       assert_denied_ssh_check "${ssh_status}"
       echo "wrong_user_auth_id=${auth_id}"
+      echo "::endgroup::"
+      return
+      ;;
+    cancel)
+      local ssh_status=0
+      wait_pid_with_timeout "tailscale ssh cancelled check" "${ssh_pid}" || ssh_status="$?"
+      ssh_pid=""
+      assert_denied_ssh_check "${ssh_status}"
+      echo "cancelled_auth_id=${auth_id}"
       echo "::endgroup::"
       return
       ;;
@@ -859,6 +885,8 @@ elif [[ "${check_result}" == "expire" ]]; then
   echo "${target} expired OIDC SSH check denial real-client smoke passed"
 elif [[ "${check_result}" == "wrong-user" ]]; then
   echo "${target} wrong-user OIDC SSH check denial real-client smoke passed"
+elif [[ "${check_result}" == "cancel" ]]; then
+  echo "${target} cancelled OIDC SSH check denial real-client smoke passed"
 elif [[ "${check_approval}" == "cli" ]]; then
   echo "${target} CLI-approved SSH check real-client smoke passed"
 else

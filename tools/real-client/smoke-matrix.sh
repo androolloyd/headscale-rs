@@ -77,6 +77,7 @@ smoke_ids=(
   ssh-cli-check
   ssh-oidc-check-wrong-user
   ssh-oidc-check-deny
+  ssh-oidc-check-cancel
   oidc-restart
   oidc-route-approve-restart
   web-register-restart
@@ -143,6 +144,7 @@ smoke_areas=(
   registration
   registration
   registration
+  ssh
   ssh
   ssh
   ssh
@@ -217,6 +219,7 @@ smoke_rust_scripts=(
   tools/real-client/ssh-cli-check-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/ssh-oidc-check-deny-smoke.sh
+  tools/real-client/ssh-oidc-check-cancel-smoke.sh
   tools/real-client/oidc-restart-smoke.sh
   tools/real-client/oidc-route-approve-restart-smoke.sh
   tools/real-client/web-register-restart-smoke.sh
@@ -287,6 +290,7 @@ smoke_go_scripts=(
   tools/real-client/ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
+  tools/real-client/ssh-oidc-check-cancel-headscale-go-smoke.sh
   tools/real-client/oidc-restart-headscale-go-smoke.sh
   tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/web-register-restart-headscale-go-smoke.sh
@@ -357,6 +361,7 @@ smoke_assertions=(
   "CLI-approved Tailscale SSH check approval"
   "wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
+  "cancelled OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "Production OIDC registration survives server restart"
   "Production OIDC route approval survives server restart"
   "Production web/CLI registration survives server restart"

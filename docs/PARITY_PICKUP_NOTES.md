@@ -1,12 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:14 ADT
+Updated: 2026-05-30 09:23 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed implementation commit: `7419e47 Add Postgres node foundation primitives`
+- Latest pushed implementation commit before the current real-client smoke slice:
+  `11cb90d Extract allocator seeding from SQLite runtime path`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -48,8 +49,8 @@ Current multi-agent split:
   hardening, not missing core transport wiring.
 - Explorer lane: residual route/SSH paired real-client coverage inventory.
   Outcome: route/SSH are broadly paired, with remaining route-via edge smokes,
-  richer route-health reload+restart combinations, and cancelled OIDC SSH-check
-  denial coverage still open.
+  richer route-health reload+restart combinations, and a new paired cancelled
+  OIDC SSH-check denial smoke slice added for Rust and headscale-go.
 
 Verified for the API-key slice:
 

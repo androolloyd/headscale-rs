@@ -86,6 +86,7 @@ predates the executable PingRequest lifecycle.
 | SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
 | SSH | `ssh-oidc-check-wrong-user` | `ssh-oidc-check-wrong-user-smoke.sh` | `ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Wrong-user OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
+| SSH | `ssh-oidc-check-cancel` | `ssh-oidc-check-cancel-smoke.sh` | `ssh-oidc-check-cancel-headscale-go-smoke.sh` | Cancelled OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | Lifecycle | `oidc-restart` | `oidc-restart-smoke.sh` | `oidc-restart-headscale-go-smoke.sh` | Production OIDC registration survives server restart |
 | Lifecycle | `oidc-route-approve-restart` | `oidc-route-approve-restart-smoke.sh` | `oidc-route-approve-restart-headscale-go-smoke.sh` | Production OIDC route approval survives server restart |
 | Lifecycle | `web-register-restart` | `web-register-restart-smoke.sh` | `web-register-restart-headscale-go-smoke.sh` | Production web/CLI registration survives server restart |
@@ -801,7 +802,11 @@ The wrong-user row authenticates the `/auth/{auth_id}` flow as a different OIDC
 user, expects the auth callback to be denied, then asserts the nonzero SSH
 exit, empty stdout, first stderr line, and access-denied stderr regex. The
 expired-denial row sets a short `tuning.register_cache_expiration`, lets the
-check auth request expire, and asserts the same denied SSH output shape:
+check auth request expire, and asserts the same denied SSH output shape. The
+cancelled-denial row lets the stock client enter the SSH `check` flow and
+emit the auth URL, then relies on the inner `timeout` to cancel the parked SSH
+attempt and asserts the nonzero exit, empty stdout, and auth-prompt stderr
+shape.
 
 ```sh
 tools/real-client/ssh-oidc-check-smoke.sh
@@ -812,6 +817,8 @@ tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-deny-smoke.sh
 tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-check-cancel-smoke.sh
+tools/real-client/ssh-oidc-check-cancel-headscale-go-smoke.sh
 ```
 
 The current-head localpart wrappers exercise `localpart:*@domain` login users
@@ -848,3 +855,8 @@ Useful knobs:
 - `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=wrong-user` uses a third mock OIDC login
   as `mallory@example.com` by default, expects HTTP `403` from the auth flow,
   and then asserts the denied SSH output shape.
+- `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=cancel` uses
+  `REAL_CLIENT_OIDC_SSH_CANCEL_TIMEOUT_SECS` as the default SSH attempt timeout
+  so the parked `tailscale ssh` exits nonzero after the auth URL is emitted;
+  the wrapper defaults to status `124`, empty stdout, the stable first auth
+  prompt line, and an auth-prompt stderr regex.

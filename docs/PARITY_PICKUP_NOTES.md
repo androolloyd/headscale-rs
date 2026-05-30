@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 10:04 ADT
+Updated: 2026-05-30 10:21 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `96477a2 Add Postgres machine admin adapter`
+  `a46a213 Add feature-gated Postgres runtime path`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -48,16 +48,26 @@ Recent accepted slices:
   `PersistentPostgresMachineAdmin` over the existing Postgres node primitives,
   including admin node mutations, auth-key registration persistence, runtime
   state sync, wire-registry hydration, route/address mutation, and node delete.
+- `a46a213` adds `headscale-cli`'s
+  `postgres-sqlx` feature, a server-local runtime database enum, a
+  feature-gated Postgres open/migrate path, a Pg-backed wire/admin runtime
+  builder for non-OIDC server configs, Postgres startup policy loading, and
+  allocator seeding from Postgres `nodes` rows while preserving the default
+  SQLite-only serve rejection in builds without `postgres-sqlx`.
 
 Current multi-agent split:
 
-- Local critical path: Postgres runtime/import wiring, starting from the
-  shared backend abstraction and the SQLite-only `Database`/server runtime
-  boundary.
+- Local critical path: Postgres runtime/import wiring. The shared
+  server-local backend abstraction and non-OIDC Pg runtime builder now compile
+  behind `headscale-cli/postgres-sqlx`; remaining critical work is the
+  Postgres OIDC registration/SSH-check handler, direct policy DB bypass,
+  live Postgres serve smokes, and Postgres import/version-guard semantics.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
-  backend abstraction plan. Outcome: runtime still opens SQLite unconditionally,
-  `headscale-db::Database` is SQLite-only, and the existing persistent admin
-  adapters are concrete `SqlitePool` adapters.
+  backend abstraction plan. Outcome before the runtime-abstraction slice:
+  server startup opened SQLite unconditionally, `headscale-db::Database` was
+  SQLite-only, and the remaining blockers were the Pg runtime builder,
+  Postgres OIDC handler, direct DB bypass, live Pg smokes, and import/version
+  guard semantics.
 - Explorer lane: residual current-upstream CLI output/help drift inventory.
   Outcome: remaining CLI work is P2 byte-for-byte success/error/prompt snapshot
   hardening, not missing core transport wiring.
@@ -134,13 +144,18 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 
 ## Next Safe Slice
 
-The current active slice is moving from Postgres foundation tables toward a
-shared backend/runtime path. The other narrow lanes remain current-upstream CLI
-output drift snapshots or the remaining route/SSH stock-client edge rows.
+The current active slice is now past the first shared backend/runtime path:
+`headscale-cli/postgres-sqlx` compiles a non-OIDC Pg runtime builder. The next
+critical slices are Postgres OIDC registration/SSH-checks, direct policy DB
+bypass, live Postgres serve smokes, and import/version-guard semantics. The
+other narrow lanes remain current-upstream CLI output drift snapshots or the
+remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
-- Postgres runtime/import support, if full replacement parity includes Postgres rather than SQLite-only compatibility
+- Postgres runtime/import support: feature-gated non-OIDC runtime wiring now
+  compiles, but OIDC registration/SSH-checks, direct policy DB bypass, live
+  Postgres serve smokes, and Postgres import/version-guard semantics remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn

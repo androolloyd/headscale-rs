@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+postgres-sqlx = ["headscale-api/postgres-sqlx", "headscale-db/postgres-sqlx", "sqlx/postgres"]
+
 [lib]
 name = "headscale_cli"
 path = "src/lib.rs"

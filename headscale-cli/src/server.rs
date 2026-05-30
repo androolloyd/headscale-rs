@@ -22,8 +22,14 @@ use tokio_stream::{
 use tonic::transport::server::Connected;
 
 use headscale_api::admin::{
-    PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentOidcRegistrationHandler,
-    PersistentPreauthAdmin, PersistentUserAdmin,
+    ApiKeyAdmin, MachineAdmin, PersistentApiKeyAdmin, PersistentMachineAdmin,
+    PersistentOidcRegistrationHandler, PersistentPreauthAdmin, PersistentUserAdmin, PreauthAdmin,
+    UserAdmin,
+};
+#[cfg(feature = "postgres-sqlx")]
+use headscale_api::admin::{
+    PersistentPostgresApiKeyAdmin, PersistentPostgresMachineAdmin, PersistentPostgresPreauthAdmin,
+    PersistentPostgresUserAdmin,
 };
 use headscale_api::dns::{
     DnsConfigSpec, DnsStore, parse_extra_records, spawn_extra_records_watcher,
@@ -36,11 +42,11 @@ use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
-    DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistry,
-    MapResponseDebugStore, PingTracker, REGISTRATION_CACHE_CLEANUP, REGISTRATION_CACHE_EXPIRATION,
-    REGISTRATION_CACHE_MAX_ENTRIES, RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey,
-    WireState, serve, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
-    spawn_route_health_probe,
+    DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistrationStore,
+    MachineRegistry, MapResponseDebugStore, PingTracker, PreauthRedeemer,
+    REGISTRATION_CACHE_CLEANUP, REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_MAX_ENTRIES,
+    RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey, WireState, serve,
+    spawn_node_expiry_waker, spawn_offline_connection_cleanup, spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -51,8 +57,8 @@ use crate::acme_issuer::{
     spawn_tls_alpn_renewal_task,
 };
 use crate::config::{
-    PolicyConfig, TuningConfig, UpstreamDatabaseConfig, server_url_hostname,
-    validate_server_url_base_domain,
+    PolicyConfig, TuningConfig, UpstreamDatabaseConfig, UpstreamPostgresConfig,
+    server_url_hostname, validate_server_url_base_domain,
 };
 use crate::derp_config::DerpConfig;
 use headscale_db::{Database, DatabaseBackend, SqliteOpenOptions};
@@ -261,7 +267,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             .filter(|addr| !addr.is_empty())
             .unwrap_or("<disabled>")
     );
-    tracing::info!("  Database: {}", cfg.db_path.display());
+    tracing::info!("  Database: {}", runtime_database_status(&cfg));
     tracing::info!("  State dir: {}", cfg.state_dir.display());
     if cfg.mesh_cidr.trim().is_empty() {
         tracing::info!("  IPv4 prefix: <disabled>");
@@ -292,7 +298,6 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             "server.server_url is required so clients receive absolute registration URLs"
         )
     })?;
-    ensure_parent_dir(&cfg.db_path)?;
     std::fs::create_dir_all(&cfg.state_dir).with_context(|| {
         format!(
             "Failed to create state directory: {}",
@@ -300,7 +305,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         )
     })?;
 
-    let db = open_sqlite_database(&cfg.db_path, cfg.database.as_ref()).await?;
+    let db = open_runtime_database(&cfg).await?;
     let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
     let oidc = runtime_from_core_oidc(&oidc_config, server_url)
         .await
@@ -325,8 +330,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     )
     .context("load DNS runtime config")?;
     let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
-    let runtime = build_persistent_wire_runtime_with_dns_and_policy(
-        db.pool(),
+    let runtime = build_persistent_wire_runtime_from_database(
+        &db,
         &cfg.state_dir,
         server_url,
         &cfg.mesh_cidr,
@@ -538,6 +543,209 @@ struct PersistentWireRuntime {
     admin_service: HeadscaleAdminService,
 }
 
+enum RuntimeDatabase {
+    Sqlite(Database),
+    #[cfg(feature = "postgres-sqlx")]
+    Postgres(sqlx::PgPool),
+}
+
+#[derive(Clone)]
+enum PersistentRuntimeStores {
+    Sqlite(SqlitePersistentRuntimeStores),
+    #[cfg(feature = "postgres-sqlx")]
+    Postgres(PostgresPersistentRuntimeStores),
+}
+
+#[derive(Clone)]
+struct SqlitePersistentRuntimeStores {
+    users: Arc<PersistentUserAdmin>,
+    api_keys: Arc<PersistentApiKeyAdmin>,
+    preauth: Arc<PersistentPreauthAdmin>,
+    machines: Arc<PersistentMachineAdmin>,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+struct PostgresPersistentRuntimeStores {
+    users: Arc<PersistentPostgresUserAdmin>,
+    api_keys: Arc<PersistentPostgresApiKeyAdmin>,
+    preauth: Arc<PersistentPostgresPreauthAdmin>,
+    machines: Arc<PersistentPostgresMachineAdmin>,
+}
+
+impl PersistentRuntimeStores {
+    fn sqlite(pool: &sqlx::SqlitePool, wire_registry: Arc<MachineRegistry>) -> Self {
+        let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
+        let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
+        let preauth =
+            Arc::new(PersistentPreauthAdmin::new(pool.clone()).with_user_admin(users.clone()));
+        let machines = Arc::new(
+            PersistentMachineAdmin::new(pool.clone())
+                .with_user_admin(users.clone())
+                .with_wire_registry(wire_registry),
+        );
+        Self::Sqlite(SqlitePersistentRuntimeStores {
+            users,
+            api_keys,
+            preauth,
+            machines,
+        })
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    fn postgres(pool: &sqlx::PgPool, wire_registry: Arc<MachineRegistry>) -> Self {
+        let users = Arc::new(PersistentPostgresUserAdmin::new(pool.clone()));
+        let api_keys = Arc::new(PersistentPostgresApiKeyAdmin::new(pool.clone()));
+        let preauth = Arc::new(
+            PersistentPostgresPreauthAdmin::new(pool.clone()).with_user_admin(users.clone()),
+        );
+        let machines = Arc::new(
+            PersistentPostgresMachineAdmin::new(pool.clone())
+                .with_user_admin(users.clone())
+                .with_wire_registry(wire_registry),
+        );
+        Self::Postgres(PostgresPersistentRuntimeStores {
+            users,
+            api_keys,
+            preauth,
+            machines,
+        })
+    }
+
+    fn users(&self) -> Arc<dyn UserAdmin> {
+        match self {
+            Self::Sqlite(stores) => {
+                let users: Arc<dyn UserAdmin> = stores.users.clone();
+                users
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let users: Arc<dyn UserAdmin> = stores.users.clone();
+                users
+            }
+        }
+    }
+
+    fn api_keys(&self) -> Arc<dyn ApiKeyAdmin> {
+        match self {
+            Self::Sqlite(stores) => {
+                let api_keys: Arc<dyn ApiKeyAdmin> = stores.api_keys.clone();
+                api_keys
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let api_keys: Arc<dyn ApiKeyAdmin> = stores.api_keys.clone();
+                api_keys
+            }
+        }
+    }
+
+    fn preauth_admin(&self) -> Arc<dyn PreauthAdmin> {
+        match self {
+            Self::Sqlite(stores) => {
+                let preauth: Arc<dyn PreauthAdmin> = stores.preauth.clone();
+                preauth
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let preauth: Arc<dyn PreauthAdmin> = stores.preauth.clone();
+                preauth
+            }
+        }
+    }
+
+    fn preauth_redeemer(&self) -> Arc<dyn PreauthRedeemer> {
+        match self {
+            Self::Sqlite(stores) => {
+                let preauth: Arc<dyn PreauthRedeemer> = stores.preauth.clone();
+                preauth
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let preauth: Arc<dyn PreauthRedeemer> = stores.preauth.clone();
+                preauth
+            }
+        }
+    }
+
+    fn machines(&self) -> Arc<dyn MachineAdmin> {
+        match self {
+            Self::Sqlite(stores) => {
+                let machines: Arc<dyn MachineAdmin> = stores.machines.clone();
+                machines
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let machines: Arc<dyn MachineAdmin> = stores.machines.clone();
+                machines
+            }
+        }
+    }
+
+    fn registration_store(&self) -> Arc<dyn MachineRegistrationStore> {
+        match self {
+            Self::Sqlite(stores) => {
+                let machines: Arc<dyn MachineRegistrationStore> = stores.machines.clone();
+                machines
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => {
+                let machines: Arc<dyn MachineRegistrationStore> = stores.machines.clone();
+                machines
+            }
+        }
+    }
+
+    async fn hydrate_wire_registry(&self, wire_registry: &MachineRegistry) -> Result<usize> {
+        match self {
+            Self::Sqlite(stores) => stores
+                .machines
+                .hydrate_wire_registry(wire_registry)
+                .await
+                .context("hydrate wire registry from SQLite nodes"),
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(stores) => stores
+                .machines
+                .hydrate_wire_registry(wire_registry)
+                .await
+                .context("hydrate wire registry from Postgres nodes"),
+        }
+    }
+
+    #[cfg_attr(not(feature = "postgres-sqlx"), allow(clippy::unnecessary_wraps))]
+    fn configure_oidc(
+        &self,
+        oidc: Option<OidcAuthRuntime>,
+        registration_cache: Arc<RegistrationCache>,
+        policy: Arc<PolicyStore>,
+        wire_registry: Arc<MachineRegistry>,
+    ) -> Result<Option<OidcAuthRuntime>> {
+        let Some(runtime) = oidc else {
+            return Ok(None);
+        };
+
+        match self {
+            Self::Sqlite(stores) => {
+                let handler = PersistentOidcRegistrationHandler::new(
+                    registration_cache,
+                    stores.machines.clone(),
+                    policy,
+                )
+                .with_wire_registry(wire_registry);
+                Ok(Some(
+                    runtime
+                        .with_user_store(stores.users.clone())
+                        .with_registration_handler(Arc::new(handler)),
+                ))
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(_) => anyhow::bail!(
+                "OIDC registration is not yet wired for the Postgres runtime; disable OIDC or use database.type \"sqlite\" until the Postgres OIDC handler lands"
+            ),
+        }
+    }
+}
+
 fn dns_store_from_config(
     spec: Option<DnsConfigSpec>,
     mesh_cidr: Option<&str>,
@@ -636,16 +844,8 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
     runtime_config: Arc<RuntimeConfigSnapshot>,
 ) -> Result<PersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
-    let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
-    let api_keys = Arc::new(PersistentApiKeyAdmin::new(pool.clone()));
-    let preauth =
-        Arc::new(PersistentPreauthAdmin::new(pool.clone()).with_user_admin(users.clone()));
     let wire_registry = Arc::new(MachineRegistry::new());
-    let machines = Arc::new(
-        PersistentMachineAdmin::new(pool.clone())
-            .with_user_admin(users.clone())
-            .with_wire_registry(wire_registry.clone()),
-    );
+    let stores = PersistentRuntimeStores::sqlite(pool, wire_registry.clone());
     let registration_cache = Arc::new(registration_cache_from_runtime_config(
         runtime_config.as_ref(),
     ));
@@ -658,20 +858,17 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         mode = policy_config.mode(),
         "loaded startup policy into wire runtime"
     );
-    let hydrated = machines
-        .hydrate_wire_registry(&wire_registry)
-        .await
-        .context("hydrate wire registry from SQLite nodes")?;
+    let hydrated = stores.hydrate_wire_registry(&wire_registry).await?;
     tracing::info!(
         nodes = hydrated,
         "hydrated persisted nodes into wire registry"
     );
     let admin_service = HeadscaleAdminService::with_user_admin(
-        users.clone(),
-        api_keys,
-        preauth.clone(),
+        stores.users(),
+        stores.api_keys(),
+        stores.preauth_admin(),
         policy.as_ref().clone(),
-        machines.clone(),
+        stores.machines(),
     )
     .with_database_pool(pool.clone())
     .with_registration_cache(registration_cache.clone())
@@ -682,24 +879,19 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         "file" => admin_service.with_policy_file(policy_config.path.clone()),
         mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
     };
-    let oidc = oidc.map(|runtime| {
-        let handler = PersistentOidcRegistrationHandler::new(
-            registration_cache.clone(),
-            machines.clone(),
-            policy.clone(),
-        )
-        .with_wire_registry(wire_registry.clone());
-        runtime
-            .with_user_store(users)
-            .with_registration_handler(Arc::new(handler))
-    });
+    let oidc = stores.configure_oidc(
+        oidc,
+        registration_cache.clone(),
+        policy.clone(),
+        wire_registry.clone(),
+    )?;
 
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
-        preauth,
+        preauth: stores.preauth_redeemer(),
         ip_allocator,
         machines: wire_registry,
-        registration_store: Some(machines),
+        registration_store: Some(stores.registration_store()),
         derp_map: DerpMapStore::shared(derp_map),
         policy,
         knock: KnockConfig::disabled(),
@@ -716,6 +908,138 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         oidc,
         admin_service,
     })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
+    pool: &sqlx::PgPool,
+    state_dir: &Path,
+    server_url: &str,
+    mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
+    oidc: Option<OidcAuthRuntime>,
+    derp_map: DerpMap,
+    dns: Arc<DnsStore>,
+    policy_config: &PolicyConfig,
+    runtime_config: Arc<RuntimeConfigSnapshot>,
+) -> Result<PersistentWireRuntime> {
+    let allocation = IpAllocationStrategy::parse(ip_allocation)?;
+    let wire_registry = Arc::new(MachineRegistry::new());
+    let stores = PersistentRuntimeStores::postgres(pool, wire_registry.clone());
+    let registration_cache = Arc::new(registration_cache_from_runtime_config(
+        runtime_config.as_ref(),
+    ));
+    let ip_allocator: Arc<dyn IpAllocator> = Arc::new(
+        CidrIpAllocator::from_postgres_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?,
+    );
+    let policy = Arc::new(PolicyStore::new());
+    let policy_loaded = load_postgres_startup_policy(pool, &policy, policy_config).await?;
+    tracing::info!(
+        loaded = policy_loaded,
+        mode = policy_config.mode(),
+        "loaded startup policy into Postgres-backed wire runtime"
+    );
+    let hydrated = stores.hydrate_wire_registry(&wire_registry).await?;
+    tracing::info!(
+        nodes = hydrated,
+        "hydrated persisted Postgres nodes into wire registry"
+    );
+    let admin_service = HeadscaleAdminService::with_user_admin(
+        stores.users(),
+        stores.api_keys(),
+        stores.preauth_admin(),
+        policy.as_ref().clone(),
+        stores.machines(),
+    )
+    .with_postgres_database_pool(pool.clone())
+    .with_registration_cache(registration_cache.clone())
+    .with_wire_registry(wire_registry.clone())
+    .with_ip_allocator(ip_allocator.clone());
+    let admin_service = match policy_config.mode() {
+        "database" => admin_service.with_postgres_policy_pool(pool.clone()),
+        "file" => admin_service.with_policy_file(policy_config.path.clone()),
+        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+    };
+    let oidc = stores.configure_oidc(
+        oidc,
+        registration_cache.clone(),
+        policy.clone(),
+        wire_registry.clone(),
+    )?;
+
+    let state = WireState {
+        server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
+        preauth: stores.preauth_redeemer(),
+        ip_allocator,
+        machines: wire_registry,
+        registration_store: Some(stores.registration_store()),
+        derp_map: DerpMapStore::shared(derp_map),
+        policy,
+        knock: KnockConfig::disabled(),
+        dns,
+        public_control_url: Some(server_url.to_string()),
+        runtime_config,
+        registration_cache,
+        pings: Arc::new(PingTracker::new()),
+        mapresponse_debug: Arc::new(MapResponseDebugStore::from_env()),
+    };
+
+    Ok(PersistentWireRuntime {
+        state,
+        oidc,
+        admin_service,
+    })
+}
+
+async fn build_persistent_wire_runtime_from_database(
+    db: &RuntimeDatabase,
+    state_dir: &Path,
+    server_url: &str,
+    mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
+    oidc: Option<OidcAuthRuntime>,
+    derp_map: DerpMap,
+    dns: Arc<DnsStore>,
+    policy_config: &PolicyConfig,
+    runtime_config: Arc<RuntimeConfigSnapshot>,
+) -> Result<PersistentWireRuntime> {
+    match db {
+        RuntimeDatabase::Sqlite(db) => {
+            build_persistent_wire_runtime_with_dns_and_policy(
+                db.pool(),
+                state_dir,
+                server_url,
+                mesh_cidr,
+                mesh_cidr_v6,
+                ip_allocation,
+                oidc,
+                derp_map,
+                dns,
+                policy_config,
+                runtime_config,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres-sqlx")]
+        RuntimeDatabase::Postgres(pool) => {
+            build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                pool,
+                state_dir,
+                server_url,
+                mesh_cidr,
+                mesh_cidr_v6,
+                ip_allocation,
+                oidc,
+                derp_map,
+                dns,
+                policy_config,
+                runtime_config,
+            )
+            .await
+        }
+    }
 }
 
 fn runtime_config_snapshot(
@@ -983,6 +1307,7 @@ fn validate_supported_runtime_config(cfg: &RunServerConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(feature = "postgres-sqlx", allow(clippy::unnecessary_wraps))]
 fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> {
     if cfg
         .database
@@ -990,6 +1315,7 @@ fn validate_unsupported_runtime_boundaries(cfg: &RunServerConfig) -> Result<()> 
         .and_then(UpstreamDatabaseConfig::runtime_backend)
         == Some(DatabaseBackend::Postgres)
     {
+        #[cfg(not(feature = "postgres-sqlx"))]
         anyhow::bail!(
             "database.type \"postgres\" is recognized for headscale-go compatibility but headscale-rs server currently supports SQLite only; set database.type to \"sqlite\" or \"sqlite3\""
         );
@@ -1603,6 +1929,32 @@ async fn load_startup_policy(
     }
 }
 
+#[cfg(feature = "postgres-sqlx")]
+async fn load_postgres_persisted_policy(pool: &sqlx::PgPool, policy: &PolicyStore) -> Result<bool> {
+    let Some(row) = headscale_db::policies::get_latest_postgres(pool)
+        .await
+        .context("load persisted ACL policy from Postgres")?
+    else {
+        return Ok(false);
+    };
+    let doc = parse_hujson_policy(&row.data).context("parse persisted ACL policy")?;
+    policy.set_at(doc, row.data, row.updated_at);
+    Ok(true)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn load_postgres_startup_policy(
+    pool: &sqlx::PgPool,
+    policy: &PolicyStore,
+    config: &PolicyConfig,
+) -> Result<bool> {
+    match config.mode() {
+        "database" => load_postgres_persisted_policy(pool, policy).await,
+        "file" => load_file_policy(config, policy).await,
+        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+    }
+}
+
 async fn load_file_policy(config: &PolicyConfig, policy: &PolicyStore) -> Result<bool> {
     let Some(path) = config.path_if_non_empty() else {
         return Ok(false);
@@ -1619,10 +1971,56 @@ async fn load_file_policy(config: &PolicyConfig, policy: &PolicyStore) -> Result
     Ok(true)
 }
 
+async fn open_runtime_database(cfg: &RunServerConfig) -> Result<RuntimeDatabase> {
+    if cfg
+        .database
+        .as_ref()
+        .and_then(UpstreamDatabaseConfig::runtime_backend)
+        == Some(DatabaseBackend::Postgres)
+    {
+        return open_postgres_runtime_database(cfg.database.as_ref()).await;
+    }
+
+    open_sqlite_database(&cfg.db_path, cfg.database.as_ref())
+        .await
+        .map(RuntimeDatabase::Sqlite)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn open_postgres_runtime_database(
+    database: Option<&UpstreamDatabaseConfig>,
+) -> Result<RuntimeDatabase> {
+    let database = database.context("database.type \"postgres\" requires a database block")?;
+    let postgres = database.debug_postgres();
+    let url = postgres_url_from_config(postgres)?;
+    let pool = headscale_db::open_postgres_pool(&url)
+        .await
+        .with_context(|| {
+            format!(
+                "open Postgres database {}",
+                postgres_database_status(postgres)
+            )
+        })?;
+    headscale_db::migrate_postgres_foundation(&pool)
+        .await
+        .context("migrate Postgres database")?;
+    Ok(RuntimeDatabase::Postgres(pool))
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+async fn open_postgres_runtime_database(
+    _database: Option<&UpstreamDatabaseConfig>,
+) -> Result<RuntimeDatabase> {
+    anyhow::bail!(
+        "database.type \"postgres\" is recognized for headscale-go compatibility but this headscale-rs build was compiled without postgres-sqlx support"
+    )
+}
+
 async fn open_sqlite_database(
     path: &Path,
     database: Option<&UpstreamDatabaseConfig>,
 ) -> Result<Database> {
+    ensure_parent_dir(path)?;
     let url = sqlite_url_for_path(path);
     let db = Database::new_with_sqlite_options(&url, sqlite_open_options(database)?)
         .await
@@ -1653,6 +2051,75 @@ fn sqlite_open_options(database: Option<&UpstreamDatabaseConfig>) -> Result<Sqli
 
 fn sqlite_url_for_path(path: &Path) -> String {
     format!("sqlite://{}?mode=rwc", path.display())
+}
+
+fn runtime_database_status(cfg: &RunServerConfig) -> String {
+    match cfg
+        .database
+        .as_ref()
+        .and_then(UpstreamDatabaseConfig::runtime_backend)
+    {
+        Some(DatabaseBackend::Postgres) => cfg.database.as_ref().map_or_else(
+            || "postgres://<missing database block>".to_string(),
+            |database| postgres_database_status(database.debug_postgres()),
+        ),
+        Some(DatabaseBackend::Sqlite) | None => cfg.db_path.display().to_string(),
+    }
+}
+
+fn postgres_database_status(postgres: &UpstreamPostgresConfig) -> String {
+    let host = non_empty_str(Some(postgres.host())).unwrap_or("localhost");
+    let port = postgres_config_port(postgres).unwrap_or(5432);
+    let name = non_empty_str(Some(postgres.name())).unwrap_or("headscale");
+    format!("postgres://{host}:{port}/{name}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_url_from_config(postgres: &UpstreamPostgresConfig) -> Result<String> {
+    let host = non_empty_str(Some(postgres.host())).unwrap_or("localhost");
+    let port = postgres_config_port(postgres).context("database.postgres.port out of range")?;
+    let name = non_empty_str(Some(postgres.name())).unwrap_or("headscale");
+    let mut url = url::Url::parse("postgres://localhost/headscale")
+        .context("build default Postgres database URL")?;
+    url.set_host(Some(host))
+        .map_err(|err| anyhow::anyhow!("database.postgres.host {host:?} is invalid: {err}"))?;
+    url.set_port(Some(port))
+        .map_err(|()| anyhow::anyhow!("database.postgres.port {port} is invalid"))?;
+    url.set_path(name);
+    if let Some(user) = non_empty_str(Some(postgres.user())) {
+        url.set_username(user)
+            .map_err(|()| anyhow::anyhow!("database.postgres.user is invalid"))?;
+    }
+    if let Some(pass) = non_empty_str(Some(postgres.pass())) {
+        url.set_password(Some(pass))
+            .map_err(|()| anyhow::anyhow!("database.postgres.pass is invalid"))?;
+    }
+    if let Some(sslmode) = postgres_sslmode(postgres.ssl()) {
+        url.query_pairs_mut().append_pair("sslmode", sslmode);
+    }
+    Ok(url.to_string())
+}
+
+fn postgres_config_port(postgres: &UpstreamPostgresConfig) -> Result<u16> {
+    let port = postgres.port();
+    if port <= 0 {
+        return Ok(5432);
+    }
+    u16::try_from(port).context("database.postgres.port must be between 1 and 65535")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_sslmode(value: &str) -> Option<&str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "false" | "disable" => Some("disable"),
+        "true" | "require" => Some("require"),
+        "allow" => Some("allow"),
+        "prefer" => Some("prefer"),
+        "verify-ca" => Some("verify-ca"),
+        "verify-full" => Some("verify-full"),
+        _ => Some(value.trim()),
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -1827,6 +2294,27 @@ impl CidrIpAllocator {
         let rows = headscale_db::headscale_nodes::list(pool)
             .await
             .context("read existing node IP addresses for allocator")?;
+        Self::from_existing_node_ips(
+            cidr,
+            cidr_v6,
+            strategy,
+            rows.iter().map(|row| ExistingNodeIpAddresses {
+                ipv4: row.ipv4.as_deref(),
+                ipv6: row.ipv6.as_deref(),
+            }),
+        )
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    async fn from_postgres_database(
+        pool: &sqlx::PgPool,
+        cidr: &str,
+        cidr_v6: Option<&str>,
+        strategy: IpAllocationStrategy,
+    ) -> Result<Self> {
+        let rows = headscale_db::headscale_nodes::list_postgres(pool)
+            .await
+            .context("read existing Postgres node IP addresses for allocator")?;
         Self::from_existing_node_ips(
             cidr,
             cidr_v6,

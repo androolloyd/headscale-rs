@@ -1232,6 +1232,11 @@ impl UpstreamPostgresConfig {
         &self.user
     }
 
+    #[cfg(feature = "postgres-sqlx")]
+    pub(crate) fn pass(&self) -> &str {
+        &self.pass
+    }
+
     pub(crate) fn ssl(&self) -> &str {
         &self.ssl
     }

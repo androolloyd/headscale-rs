@@ -1216,6 +1216,7 @@ reload_route_health_policy() {
   write_route_health_reload_policy tag:router-a tag:router-b
   kill -HUP "${server_pid}"
   wait_for_server "${target} health after policy reload" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for_route_health_approved_candidates "after-policy-reload" "${router_name},${router_b_name}"
   echo "::endgroup::"
 }
 
@@ -1950,7 +1951,6 @@ elif ((route_health_restart_flag)); then
     wait_for_route_via_owner "before policy reload observer sees router-a" \
       "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-health-before-policy-reload-owner.json"
     reload_route_health_policy
-    wait_for_route_health_approved_candidates "after-policy-reload" "${router_name},${router_b_name}"
     wait_for_route_health_peer_owner_from_admin "after-policy-reload"
   else
     wait_for_route_health_primary "before-restart"

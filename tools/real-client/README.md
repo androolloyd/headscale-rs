@@ -78,6 +78,7 @@ predates the executable PingRequest lifecycle.
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
+| Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |

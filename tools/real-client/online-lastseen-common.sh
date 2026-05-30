@@ -17,19 +17,28 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
+login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
-run_id="hs-online-lastseen-${target}-${database_backend}-$(date +%s)-$$"
+run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
   rust) client_target="rs" ;;
   headscale-go) client_target="go" ;;
 esac
-client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backend}-$$}"
+client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backend}-${login_mode}-$$}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
   *)
     echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
+
+case "${login_mode}" in
+  authkey | web) ;;
+  *)
+    echo "REAL_CLIENT_LOGIN_MODE must be authkey or web, got ${login_mode}" >&2
     exit 2
     ;;
 esac
@@ -174,6 +183,53 @@ wait_for() {
     fi
     sleep 1
   done
+}
+
+run_with_timeout() {
+  local label="$1"
+  shift
+  local deadline=$((SECONDS + timeout_secs))
+  "$@" &
+  local pid="$!"
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 1
+  done
+  wait "${pid}"
+}
+
+wait_pid_with_timeout() {
+  local label="$1"
+  local pid="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 1
+  done
+  wait "${pid}"
+}
+
+write_registration_id() {
+  local output_path="$1"
+  local status_json
+  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    url = status["AuthURL"].to_s
+    match = url.match(%r{/register/(?:hskey-authreq-)?([A-Za-z0-9_-]{24})(?:\z|[?#])})
+    exit 1 unless match
+    File.write(ARGV.fetch(0), match[1])
+  ' "${output_path}" <<<"${status_json}"
 }
 
 dump_debug() {
@@ -429,24 +485,34 @@ start_server() {
 }
 
 create_user_and_key() {
-  echo "::group::create user and preauth key"
+  echo "::group::create user"
   case "${target}" in
     rust)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
-      local user_id
-      user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
       ;;
     headscale-go)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
-      local user_id
-      user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expiration 1h >"${work_dir}/preauth.json"
       ;;
   esac
-  authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
-  echo "minted ${authkey%%-*}-..."
+  local user_id
+  user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
+  echo "created user alice ${user_id}"
   echo "::endgroup::"
+
+  if [[ "${login_mode}" == "authkey" ]]; then
+    echo "::group::mint preauth key"
+    case "${target}" in
+      rust)
+        headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
+        ;;
+      headscale-go)
+        headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expiration 1h >"${work_dir}/preauth.json"
+        ;;
+    esac
+    authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
+    echo "minted ${authkey%%-*}-..."
+    echo "::endgroup::"
+  fi
 }
 
 start_client() {
@@ -471,17 +537,51 @@ start_client() {
 
 login_client() {
   echo "::group::tailscale up"
+  up_args=(
+    tailscale up
+    "--login-server=${control_url}"
+    "--hostname=${client_name}"
+    --timeout=60s
+    --accept-routes=false
+    --accept-dns=false
+  )
+  if [[ "${login_mode}" == "authkey" ]]; then
+    up_args+=("--authkey=${authkey}")
+  fi
+
   up_status=0
-  docker exec "${client_name}" tailscale up \
-    "--login-server=${control_url}" \
-    "--hostname=${client_name}" \
-    --timeout=60s \
-    --accept-routes=false \
-    --accept-dns=false \
-    "--authkey=${authkey}" \
-    >"${work_dir}/${client_name}.tailscale-up.stdout" \
-    2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
-    up_status="$?"
+  if [[ "${login_mode}" == "web" ]]; then
+    docker exec "${client_name}" "${up_args[@]}" \
+      >"${work_dir}/${client_name}.tailscale-up.stdout" \
+      2>"${work_dir}/${client_name}.tailscale-up.stderr" &
+    up_pid="$!"
+    registration_id_path="${work_dir}/${client_name}.registration-id"
+    if ! wait_for "web registration URL" "write_registration_id '${registration_id_path}'"; then
+      dump_debug
+      return 1
+    fi
+    registration_id="$(cat "${registration_id_path}")"
+    case "${target}" in
+      rust)
+        auth_id="${registration_id}"
+        case "${auth_id}" in
+          hskey-authreq-*) ;;
+          *) auth_id="hskey-authreq-${auth_id}" ;;
+        esac
+        headscale_cmd -o json auth register "--auth-id=${auth_id}" --user alice \
+          >"${work_dir}/${client_name}.registered.json"
+        ;;
+      headscale-go)
+        headscale_cmd -o json nodes register --user alice "--key=${registration_id}" \
+          >"${work_dir}/${client_name}.registered.json"
+        ;;
+    esac
+    wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}" ||
+      up_status="$?"
+  else
+    run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+      up_status="$?"
+  fi
   if ((up_status != 0)); then
     echo "tailscale up returned ${up_status}; verifying logged-in netmap"
   fi

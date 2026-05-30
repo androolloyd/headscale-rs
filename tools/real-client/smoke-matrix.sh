@@ -69,6 +69,7 @@ fi
 smoke_ids=(
   authkey
   postgres-authkey
+  postgres-web-register
   ping-lifecycle
   web-register
   web-register-tags
@@ -141,6 +142,7 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
   database
   registration
   registration
@@ -215,6 +217,7 @@ smoke_areas=(
 smoke_rust_scripts=(
   tools/real-client/authkey-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
+  tools/real-client/postgres-web-register-smoke.sh
   tools/real-client/ping-lifecycle-smoke.sh
   tools/real-client/web-register-smoke.sh
   tools/real-client/web-register-tags-smoke.sh
@@ -288,6 +291,7 @@ smoke_rust_scripts=(
 smoke_go_scripts=(
   tools/real-client/authkey-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-headscale-go-smoke.sh
   tools/real-client/ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/web-register-headscale-go-smoke.sh
   tools/real-client/web-register-tags-headscale-go-smoke.sh
@@ -361,6 +365,7 @@ smoke_go_scripts=(
 smoke_assertions=(
   "auth-key login and one alice node"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
+  "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "debug PingRequest dispatch and public HEAD callback correlation"
   "no-auth pending registration and CLI approval"
   "web registration with owned requested tag"

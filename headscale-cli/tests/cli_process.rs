@@ -1712,6 +1712,18 @@ dns:
         "serve missing noise private key json",
     );
 
+    assert_serve_default_config_args_snapshot(
+        r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        &["-ojson-line", "serve"],
+        include_str!("snapshots/serve_missing_noise_private_key_json_line.stderr"),
+        "serve missing noise private key json-line",
+    );
+
     assert_serve_default_config_snapshot(
         r#"
 server_url: "headscale.example"

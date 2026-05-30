@@ -115,6 +115,11 @@ Recent accepted slices:
   exports `HEADSCALE_DB_POSTGRES_TEST_URL`, and includes `postgres-authkey` in
   the bounded push/PR smoke set. The local environment here has no Docker
   daemon and no Pg URL, so the full stock-client/Pg execution is deferred to CI.
+- This slice extends the same production Postgres stock-client harness to
+  no-auth web/CLI registration with paired `postgres-web-register` Rust and
+  headscale-go rows. The shared online/LastSeen harness can now run either
+  auth-key or web registration against a temporary Pg database, and CI includes
+  both Postgres rows in the bounded push/PR smoke set.
 
 Current multi-agent split:
 
@@ -128,12 +133,12 @@ Current multi-agent split:
   Pg `serve` process smoke now covers listeners plus local gRPC/CLI
   health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
-  map output, and restart hydration. A paired env-gated production Pg
-  stock-client auth-key smoke is now checked into the real-client matrix.
-  CI now provisions Postgres and includes that row in the push/PR real-client
-  job.
+  map output, and restart hydration. Paired env-gated production Pg
+  stock-client auth-key and web-registration smokes are now checked into the
+  real-client matrix. CI now provisions Postgres and includes both rows in the
+  push/PR real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
-  single auth-key/map flow.
+  auth-key and web-registration map flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -234,7 +239,7 @@ adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
 operations against Pg, and direct policy DB bypass now round-trips against
 configured Pg without a running server. The next critical slice is broader
-production Pg serve coverage beyond the single auth-key/map flow. The other
+production Pg serve coverage beyond auth-key and web-registration map flows. The other
 narrow lanes remain current-upstream CLI output drift snapshots, map/session
 churn parity, and remaining route/SSH stock-client edge rows.
 
@@ -247,9 +252,9 @@ churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production
   Pg `serve` process smoke covers public health plus local gRPC
-  health/user/preauth/policy CLI paths, and a paired env-gated Pg auth-key
-  stock-client smoke is checked into the real-client matrix and push/PR CI now
-  provisions Postgres for it; broader Pg stock-client serve smokes remain
+  health/user/preauth/policy CLI paths, and paired env-gated Pg auth-key plus
+  web-registration stock-client smokes are checked into the real-client matrix
+  and push/PR CI now provisions Postgres for them; broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

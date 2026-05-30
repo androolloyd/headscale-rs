@@ -25,10 +25,19 @@ oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
 oidc_restart="${REAL_CLIENT_OIDC_RESTART:-false}"
 oidc_advertise_routes="${REAL_CLIENT_OIDC_ADVERTISE_ROUTES:-}"
 oidc_approve_routes="${REAL_CLIENT_OIDC_APPROVE_ROUTES:-}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/oidc-${target}-smoke}"
-run_id="hs-oidc-${target}-$(date +%s)-$$"
+run_id="hs-oidc-${target}-${database_backend}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
 
 case "${oidc_restart}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -69,6 +78,15 @@ tls_cert_path=""
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 headscale_rs_socket_path="${REAL_CLIENT_HEADSCALE_RS_SOCKET:-/tmp/hsrs-${run_id}.sock}"
 headscale_go_socket_path=""
+postgres_admin_url=""
+postgres_runtime_url=""
+postgres_database_name=""
+postgres_host=""
+postgres_port=""
+postgres_user=""
+postgres_pass=""
+postgres_sslmode=""
+postgres_database_created=0
 
 cleanup() {
   docker rm -f "${client_name}" >/dev/null 2>&1 || true
@@ -84,6 +102,7 @@ cleanup() {
     kill "${mock_oidc_pid}" >/dev/null 2>&1 || true
     wait "${mock_oidc_pid}" >/dev/null 2>&1 || true
   fi
+  drop_postgres_database || true
 }
 trap cleanup EXIT
 
@@ -96,6 +115,86 @@ need() {
 
 free_port() {
   ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
+}
+
+quoted_string() {
+  ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
+}
+
+parse_postgres_test_url() {
+  eval "$(
+    ruby -ruri -rshellwords -e '
+      url = URI.parse(ARGV.fetch(0))
+      database_name = ARGV.fetch(1)
+      abort("HEADSCALE_DB_POSTGRES_TEST_URL must include a TCP host") if url.host.to_s.empty?
+      query = URI.decode_www_form(url.query.to_s).to_h
+      sslmode = query.fetch("sslmode", "false")
+      admin_db = url.path.to_s.sub(%r{\A/}, "")
+      admin_db = "postgres" if admin_db.empty?
+      admin = url.dup
+      admin.path = "/#{admin_db}"
+      runtime = url.dup
+      runtime.path = "/#{database_name}"
+      {
+        postgres_admin_url: admin.to_s,
+        postgres_runtime_url: runtime.to_s,
+        postgres_database_name: database_name,
+        postgres_host: url.host.to_s,
+        postgres_port: (url.port || 5432).to_s,
+        postgres_user: URI.decode_www_form_component(url.user.to_s),
+        postgres_pass: URI.decode_www_form_component(url.password.to_s),
+        postgres_sslmode: sslmode,
+      }.each do |key, value|
+        puts "#{key}=#{Shellwords.escape(value)}"
+      end
+    ' "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" "${postgres_database_name}"
+  )"
+}
+
+prepare_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  if [[ -z "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" ]]; then
+    echo "skipping Postgres OIDC real-client smoke: HEADSCALE_DB_POSTGRES_TEST_URL is not set" >&2
+    exit 0
+  fi
+  need psql
+  postgres_database_name="headscale_rs_pg_oidc_${target//[^a-zA-Z0-9]/_}_$(date +%s)_$$"
+  parse_postgres_test_url
+  if ! [[ "${postgres_database_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "internal temporary Postgres database name is invalid: ${postgres_database_name}" >&2
+    exit 2
+  fi
+  echo "::group::create temporary Postgres database"
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${postgres_database_name}" >"${work_dir}/postgres-create.stdout" 2>"${work_dir}/postgres-create.stderr"; then
+    echo "skipping Postgres OIDC real-client smoke: cannot create temporary database ${postgres_database_name}" >&2
+    cat "${work_dir}/postgres-create.stderr" >&2 || true
+    echo "::endgroup::"
+    exit 0
+  fi
+  postgres_database_created=1
+  echo "created ${postgres_database_name}"
+  echo "::endgroup::"
+}
+
+drop_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  ((postgres_database_created)) || return 0
+  echo "::group::drop temporary Postgres database"
+  psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${postgres_database_name}' AND pid <> pg_backend_pid()" \
+    >"${work_dir}/postgres-terminate.stdout" \
+    2>"${work_dir}/postgres-terminate.stderr" || true
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${postgres_database_name} WITH (FORCE)" \
+    >"${work_dir}/postgres-drop.stdout" \
+    2>"${work_dir}/postgres-drop.stderr"; then
+    psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${postgres_database_name}" \
+      >>"${work_dir}/postgres-drop.stdout" \
+      2>>"${work_dir}/postgres-drop.stderr"
+  fi
+  postgres_database_created=0
+  echo "::endgroup::"
 }
 
 wait_for() {
@@ -237,7 +336,11 @@ start_rust_server() {
   rm -f "${headscale_rs_socket_path}"
 
   echo "::group::build headscale-rs CLI"
-  cargo build --quiet -p headscale-cli --bin headscale
+  if [[ "${database_backend}" == "postgres" ]]; then
+    cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+  else
+    cargo build --quiet -p headscale-cli --bin headscale
+  fi
   echo "::endgroup::"
 
   cat >"${config_path}" <<EOF
@@ -274,6 +377,24 @@ client_secret = "${oidc_client_secret}"
 allowed_domains = ["example.com"]
 email_verified_required = true
 EOF
+  if [[ "${database_backend}" == "postgres" ]]; then
+    cat >>"${config_path}" <<EOF
+
+[database]
+type = "postgres"
+
+[database.postgres]
+host = $(quoted_string "${postgres_host}")
+port = ${postgres_port}
+name = $(quoted_string "${postgres_database_name}")
+user = $(quoted_string "${postgres_user}")
+pass = $(quoted_string "${postgres_pass}")
+ssl = $(quoted_string "${postgres_sslmode}")
+
+[policy]
+mode = "database"
+EOF
+  fi
 
   echo "::group::start headscale-rs OIDC server"
   printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stdout"
@@ -287,6 +408,37 @@ EOF
   echo "headscale-rs control=http://127.0.0.1:${http_port}"
   echo "headscale-rs login=${control_url}"
   echo "::endgroup::"
+}
+
+write_headscale_go_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      cat <<EOF
+
+database:
+  type: sqlite
+  sqlite:
+    path: ${db_path}
+EOF
+      ;;
+    postgres)
+      cat <<EOF
+
+database:
+  type: postgres
+  postgres:
+    host: $(quoted_string "${postgres_host}")
+    port: ${postgres_port}
+    name: $(quoted_string "${postgres_database_name}")
+    user: $(quoted_string "${postgres_user}")
+    pass: $(quoted_string "${postgres_pass}")
+    ssl: $(quoted_string "${postgres_sslmode}")
+
+policy:
+  mode: database
+EOF
+      ;;
+  esac
 }
 
 start_headscale_go_server() {
@@ -356,11 +508,6 @@ prefixes:
   v6: fd7a:115c:a1e0::/48
   allocation: sequential
 
-database:
-  type: sqlite
-  sqlite:
-    path: ${db_path}
-
 dns:
   magic_dns: true
   base_domain: "${base_domain}"
@@ -400,6 +547,7 @@ oidc:
     - example.com
   email_verified_required: true
 EOF
+  write_headscale_go_database_config >>"${config_path}"
 
   echo "::group::start headscale-go OIDC server"
   printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stdout"
@@ -556,6 +704,61 @@ assert_sqlite_oidc_state() {
   echo "::endgroup::"
 }
 
+assert_postgres_oidc_state() {
+  echo "::group::assert OIDC Postgres state"
+  local node_count
+  node_count="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -c "SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL;")"
+  if [[ "${node_count}" != "1" ]]; then
+    echo "expected 1 node row, got ${node_count}" >&2
+    exit 1
+  fi
+  local user_count
+  user_count="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -c "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL;")"
+  if [[ "${user_count}" != "1" ]]; then
+    echo "expected 1 user row, got ${user_count}" >&2
+    exit 1
+  fi
+
+  local node_row
+  node_row="$(
+    psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -F '|' -c \
+      "SELECT COALESCE(n.register_method,''), COALESCE(n.machine_key,''), COALESCE(n.node_key,''), COALESCE(n.hostname,''), COALESCE(n.given_name,''), COALESCE(n.ipv4,''), COALESCE(n.expiry::text,''), COALESCE(n.user_id::text,''), COALESCE(u.name,''), COALESCE(u.email,''), COALESCE(u.provider,''), COALESCE(u.provider_identifier,'') FROM nodes n JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL WHERE n.deleted_at IS NULL LIMIT 1;"
+  )"
+  assert_oidc_node_row "${node_row}"
+  echo "::endgroup::"
+}
+
+assert_oidc_node_row() {
+  local node_row="$1"
+  local register_method machine_key node_key hostname given_name ipv4 expiry user_id user_name email provider provider_identifier
+  IFS="|" read -r register_method machine_key node_key hostname given_name ipv4 expiry user_id user_name email provider provider_identifier <<<"${node_row}"
+  [[ "${register_method}" == "oidc" ]] || { echo "expected node register_method oidc, got ${register_method}" >&2; exit 1; }
+  [[ -n "${machine_key}" ]] || { echo "expected non-empty machine_key" >&2; exit 1; }
+  [[ -n "${node_key}" ]] || { echo "expected non-empty node_key" >&2; exit 1; }
+  [[ "${hostname}" == "${client_name}" || "${given_name}" == "${client_name}" ]] || {
+    echo "expected hostname/given_name ${client_name}, got hostname=${hostname} given_name=${given_name}" >&2
+    exit 1
+  }
+  [[ "${ipv4}" == 100.* ]] || { echo "expected CGNAT IPv4, got ${ipv4}" >&2; exit 1; }
+  [[ -n "${expiry}" ]] || { echo "expected non-empty OIDC node expiry" >&2; exit 1; }
+  [[ -n "${user_id}" ]] || { echo "expected node user_id" >&2; exit 1; }
+  [[ "${user_name}" == "${oidc_username}" ]] || { echo "expected OIDC user name ${oidc_username}, got ${user_name}" >&2; exit 1; }
+  [[ "${email}" == "${oidc_email}" ]] || { echo "expected OIDC email ${oidc_email}, got ${email}" >&2; exit 1; }
+  [[ "${provider}" == "oidc" ]] || { echo "expected OIDC provider oidc, got ${provider}" >&2; exit 1; }
+  local expected_provider_identifier="http://127.0.0.1:${oidc_port}/oidc/${oidc_subject}"
+  [[ "${provider_identifier}" == "${expected_provider_identifier}" ]] || {
+    echo "expected provider_identifier ${expected_provider_identifier}, got ${provider_identifier}" >&2
+    exit 1
+  }
+}
+
+assert_oidc_database_state() {
+  case "${database_backend}" in
+    sqlite) assert_sqlite_oidc_state ;;
+    postgres) assert_postgres_oidc_state ;;
+  esac
+}
+
 assert_headscale_go_cli_state() {
   [[ "${target}" == "headscale-go" ]] || return 0
   local expected_approved_routes
@@ -672,16 +875,20 @@ restart_oidc_server_and_assert_client() {
   docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
   echo "::endgroup::"
 
-  assert_sqlite_oidc_state
+  assert_oidc_database_state
   assert_rust_cli_state
   assert_headscale_go_cli_state
 }
 
+need ruby
+prepare_postgres_database
 need cargo
 need curl
 need docker
-need ruby
-need sqlite3
+case "${database_backend}" in
+  sqlite) need sqlite3 ;;
+  postgres) need psql ;;
+esac
 if [[ -z "${HEADSCALE_GO_BIN:-}" ]]; then
   need go
 fi
@@ -703,7 +910,7 @@ else
 fi
 start_client
 drive_oidc_login
-assert_sqlite_oidc_state
+assert_oidc_database_state
 assert_rust_cli_state ""
 assert_headscale_go_cli_state ""
 approve_oidc_routes

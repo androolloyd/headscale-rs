@@ -128,6 +128,13 @@ Recent accepted slices:
   client's netmap `AllowedIPs`, and keeps the online/LastSeen disconnect
   assertion. CI includes this Postgres route row in the bounded push/PR smoke
   set.
+- This slice makes the production OIDC stock-client harness backend-aware and
+  adds paired `postgres-oidc` Rust and headscale-go rows. The harness now creates
+  a temporary Postgres database, builds Rust with `postgres-sqlx`, runs the mock
+  OIDC confirmation flow, asserts the OIDC node/user profile rows through
+  Postgres, verifies CLI node projection, and skips cleanly when
+  `HEADSCALE_DB_POSTGRES_TEST_URL` is absent. CI includes this Postgres OIDC row
+  in the bounded push/PR smoke set.
 
 Current multi-agent split:
 
@@ -142,11 +149,11 @@ Current multi-agent split:
   health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. Paired env-gated production Pg
-  stock-client auth-key, web-registration, and route-approval smokes are now
-  checked into the real-client matrix. CI now provisions Postgres and includes
-  those rows in the push/PR real-client job.
+  stock-client auth-key, web-registration, route-approval, and OIDC smokes are
+  now checked into the real-client matrix. CI now provisions Postgres and
+  includes those rows in the push/PR real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
-  auth-key, web-registration, and route-approval map flows.
+  auth-key, web-registration, route-approval, and OIDC map flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was

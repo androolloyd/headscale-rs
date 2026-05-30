@@ -80,6 +80,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
+| Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
@@ -575,6 +576,18 @@ tools/real-client/postgres-route-approve-headscale-go-smoke.sh
 It uses `HEADSCALE_DB_POSTGRES_TEST_URL`, skips cleanly when that URL is not
 set, and asserts the CLI route state, approved-route netmap projection, online
 state, and LastSeen transition after disconnect.
+
+The Postgres OIDC scenario runs the production OIDC confirmation flow against
+Rust and headscale-go with a temporary Postgres database:
+
+```sh
+tools/real-client/postgres-oidc-smoke.sh
+tools/real-client/postgres-oidc-headscale-go-smoke.sh
+```
+
+It uses the same mock OIDC provider and stock Tailscale client as `oidc`, skips
+cleanly when `HEADSCALE_DB_POSTGRES_TEST_URL` is not set, and asserts the OIDC
+node row, user profile/provider fields, CLI node projection, and client netmap.
 
 The primary-route scenario starts two stock clients, advertises and approves
 the same subnet route on both, and asserts that exactly one node is selected as

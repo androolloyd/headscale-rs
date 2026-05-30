@@ -170,10 +170,13 @@ Current multi-agent split:
 - Explorer lane: current route/SSH and map/admin churn audit. Outcome: stale
   primary-route removal after primary withdrawal plus all-unhealthy remaining
   candidates was fixed; quiet last-seen map bookkeeping now updates timestamps
-  without waking long-poll streams; remaining high-priority follow-ups are
-  combined route-via plus route-health failover smokes, direct SSH action
-  rejection pins, canonical map-batcher reason/state deltas, and broader
-  churn/restart map-stream tests. Runtime MapSessionHandle/Seq
+  without waking long-poll streams; direct SSH action rejection pins now cover
+  missing Noise identity, unknown destination, malformed/unknown auth IDs,
+  binding mismatches, cancellation, and denied auth verdicts without seeding
+  check-period auto-approval. Remaining high-priority follow-ups are combined
+  route-via plus route-health failover smokes, canonical map-batcher
+  reason/state deltas, and broader churn/restart map-stream tests. Runtime
+  MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response
   `MapSessionHandle`/`Seq` empty.

@@ -312,6 +312,19 @@ mod tests {
         req
     }
 
+    fn request_without_noise(uri: String) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn assert_text_response(resp: Response, status: StatusCode, body: &[u8]) {
+        assert_eq!(resp.status(), status);
+        let actual = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&actual[..], body);
+    }
+
     #[tokio::test]
     async fn ssh_action_initial_returns_bound_hold_and_auth_url() {
         let (state, _dir) = fixture();
@@ -411,6 +424,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_action_followup_rejects_after_auth_denial() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+        let binding = SshCheckBinding {
+            src_node_id: src,
+            dst_node_id: dst,
+        };
+        state
+            .registration_cache
+            .insert_ssh_check(raw_auth_id.into(), binding);
+        assert!(state.registration_cache.reject(raw_auth_id, "denied"));
+
+        let resp = inner_router(state.clone())
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-{raw_auth_id}"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let action: SshAction = serde_json::from_slice(&body).unwrap();
+        assert!(!action.accept);
+        assert!(action.reject);
+        assert!(
+            state
+                .registration_cache
+                .last_ssh_auth(binding, state.policy.updated_at())
+                .is_none(),
+            "rejected auth must not seed check-period auto approval"
+        );
+    }
+
+    #[tokio::test]
     async fn ssh_action_followup_cancellation_returns_upstream_error_without_consuming_session() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
@@ -453,6 +502,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_action_rejects_missing_noise_machine_key() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let resp = inner_router(state)
+            .oneshot(request_without_noise(format!(
+                "/machine/ssh/action/{src}/to/{dst}"
+            )))
+            .await
+            .unwrap();
+
+        assert_text_response(
+            resp,
+            StatusCode::UNAUTHORIZED,
+            b"missing Noise machine key\n",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_action_rejects_unknown_dst_node() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let resp = inner_router(state.clone())
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/999999"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_text_response(resp, StatusCode::NOT_FOUND, b"dst node not found\n").await;
+        assert_eq!(
+            state.registration_cache.len(),
+            0,
+            "unknown destination must not create an auth session"
+        );
+    }
+
+    #[tokio::test]
     async fn ssh_action_rejects_wrong_dst_machine_key() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
@@ -468,6 +557,38 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(&body[..], b"machine key does not match dst node\n");
+    }
+
+    #[tokio::test]
+    async fn ssh_action_rejects_invalid_auth_id_shape() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let resp = inner_router(state)
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=not-prefixed"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_text_response(resp, StatusCode::BAD_REQUEST, b"Invalid auth_id\n").await;
+    }
+
+    #[tokio::test]
+    async fn ssh_action_rejects_unknown_auth_id() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let resp = inner_router(state)
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-abcdefghijklmnopqrstuvwx"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_text_response(resp, StatusCode::BAD_REQUEST, b"Invalid auth_id\n").await;
     }
 
     #[tokio::test]

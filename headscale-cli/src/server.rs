@@ -28,7 +28,8 @@ use headscale_api::admin::{
 };
 #[cfg(feature = "postgres-sqlx")]
 use headscale_api::admin::{
-    PersistentPostgresApiKeyAdmin, PersistentPostgresMachineAdmin, PersistentPostgresPreauthAdmin,
+    PersistentPostgresApiKeyAdmin, PersistentPostgresMachineAdmin,
+    PersistentPostgresOidcRegistrationHandler, PersistentPostgresPreauthAdmin,
     PersistentPostgresUserAdmin,
 };
 use headscale_api::dns::{
@@ -712,17 +713,14 @@ impl PersistentRuntimeStores {
         }
     }
 
-    #[cfg_attr(not(feature = "postgres-sqlx"), allow(clippy::unnecessary_wraps))]
     fn configure_oidc(
         &self,
         oidc: Option<OidcAuthRuntime>,
         registration_cache: Arc<RegistrationCache>,
         policy: Arc<PolicyStore>,
         wire_registry: Arc<MachineRegistry>,
-    ) -> Result<Option<OidcAuthRuntime>> {
-        let Some(runtime) = oidc else {
-            return Ok(None);
-        };
+    ) -> Option<OidcAuthRuntime> {
+        let runtime = oidc?;
 
         match self {
             Self::Sqlite(stores) => {
@@ -732,16 +730,26 @@ impl PersistentRuntimeStores {
                     policy,
                 )
                 .with_wire_registry(wire_registry);
-                Ok(Some(
+                Some(
                     runtime
                         .with_user_store(stores.users.clone())
                         .with_registration_handler(Arc::new(handler)),
-                ))
+                )
             }
             #[cfg(feature = "postgres-sqlx")]
-            Self::Postgres(_) => anyhow::bail!(
-                "OIDC registration is not yet wired for the Postgres runtime; disable OIDC or use database.type \"sqlite\" until the Postgres OIDC handler lands"
-            ),
+            Self::Postgres(stores) => {
+                let handler = PersistentPostgresOidcRegistrationHandler::new(
+                    registration_cache,
+                    stores.machines.clone(),
+                    policy,
+                )
+                .with_wire_registry(wire_registry);
+                Some(
+                    runtime
+                        .with_user_store(stores.users.clone())
+                        .with_registration_handler(Arc::new(handler)),
+                )
+            }
         }
     }
 }
@@ -884,7 +892,7 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         registration_cache.clone(),
         policy.clone(),
         wire_registry.clone(),
-    )?;
+    );
 
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
@@ -966,7 +974,7 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
         registration_cache.clone(),
         policy.clone(),
         wire_registry.clone(),
-    )?;
+    );
 
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
@@ -3298,6 +3306,28 @@ regions:
         assert!(runtime.state.machines.snapshot().is_empty());
     }
 
+    #[cfg(feature = "postgres-sqlx")]
+    #[tokio::test]
+    async fn postgres_runtime_store_configures_oidc_handler_without_live_database() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://headscale:headscale@127.0.0.1/headscale")
+            .unwrap();
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let stores = PersistentRuntimeStores::postgres(&pool, wire_registry.clone());
+
+        let oidc = stores.configure_oidc(
+            Some(oidc_runtime()),
+            Arc::new(RegistrationCache::new()),
+            Arc::new(PolicyStore::new()),
+            wire_registry,
+        );
+
+        assert!(oidc.is_some());
+        let debug = format!("{:?}", oidc.as_ref().unwrap());
+        assert!(debug.contains("users: Some(\"<configured>\")"));
+        assert!(debug.contains("registration_handler: Some(\"<configured>\")"));
+    }
+
     #[tokio::test]
     async fn persistent_wire_runtime_without_oidc_keeps_web_registration_mode() {
         let db = Database::in_memory().await.unwrap();
@@ -3904,31 +3934,36 @@ regions:
             ..TlsRuntimeConfig::default()
         };
 
-        let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
-        let mut server_task = tokio::spawn(run_server(cfg));
-        let wait_for_issuance = async {
-            loop {
-                if acme_server.finalized() && cache_path.exists() {
-                    break;
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
+                let mut server_task = tokio::task::spawn_local(run_server(cfg));
+                let wait_for_issuance = async {
+                    loop {
+                        if acme_server.finalized() && cache_path.exists() {
+                            break;
+                        }
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                };
+                tokio::select! {
+                    outcome = &mut server_task => {
+                        panic!("headscale server exited before HTTP-01 issuance completed: {outcome:?}");
+                    }
+                    waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
+                        waited.expect("HTTP-01 issuance through production challenge listener timed out");
+                    }
                 }
-                sleep(Duration::from_millis(25)).await;
-            }
-        };
-        tokio::select! {
-            outcome = &mut server_task => {
-                panic!("headscale server exited before HTTP-01 issuance completed: {outcome:?}");
-            }
-            waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
-                waited.expect("HTTP-01 issuance through production challenge listener timed out");
-            }
-        }
 
-        server_task.abort();
-        let _ = server_task.await;
-        assert!(acme_server.challenge_seen());
-        assert!(acme_server.finalized());
-        let material = tls::load_from_autocert_cache(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
-        assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+                server_task.abort();
+                let _ = server_task.await;
+                assert!(acme_server.challenge_seen());
+                assert!(acme_server.finalized());
+                let material =
+                    tls::load_from_autocert_cache(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
+                assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -3953,33 +3988,38 @@ regions:
             ..TlsRuntimeConfig::default()
         };
 
-        let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
-        let mut server_task = tokio::spawn(run_server(cfg));
-        let wait_for_issuance = async {
-            loop {
-                if acme_server.finalized() && cache_path.exists() {
-                    break;
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
+                let mut server_task = tokio::task::spawn_local(run_server(cfg));
+                let wait_for_issuance = async {
+                    loop {
+                        if acme_server.finalized() && cache_path.exists() {
+                            break;
+                        }
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                };
+                tokio::select! {
+                    outcome = &mut server_task => {
+                        panic!("headscale server exited before TLS-ALPN issuance completed: {outcome:?}");
+                    }
+                    waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
+                        waited.expect("TLS-ALPN issuance through production TLS listener timed out");
+                    }
                 }
-                sleep(Duration::from_millis(25)).await;
-            }
-        };
-        tokio::select! {
-            outcome = &mut server_task => {
-                panic!("headscale server exited before TLS-ALPN issuance completed: {outcome:?}");
-            }
-            waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
-                waited.expect("TLS-ALPN issuance through production TLS listener timed out");
-            }
-        }
 
-        server_task.abort();
-        let _ = server_task.await;
-        assert!(acme_server.challenge_seen());
-        assert!(acme_server.finalized());
-        let material =
-            tls::load_from_autocert_cache_with_tls_alpn(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
-        assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
-        assert!(material.acme_tls_alpn_resolver.is_some());
+                server_task.abort();
+                let _ = server_task.await;
+                assert!(acme_server.challenge_seen());
+                assert!(acme_server.finalized());
+                let material =
+                    tls::load_from_autocert_cache_with_tls_alpn(&cache_dir, LOCAL_ACME_HOSTNAME)
+                        .unwrap();
+                assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+                assert!(material.acme_tls_alpn_resolver.is_some());
+            })
+            .await;
     }
 
     #[test]

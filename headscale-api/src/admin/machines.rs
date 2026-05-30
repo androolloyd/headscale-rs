@@ -441,6 +441,15 @@ pub struct PersistentOidcRegistrationHandler {
     wire_registry: Option<Arc<MachineRegistry>>,
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+pub struct PersistentPostgresOidcRegistrationHandler {
+    registration_cache: Arc<RegistrationCache>,
+    machines: Arc<PersistentPostgresMachineAdmin>,
+    policy: Arc<PolicyStore>,
+    wire_registry: Option<Arc<MachineRegistry>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthPathRegistrationResult {
     pub record: MachineAdminRecord,
@@ -452,6 +461,27 @@ impl PersistentOidcRegistrationHandler {
     pub fn new(
         registration_cache: Arc<RegistrationCache>,
         machines: Arc<PersistentMachineAdmin>,
+        policy: Arc<PolicyStore>,
+    ) -> Self {
+        Self {
+            registration_cache,
+            machines,
+            policy,
+            wire_registry: None,
+        }
+    }
+
+    pub fn with_wire_registry(mut self, wire_registry: Arc<MachineRegistry>) -> Self {
+        self.wire_registry = Some(wire_registry);
+        self
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresOidcRegistrationHandler {
+    pub fn new(
+        registration_cache: Arc<RegistrationCache>,
+        machines: Arc<PersistentPostgresMachineAdmin>,
         policy: Arc<PolicyStore>,
     ) -> Self {
         Self {
@@ -1481,6 +1511,131 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         let src_node_id = i64::try_from(binding.src_node_id)
             .map_err(|_| crate::oidc::OidcAuthError::Store("src node id out of range".into()))?;
         let source = match headscale_db::headscale_nodes::get_by_id(
+            &self.machines.pool,
+            src_node_id,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(headscale_db::DbError::NotFound(_)) => {
+                return Err(crate::oidc::OidcAuthError::SourceNodeMissing);
+            }
+            Err(err) => return Err(crate::oidc::OidcAuthError::Store(err.to_string())),
+        };
+
+        if !source.tag_list().is_empty() || source.user_id.is_none() {
+            return Err(crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
+        }
+        let user_id = i64::try_from(user.id)
+            .map_err(|_| crate::oidc::OidcAuthError::Store("OIDC user id out of range".into()))?;
+        if source.user_id != Some(user_id) {
+            return Err(crate::oidc::OidcAuthError::UserNotSourceOwner);
+        }
+
+        if self.registration_cache.approve_without_node(auth_id) {
+            Ok(())
+        } else {
+            Err(crate::oidc::OidcAuthError::SessionExpired)
+        }
+    }
+
+    fn oidc_registration_exists(&self, registration_id: &str) -> bool {
+        self.registration_cache.get(registration_id).is_some()
+    }
+
+    fn oidc_registration_confirmation_info(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcRegistrationConfirmInfo> {
+        let record = self.registration_cache.get(registration_id)?;
+        Some(crate::oidc::OidcRegistrationConfirmInfo {
+            hostname: record.hostname,
+            os: record.os,
+            machine_key: short_oidc_machine_key(&record.machine_key_hex),
+        })
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistrationHandler {
+    async fn complete_oidc_registration(
+        &self,
+        registration_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+        node_expiry: Option<DateTime<Utc>>,
+    ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
+        let mut pending = self
+            .registration_cache
+            .get(registration_id)
+            .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        pending.set_user_identity(
+            Some(user.id),
+            oidc_user_name(user),
+            user.display_name.clone(),
+            user.profile_pic_url.clone(),
+        );
+        let mut record = machine_admin_record_from_wire(&pending);
+        record.user = oidc_user_name(user);
+        let effective_expiry = if pending.forced_tags.is_empty() {
+            node_expiry.or(pending.expiry)
+        } else {
+            None
+        };
+        record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
+        record.register_method = REGISTER_METHOD_OIDC;
+
+        let result = self
+            .machines
+            .create_or_update_auth_path_inner(
+                record,
+                &self.policy,
+                None,
+                Some(user.id as i64),
+                true,
+                Some(&pending),
+            )
+            .await
+            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
+        let wire_record = canonical_wire_record_for_auth_path(&result.record, Some(&pending))
+            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
+        if let Some(registry) = &self.wire_registry {
+            if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                registry.replace_node_key(
+                    old_node_key_hex,
+                    wire_record.node_key_hex.clone(),
+                    wire_record.clone(),
+                );
+            } else {
+                registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+            }
+        }
+        if self
+            .registration_cache
+            .complete(registration_id, wire_record)
+        {
+            Ok(crate::oidc::OidcRegistrationResult {
+                new_node: result.new_node,
+            })
+        } else {
+            Err(crate::oidc::OidcRegistrationError::SessionExpired)
+        }
+    }
+
+    async fn complete_oidc_auth_request(
+        &self,
+        auth_id: &str,
+        user: &crate::oidc::OidcStoredUser,
+    ) -> Result<(), crate::oidc::OidcAuthError> {
+        let Some(binding) = self.registration_cache.ssh_binding(auth_id) else {
+            if self.registration_cache.get(auth_id).is_some() {
+                return Err(crate::oidc::OidcAuthError::NotSshCheck);
+            }
+            return Err(crate::oidc::OidcAuthError::SessionExpired);
+        };
+        let src_node_id = i64::try_from(binding.src_node_id)
+            .map_err(|_| crate::oidc::OidcAuthError::Store("src node id out of range".into()))?;
+        let source = match headscale_db::headscale_nodes::get_postgres_by_id(
             &self.machines.pool,
             src_node_id,
         )

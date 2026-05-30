@@ -328,7 +328,7 @@ pub async fn migrate_postgres_foundation_on_connection(conn: &mut PgConnection) 
 /// runtime support for Postgres.
 #[cfg(feature = "postgres-sqlx")]
 pub async fn check_postgres_health(pool: &PgPool) -> Result<()> {
-    sqlx::query_scalar::<_, i64>("SELECT 1")
+    sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT")
         .fetch_one(pool)
         .await?;
     Ok(())
@@ -337,7 +337,7 @@ pub async fn check_postgres_health(pool: &PgPool) -> Result<()> {
 /// Check Postgres connectivity on an existing connection.
 #[cfg(feature = "postgres-sqlx")]
 pub async fn check_postgres_health_on_connection(conn: &mut PgConnection) -> Result<()> {
-    sqlx::query_scalar::<_, i64>("SELECT 1")
+    sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT")
         .fetch_one(&mut *conn)
         .await?;
     Ok(())

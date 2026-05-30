@@ -364,9 +364,32 @@ EOF
 
 headscale_cmd() {
   case "${target}" in
-    rust) "${headscale_bin}" --config "${config_path}" --unix-socket "${socket_path}" "$@" ;;
+    rust)
+      env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
+        "${headscale_bin}" --config "${config_path}" --unix-socket "${socket_path}" "$@"
+      ;;
     headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
   esac
+}
+
+headscale_health_probe() {
+  headscale_cmd -o json health >"${work_dir}/${target}-grpc-health.stdout" 2>"${work_dir}/${target}-grpc-health.stderr"
+}
+
+dump_grpc_health_debug() {
+  echo "::group::${target} gRPC health debug"
+  ls -l "${socket_path}" >&2 || true
+  if [[ -s "${work_dir}/${target}-grpc-health.stdout" ]]; then
+    echo "--- last health stdout ---" >&2
+    cat "${work_dir}/${target}-grpc-health.stdout" >&2 || true
+  fi
+  if [[ -s "${work_dir}/${target}-grpc-health.stderr" ]]; then
+    echo "--- last health stderr ---" >&2
+    cat "${work_dir}/${target}-grpc-health.stderr" >&2 || true
+  fi
+  echo "--- direct health retry ---" >&2
+  headscale_cmd -o json health >&2 || true
+  echo "::endgroup::"
 }
 
 start_server() {
@@ -391,7 +414,10 @@ start_server() {
   if [[ "${target}" == "rust" ]]; then
     wait_for "${target} TLS certificate" "test -s '${tls_cert_path}'"
   fi
-  wait_for "${target} gRPC" "headscale_cmd health >/dev/null 2>&1"
+  wait_for "${target} gRPC" "headscale_health_probe" || {
+    dump_grpc_health_debug
+    return 1
+  }
   echo "${target} control=${local_control_url}"
   echo "${target} login=${control_url}"
   echo "::endgroup::"
@@ -402,7 +428,9 @@ create_user_and_key() {
   case "${target}" in
     rust)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
-      headscale_cmd -o json preauthkeys create --user alice --reusable --expires-in 1h >"${work_dir}/preauth.json"
+      local user_id
+      user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
+      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
       ;;
     headscale-go)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"

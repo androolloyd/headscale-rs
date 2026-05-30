@@ -1,9 +1,7 @@
-Runs a mock OIDC server for testing
+This internal command runs a OpenID Connect for testing purposes
 
-Usage: headscale mockoidc [OPTIONS]
+Usage:
+  headscale mockoidc [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+  -h, --help   help for mockoidc

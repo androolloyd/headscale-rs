@@ -7,6 +7,8 @@
 use crate::{DbError, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::{PgConnection, PgPool};
 
 const POLICY_COLUMNS: &str = r"
         id,
@@ -30,6 +32,20 @@ const POLICY_COLUMNS: &str = r"
 
 fn policy_select(suffix: &str) -> String {
     format!("SELECT {POLICY_COLUMNS} FROM policies {suffix}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_POLICY_COLUMNS: &str = r"
+        id,
+        COALESCE(data, '') AS data,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
+        FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
+";
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_policy_select(suffix: &str) -> String {
+    format!("SELECT {POSTGRES_POLICY_COLUMNS} FROM policies {suffix}")
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,6 +94,91 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PolicyRow> {
     sqlx::query_as::<_, PolicyRow>(&query)
         .bind(id)
         .fetch_one(pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("policy id={id}")),
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres(pool: &PgPool, data: &str) -> Result<PolicyRow> {
+    let now = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO policies (data, created_at, updated_at, deleted_at)
+        VALUES ($1, to_timestamp($2), to_timestamp($2), NULL)
+        RETURNING id
+        ",
+    )
+    .bind(data)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    get_postgres_by_id(pool, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_on_connection(conn: &mut PgConnection, data: &str) -> Result<PolicyRow> {
+    let now = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO policies (data, created_at, updated_at, deleted_at)
+        VALUES ($1, to_timestamp($2), to_timestamp($2), NULL)
+        RETURNING id
+        ",
+    )
+    .bind(data)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_latest_postgres(pool: &PgPool) -> Result<Option<PolicyRow>> {
+    let query = postgres_policy_select("WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 1");
+    sqlx::query_as::<_, PolicyRow>(&query)
+        .fetch_optional(pool)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_latest_postgres_on_connection(
+    conn: &mut PgConnection,
+) -> Result<Option<PolicyRow>> {
+    let query = postgres_policy_select("WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 1");
+    sqlx::query_as::<_, PolicyRow>(&query)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<PolicyRow> {
+    let query = postgres_policy_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, PolicyRow>(&query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("policy id={id}")),
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<PolicyRow> {
+    let query = postgres_policy_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, PolicyRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => DbError::NotFound(format!("policy id={id}")),

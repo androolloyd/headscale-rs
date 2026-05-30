@@ -21,8 +21,8 @@ const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str = "202602201200-clear-tagged-nod
 const GO_SHAPED_TABLES: &[&str] = &["users", "pre_auth_keys", "api_keys", "nodes", "policies"];
 
 #[cfg(feature = "postgres-sqlx")]
-const POSTGRES_DATABASE_VERSIONS_SCHEMA: &str =
-    include_str!("../migrations/postgres/20260530000001_create_database_versions.sql");
+static POSTGRES_FOUNDATION_MIGRATOR: sqlx::migrate::Migrator =
+    sqlx::migrate!("./migrations/postgres");
 
 const KNOWN_GO_MIGRATIONS_THROUGH_V028: &[&str] = &[
     "202312101416",
@@ -110,9 +110,7 @@ pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Re
 pub(crate) async fn migrate_postgres_foundation_on_connection(
     conn: &mut PgConnection,
 ) -> Result<()> {
-    sqlx::raw_sql(POSTGRES_DATABASE_VERSIONS_SCHEMA)
-        .execute(&mut *conn)
-        .await?;
+    POSTGRES_FOUNDATION_MIGRATOR.run(&mut *conn).await?;
     stamp_postgres_database_version(conn).await
 }
 

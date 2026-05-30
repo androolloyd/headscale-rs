@@ -521,6 +521,7 @@
           {
             "name": "disableExpiry",
             "in": "query",
+            "description": "When true, sets expiry to null (node will never expire).",
             "required": false,
             "type": "boolean"
           }

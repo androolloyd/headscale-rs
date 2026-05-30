@@ -1,11 +1,15 @@
+Command "register" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead
 Registers a node to your network
 
-Usage: headscale nodes register [OPTIONS] --user <USER> --key <KEY>
+Usage:
+  headscale nodes register [flags]
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-  -u, --user <USER>
-  -k, --key <KEY>
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+Flags:
+  -h, --help          help for register
+  -k, --key string    Key
+  -u, --user string   User
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

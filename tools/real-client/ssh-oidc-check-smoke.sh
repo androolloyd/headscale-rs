@@ -26,10 +26,12 @@ oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
 check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
 check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
+check_approval="${REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL:-oidc}"
 register_cache_expiration="${REAL_CLIENT_REGISTER_CACHE_EXPIRATION:-}"
 ssh_deny_status="${REAL_CLIENT_OIDC_SSH_DENY_STATUS:-255}"
 ssh_deny_stderr_first_line="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_FIRST_LINE:-}"
 ssh_deny_stderr_regex="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_REGEX:-tailscale: access denied|Permission denied \(tailscale\)}"
+wrong_user_auth_status="${REAL_CLIENT_OIDC_SSH_WRONG_USER_AUTH_STATUS:-403}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/ssh-oidc-check-smoke}"
 run_id="hs-ssh-oidc-${target}-$(date +%s)-$$"
@@ -50,23 +52,41 @@ case "${check_period_cache}" in
 esac
 
 case "${check_result}" in
-  approve | expire) ;;
+  approve | expire | wrong-user) ;;
   *)
-    echo "REAL_CLIENT_OIDC_SSH_CHECK_RESULT must be approve or expire, got ${check_result}" >&2
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_RESULT must be approve, expire, or wrong-user, got ${check_result}" >&2
     exit 2
     ;;
 esac
 
-if [[ "${check_result}" == "expire" ]]; then
+case "${check_approval}" in
+  oidc | cli) ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL must be oidc or cli, got ${check_approval}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${check_result}" != "approve" && "${check_approval}" != "oidc" ]]; then
+  echo "REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL=cli is only valid with REAL_CLIENT_OIDC_SSH_CHECK_RESULT=approve" >&2
+  exit 2
+fi
+
+if [[ "${check_result}" == "expire" || "${check_result}" == "wrong-user" ]]; then
   register_cache_expiration="${register_cache_expiration:-10s}"
   if ((check_period_cache_flag)); then
-    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE cannot be true when REAL_CLIENT_OIDC_SSH_CHECK_RESULT=expire" >&2
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE cannot be true when REAL_CLIENT_OIDC_SSH_CHECK_RESULT=${check_result}" >&2
     exit 2
   fi
 fi
 
 if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" && ! "${ssh_deny_status}" =~ ^[0-9]+$ ]]; then
   echo "REAL_CLIENT_OIDC_SSH_DENY_STATUS must be empty, any, or a non-negative integer, got ${ssh_deny_status}" >&2
+  exit 2
+fi
+
+if [[ "${check_result}" == "wrong-user" && ! "${wrong_user_auth_status}" =~ ^[0-9]{3}$ ]]; then
+  echo "REAL_CLIENT_OIDC_SSH_WRONG_USER_AUTH_STATUS must be a three-digit HTTP status, got ${wrong_user_auth_status}" >&2
   exit 2
 fi
 
@@ -89,6 +109,10 @@ oidc_email="${REAL_CLIENT_OIDC_EMAIL:-${default_oidc_email}}"
 oidc_username="${REAL_CLIENT_OIDC_USERNAME:-${default_oidc_username}}"
 oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
 oidc_allowed_domains="${REAL_CLIENT_OIDC_ALLOWED_DOMAINS:-${default_oidc_allowed_domains}}"
+wrong_user_oidc_subject="${REAL_CLIENT_OIDC_SSH_WRONG_USER_SUBJECT:-mallory-subject}"
+wrong_user_oidc_email="${REAL_CLIENT_OIDC_SSH_WRONG_USER_EMAIL:-mallory@example.com}"
+wrong_user_oidc_username="${REAL_CLIENT_OIDC_SSH_WRONG_USER_USERNAME:-mallory}"
+wrong_user_oidc_groups="${REAL_CLIENT_OIDC_SSH_WRONG_USER_GROUPS:-engineering}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-$(cat "${default_policy_path}")}"
 
 case "${work_root}" in
@@ -234,6 +258,7 @@ start_mock_oidc() {
     ruby -rjson -e '
       count = Integer(ARGV.fetch(4))
       abort("REAL_CLIENT_OIDC_FLOW_COUNT must be positive") unless count.positive?
+      check_result = ARGV.fetch(5)
       groups = ARGV.fetch(3).split(",").reject(&:empty?)
       user = {
         Subject: ARGV.fetch(0),
@@ -242,8 +267,29 @@ start_mock_oidc() {
         PreferredUsername: ARGV.fetch(2),
         Groups: groups,
       }
-      puts JSON.generate(Array.new(count) { user })
-    ' "${oidc_subject}" "${oidc_email}" "${oidc_username}" "${oidc_groups}" "${oidc_flow_count}"
+      users = Array.new(count) { user }
+      if check_result == "wrong-user"
+        abort("REAL_CLIENT_OIDC_FLOW_COUNT must be at least 3 for wrong-user SSH checks") if count < 3
+        users[2] = {
+          Subject: ARGV.fetch(6),
+          Email: ARGV.fetch(7),
+          EmailVerified: true,
+          PreferredUsername: ARGV.fetch(8),
+          Groups: ARGV.fetch(9).split(",").reject(&:empty?),
+        }
+      end
+      puts JSON.generate(users)
+    ' \
+      "${oidc_subject}" \
+      "${oidc_email}" \
+      "${oidc_username}" \
+      "${oidc_groups}" \
+      "${oidc_flow_count}" \
+      "${check_result}" \
+      "${wrong_user_oidc_subject}" \
+      "${wrong_user_oidc_email}" \
+      "${wrong_user_oidc_username}" \
+      "${wrong_user_oidc_groups}"
   )"
 
   echo "::group::start mock OIDC"
@@ -318,6 +364,7 @@ EOF
   server_pid="$!"
   wait_for "headscale-rs health" "curl -fsS '${local_health_url}' >/dev/null"
   wait_for "headscale-rs TLS certificate" "test -s '${tls_cert_path}'"
+  wait_for "headscale-rs gRPC" "headscale_cmd health >/dev/null 2>&1"
   echo "headscale-rs login=${control_url}"
   echo "::endgroup::"
 }
@@ -434,7 +481,7 @@ EOF
     2>"${work_dir}/headscale-go.stderr" &
   server_pid="$!"
   wait_for "headscale-go health" "curl -kfsS '${local_health_url}' >/dev/null"
-  wait_for "headscale-go gRPC" "'${headscale_bin}' -c '${config_path}' health >/dev/null 2>&1"
+  wait_for "headscale-go gRPC" "headscale_cmd health >/dev/null 2>&1"
   echo "headscale-go login=${control_url}"
   echo "::endgroup::"
 }
@@ -583,6 +630,13 @@ dump_client_debug() {
   docker exec "${client_name}" sh -ceu 'cat /tmp/tailscaled.log' >"${work_dir}/${prefix}.tailscaled.log" 2>"${work_dir}/${prefix}.tailscaled-log.err" || true
 }
 
+headscale_cmd() {
+  case "${target}" in
+    rust) target/debug/headscale --config "${config_path}" "$@" ;;
+    headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
+  esac
+}
+
 extract_ssh_auth_id() {
   ruby -e '
     text = ARGV.map { |path| File.exist?(path) ? File.read(path) : "" }.join("\n")
@@ -602,6 +656,35 @@ approve_ssh_check_with_oidc() {
     "${control_url}/auth/${auth_id}" \
     >"${work_dir}/ssh-check-oidc.html"
   grep -Eq "SSH session authorized|Signed in successfully|Authenticated" "${work_dir}/ssh-check-oidc.html"
+}
+
+approve_ssh_check_with_cli() {
+  local auth_id="$1"
+  headscale_cmd -o json auth approve "--auth-id=${auth_id}" \
+    >"${work_dir}/ssh-check-cli-approve.stdout" \
+    2>"${work_dir}/ssh-check-cli-approve.stderr"
+}
+
+deny_ssh_check_with_wrong_user() {
+  local auth_id="$1"
+  local http_status
+  http_status="$(
+    curl -sSL \
+      --cacert "${tls_cert_path}" \
+      --resolve "host.docker.internal:${control_port}:127.0.0.1" \
+      -c "${work_dir}/ssh-check-wrong-user-oidc.cookies" \
+      -b "${work_dir}/ssh-check-wrong-user-oidc.cookies" \
+      -D "${work_dir}/ssh-check-wrong-user-oidc.headers" \
+      -o "${work_dir}/ssh-check-wrong-user-oidc.body" \
+      -w "%{http_code}" \
+      "${control_url}/auth/${auth_id}"
+  )"
+  printf '%s\n' "${http_status}" >"${work_dir}/ssh-check-wrong-user-oidc.status"
+  if [[ "${http_status}" != "${wrong_user_auth_status}" ]]; then
+    echo "expected wrong-user OIDC SSH auth status ${wrong_user_auth_status}, got ${http_status}" >&2
+    cat "${work_dir}/ssh-check-wrong-user-oidc.body" >&2 || true
+    exit 1
+  fi
 }
 
 ssh_auth_url_present() {
@@ -673,6 +756,10 @@ assert_denied_ssh_check() {
 run_ssh_check() {
   if [[ "${check_result}" == "expire" ]]; then
     echo "::group::assert expired Tailscale SSH check denial"
+  elif [[ "${check_result}" == "wrong-user" ]]; then
+    echo "::group::assert wrong-user Tailscale SSH check denial"
+  elif [[ "${check_approval}" == "cli" ]]; then
+    echo "::group::approve Tailscale SSH check with CLI"
   else
     echo "::group::approve Tailscale SSH check with OIDC"
   fi
@@ -700,16 +787,32 @@ run_ssh_check() {
   fi
   local auth_id
   auth_id="$(cat "${work_dir}/ssh-check.auth-id")"
-  if [[ "${check_result}" == "expire" ]]; then
-    local ssh_status=0
-    wait_pid_with_timeout "tailscale ssh check denial" "${ssh_pid}" || ssh_status="$?"
-    ssh_pid=""
-    assert_denied_ssh_check "${ssh_status}"
-    echo "expired_auth_id=${auth_id}"
-    echo "::endgroup::"
-    return
+  case "${check_result}" in
+    expire)
+      local ssh_status=0
+      wait_pid_with_timeout "tailscale ssh check denial" "${ssh_pid}" || ssh_status="$?"
+      ssh_pid=""
+      assert_denied_ssh_check "${ssh_status}"
+      echo "expired_auth_id=${auth_id}"
+      echo "::endgroup::"
+      return
+      ;;
+    wrong-user)
+      deny_ssh_check_with_wrong_user "${auth_id}"
+      local ssh_status=0
+      wait_pid_with_timeout "tailscale ssh wrong-user denial" "${ssh_pid}" || ssh_status="$?"
+      ssh_pid=""
+      assert_denied_ssh_check "${ssh_status}"
+      echo "wrong_user_auth_id=${auth_id}"
+      echo "::endgroup::"
+      return
+      ;;
+  esac
+  if [[ "${check_approval}" == "cli" ]]; then
+    approve_ssh_check_with_cli "${auth_id}"
+  else
+    approve_ssh_check_with_oidc "${auth_id}"
   fi
-  approve_ssh_check_with_oidc "${auth_id}"
   wait_pid_with_timeout "tailscale ssh check completion" "${ssh_pid}"
   ssh_pid=""
   grep -Fxq "${client_two}" "${work_dir}/ssh-check.stdout"
@@ -754,6 +857,10 @@ if ((check_period_cache_flag)); then
   echo "${target} OIDC SSH checkPeriod cache real-client smoke passed"
 elif [[ "${check_result}" == "expire" ]]; then
   echo "${target} expired OIDC SSH check denial real-client smoke passed"
+elif [[ "${check_result}" == "wrong-user" ]]; then
+  echo "${target} wrong-user OIDC SSH check denial real-client smoke passed"
+elif [[ "${check_approval}" == "cli" ]]; then
+  echo "${target} CLI-approved SSH check real-client smoke passed"
 else
   echo "${target} OIDC SSH check real-client smoke passed"
 fi

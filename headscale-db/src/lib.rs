@@ -304,8 +304,9 @@ pub async fn open_postgres_pool(url: &str) -> Result<PgPool> {
 
 /// Apply the narrow Postgres foundation schema to a pool.
 ///
-/// This creates and stamps `database_versions` only. It deliberately does not
-/// run the SQLite migrations or enable any user/node/preauth/API-key stores.
+/// This creates and stamps the foundation Postgres tables only. It deliberately
+/// does not run the SQLite migrations or enable any user/node/preauth/API-key
+/// stores.
 #[cfg(feature = "postgres-sqlx")]
 pub async fn migrate_postgres_foundation(pool: &PgPool) -> Result<()> {
     let mut conn = pool.acquire().await?;
@@ -319,6 +320,27 @@ pub async fn migrate_postgres_foundation(pool: &PgPool) -> Result<()> {
 #[cfg(feature = "postgres-sqlx")]
 pub async fn migrate_postgres_foundation_on_connection(conn: &mut PgConnection) -> Result<()> {
     version_guard::migrate_postgres_foundation_on_connection(conn).await
+}
+
+/// Check Postgres connectivity for foundation-only health probes.
+///
+/// This intentionally stays outside [`Database`] so it does not imply server
+/// runtime support for Postgres.
+#[cfg(feature = "postgres-sqlx")]
+pub async fn check_postgres_health(pool: &PgPool) -> Result<()> {
+    sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(pool)
+        .await?;
+    Ok(())
+}
+
+/// Check Postgres connectivity on an existing connection.
+#[cfg(feature = "postgres-sqlx")]
+pub async fn check_postgres_health_on_connection(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

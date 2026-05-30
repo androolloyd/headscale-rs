@@ -1,0 +1,18 @@
+Generate the autocompletion script for the fish shell.
+
+To load completions in your current shell session:
+
+	headscale completion fish | source
+
+To load completions for every new session, execute once:
+
+	headscale completion fish > ~/.config/fish/completions/headscale.fish
+
+You will need to start a new shell for this setup to take effect.
+
+Usage:
+  headscale completion fish [flags]
+
+Flags:
+  -h, --help              help for fish
+      --no-descriptions   disable completion descriptions

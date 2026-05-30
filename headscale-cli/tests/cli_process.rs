@@ -710,6 +710,18 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
     );
     assert_stdout_snapshot(&["node", "-h"], include_str!("snapshots/nodes_help.stdout"));
     assert_stdout_snapshot(
+        &["nodes", "register", "--help"],
+        include_str!("snapshots/nodes_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["node", "register", "--help"],
+        include_str!("snapshots/nodes_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "nodes", "register"],
+        include_str!("snapshots/nodes_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["help", "nodes", "routes"],
         include_str!("snapshots/nodes_list_routes_help.stdout"),
     );
@@ -802,7 +814,7 @@ fn mockoidc_help_and_missing_env_do_not_load_config() {
 
     let help = headscale_in(&["mockoidc", "--help"], cwd.path(), home.path());
     assert!(help.status.success(), "stderr: {}", stderr(&help));
-    assert!(stdout(&help).contains("mock OIDC server"));
+    assert!(stdout(&help).contains("OpenID Connect for testing purposes"));
 
     let missing_client_id =
         headscale_in_with_mockoidc_env(&["mockoidc"], cwd.path(), home.path(), &[]);
@@ -1848,6 +1860,18 @@ fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["completion", "--help"],
         include_str!("snapshots/completion_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["completion", "bash", "--help"],
+        include_str!("snapshots/completion_bash_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["completion", "fish", "--help"],
+        include_str!("snapshots/completion_fish_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["completion", "powershell", "--help"],
+        include_str!("snapshots/completion_powershell_help.stdout"),
     );
     assert_stdout_snapshot(
         &["debug", "--help"],

@@ -3971,6 +3971,8 @@ mod tests {
         assert!(expire_params.iter().any(|param| {
             param["name"] == "disableExpiry"
                 && param["in"] == "query"
+                && param["description"]
+                    == "When true, sets expiry to null (node will never expire)."
                 && param["required"] == false
                 && param["type"] == "boolean"
         }));

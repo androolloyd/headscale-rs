@@ -1,10 +1,29 @@
-Generate the autocompletion script for zsh
+Generate the autocompletion script for the zsh shell.
 
-Usage: headscale completion zsh [OPTIONS]
+If shell completion is not already enabled in your environment you will need
+to enable it.  You can execute the following once:
 
-Options:
-  -c, --config <CONFIG>  config file (default is /etc/headscale/config.yaml) [env: HEADSCALE_CONFIG=]
-      --no-descriptions  Disable completion descriptions
-  -o, --output <OUTPUT>  Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-      --force            Disable prompts and forces the execution
-  -h, --help             Print help
+	echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+To load completions in your current shell session:
+
+	source <(headscale completion zsh)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	headscale completion zsh > "${fpath[1]}/_headscale"
+
+#### macOS:
+
+	headscale completion zsh > $(brew --prefix)/share/zsh/site-functions/_headscale
+
+You will need to start a new shell for this setup to take effect.
+
+Usage:
+  headscale completion zsh [flags]
+
+Flags:
+  -h, --help              help for zsh
+      --no-descriptions   disable completion descriptions

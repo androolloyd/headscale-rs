@@ -658,9 +658,15 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
+        ["dumpConfig", "-h" | "--help"] => Some(UPSTREAM_DUMP_CONFIG_HELP),
+        ["mockoidc", "-h" | "--help"] => Some(UPSTREAM_MOCKOIDC_HELP),
         ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
             Some(UPSTREAM_COMPLETION_HELP)
         }
+        ["completion", "bash", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_BASH_HELP),
+        ["completion", "fish", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_FISH_HELP),
+        ["completion", "powershell", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_POWERSHELL_HELP),
+        ["completion", "zsh", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_ZSH_HELP),
         ["completion", shell, ..]
             if !matches!(
                 *shell,
@@ -712,6 +718,8 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         }
         ["nodes" | "node", "list" | "ls" | "show", "-h" | "--help"]
         | ["help", "nodes" | "node", "list" | "ls" | "show"] => Some(UPSTREAM_NODES_LIST_HELP),
+        ["nodes" | "node", "register", "-h" | "--help"]
+        | ["help", "nodes" | "node", "register"] => Some(UPSTREAM_NODES_REGISTER_HELP),
         [
             "nodes" | "node",
             "list-routes" | "lsr" | "routes",
@@ -1130,6 +1138,29 @@ Global Flags:
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
 
+const UPSTREAM_DUMP_CONFIG_HELP: &str = r"dump current config to /etc/headscale/config.dump.yaml, integration test only
+
+Usage:
+  headscale dumpConfig [flags]
+
+Flags:
+  -h, --help   help for dumpConfig
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+";
+
+const UPSTREAM_MOCKOIDC_HELP: &str = r"This internal command runs a OpenID Connect for testing purposes
+
+Usage:
+  headscale mockoidc [flags]
+
+Flags:
+  -h, --help   help for mockoidc
+";
+
 const UPSTREAM_COMPLETION_HELP: &str = r#"Generate the autocompletion script for headscale for the specified shell.
 See each sub-command's help for details on how to use the generated script.
 
@@ -1146,6 +1177,103 @@ Flags:
   -h, --help   help for completion
 
 Use "headscale completion [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_COMPLETION_BASH_HELP: &str = r"Generate the autocompletion script for the bash shell.
+
+This script depends on the 'bash-completion' package.
+If it is not installed already, you can install it via your OS's package manager.
+
+To load completions in your current shell session:
+
+	source <(headscale completion bash)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	headscale completion bash > /etc/bash_completion.d/headscale
+
+#### macOS:
+
+	headscale completion bash > $(brew --prefix)/etc/bash_completion.d/headscale
+
+You will need to start a new shell for this setup to take effect.
+
+Usage:
+  headscale completion bash
+
+Flags:
+  -h, --help              help for bash
+      --no-descriptions   disable completion descriptions
+";
+
+const UPSTREAM_COMPLETION_FISH_HELP: &str = r"Generate the autocompletion script for the fish shell.
+
+To load completions in your current shell session:
+
+	headscale completion fish | source
+
+To load completions for every new session, execute once:
+
+	headscale completion fish > ~/.config/fish/completions/headscale.fish
+
+You will need to start a new shell for this setup to take effect.
+
+Usage:
+  headscale completion fish [flags]
+
+Flags:
+  -h, --help              help for fish
+      --no-descriptions   disable completion descriptions
+";
+
+const UPSTREAM_COMPLETION_POWERSHELL_HELP: &str = r"Generate the autocompletion script for powershell.
+
+To load completions in your current shell session:
+
+	headscale completion powershell | Out-String | Invoke-Expression
+
+To load completions for every new session, add the output of the above command
+to your powershell profile.
+
+Usage:
+  headscale completion powershell [flags]
+
+Flags:
+  -h, --help              help for powershell
+      --no-descriptions   disable completion descriptions
+";
+
+const UPSTREAM_COMPLETION_ZSH_HELP: &str = r#"Generate the autocompletion script for the zsh shell.
+
+If shell completion is not already enabled in your environment you will need
+to enable it.  You can execute the following once:
+
+	echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+To load completions in your current shell session:
+
+	source <(headscale completion zsh)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	headscale completion zsh > "${fpath[1]}/_headscale"
+
+#### macOS:
+
+	headscale completion zsh > $(brew --prefix)/share/zsh/site-functions/_headscale
+
+You will need to start a new shell for this setup to take effect.
+
+Usage:
+  headscale completion zsh [flags]
+
+Flags:
+  -h, --help              help for zsh
+      --no-descriptions   disable completion descriptions
 "#;
 
 const UPSTREAM_GENERATE_HELP: &str = r#"Generate commands
@@ -1438,6 +1566,23 @@ Global Flags:
       --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
+
+const UPSTREAM_NODES_REGISTER_HELP: &str = r#"Command "register" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead
+Registers a node to your network
+
+Usage:
+  headscale nodes register [flags]
+
+Flags:
+  -h, --help          help for register
+  -k, --key string    Key
+  -u, --user string   User
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+"#;
 
 const UPSTREAM_NODES_LIST_ROUTES_HELP: &str = r"List routes available on nodes
 
@@ -2452,6 +2597,30 @@ mod tests {
             Some(UPSTREAM_VERSION_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["dumpConfig", "--help"]),
+            Some(UPSTREAM_DUMP_CONFIG_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["mockoidc", "--help"]),
+            Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "bash", "--help"]),
+            Some(UPSTREAM_COMPLETION_BASH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "fish", "--help"]),
+            Some(UPSTREAM_COMPLETION_FISH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "powershell", "--help"]),
+            Some(UPSTREAM_COMPLETION_POWERSHELL_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "zsh", "--help"]),
+            Some(UPSTREAM_COMPLETION_ZSH_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["help", "auth", "register"]),
             Some(UPSTREAM_AUTH_REGISTER_HELP)
         );
@@ -2470,6 +2639,18 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["node", "-h"]),
             Some(UPSTREAM_NODES_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["nodes", "register", "--help"]),
+            Some(UPSTREAM_NODES_REGISTER_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["node", "register", "--help"]),
+            Some(UPSTREAM_NODES_REGISTER_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "nodes", "register"]),
+            Some(UPSTREAM_NODES_REGISTER_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["help", "nodes", "routes"]),

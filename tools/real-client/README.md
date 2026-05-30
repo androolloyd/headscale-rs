@@ -83,6 +83,8 @@ predates the executable PingRequest lifecycle.
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
+| SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
+| SSH | `ssh-oidc-check-wrong-user` | `ssh-oidc-check-wrong-user-smoke.sh` | `ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Wrong-user OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | Lifecycle | `oidc-restart` | `oidc-restart-smoke.sh` | `oidc-restart-headscale-go-smoke.sh` | Production OIDC registration survives server restart |
 | Lifecycle | `oidc-route-approve-restart` | `oidc-route-approve-restart-smoke.sh` | `oidc-route-approve-restart-headscale-go-smoke.sh` | Production OIDC route approval survives server restart |
@@ -791,16 +793,23 @@ tools/real-client/ssh-smoke.sh
 tools/real-client/ssh-headscale-go-smoke.sh
 ```
 
-The OIDC `check` wrappers drive the stock client through the Headscale SSH
-`HoldAndDelegate` path. The approval row follows the browser `/auth/{auth_id}`
-flow and expects hostname output. The denial row sets a short
-`tuning.register_cache_expiration`, lets the check auth request expire, and
-asserts status `255`, empty stdout, the first stderr line, and an access-denied
-stderr regex:
+The OIDC and CLI `check` wrappers drive the stock client through the Headscale
+SSH `HoldAndDelegate` path. The OIDC approval row follows the browser
+`/auth/{auth_id}` flow and expects hostname output. The CLI approval row uses
+`headscale auth approve --auth-id ...` against the same pending check request.
+The wrong-user row authenticates the `/auth/{auth_id}` flow as a different OIDC
+user, expects the auth callback to be denied, then asserts the nonzero SSH
+exit, empty stdout, first stderr line, and access-denied stderr regex. The
+expired-denial row sets a short `tuning.register_cache_expiration`, lets the
+check auth request expire, and asserts the same denied SSH output shape:
 
 ```sh
 tools/real-client/ssh-oidc-check-smoke.sh
 tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
+tools/real-client/ssh-cli-check-smoke.sh
+tools/real-client/ssh-cli-check-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
+tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-deny-smoke.sh
 tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
 ```
@@ -834,3 +843,8 @@ Useful knobs:
   `REAL_CLIENT_REGISTER_CACHE_EXPIRATION=10s`,
   `REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS=45`, status `255`, first stderr line
   `# Headscale SSH requires an additional check.`, and an access-denied regex.
+- `REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL=cli` approves the pending SSH check with
+  `headscale auth approve --auth-id ...` instead of the browser flow.
+- `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=wrong-user` uses a third mock OIDC login
+  as `mallory@example.com` by default, expects HTTP `403` from the auth flow,
+  and then asserts the denied SSH output shape.

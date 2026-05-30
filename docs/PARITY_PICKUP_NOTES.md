@@ -110,11 +110,11 @@ Recent accepted slices:
   stock Tailscale client, capture `tailscale debug netmap`, and assert the
   persisted node lifecycle. They skip cleanly when the Pg URL is absent.
 - This slice wires the paired `postgres-authkey` stock-client row into
-  `.github/workflows/real-client-parity.yml`: CI now starts a Postgres 16
-  service, installs `postgresql-client`, exports
-  `HEADSCALE_DB_POSTGRES_TEST_URL`, and includes `postgres-authkey` in the PR
-  smoke set. The local environment here has no Docker daemon and no Pg URL, so
-  the full stock-client/Pg execution is deferred to CI.
+  `.github/workflows/real-client-parity.yml`: CI now runs on PRs and matching
+  `main` pushes, starts a Postgres 16 service, installs `postgresql-client`,
+  exports `HEADSCALE_DB_POSTGRES_TEST_URL`, and includes `postgres-authkey` in
+  the bounded push/PR smoke set. The local environment here has no Docker
+  daemon and no Pg URL, so the full stock-client/Pg execution is deferred to CI.
 
 Current multi-agent split:
 
@@ -130,7 +130,8 @@ Current multi-agent split:
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. A paired env-gated production Pg
   stock-client auth-key smoke is now checked into the real-client matrix.
-  CI now provisions Postgres and includes that row in the PR real-client job.
+  CI now provisions Postgres and includes that row in the push/PR real-client
+  job.
   Remaining critical work is broader production Pg serve coverage beyond the
   single auth-key/map flow.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
@@ -247,7 +248,7 @@ churn parity, and remaining route/SSH stock-client edge rows.
   smoke exist; the first production
   Pg `serve` process smoke covers public health plus local gRPC
   health/user/preauth/policy CLI paths, and a paired env-gated Pg auth-key
-  stock-client smoke is checked into the real-client matrix and PR CI now
+  stock-client smoke is checked into the real-client matrix and push/PR CI now
   provisions Postgres for it; broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants

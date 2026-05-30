@@ -60,6 +60,10 @@ group_end() {
   fi
 }
 
+group_start "check locked fuzz manifest"
+cargo check --locked --bins
+group_end
+
 for target in "${targets[@]}"; do
   group_start "build ${target}"
   set +e

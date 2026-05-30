@@ -898,10 +898,11 @@ async fn map_inner(
         return resp;
     }
 
-    // P1 lifecycle: stamp `last_seen` on every /map arrival.
-    // (Mirrors upstream's `db.UpdateNodeFromMapRequest`.) The COW
-    // update is O(n) in registry size; the perf concern is documented
-    // on `MachineRegistry::touch_last_seen` itself.
+    // P1 lifecycle: stamp `last_seen` on every /map arrival without
+    // waking long-poll streams. This mirrors upstream's quiet timestamp
+    // bookkeeping: only peer-visible state changes should produce map
+    // churn. The COW update is O(n) in registry size; the perf concern
+    // is documented on `MachineRegistry::touch_last_seen` itself.
     state.machines.touch_last_seen(&node_key_hex);
     if let Some(touched) = state.machines.get(&node_key_hex) {
         own.last_seen = touched.last_seen;

@@ -662,6 +662,28 @@ async fn map_touches_last_seen() {
 }
 
 #[tokio::test]
+async fn map_last_seen_touch_does_not_wake_long_pollers() {
+    let reg = Arc::new(MachineRegistry::new());
+    reg.upsert(
+        "ac".repeat(32),
+        mk_record(0xac, "node-quiet-touch", 31, false),
+    );
+    let mut generation = reg.subscribe_gen();
+    let (wire, _admin) = fixture(reg.clone());
+
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    let (s, _) = wire_map(&wire, &"ac".repeat(32)).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let changed =
+        tokio::time::timeout(std::time::Duration::from_millis(50), generation.changed()).await;
+    assert!(
+        changed.is_err(),
+        "timestamp-only /map bookkeeping must not wake streams"
+    );
+}
+
+#[tokio::test]
 async fn gc_ephemeral_removes_stale_devices() {
     let reg = Arc::new(MachineRegistry::new());
     let mut stale = mk_record(0xc0, "ephem-stale", 40, true);

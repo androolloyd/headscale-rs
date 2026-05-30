@@ -2390,11 +2390,12 @@ impl MachineRegistry {
     /// long-poll waiter.
     ///
     /// Most lifecycle mutators (`set_expiry`, `rename`, `logout`,
-    /// `delete`, `touch_last_seen`, `set_forced_tags`) route through
-    /// this helper so the COW pattern is
-    /// expressed exactly once. Returns whatever `f` returns — typically
-    /// a Result so callers can distinguish "node not found" from
-    /// "applied".
+    /// `delete`, `set_forced_tags`) route through this helper so the
+    /// COW pattern is expressed exactly once. `touch_last_seen` uses a
+    /// quiet variant because timestamp-only map bookkeeping is not
+    /// peer-visible state and should not wake long-poll streams.
+    /// Returns whatever `f` returns — typically a Result so callers can
+    /// distinguish "node not found" from "applied".
     pub fn update_with<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
@@ -2403,6 +2404,20 @@ impl MachineRegistry {
     }
 
     fn update_with_operation<R, F>(&self, operation: &str, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
+    {
+        self.update_with_operation_and_wake(operation, true, f)
+    }
+
+    fn update_with_operation_quiet<R, F>(&self, operation: &str, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
+    {
+        self.update_with_operation_and_wake(operation, false, f)
+    }
+
+    fn update_with_operation_and_wake<R, F>(&self, operation: &str, wake: bool, f: F) -> R
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
     {
@@ -2417,7 +2432,9 @@ impl MachineRegistry {
         let elapsed = start.elapsed();
         self.record_nodestore_operation(operation, elapsed);
         self.record_nodestore_batch(1, elapsed);
-        self.wake_waiters();
+        if wake {
+            self.wake_waiters();
+        }
         r
     }
 
@@ -2505,7 +2522,7 @@ impl MachineRegistry {
     /// registry; the API stays the same.
     pub fn touch_last_seen(&self, node_key_hex: &str) -> bool {
         let now = Utc::now();
-        self.update_with(|map| match map.get_mut(node_key_hex) {
+        self.update_with_operation_quiet("touch_last_seen", |map| match map.get_mut(node_key_hex) {
             Some(rec) => {
                 rec.last_seen = now;
                 true
@@ -3923,11 +3940,16 @@ mod registry_tests {
         let reg = MachineRegistry::new();
         reg.upsert("nk-a".to_string(), mk_record(6));
         let before = reg.get("nk-a").unwrap().last_seen;
+        let generation = reg.subscribe_gen();
         // Spin briefly to ensure the wall-clock ticks past `before`.
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert!(reg.touch_last_seen("nk-a"));
         let after = reg.get("nk-a").unwrap().last_seen;
         assert!(after > before, "touch should advance last_seen");
+        assert!(
+            !generation.has_changed().unwrap(),
+            "touch should not wake map streams"
+        );
         assert!(!reg.touch_last_seen("nk-zzz"));
     }
 

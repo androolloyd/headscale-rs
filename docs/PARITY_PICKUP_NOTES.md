@@ -169,10 +169,11 @@ Current multi-agent split:
   OIDC SSH-check denial smoke slice added for Rust and headscale-go.
 - Explorer lane: current route/SSH and map/admin churn audit. Outcome: stale
   primary-route removal after primary withdrawal plus all-unhealthy remaining
-  candidates was fixed; remaining high-priority follow-ups are combined
-  route-via plus route-health failover smokes, direct SSH action rejection pins,
-  quiet last-seen map bookkeeping, canonical map-batcher reason/state deltas,
-  and broader churn/restart map-stream tests. Runtime MapSessionHandle/Seq
+  candidates was fixed; quiet last-seen map bookkeeping now updates timestamps
+  without waking long-poll streams; remaining high-priority follow-ups are
+  combined route-via plus route-health failover smokes, direct SSH action
+  rejection pins, canonical map-batcher reason/state deltas, and broader
+  churn/restart map-stream tests. Runtime MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response
   `MapSessionHandle`/`Seq` empty.
@@ -275,6 +276,5 @@ churn parity, and remaining route/SSH stock-client edge rows.
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,
-  including quiet last-seen bookkeeping plus canonical map-batcher reason/state
-  deltas
+  including canonical map-batcher reason/state deltas
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed

@@ -4,7 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-4483fd0cad38717913e7509fc50f9d48c691b02b}" \
+# shellcheck source=tools/real-client/headscale-go-current.sh
+source tools/real-client/headscale-go-current.sh
+
+HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}" \
 REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/route-via-restart-headscale-go-smoke}" \
 REAL_CLIENT_RESTART_TARGET=headscale-go \
 REAL_CLIENT_RESTART_ROUTE_VIA=true \

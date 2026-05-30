@@ -6,7 +6,7 @@ Updated: 2026-05-30 07:11 ADT
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before this pickup: `dc53bfb Broaden parity harness coverage`
+- Latest pushed commit before the route-health reload/restart pickup: `dc53bfb Broaden parity harness coverage`
 - Remote: `origin/main` was pushed through `dc53bfb`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `dc53bfb`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -53,11 +53,11 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 
 ## Next Safe Slice
 
-The route-health policy-reload-then-production-restart stock-client smoke is the
-current active slice. It adds paired Rust/headscale-go scripts that start with
-one auto-approved tagged router, reload policy to add the second candidate,
+The route-health policy-reload-then-production-restart stock-client smoke is now
+implemented in this pickup. It adds paired Rust/headscale-go scripts that start
+with one auto-approved tagged router, reload policy to add the second candidate,
 restart the production server, and assert route-health failover still works.
-After that lands, the next narrow lanes are current-upstream CLI output drift
+The next narrow lanes are current-upstream CLI output drift
 snapshots, true Postgres runtime/import support, or the remaining route/SSH
 stock-client edge rows.
 

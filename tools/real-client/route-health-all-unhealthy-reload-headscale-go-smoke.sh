@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+# shellcheck source=tools/real-client/headscale-go-current.sh
+source tools/real-client/headscale-go-current.sh
+
 route="${REAL_CLIENT_ROUTE:-10.94.0.0/24}"
 
 route_health_all_unhealthy_reload_policy() {
@@ -39,7 +42,7 @@ route_health_all_unhealthy_reload_policy() {
 initial_policy="$(route_health_all_unhealthy_reload_policy tag:router-a tag:router-b)"
 reload_policy="$(route_health_all_unhealthy_reload_policy tag:router-a tag:router-b)"
 
-HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-4483fd0cad38717913e7509fc50f9d48c691b02b}" \
+HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}" \
 REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/route-health-all-unhealthy-reload-headscale-go-smoke}" \
 REAL_CLIENT_TIMEOUT_SECS="${REAL_CLIENT_TIMEOUT_SECS:-180}" \
 REAL_CLIENT_CLIENT_COUNT="${REAL_CLIENT_CLIENT_COUNT:-2}" \

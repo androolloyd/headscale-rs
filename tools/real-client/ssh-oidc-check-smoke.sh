@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+# shellcheck source=tools/real-client/headscale-go-current.sh
+source tools/real-client/headscale-go-current.sh
+
 target="${REAL_CLIENT_OIDC_SSH_TARGET:-rust}"
 case "${target}" in
   rust | headscale-go) ;;
@@ -14,7 +17,7 @@ case "${target}" in
 esac
 
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
-headscale_go_version="${HEADSCALE_GO_VERSION:-4483fd0cad38717913e7509fc50f9d48c691b02b}"
+headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
 attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-120}"

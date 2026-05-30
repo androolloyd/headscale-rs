@@ -279,11 +279,19 @@ server:
   server_url: ${control_url}
   listen: 0.0.0.0:${http_port}
   https_listen: 0.0.0.0:${https_port}
+  grpc_listen_addr: 127.0.0.1:${grpc_port}
+  grpc_allow_insecure: true
   db_path: ${db_path}
   state_dir: ${work_dir}/state
   unix_socket: ${socket_path}
   unix_socket_permission: "0700"
   tls_hostname: host.docker.internal
+
+unix_socket: ${socket_path}
+unix_socket_permission: "0700"
+
+cli:
+  timeout: 5s
 
 noise:
   private_key_path: ${work_dir}/noise_private.key
@@ -356,7 +364,7 @@ EOF
 
 headscale_cmd() {
   case "${target}" in
-    rust) "${headscale_bin}" --config "${config_path}" "$@" ;;
+    rust) "${headscale_bin}" --config "${config_path}" --unix-socket "${socket_path}" "$@" ;;
     headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
   esac
 }

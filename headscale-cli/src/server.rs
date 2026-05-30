@@ -2639,6 +2639,85 @@ mod tests {
     use tower::ServiceExt;
     use tower::service_fn;
 
+    #[cfg(feature = "postgres-sqlx")]
+    const POSTGRES_TEST_URL_ENV: &str = "HEADSCALE_DB_POSTGRES_TEST_URL";
+
+    #[cfg(feature = "postgres-sqlx")]
+    type BoxTestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    #[cfg(feature = "postgres-sqlx")]
+    struct TempPostgresRuntimeSchema {
+        admin_pool: sqlx::PgPool,
+        runtime_pool: sqlx::PgPool,
+        quoted_name: String,
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    impl TempPostgresRuntimeSchema {
+        async fn open(test_name: &str) -> BoxTestResult<Option<Self>> {
+            use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+            use std::str::FromStr;
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            let Ok(url) = std::env::var(POSTGRES_TEST_URL_ENV) else {
+                eprintln!(
+                    "skipping Postgres runtime smoke {test_name}: {POSTGRES_TEST_URL_ENV} is not set"
+                );
+                return Ok(None);
+            };
+
+            let admin_pool = headscale_db::open_postgres_pool(&url).await?;
+            let schema = {
+                let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+                format!(
+                    "headscale_rs_pg_runtime_{}_{}_{}",
+                    std::process::id(),
+                    test_name,
+                    nanos
+                )
+            };
+            let quoted_name = quote_pg_identifier(&schema);
+
+            sqlx::query(&format!("CREATE SCHEMA {quoted_name}"))
+                .execute(&admin_pool)
+                .await?;
+
+            let runtime_options =
+                PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]);
+            let runtime_pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect_with(runtime_options)
+                .await?;
+
+            Ok(Some(Self {
+                admin_pool,
+                runtime_pool,
+                quoted_name,
+            }))
+        }
+
+        fn pool(&self) -> &sqlx::PgPool {
+            &self.runtime_pool
+        }
+
+        async fn cleanup(self) -> BoxTestResult {
+            self.runtime_pool.close().await;
+            sqlx::query(&format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                self.quoted_name
+            ))
+            .execute(&self.admin_pool)
+            .await?;
+            self.admin_pool.close().await;
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    fn quote_pg_identifier(identifier: &str) -> String {
+        format!(r#""{}""#, identifier.replace('"', r#""""#))
+    }
+
     fn oidc_runtime() -> OidcAuthRuntime {
         OidcAuthRuntime::new(OidcAuthConfig {
             issuer: "https://issuer.example".into(),
@@ -3326,6 +3405,154 @@ regions:
         let debug = format!("{:?}", oidc.as_ref().unwrap());
         assert!(debug.contains("users: Some(\"<configured>\")"));
         assert!(debug.contains("registration_handler: Some(\"<configured>\")"));
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    #[tokio::test]
+    async fn postgres_persistent_runtime_registers_and_hydrates_against_live_database()
+    -> BoxTestResult {
+        let Some(schema) = TempPostgresRuntimeSchema::open("runtime_register_hydrate").await?
+        else {
+            return Ok(());
+        };
+
+        let result = async {
+            headscale_db::migrate_postgres_foundation(schema.pool()).await?;
+            let dir = tempfile::tempdir()?;
+            let state_dir = dir.path().join("state");
+            let config_path = dir.path().join("postgres-config.yaml");
+            std::fs::write(
+                &config_path,
+                r"
+database:
+  type: postgres
+",
+            )?;
+            let parsed = crate::config::CliConfig::load(&config_path)?;
+            let mut cfg = test_run_server_config(&dir);
+            cfg.database = parsed.database;
+            cfg.policy = PolicyConfig::database();
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+
+            let runtime = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &state_dir,
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                Some(oidc_runtime()),
+                derp_map,
+                dns,
+                &cfg.policy,
+                runtime_config,
+            )
+            .await?;
+            assert!(runtime.oidc.is_some());
+
+            let user = runtime
+                .admin_service
+                .create_user(TonicRequest::new(CreateUserRequest {
+                    name: "alice".into(),
+                    display_name: String::new(),
+                    email: String::new(),
+                    picture_url: String::new(),
+                }))
+                .await?
+                .into_inner()
+                .user
+                .expect("created user");
+            runtime
+                .admin_service
+                .set_policy(TonicRequest::new(SetPolicyRequest {
+                    policy: r#"{"tagOwners":{"tag:server":["alice@"]}}"#.into(),
+                }))
+                .await?;
+
+            let auth_key = runtime
+                .admin_service
+                .create_pre_auth_key(TonicRequest::new(CreatePreAuthKeyRequest {
+                    user: user.id,
+                    reusable: true,
+                    ephemeral: false,
+                    expiration: None,
+                    acl_tags: Vec::new(),
+                }))
+                .await?
+                .into_inner()
+                .pre_auth_key
+                .expect("preauth key")
+                .key;
+
+            let node_key = "a9".repeat(32);
+            let machine_key = "b9".repeat(32);
+            let register = wire_register_authkey(
+                &runtime.state,
+                &node_key,
+                &machine_key,
+                &auth_key,
+                "pg-router",
+            )
+            .await;
+            assert!(register.machine_authorized);
+            assert!(register.error.is_empty());
+
+            let node_row = headscale_db::headscale_nodes::get_postgres_by_node_key(
+                schema.pool(),
+                &format!("nodekey:{node_key}"),
+            )
+            .await?;
+            assert_eq!(node_row.hostname, "pg-router");
+            assert_eq!(
+                node_row.register_method,
+                headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
+            );
+            assert!(
+                headscale_db::policies::get_latest_postgres(schema.pool())
+                    .await?
+                    .is_some()
+            );
+
+            drop(runtime);
+
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+            let restarted = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &state_dir,
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                None,
+                derp_map,
+                dns,
+                &cfg.policy,
+                runtime_config,
+            )
+            .await?;
+
+            let hydrated = restarted
+                .state
+                .machines
+                .get(&node_key)
+                .expect("Postgres node hydrated");
+            assert_eq!(hydrated.hostname, "pg-router");
+            assert_eq!(hydrated.user, "alice");
+            assert_eq!(hydrated.register_method, 1);
+
+            let full = wire_full_map(&restarted.state, &node_key, &machine_key).await;
+            let self_node = full.node.expect("self node after Postgres restart");
+            assert_eq!(self_node.name, "pg-router");
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        schema.cleanup().await?;
+        result
     }
 
     #[tokio::test]
@@ -4119,8 +4346,32 @@ regions:
         }
     }
 
+    #[cfg(not(feature = "postgres-sqlx"))]
     #[test]
     fn runtime_config_rejects_unsupported_postgres_before_opening_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "
+server_url: \"https://headscale.example\"
+database:
+  type: postgres
+",
+        )
+        .unwrap();
+        let parsed = crate::config::CliConfig::load(&config_path).unwrap();
+        let mut cfg = test_run_server_config(&dir);
+        cfg.database = parsed.database;
+
+        let err = validate_supported_runtime_config(&cfg).unwrap_err();
+
+        assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    #[test]
+    fn runtime_config_accepts_postgres_when_feature_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         std::fs::write(
@@ -4136,9 +4387,7 @@ database:
         let mut cfg = test_run_server_config(&dir);
         cfg.database = parsed.database;
 
-        let err = validate_supported_runtime_config(&cfg).unwrap_err();
-
-        assert!(format!("{err:#}").contains("headscale-rs server currently supports SQLite only"));
+        validate_supported_runtime_config(&cfg).unwrap();
     }
 
     #[test]

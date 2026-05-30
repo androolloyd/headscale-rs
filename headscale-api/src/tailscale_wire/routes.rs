@@ -263,6 +263,8 @@ impl PrimaryRouteState {
             if let Some(new_primary) = new_primary {
                 self.primaries.insert(route.clone(), *new_primary);
                 changed = true;
+            } else if self.primaries.remove(route).is_some() {
+                changed = true;
             }
         }
 
@@ -747,6 +749,21 @@ mod tests {
         assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
         assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 2)]));
         assert_eq!(unhealthy(&state), vec![1, 2]);
+    }
+
+    #[test]
+    fn all_unhealthy_candidates_after_primary_withdraw_do_not_keep_stale_primary() {
+        let mut state = PrimaryRouteState::new();
+        assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_node_health(2, false));
+
+        assert!(state.set_routes(1, Vec::<String>::new()).unwrap());
+
+        assert_eq!(state.primary_routes(1), Vec::<String>::new());
+        assert_eq!(state.primary_routes(2), Vec::<String>::new());
+        assert_eq!(primaries(&state), BTreeMap::new());
+        assert_eq!(unhealthy(&state), vec![2]);
     }
 
     #[test]

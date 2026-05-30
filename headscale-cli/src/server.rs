@@ -1801,6 +1801,12 @@ struct IpFamilyAllocator {
     used: BTreeSet<u128>,
 }
 
+#[derive(Clone, Copy)]
+struct ExistingNodeIpAddresses<'a> {
+    ipv4: Option<&'a str>,
+    ipv6: Option<&'a str>,
+}
+
 impl CidrIpAllocator {
     #[cfg(test)]
     fn from_cidr(cidr: &str) -> Result<Self> {
@@ -1818,12 +1824,29 @@ impl CidrIpAllocator {
         cidr_v6: Option<&str>,
         strategy: IpAllocationStrategy,
     ) -> Result<Self> {
-        let allocator = Self::from_cidrs_with_strategy(cidr, cidr_v6, strategy)?;
         let rows = headscale_db::headscale_nodes::list(pool)
             .await
             .context("read existing node IP addresses for allocator")?;
+        Self::from_existing_node_ips(
+            cidr,
+            cidr_v6,
+            strategy,
+            rows.iter().map(|row| ExistingNodeIpAddresses {
+                ipv4: row.ipv4.as_deref(),
+                ipv6: row.ipv6.as_deref(),
+            }),
+        )
+    }
+
+    fn from_existing_node_ips<'a>(
+        cidr: &str,
+        cidr_v6: Option<&str>,
+        strategy: IpAllocationStrategy,
+        rows: impl IntoIterator<Item = ExistingNodeIpAddresses<'a>>,
+    ) -> Result<Self> {
+        let allocator = Self::from_cidrs_with_strategy(cidr, cidr_v6, strategy)?;
         for row in rows {
-            allocator.seed_existing(row.ipv4.as_deref(), row.ipv6.as_deref())?;
+            allocator.seed_existing(row.ipv4, row.ipv6)?;
         }
         Ok(allocator)
     }
@@ -4509,6 +4532,29 @@ database:
         allocator
             .seed_existing(Some("100.64.0.1"), Some("fd7a:115c:a1e0::1"))
             .unwrap();
+
+        assert_eq!(
+            allocator.allocate("first").unwrap(),
+            Ipv4Addr::new(100, 64, 0, 2)
+        );
+        assert_eq!(
+            allocator.allocate_ipv6("first").unwrap(),
+            Some("fd7a:115c:a1e0::2".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn cidr_allocator_seeds_from_backend_loaded_node_ips() {
+        let allocator = CidrIpAllocator::from_existing_node_ips(
+            "100.64.0.0/30",
+            Some("fd7a:115c:a1e0::/126"),
+            IpAllocationStrategy::Sequential,
+            [ExistingNodeIpAddresses {
+                ipv4: Some("100.64.0.1"),
+                ipv6: Some("fd7a:115c:a1e0::1"),
+            }],
+        )
+        .unwrap();
 
         assert_eq!(
             allocator.allocate("first").unwrap(),

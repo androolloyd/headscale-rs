@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:08 ADT
+Updated: 2026-05-30 09:14 ADT
 
 ## Current State
 
@@ -31,15 +31,25 @@ Recent accepted slices:
 - The node slice adds a headscale-go-shaped `nodes` migration and Postgres node
   primitives for create/read/list/update/tag/rename/route/IP/logout/delete
   paths.
+- The current in-progress runtime extraction makes allocator seeding consume
+  backend-loaded node IP rows rather than baking that logic directly into the
+  SQLite pool path.
 
 Current multi-agent split:
 
 - Local critical path: Postgres runtime/import wiring, starting from the
   SQLite-only `Database`/server runtime boundary.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
-  backend abstraction plan.
+  backend abstraction plan. Outcome: runtime still opens SQLite unconditionally,
+  `headscale-db::Database` is SQLite-only, and the existing persistent admin
+  adapters are concrete `SqlitePool` adapters.
 - Explorer lane: residual current-upstream CLI output/help drift inventory.
+  Outcome: remaining CLI work is P2 byte-for-byte success/error/prompt snapshot
+  hardening, not missing core transport wiring.
 - Explorer lane: residual route/SSH paired real-client coverage inventory.
+  Outcome: route/SSH are broadly paired, with remaining route-via edge smokes,
+  richer route-health reload+restart combinations, and cancelled OIDC SSH-check
+  denial coverage still open.
 
 Verified for the API-key slice:
 

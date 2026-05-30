@@ -8,6 +8,8 @@
 use crate::{DbError, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::{PgConnection, PgPool};
 
 const REGISTER_METHOD_OIDC: &str = "oidc";
 const USER_COLUMNS: &str = r"
@@ -37,6 +39,25 @@ const USER_COLUMNS: &str = r"
 
 fn user_select(suffix: &str) -> String {
     format!("SELECT {USER_COLUMNS} FROM users {suffix}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_USER_COLUMNS: &str = r"
+        id,
+        COALESCE(name, '') AS name,
+        COALESCE(display_name, '') AS display_name,
+        COALESCE(email, '') AS email,
+        provider_identifier,
+        COALESCE(provider, '') AS provider,
+        COALESCE(profile_pic_url, '') AS profile_pic_url,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
+        FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
+";
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_user_select(suffix: &str) -> String {
+    format!("SELECT {POSTGRES_USER_COLUMNS} FROM users {suffix}")
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
@@ -360,6 +381,249 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
         return Err(DbError::NotFound(format!("user id={id}")));
     }
     tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres(pool: &PgPool, params: CreateParams) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_on_connection(&mut conn, params).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+) -> Result<UserRow> {
+    validate_hostname(&params.name).map_err(|e| DbError::General(e.to_string()))?;
+    let provider_identifier = normalize_provider_identifier(params.provider_identifier);
+    let now = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO users
+            (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), to_timestamp($7), NULL)
+        RETURNING id
+        ",
+    )
+    .bind(&params.name)
+    .bind(&params.display_name)
+    .bind(&params.email)
+    .bind(&provider_identifier)
+    .bind(&params.provider)
+    .bind(&params.profile_pic_url)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?;
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_or_update_oidc_user_postgres(
+    pool: &PgPool,
+    params: OidcUserParams,
+) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    create_or_update_oidc_user_postgres_on_connection(&mut conn, params).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_or_update_oidc_user_postgres_on_connection(
+    conn: &mut PgConnection,
+    params: OidcUserParams,
+) -> Result<UserRow> {
+    let provider_identifier = normalize_oidc_provider_identifier(params.provider_identifier)
+        .map_err(|e| DbError::General(e.to_string()))?;
+    let now = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO users
+            (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), to_timestamp($7), NULL)
+        ON CONFLICT (provider_identifier) WHERE provider_identifier IS NOT NULL DO UPDATE SET
+            name = CASE WHEN excluded.name != '' THEN excluded.name ELSE users.name END,
+            display_name = excluded.display_name,
+            email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
+            provider_identifier = excluded.provider_identifier,
+            provider = excluded.provider,
+            profile_pic_url = excluded.profile_pic_url,
+            updated_at = excluded.updated_at
+        WHERE users.deleted_at IS NULL
+        RETURNING id
+        ",
+    )
+    .bind(&params.name)
+    .bind(&params.display_name)
+    .bind(&params.email)
+    .bind(&provider_identifier)
+    .bind(REGISTER_METHOD_OIDC)
+    .bind(&params.profile_pic_url)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?;
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_id_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id_on_connection(conn: &mut PgConnection, id: i64) -> Result<UserRow> {
+    let query = postgres_user_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, UserRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_name(pool: &PgPool, name: &str) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_name_on_connection(&mut conn, name).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_name_on_connection(
+    conn: &mut PgConnection,
+    name: &str,
+) -> Result<UserRow> {
+    let query = postgres_user_select("WHERE name = $1 AND deleted_at IS NULL ORDER BY id");
+    let rows = sqlx::query_as::<_, UserRow>(&query)
+        .bind(name)
+        .fetch_all(&mut *conn)
+        .await?;
+    match rows.len() {
+        0 => Err(DbError::NotFound(format!("user name={name}"))),
+        1 => Ok(rows.into_iter().next().expect("len checked")),
+        n => Err(DbError::General(format!(
+            "expected exactly one user, found {n}"
+        ))),
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_oidc_identifier(pool: &PgPool, id: &str) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_oidc_identifier_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_oidc_identifier_on_connection(
+    conn: &mut PgConnection,
+    id: &str,
+) -> Result<UserRow> {
+    let query = postgres_user_select("WHERE provider_identifier = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, UserRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres(pool: &PgPool) -> Result<Vec<UserRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_on_connection(&mut conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<UserRow>> {
+    let query = postgres_user_select("WHERE deleted_at IS NULL ORDER BY id");
+    sqlx::query_as::<_, UserRow>(&query)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn rename_postgres(pool: &PgPool, id: i64, new_name: &str) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    rename_postgres_on_connection(&mut conn, id, new_name).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn rename_postgres_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    new_name: &str,
+) -> Result<UserRow> {
+    validate_hostname(new_name).map_err(|e| DbError::General(e.to_string()))?;
+    let existing = get_postgres_by_id_on_connection(conn, id).await?;
+    if existing.provider == REGISTER_METHOD_OIDC {
+        return Err(DbError::General(
+            UserError::CannotChangeOidcUser.to_string(),
+        ));
+    }
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE users
+        SET name = $1, updated_at = to_timestamp($2)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(new_name)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("user id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn touch_postgres_by_name(pool: &PgPool, name: &str) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    touch_postgres_by_name_on_connection(&mut conn, name).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn touch_postgres_by_name_on_connection(
+    conn: &mut PgConnection,
+    name: &str,
+) -> Result<()> {
+    let now = now_unix();
+    sqlx::query(
+        "
+        UPDATE users
+        SET updated_at = to_timestamp($1)
+        WHERE name = $2 AND deleted_at IS NULL
+        ",
+    )
+    .bind(now)
+    .bind(name)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    destroy_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let affected = sqlx::query("DELETE FROM users WHERE id = $1 AND deleted_at IS NULL")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("user id={id}")));
+    }
     Ok(())
 }
 

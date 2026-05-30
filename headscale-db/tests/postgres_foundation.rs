@@ -2,7 +2,7 @@
 
 use headscale_db::{
     HEADSCALE_GO_CURRENT_VERSION, check_postgres_health_on_connection,
-    migrate_postgres_foundation_on_connection, open_postgres_pool, policies,
+    migrate_postgres_foundation_on_connection, open_postgres_pool, policies, users,
 };
 use sqlx::{PgConnection, PgPool};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,6 +104,192 @@ async fn postgres_health_check_pings_database() -> TestResult {
     };
 
     let result = check_postgres_health_on_connection(&mut schema.conn).await;
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_user_primitives_match_sqlite_contract() -> TestResult {
+    let Some(mut schema) = TempSchema::open("users").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let alice = users::create_postgres_on_connection(
+            &mut schema.conn,
+            users::CreateParams {
+                name: "alice".into(),
+                display_name: "Alice Smith".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: None,
+                provider: "cli".into(),
+                profile_pic_url: "https://example.com/alice.png".into(),
+            },
+        )
+        .await?;
+        assert_eq!(alice.name, "alice");
+        assert_eq!(alice.display(), "Alice Smith");
+        assert_eq!(alice.username(), "alice@example.com");
+        assert_eq!(alice.provider, "cli");
+        assert!(alice.created_at > 0);
+        assert_eq!(alice.created_at, alice.updated_at);
+        assert!(alice.deleted_at.is_none());
+
+        assert_eq!(
+            users::get_postgres_by_id_on_connection(&mut schema.conn, alice.id)
+                .await?
+                .name,
+            "alice"
+        );
+        assert_eq!(
+            users::get_postgres_by_name_on_connection(&mut schema.conn, "alice")
+                .await?
+                .id,
+            alice.id
+        );
+        assert!(matches!(
+            users::create_postgres_on_connection(
+                &mut schema.conn,
+                users::CreateParams {
+                    name: "alice".into(),
+                    provider: "cli".into(),
+                    ..users::CreateParams::default()
+                },
+            )
+            .await
+            .unwrap_err(),
+            headscale_db::DbError::General(_)
+        ));
+
+        let renamed =
+            users::rename_postgres_on_connection(&mut schema.conn, alice.id, "renamed").await?;
+        assert_eq!(renamed.name, "renamed");
+        users::touch_postgres_by_name_on_connection(&mut schema.conn, "renamed").await?;
+        assert_eq!(
+            users::list_postgres_on_connection(&mut schema.conn)
+                .await?
+                .len(),
+            1
+        );
+
+        users::destroy_postgres_on_connection(&mut schema.conn, renamed.id).await?;
+        assert!(
+            users::list_postgres_on_connection(&mut schema.conn)
+                .await?
+                .is_empty()
+        );
+        assert!(matches!(
+            users::destroy_postgres_on_connection(&mut schema.conn, renamed.id)
+                .await
+                .unwrap_err(),
+            headscale_db::DbError::NotFound(_)
+        ));
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_oidc_user_primitives_match_upsert_contract() -> TestResult {
+    let Some(mut schema) = TempSchema::open("oidc_users").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let original = users::create_or_update_oidc_user_postgres_on_connection(
+            &mut schema.conn,
+            users::OidcUserParams {
+                name: "oidc-user".into(),
+                email: "old@example.com".into(),
+                display_name: "Old Name".into(),
+                provider_identifier: "issuer/sub".into(),
+                profile_pic_url: "https://example.com/old.png".into(),
+            },
+        )
+        .await?;
+        assert_eq!(original.name, "oidc-user");
+        assert_eq!(original.provider, "oidc");
+        assert_eq!(original.provider_identifier.as_deref(), Some("issuer/sub"));
+        assert_eq!(
+            users::get_postgres_by_oidc_identifier_on_connection(&mut schema.conn, "issuer/sub")
+                .await?
+                .id,
+            original.id
+        );
+        assert!(matches!(
+            users::rename_postgres_on_connection(&mut schema.conn, original.id, "new-name")
+                .await
+                .unwrap_err(),
+            headscale_db::DbError::General(_)
+        ));
+
+        let updated = users::create_or_update_oidc_user_postgres_on_connection(
+            &mut schema.conn,
+            users::OidcUserParams {
+                display_name: "New Name".into(),
+                provider_identifier: "issuer/sub".into(),
+                ..users::OidcUserParams::default()
+            },
+        )
+        .await?;
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.name, "oidc-user");
+        assert_eq!(updated.email, "old@example.com");
+        assert_eq!(updated.display_name, "New Name");
+        assert_eq!(updated.profile_pic_url, "");
+
+        users::create_postgres_on_connection(
+            &mut schema.conn,
+            users::CreateParams {
+                name: "same".into(),
+                provider_identifier: Some("issuer/a".into()),
+                provider: "oidc".into(),
+                ..users::CreateParams::default()
+            },
+        )
+        .await?;
+        users::create_postgres_on_connection(
+            &mut schema.conn,
+            users::CreateParams {
+                name: "same".into(),
+                provider_identifier: Some("issuer/b".into()),
+                provider: "oidc".into(),
+                ..users::CreateParams::default()
+            },
+        )
+        .await?;
+        assert!(matches!(
+            users::get_postgres_by_name_on_connection(&mut schema.conn, "same")
+                .await
+                .unwrap_err(),
+            headscale_db::DbError::General(_)
+        ));
+
+        sqlx::query("UPDATE users SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1")
+            .bind(updated.id)
+            .execute(&mut schema.conn)
+            .await?;
+        assert!(matches!(
+            users::get_postgres_by_id_on_connection(&mut schema.conn, updated.id)
+                .await
+                .unwrap_err(),
+            headscale_db::DbError::NotFound(_)
+        ));
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
     schema.cleanup().await?;
     result?;
     Ok(())

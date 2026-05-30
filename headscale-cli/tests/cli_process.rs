@@ -1266,6 +1266,15 @@ fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label
 }
 
 fn assert_serve_default_config_snapshot(config: &str, expected: &str, label: &str) {
+    assert_serve_default_config_args_snapshot(config, &["serve"], expected, label);
+}
+
+fn assert_serve_default_config_args_snapshot(
+    config: &str,
+    args: &[&str],
+    expected: &str,
+    label: &str,
+) {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let db_path = cwd.path().join("should-not-exist.sqlite");
@@ -1283,7 +1292,7 @@ database:
     )
     .unwrap();
 
-    let output = headscale_in(&["serve"], cwd.path(), home.path());
+    let output = headscale_in(args, cwd.path(), home.path());
 
     assert_process_stderr_snapshot(&output, 1, expected, label);
     assert!(
@@ -1464,6 +1473,18 @@ dns:
         "serve missing noise private key",
     );
 
+    assert_serve_default_config_args_snapshot(
+        r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        &["-o", "json", "serve"],
+        include_str!("snapshots/serve_missing_noise_private_key_json.stderr"),
+        "serve missing noise private key json",
+    );
+
     assert_serve_default_config_snapshot(
         r#"
 server_url: "headscale.example"
@@ -1621,6 +1642,15 @@ database:
         1,
         include_str!("snapshots/serve_unsupported_postgres.stderr"),
         "serve unsupported postgres",
+    );
+
+    let output = headscale_in(&["-ojson-line", "serve"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/serve_unsupported_postgres_json_line.stderr"),
+        "serve unsupported postgres json-line",
     );
     assert!(
         !db_path.exists(),
@@ -3725,6 +3755,13 @@ async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() 
         include_str!("snapshots/grpc_remote_auth_failure_json_line.stderr")
     );
 
+    let bad_auth_json = wait_for_headscale_status(&bad_config, &["-o", "json", "health"], 4).await;
+    assert_eq!(stdout(&bad_auth_json), "");
+    assert_eq!(
+        stderr(&bad_auth_json),
+        include_str!("snapshots/grpc_remote_auth_failure_json.stderr")
+    );
+
     handle.abort();
     let _ = handle.await;
 }
@@ -3740,6 +3777,13 @@ async fn live_local_grpc_health_failure_matches_process_stderr() {
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_live_health_failure_json_line.stderr")
     );
 
     handle.abort();

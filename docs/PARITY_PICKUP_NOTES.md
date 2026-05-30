@@ -30,25 +30,29 @@ cargo test -p headscale-cli run_server_http01_acme_issues_through_production_cha
 CARGO_INCREMENTAL=0 cargo clippy -p headscale-cli --all-targets -- -D warnings
 ```
 
-## Next Safe Slice
+## Completed After Pickup
 
-The narrow next lane is CLI structured-error snapshot parity. It has no edits yet after `cdd220a`.
-
-Suggested additive tests from the helper agent:
+CLI structured-error snapshot parity was completed after `4d04612`:
 
 - Add `serve_missing_noise_private_key_json.stderr` near `serve_rejects_supported_server_init_validation_before_state_startup`
 - Add `serve_unsupported_postgres_json_line.stderr` beside `serve_rejects_unsupported_postgres_before_sqlite_startup`
 - Add `grpc_live_health_failure_json_line.stderr` inside `live_local_grpc_health_failure_matches_process_stderr`
 - Add `grpc_remote_auth_failure_json.stderr` beside `live_remote_grpc_config_success_and_auth_errors_match_process_output`
 
-Expected test targets after that slice:
+Verified test targets for that slice:
 
 ```sh
-cargo test -p headscale-cli --test cli_process serve_rejects_supported_server_init_validation_before_state_startup -- --nocapture
-cargo test -p headscale-cli --test cli_process serve_rejects_unsupported_postgres_before_sqlite_startup -- --nocapture
-cargo test -p headscale-cli --test cli_process live_remote_grpc_config_success_and_auth_errors_match_process_output -- --nocapture
-cargo test -p headscale-cli --test cli_process live_local_grpc_health_failure_matches_process_stderr -- --nocapture
+CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process serve_rejects_supported_server_init_validation_before_state_startup -- --nocapture
+CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process serve_rejects_unsupported_postgres_before_sqlite_startup -- --nocapture
+CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_remote_grpc_config_success_and_auth_errors_match_process_output -- --nocapture
+CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_grpc_health_failure_matches_process_stderr -- --nocapture
 ```
+
+## Next Safe Slice
+
+The next narrow lanes are either TLS-ALPN controlled-CA production-process
+coverage through the real public TLS listener, or broader current-upstream CLI
+output drift snapshots once a fresh headscale-go comparison target is selected.
 
 ## Remaining Larger Parity Tracks
 
@@ -58,4 +62,3 @@ cargo test -p headscale-cli --test cli_process live_local_grpc_health_failure_ma
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed
-

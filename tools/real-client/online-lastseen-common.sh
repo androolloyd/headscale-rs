@@ -19,7 +19,11 @@ timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 run_id="hs-online-lastseen-${target}-${database_backend}-$(date +%s)-$$"
-client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
+case "${target}" in
+  rust) client_target="rs" ;;
+  headscale-go) client_target="go" ;;
+esac
+client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backend}-$$}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 
 case "${database_backend}" in

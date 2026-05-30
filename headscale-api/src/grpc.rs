@@ -269,6 +269,16 @@ pub mod upstream {
         }
     }
 
+    #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
+    #[async_trait]
+    impl DatabaseHealthCheck for sqlx::PgPool {
+        async fn ping(&self) -> Result<(), String> {
+            headscale_db::check_postgres_health(self)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+
     #[cfg(feature = "admin")]
     #[async_trait]
     impl PolicyPersistence for sqlx::SqlitePool {
@@ -286,6 +296,32 @@ pub mod upstream {
 
         async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
             headscale_db::policies::set(self, policy)
+                .await
+                .map(|policy| PersistedPolicy {
+                    policy: policy.data,
+                    updated_at: policy.updated_at,
+                })
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
+    #[async_trait]
+    impl PolicyPersistence for sqlx::PgPool {
+        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
+            headscale_db::policies::get_latest_postgres(self)
+                .await
+                .map(|row| {
+                    row.map(|policy| PersistedPolicy {
+                        policy: policy.data,
+                        updated_at: policy.updated_at,
+                    })
+                })
+                .map_err(|e| e.to_string())
+        }
+
+        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
+            headscale_db::policies::set_postgres(self, policy)
                 .await
                 .map(|policy| PersistedPolicy {
                     policy: policy.data,
@@ -343,6 +379,11 @@ pub mod upstream {
             self.with_database_health(Arc::new(pool))
         }
 
+        #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
+        pub fn with_postgres_database_pool(self, pool: sqlx::PgPool) -> Self {
+            self.with_database_health(Arc::new(pool))
+        }
+
         pub fn with_policy_persistence(
             mut self,
             policy_persistence: Arc<dyn PolicyPersistence>,
@@ -354,6 +395,11 @@ pub mod upstream {
 
         #[cfg(feature = "admin")]
         pub fn with_policy_pool(self, pool: sqlx::SqlitePool) -> Self {
+            self.with_policy_persistence(Arc::new(pool))
+        }
+
+        #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
+        pub fn with_postgres_policy_pool(self, pool: sqlx::PgPool) -> Self {
             self.with_policy_persistence(Arc::new(pool))
         }
 

@@ -42,6 +42,9 @@ admin = [
     "dep:headscale-db",
     "dep:sqlx",
 ]
+# Compile Postgres-backed admin store adapters for parity work without
+# changing the default SQLite runtime wiring.
+postgres-sqlx = ["admin", "headscale-db/postgres-sqlx", "sqlx/postgres"]
 
 [dependencies]
 tokio.workspace = true

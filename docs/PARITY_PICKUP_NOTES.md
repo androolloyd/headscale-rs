@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:23 ADT
+Updated: 2026-05-30 09:26 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed implementation commit before the current real-client smoke slice:
-  `11cb90d Extract allocator seeding from SQLite runtime path`
+- Latest pushed implementation commit before the current Postgres API adapter slice:
+  `06b9ad2 Add OIDC SSH check cancel smoke parity`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -35,6 +35,9 @@ Recent accepted slices:
 - The current in-progress runtime extraction makes allocator seeding consume
   backend-loaded node IP rows rather than baking that logic directly into the
   SQLite pool path.
+- The current in-progress API adapter slice adds feature-gated Postgres
+  policy-persistence and database-health trait implementations for the gRPC
+  admin service without removing the explicit Postgres `serve` guard.
 
 Current multi-agent split:
 

@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 11:50 ADT
+Updated: 2026-05-30 12:08 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed baseline before this pickup:
-  `b3eeb43 Add Postgres serve process smoke`
+  `5fdf1ee Pin map session resume parity`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -93,6 +93,14 @@ Recent accepted slices:
   `policy --bypass-grpc-and-access-database-directly`, migrates the foundation
   tables, proves missing-policy error shape, and round-trips `set`, `get`, and
   `check` before dropping the temporary database.
+- This slice adds an env-gated live-Postgres OIDC runtime smoke in
+  `headscale-cli/src/server.rs`. It creates an OIDC user through the Pg user
+  store, completes interactive wire registration through
+  `PersistentPostgresOidcRegistrationHandler`, proves same-machine OIDC rekey
+  replacement in the live registry, checks Go-shaped Pg node rows and route
+  hostinfo preservation, runs a full map against the rekeyed node, and rebuilds
+  the Pg runtime to prove restart hydration. The smoke skips cleanly when
+  `HEADSCALE_DB_POSTGRES_TEST_URL` is absent.
 
 Current multi-agent split:
 
@@ -104,9 +112,10 @@ Current multi-agent split:
   Postgres without a running server, an env-gated live-Pg runtime
   construction/register/hydration smoke is covered, and the first production
   Pg `serve` process smoke now covers listeners plus local gRPC/CLI
-  health/user/preauth/policy operations. Remaining critical work is broader
-  production Pg serve coverage for OIDC/wire registry projection and
-  stock-client map/registration flows.
+  health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
+  covers OIDC registration, same-machine rekey, live-registry projection, full
+  map output, and restart hydration. Remaining critical work is broader
+  production Pg serve coverage for stock-client map/registration flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -207,10 +216,9 @@ adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
 operations against Pg, and direct policy DB bypass now round-trips against
 configured Pg without a running server. The next critical slice is broader
-production Pg serve coverage for OIDC/wire registry projection and stock-client
-registration/map flows. The other narrow lanes remain
-current-upstream CLI output drift snapshots, map/session churn parity, and
-remaining route/SSH stock-client edge rows.
+production Pg serve coverage for stock-client registration/map flows. The other
+narrow lanes remain current-upstream CLI output drift snapshots,
+map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
@@ -218,10 +226,10 @@ remaining route/SSH stock-client edge rows.
   registration/SSH-check approval now compiles, foundation migration has
   import/version guards, backend-aware direct policy DB bypass is wired and
   process-covered against Pg without a running server, and an env-gated live-Pg
-  runtime register/hydrate smoke exists; the first production
+  runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
+  smoke exist; the first production
   Pg `serve` process smoke covers public health plus local gRPC
-  health/user/preauth/policy CLI paths, while OIDC/wire and stock-client serve
-  smokes remain
+  health/user/preauth/policy CLI paths, while stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

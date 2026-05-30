@@ -3555,6 +3555,227 @@ database:
         result
     }
 
+    #[cfg(feature = "postgres-sqlx")]
+    #[tokio::test]
+    async fn postgres_persistent_runtime_oidc_register_rekeys_and_projects_live_registry()
+    -> BoxTestResult {
+        let Some(schema) = TempPostgresRuntimeSchema::open("oidc_rekey_project").await? else {
+            return Ok(());
+        };
+
+        let result = async {
+            headscale_db::migrate_postgres_foundation(schema.pool()).await?;
+            let dir = tempfile::tempdir()?;
+            let state_dir = dir.path().join("state");
+            let config_path = dir.path().join("postgres-config.yaml");
+            std::fs::write(
+                &config_path,
+                r"
+database:
+  type: postgres
+",
+            )?;
+            let parsed = crate::config::CliConfig::load(&config_path)?;
+            let mut cfg = test_run_server_config(&dir);
+            cfg.database = parsed.database;
+            cfg.policy = PolicyConfig::database();
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+
+            let runtime = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &state_dir,
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                Some(oidc_runtime()),
+                derp_map,
+                dns,
+                &cfg.policy,
+                runtime_config,
+            )
+            .await?;
+            assert!(runtime.oidc.is_some());
+
+            let oidc_users = Arc::new(PersistentPostgresUserAdmin::new(schema.pool().clone()));
+            let oidc_user = headscale_api::oidc::OidcUserStore::create_or_update_oidc_user(
+                oidc_users.as_ref(),
+                headscale_api::oidc::OidcUserProfile {
+                    name: "alice".into(),
+                    display_name: "Alice Example".into(),
+                    email: "alice@example.com".into(),
+                    provider_identifier: "https://issuer.example/alice-sub".into(),
+                    provider: REGISTER_METHOD_OIDC.into(),
+                    profile_pic_url: "https://issuer.example/alice.png".into(),
+                },
+            )
+            .await?;
+            assert_eq!(oidc_user.provider, REGISTER_METHOD_OIDC);
+
+            runtime
+                .admin_service
+                .set_policy(TonicRequest::new(SetPolicyRequest {
+                    policy: r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#.into(),
+                }))
+                .await?;
+
+            let oidc_machines = Arc::new(
+                PersistentPostgresMachineAdmin::new(schema.pool().clone())
+                    .with_user_admin(oidc_users.clone())
+                    .with_wire_registry(runtime.state.machines.clone()),
+            );
+            let oidc_handler = PersistentPostgresOidcRegistrationHandler::new(
+                runtime.state.registration_cache.clone(),
+                oidc_machines,
+                runtime.state.policy.clone(),
+            )
+            .with_wire_registry(runtime.state.machines.clone());
+
+            let first_node_key = "c9".repeat(32);
+            let second_node_key = "d9".repeat(32);
+            let machine_key = "e9".repeat(32);
+            let first_register = wire_register_interactive(
+                &runtime.state,
+                &first_node_key,
+                &machine_key,
+                "oidc-router-one",
+                &["10.81.0.0/24"],
+            )
+            .await;
+            assert!(!first_register.machine_authorized);
+            let first_registration_id = registration_id_from_auth_url(&first_register.auth_url);
+            let first_result = oidc_handler
+                .complete_oidc_registration(&first_registration_id, &oidc_user, None)
+                .await?;
+            assert!(first_result.new_node);
+
+            let first_row = headscale_db::headscale_nodes::get_postgres_by_node_key(
+                schema.pool(),
+                &format!("nodekey:{first_node_key}"),
+            )
+            .await?;
+            assert_eq!(first_row.machine_key, format!("mkey:{machine_key}"));
+            assert_eq!(first_row.user_id, Some(i64::try_from(oidc_user.id)?));
+            assert_eq!(
+                first_row.register_method,
+                headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+            );
+            assert_eq!(first_row.approved_route_list(), Vec::<String>::new());
+            let first_ipv4 = first_row.ipv4.clone();
+            let first_wire = runtime
+                .state
+                .machines
+                .get(&first_node_key)
+                .expect("first OIDC node projected into live registry");
+            assert_eq!(first_wire.hostname, "oidc-router-one");
+            assert_eq!(first_wire.user, "alice@example.com");
+            assert_eq!(first_wire.register_method, 3);
+            assert_eq!(first_wire.available_routes, vec!["10.81.0.0/24"]);
+
+            let second_register = wire_register_interactive(
+                &runtime.state,
+                &second_node_key,
+                &machine_key,
+                "oidc-router-two",
+                &["10.82.0.0/24"],
+            )
+            .await;
+            assert!(!second_register.machine_authorized);
+            let second_registration_id = registration_id_from_auth_url(&second_register.auth_url);
+            let second_result = oidc_handler
+                .complete_oidc_registration(&second_registration_id, &oidc_user, None)
+                .await?;
+            assert!(!second_result.new_node);
+
+            assert!(runtime.state.machines.get(&first_node_key).is_none());
+            let second_wire = runtime
+                .state
+                .machines
+                .get(&second_node_key)
+                .expect("rekeyed OIDC node projected into live registry");
+            assert_eq!(second_wire.hostname, "oidc-router-two");
+            assert_eq!(second_wire.user, "alice@example.com");
+            assert_eq!(second_wire.register_method, 3);
+            assert_eq!(second_wire.available_routes, vec!["10.82.0.0/24"]);
+            assert_eq!(
+                headscale_db::headscale_nodes::list_postgres(schema.pool())
+                    .await?
+                    .len(),
+                1
+            );
+
+            let second_row = headscale_db::headscale_nodes::get_postgres_by_machine_key(
+                schema.pool(),
+                &format!("mkey:{machine_key}"),
+            )
+            .await?;
+            assert_eq!(second_row.node_key, format!("nodekey:{second_node_key}"));
+            assert_eq!(second_row.hostname, "oidc-router-two");
+            assert_eq!(second_row.user_id, Some(i64::try_from(oidc_user.id)?));
+            assert_eq!(second_row.ipv4, first_ipv4);
+            assert_eq!(
+                second_row.host_info_value()["RoutableIPs"],
+                serde_json::json!(["10.82.0.0/24"])
+            );
+
+            let full = wire_full_map(&runtime.state, &second_node_key, &machine_key).await;
+            let self_node = full.node.expect("self node after OIDC Pg rekey");
+            assert_eq!(self_node.name, "oidc-router-two");
+            assert_eq!(
+                self_node.hostinfo.routable_ips,
+                vec!["10.82.0.0/24".to_string()]
+            );
+
+            drop(runtime);
+
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+            let restarted = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &state_dir,
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                None,
+                derp_map,
+                dns,
+                &cfg.policy,
+                runtime_config,
+            )
+            .await?;
+
+            let hydrated = restarted
+                .state
+                .machines
+                .get(&second_node_key)
+                .expect("rekeyed OIDC Postgres node hydrated");
+            assert_eq!(hydrated.hostname, "oidc-router-two");
+            assert_eq!(hydrated.user, "alice@example.com");
+            assert_eq!(hydrated.register_method, 3);
+            assert_eq!(hydrated.available_routes, vec!["10.82.0.0/24"]);
+            let restarted_full =
+                wire_full_map(&restarted.state, &second_node_key, &machine_key).await;
+            let restarted_self = restarted_full
+                .node
+                .expect("self node after OIDC Pg hydration");
+            assert_eq!(restarted_self.name, "oidc-router-two");
+            assert_eq!(
+                restarted_self.hostinfo.routable_ips,
+                vec!["10.82.0.0/24".to_string()]
+            );
+
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        schema.cleanup().await?;
+        result
+    }
+
     #[tokio::test]
     async fn persistent_wire_runtime_without_oidc_keeps_web_registration_mode() {
         let db = Database::in_memory().await.unwrap();

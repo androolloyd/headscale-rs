@@ -1,12 +1,12 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:01 ADT
+Updated: 2026-05-30 09:08 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before the Postgres node pickup: `2bd5ef5 Add Postgres preauth key foundation primitives`
+- Latest pushed implementation commit: `7419e47 Add Postgres node foundation primitives`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -31,6 +31,15 @@ Recent accepted slices:
 - The node slice adds a headscale-go-shaped `nodes` migration and Postgres node
   primitives for create/read/list/update/tag/rename/route/IP/logout/delete
   paths.
+
+Current multi-agent split:
+
+- Local critical path: Postgres runtime/import wiring, starting from the
+  SQLite-only `Database`/server runtime boundary.
+- Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
+  backend abstraction plan.
+- Explorer lane: residual current-upstream CLI output/help drift inventory.
+- Explorer lane: residual route/SSH paired real-client coverage inventory.
 
 Verified for the API-key slice:
 

@@ -7,7 +7,7 @@ Updated: 2026-05-30 10:04 ADT
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `a46f9ad Add Postgres user and preauth admin adapters`
+  `96477a2 Add Postgres machine admin adapter`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -44,7 +44,7 @@ Recent accepted slices:
   `PersistentPostgresUserAdmin` and `PersistentPostgresPreauthAdmin`
   adapters, and aligns Postgres user deletion with the SQLite/headscale-go
   non-empty-user and owned-preauth cleanup semantics.
-- The current Postgres machine-adapter slice adds a feature-gated
+- `96477a2` adds a feature-gated
   `PersistentPostgresMachineAdmin` over the existing Postgres node primitives,
   including admin node mutations, auth-key registration persistence, runtime
   state sync, wire-registry hydration, route/address mutation, and node delete.

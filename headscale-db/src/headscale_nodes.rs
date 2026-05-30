@@ -10,6 +10,8 @@ use crate::{DbError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::{PgConnection, PgPool};
 
 pub const REGISTER_METHOD_AUTH_KEY: &str = "authkey";
 pub const REGISTER_METHOD_CLI: &str = "cli";
@@ -61,6 +63,35 @@ const NODE_COLUMNS: &str = r"
 
 fn node_select(suffix: &str) -> String {
     format!("SELECT {NODE_COLUMNS} FROM nodes {suffix}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_NODE_COLUMNS: &str = r"
+        id,
+        COALESCE(machine_key, '') AS machine_key,
+        COALESCE(node_key, '') AS node_key,
+        COALESCE(disco_key, '') AS disco_key,
+        COALESCE(endpoints, '[]') AS endpoints,
+        COALESCE(host_info, '{}') AS host_info,
+        ipv4,
+        ipv6,
+        COALESCE(hostname, '') AS hostname,
+        COALESCE(given_name, '') AS given_name,
+        user_id,
+        COALESCE(register_method, '') AS register_method,
+        COALESCE(tags, '[]') AS tags,
+        auth_key_id,
+        FLOOR(EXTRACT(EPOCH FROM expiry))::BIGINT AS expiry,
+        FLOOR(EXTRACT(EPOCH FROM last_seen))::BIGINT AS last_seen,
+        COALESCE(approved_routes, '[]') AS approved_routes,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
+        FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
+";
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_node_select(suffix: &str) -> String {
+    format!("SELECT {POSTGRES_NODE_COLUMNS} FROM nodes {suffix}")
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,6 +319,107 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres(pool: &PgPool, params: CreateParams) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_on_connection(&mut conn, params).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    if !params.given_name.is_empty() {
+        validate_given_name(&params.given_name)?;
+    }
+
+    let now = now_unix();
+    let tags = normalize_tags(params.tags);
+    let user_id = tag_owned_user_id(params.user_id, &tags);
+    let endpoints = json_array(&params.endpoints)?;
+    let host_info = json_object_or_value(&params.host_info)?;
+    let tags = json_array(&tags)?;
+    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO nodes (
+            machine_key,
+            node_key,
+            disco_key,
+            endpoints,
+            host_info,
+            ipv4,
+            ipv6,
+            hostname,
+            given_name,
+            user_id,
+            register_method,
+            tags,
+            auth_key_id,
+            expiry,
+            last_seen,
+            approved_routes,
+            created_at,
+            updated_at,
+            deleted_at
+        )
+        VALUES (
+            NULLIF($1, ''),
+            NULLIF($2, ''),
+            NULLIF($3, ''),
+            $4,
+            $5,
+            $6,
+            $7,
+            NULLIF($8, ''),
+            NULLIF($9, ''),
+            $10,
+            NULLIF($11, ''),
+            $12,
+            $13,
+            CASE
+                WHEN $14::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($14::BIGINT)::DOUBLE PRECISION)
+            END,
+            CASE
+                WHEN $15::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($15::BIGINT)::DOUBLE PRECISION)
+            END,
+            $16,
+            to_timestamp(($17::BIGINT)::DOUBLE PRECISION),
+            to_timestamp(($18::BIGINT)::DOUBLE PRECISION),
+            NULL
+        )
+        RETURNING id
+        ",
+    )
+    .bind(&params.machine_key)
+    .bind(&params.node_key)
+    .bind(&params.disco_key)
+    .bind(&endpoints)
+    .bind(&host_info)
+    .bind(&params.ipv4)
+    .bind(&params.ipv6)
+    .bind(&params.hostname)
+    .bind(&params.given_name)
+    .bind(user_id)
+    .bind(&params.register_method)
+    .bind(&tags)
+    .bind(params.auth_key_id)
+    .bind(params.expiry)
+    .bind(params.last_seen)
+    .bind(&approved_routes)
+    .bind(now)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?;
+
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
     let query = node_select("WHERE id = ? AND deleted_at IS NULL");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -327,6 +459,94 @@ pub async fn get_by_machine_key_and_user(
         .bind(machine_key)
         .bind(user_id)
         .fetch_one(pool)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_id_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<HeadscaleNodeRow> {
+    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_node_key(pool: &PgPool, node_key: &str) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_node_key_on_connection(&mut conn, node_key).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_node_key_on_connection(
+    conn: &mut PgConnection,
+    node_key: &str,
+) -> Result<HeadscaleNodeRow> {
+    let query = postgres_node_select("WHERE node_key = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(node_key)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_machine_key(
+    pool: &PgPool,
+    machine_key: &str,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_machine_key_on_connection(&mut conn, machine_key).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_machine_key_on_connection(
+    conn: &mut PgConnection,
+    machine_key: &str,
+) -> Result<HeadscaleNodeRow> {
+    let query =
+        postgres_node_select("WHERE machine_key = $1 AND deleted_at IS NULL ORDER BY id LIMIT 1");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(machine_key)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_machine_key_and_user(
+    pool: &PgPool,
+    machine_key: &str,
+    user_id: i64,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_machine_key_and_user_on_connection(&mut conn, machine_key, user_id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_machine_key_and_user_on_connection(
+    conn: &mut PgConnection,
+    machine_key: &str,
+    user_id: i64,
+) -> Result<HeadscaleNodeRow> {
+    let query = postgres_node_select(
+        "WHERE machine_key = $1 AND user_id = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1",
+    );
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(machine_key)
+        .bind(user_id)
+        .fetch_one(&mut *conn)
         .await
         .map_err(map_not_found)
 }
@@ -416,6 +636,106 @@ pub async fn update_from_auth_path(
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn update_postgres_from_auth_path(
+    pool: &PgPool,
+    id: i64,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    update_postgres_from_auth_path_on_connection(&mut conn, id, params).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn update_postgres_from_auth_path_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    if !params.given_name.is_empty() {
+        validate_given_name(&params.given_name)?;
+    }
+
+    let duplicate_given_name_count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM nodes
+        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.given_name)
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if duplicate_given_name_count > 0 {
+        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
+    }
+
+    let tags = normalize_tags(params.tags);
+    let user_id = tag_owned_user_id(params.user_id, &tags);
+    let endpoints = json_array(&params.endpoints)?;
+    let host_info = json_object_or_value(&params.host_info)?;
+    let tags = json_array(&tags)?;
+    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            machine_key = NULLIF($1, ''),
+            node_key = NULLIF($2, ''),
+            disco_key = NULLIF($3, ''),
+            endpoints = $4,
+            host_info = $5,
+            ipv4 = $6,
+            ipv6 = $7,
+            hostname = NULLIF($8, ''),
+            given_name = NULLIF($9, ''),
+            user_id = $10,
+            register_method = NULLIF($11, ''),
+            tags = $12,
+            auth_key_id = $13,
+            expiry = CASE
+                WHEN $14::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($14::BIGINT)::DOUBLE PRECISION)
+            END,
+            last_seen = CASE
+                WHEN $15::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($15::BIGINT)::DOUBLE PRECISION)
+            END,
+            approved_routes = $16,
+            updated_at = to_timestamp(($17::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $18 AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.machine_key)
+    .bind(&params.node_key)
+    .bind(&params.disco_key)
+    .bind(&endpoints)
+    .bind(&host_info)
+    .bind(&params.ipv4)
+    .bind(&params.ipv6)
+    .bind(&params.hostname)
+    .bind(&params.given_name)
+    .bind(user_id)
+    .bind(&params.register_method)
+    .bind(&tags)
+    .bind(params.auth_key_id)
+    .bind(params.expiry)
+    .bind(params.last_seen)
+    .bind(&approved_routes)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
     let query = node_select("WHERE deleted_at IS NULL ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -429,6 +749,40 @@ pub async fn list_by_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<Headsca
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(user_id)
         .fetch_all(pool)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres(pool: &PgPool) -> Result<Vec<HeadscaleNodeRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_on_connection(&mut conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = postgres_node_select("WHERE deleted_at IS NULL ORDER BY id");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_user(pool: &PgPool, user_id: i64) -> Result<Vec<HeadscaleNodeRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_by_user_on_connection(&mut conn, user_id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_user_on_connection(
+    conn: &mut PgConnection,
+    user_id: i64,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = postgres_node_select("WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(user_id)
+        .fetch_all(&mut *conn)
         .await
         .map_err(DbError::from)
 }
@@ -460,6 +814,50 @@ pub async fn set_tags(pool: &SqlitePool, id: i64, tags: Vec<String>) -> Result<H
         return Err(DbError::NotFound(format!("node id={id}")));
     }
     get_by_id(pool, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_tags(
+    pool: &PgPool,
+    id: i64,
+    tags: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_tags_on_connection(&mut conn, id, tags).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_tags_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    tags: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let tags = normalize_tags(tags);
+    let clear_user_id = !tags.is_empty();
+    let tags = json_array(&tags)?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            user_id = CASE WHEN $1 THEN NULL ELSE user_id END,
+            tags = $2,
+            updated_at = to_timestamp(($3::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $4 AND deleted_at IS NULL
+        ",
+    )
+    .bind(clear_user_id)
+    .bind(tags)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
 }
 
 pub async fn rename(pool: &SqlitePool, id: i64, new_given_name: &str) -> Result<HeadscaleNodeRow> {
@@ -500,6 +898,59 @@ pub async fn rename(pool: &SqlitePool, id: i64, new_given_name: &str) -> Result<
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn rename_postgres(
+    pool: &PgPool,
+    id: i64,
+    new_given_name: &str,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    rename_postgres_on_connection(&mut conn, id, new_given_name).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn rename_postgres_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    new_given_name: &str,
+) -> Result<HeadscaleNodeRow> {
+    validate_given_name(new_given_name)?;
+    let count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM nodes
+        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
+        ",
+    )
+    .bind(new_given_name)
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if count > 0 {
+        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
+    }
+
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET given_name = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(new_given_name)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn set_approved_routes(
     pool: &SqlitePool,
     id: i64,
@@ -525,6 +976,44 @@ pub async fn set_approved_routes(
         return Err(DbError::NotFound(format!("node id={id}")));
     }
     get_by_id(pool, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_approved_routes(
+    pool: &PgPool,
+    id: i64,
+    routes: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_approved_routes_on_connection(&mut conn, id, routes).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_approved_routes_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    routes: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let routes = json_array(&expand_exit_routes(routes))?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET approved_routes = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(routes)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
 }
 
 pub async fn set_host_info_routable_ips(
@@ -570,6 +1059,60 @@ pub async fn set_host_info_routable_ips(
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_host_info_routable_ips(
+    pool: &PgPool,
+    id: i64,
+    routes: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_host_info_routable_ips_on_connection(&mut conn, id, routes).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_host_info_routable_ips_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    routes: Vec<String>,
+) -> Result<HeadscaleNodeRow> {
+    let row = get_postgres_by_id_on_connection(conn, id).await?;
+    let mut host_info = row.host_info_value();
+    if !host_info.is_object() {
+        host_info = json!({});
+    }
+    if let Value::Object(fields) = &mut host_info {
+        if routes.is_empty() {
+            fields.remove("RoutableIPs");
+        } else {
+            fields.insert(
+                "RoutableIPs".into(),
+                Value::Array(routes.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+
+    let host_info = json_object_or_value(&host_info)?;
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET host_info = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(host_info)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn set_expiry(
     pool: &SqlitePool,
     id: i64,
@@ -599,6 +1142,48 @@ pub async fn set_expiry(
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_expiry(
+    pool: &PgPool,
+    id: i64,
+    expiry: Option<i64>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_expiry_on_connection(&mut conn, id, expiry).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_expiry_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    expiry: Option<i64>,
+) -> Result<HeadscaleNodeRow> {
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            expiry = CASE
+                WHEN $1::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
+            END,
+            updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(expiry)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn set_last_seen(
     pool: &SqlitePool,
     id: i64,
@@ -626,6 +1211,48 @@ pub async fn set_last_seen(
         return Err(DbError::NotFound(format!("node id={id}")));
     }
     get_by_id(pool, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_last_seen(
+    pool: &PgPool,
+    id: i64,
+    last_seen: Option<i64>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_last_seen_on_connection(&mut conn, id, last_seen).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_last_seen_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    last_seen: Option<i64>,
+) -> Result<HeadscaleNodeRow> {
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            last_seen = CASE
+                WHEN $1::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
+            END,
+            updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(last_seen)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
 }
 
 pub async fn set_ip_addresses(
@@ -659,6 +1286,49 @@ pub async fn set_ip_addresses(
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_ip_addresses(
+    pool: &PgPool,
+    id: i64,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    set_postgres_ip_addresses_on_connection(&mut conn, id, ipv4, ipv6).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_ip_addresses_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+) -> Result<HeadscaleNodeRow> {
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            ipv4 = $1,
+            ipv6 = $2,
+            updated_at = to_timestamp(($3::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $4 AND deleted_at IS NULL
+        ",
+    )
+    .bind(ipv4)
+    .bind(ipv6)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn logout(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
     let affected = sqlx::query(
@@ -683,10 +1353,63 @@ pub async fn logout(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
     get_by_id(pool, id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn logout_postgres(pool: &PgPool, id: i64) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    logout_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn logout_postgres_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<HeadscaleNodeRow> {
+    let now = now_unix();
+    let affected = sqlx::query(
+        "
+        UPDATE nodes
+        SET
+            expiry = to_timestamp(($1::BIGINT)::DOUBLE PRECISION),
+            updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $3 AND deleted_at IS NULL
+        ",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    get_postgres_by_id_on_connection(conn, id).await
+}
+
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
     let affected = sqlx::query("DELETE FROM nodes WHERE id = ?")
         .bind(id)
         .execute(pool)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    destroy_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let affected = sqlx::query("DELETE FROM nodes WHERE id = $1")
+        .bind(id)
+        .execute(&mut *conn)
         .await?
         .rows_affected();
     if affected == 0 {

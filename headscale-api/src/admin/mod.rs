@@ -90,6 +90,8 @@ use serde_json::json;
 
 use crate::tailscale_wire::routes::normalize_routes;
 
+#[cfg(feature = "postgres-sqlx")]
+pub use api_keys::PersistentPostgresApiKeyAdmin;
 pub use api_keys::{
     ApiKeyAdmin, ApiKeyAdminError, ApiKeyAdminKey, ApiKeyCreated, ApiKeyMintRequest,
     NoopApiKeyAdmin, PersistentApiKeyAdmin,

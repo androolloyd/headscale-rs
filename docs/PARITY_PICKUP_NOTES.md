@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:26 ADT
+Updated: 2026-05-30 09:30 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed implementation commit before the current Postgres API adapter slice:
-  `06b9ad2 Add OIDC SSH check cancel smoke parity`
+- Latest pushed implementation commit before the current API-key adapter slice:
+  `f4d98a2 Add Postgres policy health API adapters`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -38,6 +38,9 @@ Recent accepted slices:
 - The current in-progress API adapter slice adds feature-gated Postgres
   policy-persistence and database-health trait implementations for the gRPC
   admin service without removing the explicit Postgres `serve` guard.
+- The current in-progress API-key adapter slice adds a feature-gated
+  `PersistentPostgresApiKeyAdmin` over the existing Postgres API-key primitives
+  while leaving the default SQLite adapter unchanged.
 
 Current multi-agent split:
 

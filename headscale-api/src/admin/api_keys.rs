@@ -161,6 +161,93 @@ impl ApiKeyAdmin for PersistentApiKeyAdmin {
     }
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+pub struct PersistentPostgresApiKeyAdmin {
+    pool: sqlx::PgPool,
+    cost: u32,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresApiKeyAdmin {
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool,
+            cost: headscale_db::api_keys::BCRYPT_COST_DEFAULT,
+        }
+    }
+
+    pub fn new_for_test(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool,
+            cost: headscale_db::api_keys::BCRYPT_COST_TEST,
+        }
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl ApiKeyAdmin for PersistentPostgresApiKeyAdmin {
+    async fn validate(&self, candidate: &str) -> bool {
+        headscale_db::api_keys::validate_postgres(&self.pool, candidate)
+            .await
+            .is_ok()
+    }
+
+    async fn mint(&self, req: ApiKeyMintRequest) -> Result<ApiKeyCreated, ApiKeyAdminError> {
+        let created = headscale_db::api_keys::create_postgres_with_cost(
+            &self.pool,
+            headscale_db::api_keys::CreateParams {
+                expiration: req.expiration,
+            },
+            self.cost,
+        )
+        .await
+        .map_err(map_db_err)?;
+        Ok(ApiKeyCreated {
+            api_key: created.plaintext,
+        })
+    }
+
+    async fn list(&self) -> Vec<ApiKeyAdminKey> {
+        match headscale_db::api_keys::list_postgres(&self.pool).await {
+            Ok(rows) => rows.iter().map(row_to_admin).collect(),
+            Err(e) => {
+                tracing::warn!(?e, "api key list failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn expire_by_prefix(&self, prefix: &str) -> Result<(), ApiKeyAdminError> {
+        headscale_db::api_keys::expire_postgres_by_prefix(&self.pool, prefix)
+            .await
+            .map_err(map_db_err)
+    }
+
+    async fn expire_by_id(&self, id: u64) -> Result<(), ApiKeyAdminError> {
+        let id = i64::try_from(id)
+            .map_err(|_| ApiKeyAdminError::Store("api key id overflows i64".into()))?;
+        headscale_db::api_keys::expire_postgres(&self.pool, id)
+            .await
+            .map_err(map_db_err)
+    }
+
+    async fn delete_by_prefix(&self, prefix: &str) -> Result<(), ApiKeyAdminError> {
+        headscale_db::api_keys::destroy_postgres_by_prefix(&self.pool, prefix)
+            .await
+            .map_err(map_db_err)
+    }
+
+    async fn delete_by_id(&self, id: u64) -> Result<(), ApiKeyAdminError> {
+        let id = i64::try_from(id)
+            .map_err(|_| ApiKeyAdminError::Store("api key id overflows i64".into()))?;
+        headscale_db::api_keys::destroy_postgres(&self.pool, id)
+            .await
+            .map_err(map_db_err)
+    }
+}
+
 fn row_to_admin(row: &headscale_db::api_keys::ApiKeyRow) -> ApiKeyAdminKey {
     ApiKeyAdminKey {
         id: u64::try_from(row.id).unwrap_or_default(),

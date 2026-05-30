@@ -7,7 +7,7 @@ Updated: 2026-05-30 10:21 ADT
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `a46a213 Add feature-gated Postgres runtime path`
+  `cbbfe0d Add feature-gated Postgres runtime path`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -48,7 +48,7 @@ Recent accepted slices:
   `PersistentPostgresMachineAdmin` over the existing Postgres node primitives,
   including admin node mutations, auth-key registration persistence, runtime
   state sync, wire-registry hydration, route/address mutation, and node delete.
-- `a46a213` adds `headscale-cli`'s
+- `cbbfe0d` adds `headscale-cli`'s
   `postgres-sqlx` feature, a server-local runtime database enum, a
   feature-gated Postgres open/migrate path, a Pg-backed wire/admin runtime
   builder for non-OIDC server configs, Postgres startup policy loading, and

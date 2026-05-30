@@ -1,33 +1,36 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-25 15:08 ADT
+Updated: 2026-05-30 07:11 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit: `cdd220a Add HTTP-01 ACME process parity smoke`
-- Remote: `origin/main` is pushed through `cdd220a`
-- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `cdd220a`
+- Latest pushed commit before this pickup: `dc53bfb Broaden parity harness coverage`
+- Remote: `origin/main` was pushed through `dc53bfb`
+- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `dc53bfb`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
 
 ## Just Landed
 
-`cdd220a` closes the HTTP-01 controlled-CA production-listener parity slice:
+`dc53bfb` closes the latest accepted parity harness slice:
 
-- Refactored the local ACME test helper in `headscale-cli/src/acme_issuer.rs` into `#[cfg(test)] pub(crate) mod test_support`
-- Added a test-only/internal `TlsRuntimeConfig::acme_ca_root_path` hook so `run_server` tests can trust the controlled local CA without exposing a user-facing config key
-- Added `server::tests::run_server_http01_acme_issues_through_production_challenge_listener`
-- Updated `docs/headscale-go-parity.md` and `docs/HARDENING.md` so HTTP-01 process coverage is no longer listed as missing
+- Added TLS-ALPN controlled-CA process coverage through the production public TLS listener.
+- Added the initial Postgres feature-gated foundation tests in `headscale-db`.
+- Added paired route-via same-tag and SSH expired OIDC check-denial stock-client smokes.
+- Updated the parity matrix and docs for those accepted coverage slices.
 
 Verified before commit:
 
 ```sh
+CARGO_TARGET_DIR=target/codex-verify-cli CARGO_INCREMENTAL=0 cargo test -p headscale-cli run_server_tls_alpn_acme_issues_through_production_tls_listener -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-cli CARGO_INCREMENTAL=0 cargo test -p headscale-cli acme -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db CARGO_INCREMENTAL=0 cargo test -p headscale-db --all-targets -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --test postgres_foundation -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-clippy CARGO_INCREMENTAL=0 cargo clippy -p headscale-cli -p headscale-db --all-targets -- -D warnings
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --features postgres-sqlx --all-targets -- -D warnings
 cargo fmt --all -- --check
 git diff --check
-cargo test -p headscale-cli acme_issuer -- --nocapture
-cargo test -p headscale-cli run_server_http01_acme_issues_through_production_challenge_listener -- --nocapture
-CARGO_INCREMENTAL=0 cargo clippy -p headscale-cli --all-targets -- -D warnings
 ```
 
 ## Completed After Pickup
@@ -50,15 +53,18 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 
 ## Next Safe Slice
 
-The TLS-ALPN controlled-CA production-process coverage through the real public
-TLS listener is now implemented. The next narrow lanes are broader
-current-upstream CLI output drift snapshots, Postgres runtime foundation beyond
-the version-table smoke, or the remaining route/SSH stock-client edge rows.
+The route-health policy-reload-then-production-restart stock-client smoke is the
+current active slice. It adds paired Rust/headscale-go scripts that start with
+one auto-approved tagged router, reload policy to add the second candidate,
+restart the production server, and assert route-health failover still works.
+After that lands, the next narrow lanes are current-upstream CLI output drift
+snapshots, true Postgres runtime/import support, or the remaining route/SSH
+stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
 - Postgres runtime/import support, if full replacement parity includes Postgres rather than SQLite-only compatibility
-- Broader paired route-via and route-health reload/restart stock-client matrices
+- Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed

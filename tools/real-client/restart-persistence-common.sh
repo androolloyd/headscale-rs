@@ -24,6 +24,7 @@ mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
+route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
 web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
@@ -65,6 +66,19 @@ case "${route_health_restart}" in
     ;;
   *)
     echo "REAL_CLIENT_RESTART_ROUTE_HEALTH must be true or false, got ${route_health_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_health_reload_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_reload_restart_flag=1
+    route_health_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_reload_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD must be true or false, got ${route_health_reload_restart}" >&2
     exit 2
     ;;
 esac
@@ -118,6 +132,10 @@ if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
 fi
 if ((route_health_all_unhealthy_restart_flag && ! route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
+  exit 2
+fi
+if ((route_health_reload_restart_flag && (route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag))); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD cannot be combined with mixed-exit or all-unhealthy restart modes" >&2
   exit 2
 fi
 if ((route_health_restart_flag)); then
@@ -393,6 +411,10 @@ EOF
     return
   fi
   if ((route_health_restart_flag)); then
+    if ((route_health_reload_restart_flag)); then
+      write_route_health_reload_policy tag:router-a
+      return
+    fi
     cat >"${work_dir}/policy.hujson" <<EOF
 {
   "grants": [
@@ -422,6 +444,37 @@ EOF
   ]
 }
 EOF
+}
+
+write_route_health_reload_policy() {
+  local auto_tags=("$@")
+  ruby -rjson -e '
+    route = ARGV.fetch(0)
+    auto_tags = ARGV.drop(1)
+    puts JSON.pretty_generate({
+      tagOwners: {
+        "tag:router-a" => ["router@"],
+        "tag:router-b" => ["router@"],
+      },
+      autoApprovers: {
+        routes: {
+          route => auto_tags,
+        },
+      },
+      grants: [
+        {
+          src: ["*"],
+          dst: ["*"],
+          ip: ["*"],
+        },
+        {
+          src: ["*"],
+          dst: [route],
+          ip: ["*"],
+        },
+      ],
+    })
+  ' "${route}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
 }
 
 write_config() {
@@ -635,6 +688,18 @@ create_route_via_users_and_keys() {
   router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
   echo "created router user ${router_user_id}, alice user ${alice_user_id}, and bob user ${bob_user_id}"
   echo "minted tagged router keys"
+  echo "::endgroup::"
+}
+
+create_route_health_reload_users_and_keys() {
+  echo "::group::create route-health reload users and tagged preauth keys"
+  local router_user_id alice_user_id
+  router_user_id="$(create_user_json router "${work_dir}/user-router.json")"
+  alice_user_id="$(create_user_json alice "${work_dir}/user-alice.json")"
+  router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-a "${work_dir}/preauth-router-a.json")"
+  router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
+  echo "created router user ${router_user_id} and alice user ${alice_user_id}"
+  echo "minted route-health tagged router keys"
   echo "::endgroup::"
 }
 
@@ -1072,6 +1137,86 @@ wait_for_route_health_primary() {
       return 1
     }
   cat "${work_dir}/route-health-primary-${safe_label}.json"
+}
+
+assert_route_health_approved_candidates() {
+  local label="$1"
+  local expected_csv="$2"
+  local nodes_path="${work_dir}/nodes-${label}.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    route = ARGV.fetch(1)
+    router_a_name = ARGV.fetch(2)
+    router_b_name = ARGV.fetch(3)
+    expected = ARGV.fetch(4).split(",").reject(&:empty?).sort
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    def find_node(nodes, name)
+      nodes.find { |node| node_name(node).to_s == name } ||
+        abort("missing node #{name.inspect} in #{nodes.inspect}")
+    end
+
+    def routes(node, camel, snake)
+      Array(node[camel] || node[snake]).map(&:to_s).sort
+    end
+
+    def primary_routes(node)
+      Array(
+        node["subnetRoutes"] ||
+        node["subnet_routes"] ||
+        node["primaryRoutes"] ||
+        node["primary_routes"]
+      ).map(&:to_s)
+    end
+
+    routers = [find_node(nodes, router_a_name), find_node(nodes, router_b_name)]
+    routers.each do |router|
+      available = routes(router, "availableRoutes", "available_routes")
+      abort("expected #{node_name(router).inspect} to advertise #{route.inspect}, got #{available.inspect}") unless available.include?(route)
+    end
+
+    approved = routers.select do |router|
+      routes(router, "approvedRoutes", "approved_routes").include?(route)
+    end.map { |router| node_name(router).to_s }.sort
+    abort("expected approved route-health candidates #{expected.inspect}, got #{approved.inspect}") unless approved == expected
+
+    primary = nodes.select { |node| primary_routes(node).include?(route) }
+    abort("expected exactly one primary owner for #{route.inspect}, got #{primary.length}") unless primary.length == 1
+    primary_name = node_name(primary.fetch(0)).to_s
+    abort("expected primary #{primary_name.inspect} to be one of approved candidates #{expected.inspect}") unless expected.include?(primary_name)
+
+    puts JSON.pretty_generate({
+      route: route,
+      approved_candidates: approved,
+      primary: primary_name,
+    })
+  ' "${nodes_path}" "${route}" "${router_name}" "${router_b_name}" "${expected_csv}"
+}
+
+wait_for_route_health_approved_candidates() {
+  local label="$1"
+  local expected_csv="$2"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for "${label} route-health approved candidates ${expected_csv}" \
+    "assert_route_health_approved_candidates '${safe_label}' '${expected_csv}' > '${work_dir}/route-health-candidates-${safe_label}.json'" || {
+      cat "${work_dir}/route-health-candidates-${safe_label}.json" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${work_dir}/route-health-candidates-${safe_label}.json"
+}
+
+reload_route_health_policy() {
+  echo "::group::reload route-health policy"
+  write_route_health_reload_policy tag:router-a tag:router-b
+  kill -HUP "${server_pid}"
+  wait_for_server "${target} health after policy reload" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  echo "::endgroup::"
 }
 
 route_health_primary_name_from_nodes() {
@@ -1775,24 +1920,42 @@ elif ((route_via_restart_flag)); then
   assert_route_via_persisted_nodes "after-restart"
   wait_for_route_via_peer_maps "after restart"
 elif ((route_health_restart_flag)); then
-  create_user_and_key
+  if ((route_health_reload_restart_flag)); then
+    create_route_health_reload_users_and_keys
+  else
+    create_user_and_key
+  fi
   start_client "${router_name}"
   start_client "${router_b_name}"
   if ((route_health_mixed_exit_restart_flag)); then
     start_client "${exit_name}"
   fi
   start_client "${observer_name}"
-  login_router_with_authkey "${router_name}" "${authkey}"
-  login_router_with_authkey "${router_b_name}" "${authkey}"
-  approve_router_routes "${router_name}"
-  approve_router_routes "${router_b_name}"
+  if ((route_health_reload_restart_flag)); then
+    login_router_with_authkey "${router_name}" "${router_a_authkey}"
+    login_router_with_authkey "${router_b_name}" "${router_b_authkey}"
+  else
+    login_router_with_authkey "${router_name}" "${authkey}"
+    login_router_with_authkey "${router_b_name}" "${authkey}"
+    approve_router_routes "${router_name}"
+    approve_router_routes "${router_b_name}"
+  fi
   if ((route_health_mixed_exit_restart_flag)); then
     login_exit_with_authkey "${exit_name}" "${authkey}"
     approve_exit_routes "${exit_name}"
   fi
   login_observer_with_web_registration "${observer_name}" alice
-  wait_for_route_health_primary "before-restart"
-  wait_for_route_health_peer_owner_from_admin "before-restart"
+  if ((route_health_reload_restart_flag)); then
+    wait_for_route_health_approved_candidates "before-policy-reload" "${router_name}"
+    wait_for_route_via_owner "before policy reload observer sees router-a" \
+      "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-health-before-policy-reload-owner.json"
+    reload_route_health_policy
+    wait_for_route_health_approved_candidates "after-policy-reload" "${router_name},${router_b_name}"
+    wait_for_route_health_peer_owner_from_admin "after-policy-reload"
+  else
+    wait_for_route_health_primary "before-restart"
+    wait_for_route_health_peer_owner_from_admin "before-restart"
+  fi
 
   stop_server
   start_server
@@ -1802,7 +1965,11 @@ elif ((route_health_restart_flag)); then
     wait_for "exit node reconnected after restart" "tailscale_logged_in '${exit_name}'"
   fi
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
-  wait_for_route_health_primary "after-restart"
+  if ((route_health_reload_restart_flag)); then
+    wait_for_route_health_approved_candidates "after-restart" "${router_name},${router_b_name}"
+  else
+    wait_for_route_health_primary "after-restart"
+  fi
   if ((route_health_all_unhealthy_restart_flag)); then
     assert_route_health_all_unhealthy_after_restart
   else

@@ -125,6 +125,7 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-via-multiprefix-restart` | `route-via-multiprefix-restart-smoke.sh` | `route-via-multiprefix-restart-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` restart persistence |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
+| Routes | `route-health-reload-restart` | `route-health-reload-restart-smoke.sh` | `route-health-reload-restart-headscale-go-smoke.sh` | Current-head route-health policy reload expansion survives production restart |
 | Routes | `route-health-restart` | `route-health-restart-smoke.sh` | `route-health-restart-headscale-go-smoke.sh` | Production route-health failover after server restart |
 | Routes | `route-health-primary-restart` | `route-health-primary-restart-smoke.sh` | `route-health-primary-restart-headscale-go-smoke.sh` | Current-head route-health primary owner survives server restart |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health last-known-primary retention when all candidates are unavailable |
@@ -691,6 +692,16 @@ asserts route-health HA failover across the newly expanded candidate set:
 ```sh
 tools/real-client/route-health-reload-smoke.sh
 tools/real-client/route-health-reload-headscale-go-smoke.sh
+```
+
+The route-health reload-restart variant runs the production server, starts with
+only `tag:router-a` auto-approved, reloads policy to add `tag:router-b`,
+verifies the expanded HA candidate set, restarts the server, and then asserts
+post-restart failover:
+
+```sh
+tools/real-client/route-health-reload-restart-smoke.sh
+tools/real-client/route-health-reload-restart-headscale-go-smoke.sh
 ```
 
 The route-health restart variant runs the production server with persistent

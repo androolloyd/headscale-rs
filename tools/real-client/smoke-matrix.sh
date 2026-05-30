@@ -116,6 +116,7 @@ smoke_ids=(
   route-via-multiprefix-restart
   route-health
   route-health-reload
+  route-health-reload-restart
   route-health-restart
   route-health-primary-restart
   route-health-all-unhealthy
@@ -167,6 +168,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -250,6 +252,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-multiprefix-restart-smoke.sh
   tools/real-client/route-health-smoke.sh
   tools/real-client/route-health-reload-smoke.sh
+  tools/real-client/route-health-reload-restart-smoke.sh
   tools/real-client/route-health-restart-smoke.sh
   tools/real-client/route-health-primary-restart-smoke.sh
   tools/real-client/route-health-all-unhealthy-smoke.sh
@@ -317,6 +320,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
   tools/real-client/route-health-headscale-go-smoke.sh
   tools/real-client/route-health-reload-headscale-go-smoke.sh
+  tools/real-client/route-health-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-health-restart-headscale-go-smoke.sh
   tools/real-client/route-health-primary-restart-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
@@ -384,6 +388,7 @@ smoke_assertions=(
   "current-head multi-prefix route steering with grants via survives server restart"
   "current-head route-health failover and sticky recovery"
   "current-head route-health policy reload expands HA failover"
+  "current-head route-health policy reload expansion survives production restart"
   "current-head route-health production restart failover"
   "current-head route-health preserves primary owner across server restart"
   "current-head route-health all-unavailable last-known-primary retention"

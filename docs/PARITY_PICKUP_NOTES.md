@@ -7,7 +7,7 @@ Updated: 2026-05-30 09:54 ADT
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `9005ea9 Add Postgres user and preauth admin adapters`
+  `a46f9ad Add Postgres user and preauth admin adapters`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -40,7 +40,7 @@ Recent accepted slices:
 - `3197a37` adds a feature-gated
   `PersistentPostgresApiKeyAdmin` over the existing Postgres API-key primitives
   while leaving the default SQLite adapter unchanged.
-- `9005ea9` adds feature-gated
+- `a46f9ad` adds feature-gated
   `PersistentPostgresUserAdmin` and `PersistentPostgresPreauthAdmin`
   adapters, and aligns Postgres user deletion with the SQLite/headscale-go
   non-empty-user and owned-preauth cleanup semantics.

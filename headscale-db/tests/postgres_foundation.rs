@@ -30,6 +30,18 @@ async fn postgres_foundation_creates_and_stamps_database_versions() -> TestResul
         .await?;
 
         assert_eq!(row, (1, HEADSCALE_GO_CURRENT_VERSION.to_string(), true));
+
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+        let row: (i64, String, bool) = sqlx::query_as(
+            "
+            SELECT id, version, updated_at IS NOT NULL
+            FROM database_versions
+            ",
+        )
+        .fetch_one(&mut schema.conn)
+        .await?;
+
+        assert_eq!(row, (1, HEADSCALE_GO_CURRENT_VERSION.to_string(), true));
         Ok::<(), headscale_db::DbError>(())
     }
     .await;
@@ -76,6 +88,70 @@ async fn postgres_foundation_rejects_newer_database_versions_before_migration() 
         assert!(err.to_string().contains("newer headscale-go"));
         assert!(!postgres_table_exists(&mut schema.conn, "_sqlx_migrations").await?);
         assert!(!postgres_table_exists(&mut schema.conn, "users").await?);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_foundation_rejects_unsupported_rust_managed_database_version() -> TestResult {
+    let Some(mut schema) = TempSchema::open("reject_rust_managed_database_version").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY,
+                version TEXT NOT NULL,
+                updated_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE users (
+                id BIGINT PRIMARY KEY
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.99.0', CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        let err = migrate_postgres_foundation_on_connection(&mut schema.conn)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            headscale_db::DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+        ));
+        assert!(err.to_string().contains("Rust-managed Postgres"));
+        assert!(!postgres_table_exists(&mut schema.conn, "policies").await?);
 
         Ok::<(), headscale_db::DbError>(())
     }

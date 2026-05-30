@@ -136,6 +136,7 @@ smoke_ids=(
   ssh
   ssh-localpart
   ssh-profile-variants
+  ssh-accept-env
 )
 
 smoke_areas=(
@@ -205,6 +206,7 @@ smoke_areas=(
   routes
   routes
   derp
+  ssh
   ssh
   ssh
   ssh
@@ -280,6 +282,7 @@ smoke_rust_scripts=(
   tools/real-client/ssh-smoke.sh
   tools/real-client/ssh-localpart-smoke.sh
   tools/real-client/ssh-profile-variants-smoke.sh
+  tools/real-client/ssh-accept-env-smoke.sh
 )
 
 smoke_go_scripts=(
@@ -352,6 +355,7 @@ smoke_go_scripts=(
   tools/real-client/ssh-headscale-go-smoke.sh
   tools/real-client/ssh-localpart-headscale-go-smoke.sh
   tools/real-client/ssh-profile-variants-headscale-go-smoke.sh
+  tools/real-client/ssh-accept-env-headscale-go-smoke.sh
 )
 
 smoke_assertions=(
@@ -424,6 +428,7 @@ smoke_assertions=(
   "Tailscale SSH allow, deny, and ACL timeout"
   "current-head Tailscale SSH localpart login users from profile emails"
   "current-head Tailscale SSH profile email variants and exact denial status/stderr"
+  "current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
 )
 
 assert_matrix_lengths() {

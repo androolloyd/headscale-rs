@@ -145,6 +145,7 @@ predates the executable PingRequest lifecycle.
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
 | SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants and exact denial status/stderr |
+| SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables |
 
 ## Local and CI Execution
 
@@ -826,13 +827,18 @@ The current-head localpart wrappers exercise `localpart:*@domain` login users
 with profile emails. The profile-variant row also checks split username/email
 profiles against headscale-go, wrong-domain profile emails, bare usernames with
 no profile email, exact denied status `255`, empty denied stdout, and the
-stable first denial stderr line:
+stable first denial stderr line. The `ssh-accept-env` row runs a tagged target
+with policy `acceptEnv: ["LANG", "LC_*"]`, passes `LANG` and `LC_ACCEPT_ENV_SMOKE`
+through the stock client command environment, and asserts the remote command
+prints those accepted values:
 
 ```sh
 tools/real-client/ssh-localpart-smoke.sh
 tools/real-client/ssh-localpart-headscale-go-smoke.sh
 tools/real-client/ssh-profile-variants-smoke.sh
 tools/real-client/ssh-profile-variants-headscale-go-smoke.sh
+tools/real-client/ssh-accept-env-smoke.sh
+tools/real-client/ssh-accept-env-headscale-go-smoke.sh
 ```
 
 Useful knobs:
@@ -846,6 +852,10 @@ Useful knobs:
 - `REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS` defaults to `30`; this fails fast
   when a control server does not re-emit peer `sshHostKeys`, which the
   `tailscale ssh` wrapper needs for strict host-key checking.
+- `REAL_CLIENT_SSH_COMMAND`, `REAL_CLIENT_EXPECT_SSH_STDOUT`, and
+  `REAL_CLIENT_SSH_SEND_ENV` let wrappers run a non-`hostname` SSH command and
+  assert exact stdout; `REAL_CLIENT_SSH_SEND_ENV` is a comma-separated list of
+  `NAME=value` pairs passed into the client-side `tailscale ssh` process.
 - `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=expire` reuses
   `ssh-oidc-check-smoke.sh` for the denied check path; the wrapper defaults
   `REAL_CLIENT_REGISTER_CACHE_EXPIRATION=10s`,

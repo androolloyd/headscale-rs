@@ -1,0 +1,21 @@
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ],
+  "tagOwners": {
+    "tag:server": ["alice@"]
+  },
+  "ssh": [
+    {
+      "action": "accept",
+      "acceptEnv": ["LANG", "LC_*"],
+      "src": ["alice@"],
+      "dst": ["tag:server"],
+      "users": ["root"]
+    }
+  ]
+}

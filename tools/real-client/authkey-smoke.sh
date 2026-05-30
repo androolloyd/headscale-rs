@@ -65,6 +65,9 @@ enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
 ssh_user="${REAL_CLIENT_SSH_USER:-}"
 expected_ssh_matrix="${REAL_CLIENT_EXPECT_SSH_MATRIX:-}"
+ssh_command="${REAL_CLIENT_SSH_COMMAND:-hostname}"
+ssh_expected_stdout="${REAL_CLIENT_EXPECT_SSH_STDOUT:-}"
+ssh_send_env="${REAL_CLIENT_SSH_SEND_ENV:-}"
 ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
 ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
 ssh_deny_status="${REAL_CLIENT_EXPECT_SSH_DENY_STATUS:-}"
@@ -196,6 +199,17 @@ fi
 if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" && ! "${ssh_deny_status}" =~ ^[0-9]+$ ]]; then
   echo "REAL_CLIENT_EXPECT_SSH_DENY_STATUS must be empty, any, or a non-negative integer, got ${ssh_deny_status}" >&2
   exit 2
+fi
+ssh_env_args=()
+if [[ -n "${ssh_send_env}" ]]; then
+  IFS=',' read -r -a ssh_send_env_entries <<<"${ssh_send_env}"
+  for ssh_send_env_entry in "${ssh_send_env_entries[@]}"; do
+    if [[ ! "${ssh_send_env_entry}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      echo "REAL_CLIENT_SSH_SEND_ENV entries must be comma-separated NAME=value pairs, got ${ssh_send_env_entry}" >&2
+      exit 2
+    fi
+    ssh_env_args+=(--env "${ssh_send_env_entry}")
+  done
 fi
 case "${expected_register_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -698,9 +712,9 @@ tailscale_ssh_attempt() {
   local target_name="$2"
   local stdout_path="$3"
   local stderr_path="$4"
-  docker exec "${source_name}" sh -ceu \
-    'timeout "$1" tailscale ssh "$2@$3" hostname' \
-    sh "${ssh_attempt_timeout_secs}" "${ssh_user}" "${target_name}" \
+  docker exec "${ssh_env_args[@]}" "${source_name}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" "$4"' \
+    sh "${ssh_attempt_timeout_secs}" "${ssh_user}" "${target_name}" "${ssh_command}" \
     >"${stdout_path}" \
     2>"${stderr_path}"
 }
@@ -711,6 +725,12 @@ tailscale_ssh_succeeded() {
   local stdout_path="${work_dir}/ssh-${source_name}-to-${target_name}.stdout"
   local stderr_path="${work_dir}/ssh-${source_name}-to-${target_name}.stderr"
   tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" || return 1
+  if [[ -n "${ssh_expected_stdout}" ]]; then
+    local actual_stdout
+    actual_stdout="$(sed 's/\r$//' "${stdout_path}")"
+    [[ "${actual_stdout}" == "${ssh_expected_stdout}" ]]
+    return
+  fi
   grep -Fxq "${target_name}" "${stdout_path}"
 }
 
@@ -1854,6 +1874,7 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
       allow)
         if ! wait_for "tailscale ssh ${source_name} to ${target_name}" \
           "tailscale_ssh_succeeded '${source_name}' '${target_name}'"; then
+          cat "${work_dir}/ssh-${source_name}-to-${target_name}.stdout" >&2 || true
           cat "${work_dir}/ssh-${source_name}-to-${target_name}.stderr" >&2 || true
           dump_client_debug "${source_name}"
           dump_client_debug "${target_name}"

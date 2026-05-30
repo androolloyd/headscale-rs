@@ -757,12 +757,12 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
     }
 
     match cmd {
-        PreauthKeysCmd::Expire { id } | PreauthKeysCmd::Delete { id } => {
-            if id.unwrap_or_default() == 0 {
-                return Err(AdminError::Usage(
-                    "missing --id parameter: missing parameters".into(),
-                ));
-            }
+        PreauthKeysCmd::Expire { id } | PreauthKeysCmd::Delete { id }
+            if id.unwrap_or_default() == 0 =>
+        {
+            return Err(AdminError::Usage(
+                "missing --id parameter: missing parameters".into(),
+            ));
         }
         _ => {}
     }

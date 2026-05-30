@@ -119,12 +119,17 @@ pub(crate) async fn migrate_postgres_foundation_on_connection(
 pub(crate) async fn check_postgres_headscale_go_import_compatibility(
     conn: &mut PgConnection,
 ) -> Result<HeadscaleGoImportCompatibility> {
-    if postgres_table_exists(conn, "_sqlx_migrations").await? {
-        return Ok(HeadscaleGoImportCompatibility::RustManaged);
-    }
+    let rust_managed = postgres_table_exists(conn, "_sqlx_migrations").await?;
 
     if postgres_table_exists(conn, "database_versions").await? {
+        if rust_managed {
+            return check_postgres_rust_managed_database_versions_table(conn).await;
+        }
         return check_postgres_database_versions_table(conn).await;
+    }
+
+    if rust_managed {
+        return Ok(HeadscaleGoImportCompatibility::RustManaged);
     }
 
     if postgres_table_exists(conn, "migrations").await? {
@@ -158,13 +163,50 @@ async fn stamp_postgres_database_version(conn: &mut PgConnection) -> Result<()> 
 }
 
 #[cfg(feature = "postgres-sqlx")]
+async fn check_postgres_rust_managed_database_versions_table(
+    conn: &mut PgConnection,
+) -> Result<HeadscaleGoImportCompatibility> {
+    let rows = postgres_database_version_rows(conn).await?;
+
+    if rows.is_empty() {
+        return Ok(HeadscaleGoImportCompatibility::RustManaged);
+    }
+
+    if rows.len() != 1 || rows[0].0 != 1 {
+        return unsupported(
+            "database_versions must contain at most the upstream single row with id=1",
+        );
+    }
+
+    let stored_version = rows[0].1.trim();
+    if stored_version.is_empty() {
+        return unsupported("database_versions.version is empty");
+    }
+
+    if stored_version == HEADSCALE_GO_CURRENT_VERSION {
+        return Ok(HeadscaleGoImportCompatibility::RustManaged);
+    }
+
+    if postgres_table_exists(conn, "migrations").await? {
+        return check_postgres_database_versions_table(conn).await;
+    }
+
+    if postgres_has_any_go_shaped_table(conn).await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but Rust-managed Postgres databases \
+             must be stamped with {HEADSCALE_GO_CURRENT_VERSION} or include supported \
+             headscale-go migration history"
+        ));
+    }
+
+    check_postgres_database_versions_table(conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
 async fn check_postgres_database_versions_table(
     conn: &mut PgConnection,
 ) -> Result<HeadscaleGoImportCompatibility> {
-    let rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, version FROM database_versions ORDER BY id")
-            .fetch_all(&mut *conn)
-            .await?;
+    let rows = postgres_database_version_rows(conn).await?;
 
     if rows.is_empty() {
         if postgres_table_exists(conn, "_sqlx_migrations").await? {
@@ -231,6 +273,15 @@ async fn check_postgres_database_versions_table(
              imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible Postgres schemas"
         )),
     }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn postgres_database_version_rows(conn: &mut PgConnection) -> Result<Vec<(i64, String)>> {
+    Ok(
+        sqlx::query_as("SELECT id, version FROM database_versions ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await?,
+    )
 }
 
 #[cfg(feature = "postgres-sqlx")]

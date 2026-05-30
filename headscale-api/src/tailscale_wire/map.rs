@@ -5436,6 +5436,105 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stream_true_initial_routable_ips_wake_peer_with_allowed_ips() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.40.0.0/16:*"]}
+            ],
+            "autoApprovers": {
+                "routes": {"10.40.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "d1".repeat(32);
+        let router_key = "d2".repeat(32);
+        let route = "10.40.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            policy_record(&router_key, "router", 11, "router", Vec::new()),
+        );
+
+        let app = router(state.clone());
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+        let alice_first = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            alice_first.peers.is_empty(),
+            "router is hidden until its initial stream request advertises an allowed route"
+        );
+
+        let router_req = serde_json::json!({
+            "Stream": true,
+            "Version": 113,
+            "Compress": "zstd",
+            "Hostinfo": {
+                "RoutableIPs": [route]
+            },
+        });
+        let router_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{router_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&router_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(router_resp.status(), StatusCode::OK);
+
+        let mut router_body = router_resp.into_body();
+        let router_first = next_zstd_map_response(&mut router_body).await;
+        let self_node = router_first.node.as_ref().expect("router self node");
+        assert!(
+            self_node
+                .hostinfo
+                .routable_ips
+                .iter()
+                .any(|advertised| advertised == route)
+        );
+        assert!(
+            self_node.allowed_ips.iter().any(|allowed| allowed == route),
+            "router self node should be route-aware in its first stream response"
+        );
+
+        let alice_delta = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_zstd_map_response(&mut alice_body),
+        )
+        .await
+        .expect("observer route-aware peer delta");
+        assert!(alice_delta.peers.is_empty());
+        assert!(alice_delta.peers_removed.is_empty());
+        assert!(alice_delta.peers_changed_patch.is_empty());
+        assert_eq!(alice_delta.peers_changed.len(), 1);
+        let peer = &alice_delta.peers_changed[0];
+        assert_eq!(peer.id, stable_id_from_key(&router_key));
+        assert_eq!(peer.name, "router");
+        assert!(
+            peer.hostinfo
+                .routable_ips
+                .iter()
+                .any(|advertised| advertised == route)
+        );
+        assert!(
+            peer.allowed_ips.iter().any(|allowed| allowed == route),
+            "observer should see route-derived AllowedIPs from the router's initial stream request"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stream_true_route_withdraw_emits_full_peer_delta_without_route_allowed_ip() {
         let (state, _dir) = fixture();

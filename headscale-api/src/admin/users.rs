@@ -17,6 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::PgPool;
 use sqlx::SqlitePool;
 
 use super::auth::now_unix;
@@ -494,6 +496,181 @@ impl UserAdmin for PersistentUserAdmin {
             UPDATE users
             SET updated_at = datetime(?, 'unixepoch')
             WHERE id = ? AND deleted_at IS NULL
+            ",
+        )
+        .bind(now)
+        .bind(db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| UserRegistryError::Store(e.to_string()))
+        .map(|_| ())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+pub struct PersistentPostgresUserAdmin {
+    pool: PgPool,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresUserAdmin {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    async fn get_by_username(&self, name: &str) -> Result<Option<UserRecord>, UserRegistryError> {
+        match headscale_db::users::get_postgres_by_name(&self.pool, name).await {
+            Ok(row) => return Ok(Some(PersistentUserAdmin::row_to_record(row))),
+            Err(headscale_db::DbError::NotFound(_)) => {}
+            Err(e) => return Err(PersistentUserAdmin::map_optional_error(e, name)),
+        }
+
+        let rows = headscale_db::users::list_postgres(&self.pool)
+            .await
+            .map_err(|e| UserRegistryError::Store(e.to_string()))?;
+        let matches = rows
+            .into_iter()
+            .filter(|row| row.username() == name)
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(PersistentUserAdmin::row_to_record(
+                matches.into_iter().next().expect("len checked"),
+            ))),
+            n => Err(UserRegistryError::Store(format!(
+                "expected exactly one user, found {n}"
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl crate::oidc::OidcUserStore for PersistentPostgresUserAdmin {
+    async fn create_or_update_oidc_user(
+        &self,
+        profile: crate::oidc::OidcUserProfile,
+    ) -> Result<crate::oidc::OidcStoredUser, String> {
+        let row = headscale_db::users::create_or_update_oidc_user_postgres(
+            &self.pool,
+            headscale_db::users::OidcUserParams {
+                name: profile.name,
+                display_name: profile.display_name,
+                email: profile.email,
+                provider_identifier: profile.provider_identifier,
+                profile_pic_url: profile.profile_pic_url,
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let record = PersistentUserAdmin::row_to_record(row);
+        Ok(crate::oidc::OidcStoredUser {
+            id: record.id,
+            name: record.name,
+            display_name: record.display_name,
+            email: record.email,
+            provider_identifier: record.provider_id,
+            provider: record.provider,
+            profile_pic_url: record.profile_pic_url,
+        })
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl UserAdmin for PersistentPostgresUserAdmin {
+    async fn create(&self, name: &str) -> Result<UserRecord, UserRegistryError> {
+        self.create_detailed(name, "", "", "").await
+    }
+
+    async fn create_detailed(
+        &self,
+        name: &str,
+        display_name: &str,
+        email: &str,
+        profile_pic_url: &str,
+    ) -> Result<UserRecord, UserRegistryError> {
+        if !is_valid_user_name(name) {
+            return Err(UserRegistryError::InvalidName(name.to_string()));
+        }
+        let row = headscale_db::users::create_postgres(
+            &self.pool,
+            headscale_db::users::CreateParams {
+                name: name.to_string(),
+                display_name: display_name.to_string(),
+                email: email.to_string(),
+                provider_identifier: None,
+                provider: String::new(),
+                profile_pic_url: profile_pic_url.to_string(),
+            },
+        )
+        .await
+        .map_err(|e| PersistentUserAdmin::map_db_write_error(e, name))?;
+        Ok(PersistentUserAdmin::row_to_record(row))
+    }
+
+    async fn delete(&self, name: &str) -> Result<(), UserRegistryError> {
+        let user = self
+            .get_by_username(name)
+            .await?
+            .ok_or_else(|| UserRegistryError::Missing(name.to_string()))?;
+        self.delete_by_id(user.id).await
+    }
+
+    async fn delete_by_id(&self, id: u64) -> Result<(), UserRegistryError> {
+        let db_id = u64_to_i64(id)?;
+        headscale_db::users::destroy_postgres(&self.pool, db_id)
+            .await
+            .map_err(|e| PersistentUserAdmin::map_db_write_error(e, &id.to_string()))
+    }
+
+    async fn get(&self, name: &str) -> Result<Option<UserRecord>, UserRegistryError> {
+        self.get_by_username(name).await
+    }
+
+    async fn get_by_id(&self, id: u64) -> Result<Option<UserRecord>, UserRegistryError> {
+        let db_id = u64_to_i64(id)?;
+        match headscale_db::users::get_postgres_by_id(&self.pool, db_id).await {
+            Ok(row) => Ok(Some(PersistentUserAdmin::row_to_record(row))),
+            Err(headscale_db::DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(PersistentUserAdmin::map_optional_error(e, &id.to_string())),
+        }
+    }
+
+    async fn rename_by_id(&self, id: u64, new_name: &str) -> Result<UserRecord, UserRegistryError> {
+        if !is_valid_user_name(new_name) {
+            return Err(UserRegistryError::InvalidName(new_name.to_string()));
+        }
+        let db_id = u64_to_i64(id)?;
+        let row = headscale_db::users::rename_postgres(&self.pool, db_id, new_name)
+            .await
+            .map_err(|e| PersistentUserAdmin::map_db_write_error(e, new_name))?;
+        Ok(PersistentUserAdmin::row_to_record(row))
+    }
+
+    async fn all(&self) -> Result<Vec<UserRecord>, UserRegistryError> {
+        let rows = headscale_db::users::list_postgres(&self.pool)
+            .await
+            .map_err(|e| UserRegistryError::Store(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(PersistentUserAdmin::row_to_record)
+            .collect())
+    }
+
+    async fn touch(&self, name: &str) -> Result<(), UserRegistryError> {
+        let Some(user) = self.get_by_username(name).await? else {
+            return Ok(());
+        };
+        let db_id = u64_to_i64(user.id)?;
+        let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
+        sqlx::query(
+            "
+            UPDATE users
+            SET updated_at = to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
+            WHERE id = $2 AND deleted_at IS NULL
             ",
         )
         .bind(now)

@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:35 ADT
+Updated: 2026-05-30 09:54 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `3197a37 Add Postgres API key admin adapter`
+  `9005ea9 Add Postgres user and preauth admin adapters`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -40,11 +40,16 @@ Recent accepted slices:
 - `3197a37` adds a feature-gated
   `PersistentPostgresApiKeyAdmin` over the existing Postgres API-key primitives
   while leaving the default SQLite adapter unchanged.
+- `9005ea9` adds feature-gated
+  `PersistentPostgresUserAdmin` and `PersistentPostgresPreauthAdmin`
+  adapters, and aligns Postgres user deletion with the SQLite/headscale-go
+  non-empty-user and owned-preauth cleanup semantics.
 
 Current multi-agent split:
 
 - Local critical path: Postgres runtime/import wiring, starting from the
-  SQLite-only `Database`/server runtime boundary.
+  remaining machine/node admin adapter and the SQLite-only `Database`/server
+  runtime boundary.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome: runtime still opens SQLite unconditionally,
   `headscale-db::Database` is SQLite-only, and the existing persistent admin
@@ -56,6 +61,11 @@ Current multi-agent split:
   Outcome: route/SSH are broadly paired, with remaining route-via edge smokes,
   richer route-health reload+restart combinations, and a new paired cancelled
   OIDC SSH-check denial smoke slice added for Rust and headscale-go.
+- Explorer lane: Postgres machine admin next-slice inventory. Outcome:
+  `headscale_db::headscale_nodes` already exposes the needed Postgres node
+  primitives; the next safe slice is a feature-gated
+  `PersistentPostgresMachineAdmin`, while the full runtime backend abstraction
+  should wait until the remaining admin adapters are stable.
 
 Verified for the API-key slice:
 

@@ -104,7 +104,11 @@ pub use machines::{
 pub use preauth::{
     InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,
 };
+#[cfg(feature = "postgres-sqlx")]
+pub use preauth_persistent::PersistentPostgresPreauthAdmin;
 pub use preauth_persistent::PersistentPreauthAdmin;
+#[cfg(feature = "postgres-sqlx")]
+pub use users::PersistentPostgresUserAdmin;
 pub use users::{PersistentUserAdmin, UserAdmin, UserRecord, UserRegistry, UserRegistryError};
 
 use views::Section;

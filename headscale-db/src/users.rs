@@ -9,7 +9,7 @@ use crate::{DbError, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 #[cfg(feature = "postgres-sqlx")]
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 
 const REGISTER_METHOD_OIDC: &str = "oidc";
 const USER_COLUMNS: &str = r"
@@ -616,14 +616,46 @@ pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
-    let affected = sqlx::query("DELETE FROM users WHERE id = $1 AND deleted_at IS NULL")
-        .bind(id)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("user id={id}")));
+    let mut tx = conn.begin().await?;
+
+    let user_exists: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if user_exists.is_none() {
+        return Err(DbError::NotFound("user".into()));
     }
+
+    let owned_nodes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE user_id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if owned_nodes > 0 {
+        return Err(DbError::Constraint("user not empty: node(s) found".into()));
+    }
+
+    let key_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM pre_auth_keys WHERE user_id = $1")
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+    for key_id in key_ids {
+        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = $1")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 

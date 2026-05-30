@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::PgPool;
 use sqlx::SqlitePool;
 
 use crate::tailscale_wire::{PreauthRedeemer, RedeemError, RedeemOk};
@@ -212,6 +214,165 @@ impl PersistentPreauthAdmin {
     }
 }
 
+/// Postgres-backed admin-side preauth store.
+///
+/// Mirrors [`PersistentPreauthAdmin`] while using the feature-gated
+/// headscale-go-compatible Postgres primitives in
+/// [`headscale_db::preauth_keys`].
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+pub struct PersistentPostgresPreauthAdmin {
+    pool: PgPool,
+    cost: u32,
+    plaintext_cache: Arc<Mutex<HashMap<i64, String>>>,
+    users: Option<Arc<dyn UserAdmin>>,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresPreauthAdmin {
+    /// Wrap an existing sqlx Postgres pool. The caller is responsible
+    /// for having run migrations before wiring the adapter into the
+    /// admin router.
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            cost: preauth_keys::BCRYPT_COST_DEFAULT,
+            plaintext_cache: Arc::new(Mutex::new(HashMap::new())),
+            users: None,
+        }
+    }
+
+    /// Test-only constructor that uses [`preauth_keys::BCRYPT_COST_TEST`].
+    #[doc(hidden)]
+    pub fn new_for_test(pool: PgPool) -> Self {
+        Self {
+            pool,
+            cost: preauth_keys::BCRYPT_COST_TEST,
+            plaintext_cache: Arc::new(Mutex::new(HashMap::new())),
+            users: None,
+        }
+    }
+
+    pub fn with_user_admin(mut self, users: Arc<dyn UserAdmin>) -> Self {
+        self.users = Some(users);
+        self
+    }
+
+    /// Direct access to the underlying pool for embedding wire-layer
+    /// integrations that need to share the same DB.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    async fn mint_inner(
+        &self,
+        req: PreauthMintRequest,
+        explicit_expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        if req.user.trim().is_empty() && req.tags.is_empty() {
+            return Err(PreauthAdminError::Invalid(
+                "user must be non-empty unless acl_tags are provided".to_string(),
+            ));
+        }
+        let expiration = super::preauth::expiration_for_mint(req.ttl_secs, explicit_expiration);
+        let storage_user_id = self.storage_user_id(&req.user).await?;
+
+        let created = preauth_keys::create_postgres_with_cost(
+            &self.pool,
+            CreateParams {
+                user_id: storage_user_id,
+                reusable: req.reusable,
+                ephemeral: req.ephemeral,
+                tags: req.tags.clone(),
+                expiration,
+            },
+            self.cost,
+        )
+        .await
+        .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?;
+
+        self.plaintext_cache
+            .lock()
+            .insert(created.row.id, created.plaintext.clone());
+
+        let user = self.display_user_for_row(&created.row).await;
+        Ok(PreauthAdminKey {
+            id: created.row.id.max(0) as u64,
+            key: created.plaintext,
+            user,
+            created_at: created.row.created_at as u64,
+            expires_at: super::preauth::display_expires_at(created.row.expiration),
+            reusable: created.row.reusable,
+            ephemeral: created.row.ephemeral,
+            tags: req.tags,
+            redemptions: 0,
+        })
+    }
+
+    /// Atomically try to redeem the given candidate plaintext.
+    pub async fn try_use(&self, candidate: &str) -> Result<PreauthKeyRow, UseError> {
+        preauth_keys::try_use_postgres(&self.pool, candidate).await
+    }
+
+    async fn storage_user_id(&self, user: &str) -> Result<String, PreauthAdminError> {
+        if user.trim().is_empty() {
+            return Ok(String::new());
+        }
+        let Some(users) = &self.users else {
+            return Ok(user.to_string());
+        };
+        let record = users
+            .get(user)
+            .await
+            .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?
+            .ok_or_else(|| PreauthAdminError::Invalid("user not found".to_string()))?;
+        Ok(record.id.to_string())
+    }
+
+    async fn display_user_for_row(&self, row: &PreauthKeyRow) -> String {
+        let Some(users) = &self.users else {
+            return row.user_id.clone();
+        };
+        let Ok(id) = row.user_id.parse::<u64>() else {
+            return row.user_id.clone();
+        };
+        match users.get_by_id(id).await {
+            Ok(Some(user)) => user.name,
+            Ok(None) | Err(_) => row.user_id.clone(),
+        }
+    }
+
+    async fn row_to_redeem_ok(&self, row: &PreauthKeyRow) -> RedeemOk {
+        RedeemOk::for_user(self.display_user_for_row(row).await)
+            .ephemeral(row.ephemeral)
+            .tags(row.tag_list())
+            .auth_key_id(row.id)
+    }
+
+    async fn row_to_admin_key(&self, row: &PreauthKeyRow) -> PreauthAdminKey {
+        let key = {
+            self.plaintext_cache
+                .lock()
+                .get(&row.id)
+                .cloned()
+                .unwrap_or_else(|| row.display_key())
+        };
+        let user = self.display_user_for_row(row).await;
+        let redemptions = u64::from(!row.reusable && row.used_at.is_some());
+        PreauthAdminKey {
+            id: row.id.max(0) as u64,
+            key,
+            user,
+            created_at: row.created_at as u64,
+            expires_at: super::preauth::display_expires_at(row.expiration),
+            reusable: row.reusable,
+            ephemeral: row.ephemeral,
+            tags: row.tag_list(),
+            redemptions,
+        }
+    }
+}
+
 #[async_trait]
 impl PreauthRedeemer for PersistentPreauthAdmin {
     async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
@@ -221,6 +382,22 @@ impl PreauthRedeemer for PersistentPreauthAdmin {
 
     async fn lookup(&self, key: &str) -> Option<RedeemOk> {
         let row = preauth_keys::get_by_token(&self.pool, key).await.ok()?;
+        Some(self.row_to_redeem_ok(&row).await)
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl PreauthRedeemer for PersistentPostgresPreauthAdmin {
+    async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
+        let row = self.try_use(key).await.map_err(use_error_to_redeem)?;
+        Ok(self.row_to_redeem_ok(&row).await)
+    }
+
+    async fn lookup(&self, key: &str) -> Option<RedeemOk> {
+        let row = preauth_keys::get_postgres_by_token(&self.pool, key)
+            .await
+            .ok()?;
         Some(self.row_to_redeem_ok(&row).await)
     }
 }
@@ -322,6 +499,97 @@ impl PreauthAdmin for PersistentPreauthAdmin {
         let id = i64::try_from(id)
             .map_err(|_| PreauthAdminError::Invalid("id out of range".to_string()))?;
         preauth_keys::destroy(&self.pool, id)
+            .await
+            .map_err(db_error_to_admin)?;
+        self.plaintext_cache.lock().remove(&id);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl PreauthAdmin for PersistentPostgresPreauthAdmin {
+    async fn list(&self) -> Vec<PreauthAdminKey> {
+        match preauth_keys::list_all_postgres(&self.pool).await {
+            Ok(rows) => {
+                let mut keys = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    keys.push(self.row_to_admin_key(row).await);
+                }
+                keys
+            }
+            Err(e) => {
+                tracing::warn!(?e, "preauth list failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, None).await
+    }
+
+    async fn mint_with_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<i64>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, expiration).await
+    }
+
+    async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError> {
+        if prefix.len() < 4 {
+            return Err(PreauthAdminError::Invalid(
+                "prefix must be at least 4 chars".to_string(),
+            ));
+        }
+        let from_cache = {
+            let cache = self.plaintext_cache.lock();
+            cache
+                .iter()
+                .find(|(_, plain)| plain.starts_with(prefix))
+                .map(|(id, _)| *id)
+        };
+        if let Some(id) = from_cache {
+            preauth_keys::expire_postgres(&self.pool, id)
+                .await
+                .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?;
+            return Ok(());
+        }
+        match preauth_keys::list_all_postgres(&self.pool).await {
+            Ok(rows) => {
+                let target_id = rows.iter().find_map(|r| {
+                    if r.display_key().starts_with(prefix) {
+                        Some(r.id)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(id) = target_id {
+                    preauth_keys::expire_postgres(&self.pool, id)
+                        .await
+                        .map_err(|e| PreauthAdminError::Invalid(e.to_string()))?;
+                    Ok(())
+                } else {
+                    Err(PreauthAdminError::Unknown(prefix.to_string()))
+                }
+            }
+            Err(e) => Err(PreauthAdminError::Invalid(e.to_string())),
+        }
+    }
+
+    async fn expire_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
+        let id = i64::try_from(id)
+            .map_err(|_| PreauthAdminError::Invalid("id out of range".to_string()))?;
+        preauth_keys::expire_postgres(&self.pool, id)
+            .await
+            .map_err(db_error_to_admin)
+    }
+
+    async fn delete_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
+        let id = i64::try_from(id)
+            .map_err(|_| PreauthAdminError::Invalid("id out of range".to_string()))?;
+        preauth_keys::destroy_postgres(&self.pool, id)
             .await
             .map_err(db_error_to_admin)?;
         self.plaintext_cache.lock().remove(&id);

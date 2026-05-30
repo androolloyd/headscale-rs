@@ -331,6 +331,7 @@ write_policy_file() {
 start_rust_server() {
   http_port="$(free_port)"
   https_port="$(free_port)"
+  grpc_port="$(free_port)"
   control_port="${https_port}"
   control_url="https://host.docker.internal:${https_port}"
   local_health_url="http://127.0.0.1:${http_port}/health"
@@ -348,6 +349,7 @@ start_rust_server() {
 [server]
 listen = "127.0.0.1:${http_port}"
 https_listen = "0.0.0.0:${https_port}"
+grpc_listen_addr = "127.0.0.1:${grpc_port}"
 server_url = "${control_url}"
 state_dir = "${work_dir}/state"
 db_path = "${db_path}"
@@ -362,6 +364,15 @@ private_key_path = "${work_dir}/state/noise_private.key"
 expiry = "180d"
 
 $(register_cache_toml)
+
+[dns]
+magic_dns = true
+base_domain = "${base_domain}"
+override_local_dns = false
+search_domains = []
+
+[dns.nameservers]
+global = []
 
 [policy]
 mode = "file"

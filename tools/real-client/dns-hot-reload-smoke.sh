@@ -19,6 +19,7 @@ mkdir -p "${work_dir}"
 
 http_port=""
 https_port=""
+grpc_port=""
 server_pid=""
 config_path="${work_dir}/config.yaml"
 db_path="${work_dir}/db.sqlite"
@@ -88,6 +89,7 @@ server:
   server_url: ${control_url}
   listen: 0.0.0.0:${http_port}
   https_listen: 0.0.0.0:${https_port}
+  grpc_listen_addr: 127.0.0.1:${grpc_port}
   db_path: ${db_path}
   state_dir: ${work_dir}/state
   unix_socket: ${socket_path}
@@ -220,6 +222,7 @@ need ruby
 
 http_port="$(free_port)"
 https_port="$(free_port)"
+grpc_port="$(free_port)"
 control_url="https://host.docker.internal:${https_port}"
 local_control_url="http://127.0.0.1:${http_port}"
 

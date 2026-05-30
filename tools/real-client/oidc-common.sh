@@ -224,6 +224,9 @@ start_rust_server() {
   if [[ -z "${https_port}" ]]; then
     https_port="$(free_port)"
   fi
+  if [[ -z "${grpc_port}" ]]; then
+    grpc_port="$(free_port)"
+  fi
   control_port="${https_port}"
   control_url="https://host.docker.internal:${https_port}"
   local_health_url="http://127.0.0.1:${http_port}/health"
@@ -241,6 +244,7 @@ start_rust_server() {
 [server]
 listen = "127.0.0.1:${http_port}"
 https_listen = "0.0.0.0:${https_port}"
+grpc_listen_addr = "127.0.0.1:${grpc_port}"
 server_url = "${control_url}"
 state_dir = "${work_dir}/state"
 db_path = "${db_path}"
@@ -253,6 +257,15 @@ private_key_path = "${work_dir}/state/noise_private.key"
 
 [node]
 expiry = "180d"
+
+[dns]
+magic_dns = true
+base_domain = "${base_domain}"
+override_local_dns = false
+search_domains = []
+
+[dns.nameservers]
+global = []
 
 [oidc]
 issuer = "http://127.0.0.1:${oidc_port}/oidc"

@@ -5860,6 +5860,53 @@ mod tests {
         assert!(node.get("Name").is_some());
     }
 
+    /// Current headscale-go accepts Tailcfg map-session resume fields but
+    /// does not populate `MapResponse.MapSessionHandle`/`Seq`; Tailcfg permits
+    /// servers to ignore resume requests and start a fresh stream.
+    #[tokio::test]
+    async fn stream_true_ignores_map_session_resume_fields_like_headscale_go() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state);
+        let req_body = serde_json::json!({
+            "Stream": true,
+            "Version": 133,
+            "Compress": "zstd",
+            "MapSessionHandle": "client-resume-handle",
+            "MapSessionSeq": 41,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(mr.map_session_handle, "");
+        assert_eq!(mr.seq, 0);
+        assert_eq!(mr.peers.len(), 1);
+    }
+
     /// Wall 7 round-trip: a MapRequest carrying `DiscoKey`,
     /// `Endpoints`, and `Hostinfo.NetInfo.PreferredDERP` for peer-a
     /// must persist into `MachineRecord` and then fan back out on

@@ -457,14 +457,14 @@ impl TempPostgresServeDatabase {
     async fn open(test_name: &str) -> BoxTestResult<Option<Self>> {
         let Ok(url) = std::env::var(POSTGRES_TEST_URL_ENV) else {
             eprintln!(
-                "skipping Postgres serve smoke {test_name}: {POSTGRES_TEST_URL_ENV} is not set"
+                "skipping Postgres runtime smoke {test_name}: {POSTGRES_TEST_URL_ENV} is not set"
             );
             return Ok(None);
         };
 
         let parsed = url::Url::parse(&url)?;
         let Some(host) = parsed.host_str() else {
-            eprintln!("skipping Postgres serve smoke {test_name}: URL must include a TCP host");
+            eprintln!("skipping Postgres runtime smoke {test_name}: URL must include a TCP host");
             return Ok(None);
         };
         let port = parsed.port().unwrap_or(5432);
@@ -482,7 +482,7 @@ impl TempPostgresServeDatabase {
             .await
         {
             eprintln!(
-                "skipping Postgres serve smoke {test_name}: cannot create temporary database: {err}"
+                "skipping Postgres runtime smoke {test_name}: cannot create temporary database: {err}"
             );
             admin_pool.close().await;
             return Ok(None);
@@ -2166,6 +2166,79 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     assert!(check.status.success(), "stderr: {}", stderr(&check));
     assert_eq!(stdout(&check), "Policy is valid\n");
     assert_eq!(stderr(&check), "");
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("direct_policy").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let config = write_postgres_serve_config(
+        dir.path(),
+        database.fields(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+    );
+    let policy_path = dir.path().join("pg-direct-policy.hujson");
+    fs::write(&policy_path, "{\n  // preserved pg\n  \"acls\": []\n}\n")?;
+    let policy = policy_path.to_string_lossy().to_string();
+    let bypass = "--bypass-grpc-and-access-database-directly";
+
+    let result = async {
+        let empty_get = headscale_with_config(&config, &["--force", "policy", "get", bypass]);
+        assert_eq!(empty_get.status.code(), Some(6));
+        assert_eq!(stdout(&empty_get), "");
+        assert!(
+            stderr(&empty_get).contains("loading ACL from Postgres database: acl policy not found"),
+            "stderr: {}",
+            stderr(&empty_get)
+        );
+
+        let set_json = headscale_with_config(
+            &config,
+            &[
+                "--force", "-o", "json", "policy", "set", "--file", &policy, bypass,
+            ],
+        );
+        assert!(set_json.status.success(), "stderr: {}", stderr(&set_json));
+        let set_json: serde_json::Value = serde_json::from_slice(&set_json.stdout)?;
+        assert_eq!(set_json["applied"], true);
+        assert_eq!(
+            set_json["policy"],
+            "{\n  // preserved pg\n  \"acls\": []\n}\n"
+        );
+
+        let set_text = headscale_with_config(
+            &config,
+            &["--force", "policy", "set", "--file", &policy, bypass],
+        );
+        assert!(set_text.status.success(), "stderr: {}", stderr(&set_text));
+        assert_eq!(stdout(&set_text), "Policy updated.\n");
+        assert_eq!(stderr(&set_text), "");
+
+        let get =
+            headscale_with_config(&config, &["--force", "-o", "json", "policy", "get", bypass]);
+        assert!(get.status.success(), "stderr: {}", stderr(&get));
+        assert_eq!(stdout(&get), "{\n  // preserved pg\n  \"acls\": []\n}\n");
+        assert_eq!(stderr(&get), "");
+
+        let check = headscale_with_config(
+            &config,
+            &["--force", "policy", "check", "--file", &policy, bypass],
+        );
+        assert!(check.status.success(), "stderr: {}", stderr(&check));
+        assert_eq!(stdout(&check), "Policy is valid\n");
+        assert_eq!(stderr(&check), "");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    database.cleanup().await?;
+    result
 }
 
 #[test]

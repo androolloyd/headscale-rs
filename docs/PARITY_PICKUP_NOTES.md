@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 11:41 ADT
+Updated: 2026-05-30 11:50 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed baseline before this pickup:
-  `db0b31f Add Postgres runtime smoke and route primary guard`
+  `b3eeb43 Add Postgres serve process smoke`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -79,7 +79,7 @@ Recent accepted slices:
   and every remaining candidate is unhealthy: the stale primary entry is now
   removed instead of kept, with a focused regression in
   `headscale-api/src/tailscale_wire/routes.rs`.
-- The next slice adds an env-gated production Postgres `serve` process smoke in
+- `b3eeb43` adds an env-gated production Postgres `serve` process smoke in
   `headscale-cli/tests/cli_process.rs`. It creates a temporary Postgres
   database from `HEADSCALE_DB_POSTGRES_TEST_URL`, starts the real
   `headscale serve` binary with Pg config, checks the public `/health` path,
@@ -87,6 +87,12 @@ Recent accepted slices:
   database-backed policy set/get through the CLI before dropping the temporary
   database. It skips cleanly when the env var is absent or the role cannot
   create a temporary database.
+- This slice adds env-gated process coverage for Postgres direct policy DB
+  bypass without a running server. The real `headscale` binary opens the
+  configured Pg database through
+  `policy --bypass-grpc-and-access-database-directly`, migrates the foundation
+  tables, proves missing-policy error shape, and round-trips `set`, `get`, and
+  `check` before dropping the temporary database.
 
 Current multi-agent split:
 
@@ -94,12 +100,13 @@ Current multi-agent split:
   server-local backend abstraction and Pg runtime builder now compile behind
   `headscale-cli/postgres-sqlx`, including OIDC registration and SSH-check
   approval, and Postgres foundation migration now has import/version guards.
-  Backend-aware direct policy DB bypass is wired, an env-gated live-Pg runtime
+  Backend-aware direct policy DB bypass is wired and process-covered against
+  Postgres without a running server, an env-gated live-Pg runtime
   construction/register/hydration smoke is covered, and the first production
   Pg `serve` process smoke now covers listeners plus local gRPC/CLI
   health/user/preauth/policy operations. Remaining critical work is broader
-  production Pg serve coverage for OIDC/wire registry projection, direct policy
-  bypass while the server is stopped, and stock-client map/registration flows.
+  production Pg serve coverage for OIDC/wire registry projection and
+  stock-client map/registration flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -195,9 +202,10 @@ rejects unsupported existing version state before running migrations, and an
 env-gated live-Pg runtime smoke proves register/persist/hydrate behavior without
 adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
-operations against Pg. The next critical slice is broader production Pg serve
-coverage for OIDC/wire registry projection, direct-policy round trips, and
-stock-client registration/map flows. The other narrow lanes remain
+operations against Pg, and direct policy DB bypass now round-trips against
+configured Pg without a running server. The next critical slice is broader
+production Pg serve coverage for OIDC/wire registry projection and stock-client
+registration/map flows. The other narrow lanes remain
 current-upstream CLI output drift snapshots, map/session churn parity, and
 remaining route/SSH stock-client edge rows.
 
@@ -205,11 +213,12 @@ remaining route/SSH stock-client edge rows.
 
 - Postgres runtime/import support: feature-gated Pg runtime wiring with OIDC
   registration/SSH-check approval now compiles, foundation migration has
-  import/version guards, backend-aware direct policy DB bypass is wired, and an
-  env-gated live-Pg runtime register/hydrate smoke exists; the first production
+  import/version guards, backend-aware direct policy DB bypass is wired and
+  process-covered against Pg without a running server, and an env-gated live-Pg
+  runtime register/hydrate smoke exists; the first production
   Pg `serve` process smoke covers public health plus local gRPC
-  health/user/preauth/policy CLI paths, while OIDC/wire, direct-policy, and
-  stock-client serve smokes remain
+  health/user/preauth/policy CLI paths, while OIDC/wire and stock-client serve
+  smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

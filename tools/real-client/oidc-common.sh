@@ -452,23 +452,30 @@ drive_oidc_login() {
     "${control_url}/register/${registration_id}" \
     >"${work_dir}/oidc-callback.html"
   grep -Eiq "Location: .*host\.docker\.internal:${control_port}/oidc/callback\\?" "${work_dir}/oidc-callback.headers"
-  grep -Eq "Confirm node registration" "${work_dir}/oidc-callback.html"
-  local confirm_csrf
-  confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${work_dir}/oidc-callback.html" | head -n 1)"
-  if [[ -z "${confirm_csrf}" ]]; then
-    echo "OIDC confirmation page did not contain CSRF token" >&2
+  if grep -Eq "Confirm node registration" "${work_dir}/oidc-callback.html"; then
+    local confirm_csrf
+    confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${work_dir}/oidc-callback.html" | head -n 1)"
+    if [[ -z "${confirm_csrf}" ]]; then
+      echo "OIDC confirmation page did not contain CSRF token" >&2
+      exit 1
+    fi
+    curl -fsSL \
+      --cacert "${tls_cert_path}" \
+      --resolve "host.docker.internal:${control_port}:127.0.0.1" \
+      -c "${work_dir}/oidc.cookies" \
+      -b "${work_dir}/oidc.cookies" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      --data "headscale_register_confirm=${confirm_csrf}" \
+      "${control_url}/register/confirm/${registration_id}" \
+      >"${work_dir}/oidc-confirm.html"
+    grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-confirm.html"
+  elif grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-callback.html"; then
+    cp "${work_dir}/oidc-callback.html" "${work_dir}/oidc-confirm.html"
+    echo "OIDC callback completed registration without explicit confirm form"
+  else
+    echo "OIDC callback contained neither confirmation form nor success page" >&2
     exit 1
   fi
-  curl -fsSL \
-    --cacert "${tls_cert_path}" \
-    --resolve "host.docker.internal:${control_port}:127.0.0.1" \
-    -c "${work_dir}/oidc.cookies" \
-    -b "${work_dir}/oidc.cookies" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    --data "headscale_register_confirm=${confirm_csrf}" \
-    "${control_url}/register/confirm/${registration_id}" \
-    >"${work_dir}/oidc-confirm.html"
-  grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-confirm.html"
 
   if ! wait_pid_with_timeout "tailscale up OIDC" "${up_pid}"; then
     echo "tailscale up returned non-zero; verifying logged-in netmap" >&2

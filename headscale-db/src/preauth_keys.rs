@@ -31,6 +31,8 @@ use crate::{DbError, Result};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::{Connection, PgConnection, PgPool};
 
 /// Brand prefix on the plaintext bearer token.
 pub const TOKEN_PREFIX: &str = "hskey-auth-";
@@ -86,6 +88,32 @@ const PREAUTH_KEY_COLUMNS: &str = r"
 
 fn preauth_key_select(suffix: &str) -> String {
     format!("SELECT {PREAUTH_KEY_COLUMNS} FROM pre_auth_keys {suffix}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_PREAUTH_KEY_COLUMNS: &str = r"
+        id,
+        key,
+        prefix,
+        COALESCE(convert_from(hash, 'UTF8'), '') AS key_hash,
+        COALESCE(user_id::TEXT, '') AS user_id,
+        reusable,
+        ephemeral,
+        COALESCE(tags, '[]') AS tags,
+        FLOOR(EXTRACT(EPOCH FROM expiration))::BIGINT AS expiration,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        CASE
+            WHEN used THEN COALESCE(
+                FLOOR(EXTRACT(EPOCH FROM expiration))::BIGINT,
+                COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0)
+            )
+            ELSE NULL
+        END AS used_at
+";
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_preauth_key_select(suffix: &str) -> String {
+    format!("SELECT {POSTGRES_PREAUTH_KEY_COLUMNS} FROM pre_auth_keys {suffix}")
 }
 
 /// One pre-auth-key row in the DB. Mirrors the Go upstream's
@@ -271,6 +299,92 @@ pub async fn create_with_cost(
     })
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres(pool: &PgPool, params: CreateParams) -> Result<Created> {
+    create_postgres_with_cost(pool, params, BCRYPT_COST_DEFAULT).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_for_test(pool: &PgPool, params: CreateParams) -> Result<Created> {
+    create_postgres_with_cost(pool, params, BCRYPT_COST_TEST).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost(
+    pool: &PgPool,
+    params: CreateParams,
+    cost: u32,
+) -> Result<Created> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_with_cost_on_connection(&mut conn, params, cost).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_for_test_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+) -> Result<Created> {
+    create_postgres_with_cost_on_connection(conn, params, BCRYPT_COST_TEST).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+    cost: u32,
+) -> Result<Created> {
+    let storage_user_id = resolve_postgres_storage_user_id(conn, &params.user_id).await?;
+    if storage_user_id.is_none() && params.tags.is_empty() {
+        return Err(DbError::General(
+            "user_id must be non-empty unless tags are provided".into(),
+        ));
+    }
+    let (plaintext, prefix, secret) = generate_plaintext_parts();
+    let hash =
+        bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
+    let tags_json = serde_json::to_string(&params.tags)?;
+    let created_at = now_unix();
+
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO pre_auth_keys
+            (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+        VALUES (
+            NULL,
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            false,
+            $6,
+            CASE
+                WHEN $7::BIGINT IS NULL THEN NULL
+                ELSE to_timestamp(($7::BIGINT)::DOUBLE PRECISION)
+            END,
+            to_timestamp(($8::BIGINT)::DOUBLE PRECISION)
+        )
+        RETURNING id
+        ",
+    )
+    .bind(&prefix)
+    .bind(hash.as_bytes())
+    .bind(storage_user_id)
+    .bind(params.reusable)
+    .bind(params.ephemeral)
+    .bind(&tags_json)
+    .bind(params.expiration)
+    .bind(created_at)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_create_err)?;
+
+    Ok(Created {
+        plaintext,
+        row: get_postgres_by_id_on_connection(conn, id).await?,
+    })
+}
+
 async fn resolve_storage_user_id(pool: &SqlitePool, user_id: &str) -> Result<Option<i64>> {
     let user_id = user_id.trim();
     if user_id.is_empty() {
@@ -294,6 +408,33 @@ async fn resolve_storage_user_id(pool: &SqlitePool, user_id: &str) -> Result<Opt
     }
 }
 
+#[cfg(feature = "postgres-sqlx")]
+async fn resolve_postgres_storage_user_id(
+    conn: &mut PgConnection,
+    user_id: &str,
+) -> Result<Option<i64>> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(id) = user_id.parse::<i64>() {
+        match crate::users::get_postgres_by_id_on_connection(conn, id).await {
+            Ok(user) => return Ok(Some(user.id)),
+            Err(DbError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    match crate::users::get_postgres_by_name_on_connection(conn, user_id).await {
+        Ok(user) => Ok(Some(user.id)),
+        Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
+            "preauth key user {user_id:?} does not exist"
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
 fn map_create_err(e: sqlx::Error) -> DbError {
     match &e {
         sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
@@ -309,6 +450,28 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PreauthKeyRow> {
     sqlx::query_as::<_, PreauthKeyRow>(&query)
         .bind(id)
         .fetch_one(pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<PreauthKeyRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_id_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<PreauthKeyRow> {
+    let query = postgres_preauth_key_select("WHERE id = $1");
+    sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
@@ -373,6 +536,43 @@ pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthK
     }
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_token(pool: &PgPool, candidate: &str) -> Result<PreauthKeyRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_token_on_connection(&mut conn, candidate).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_token_on_connection(
+    conn: &mut PgConnection,
+    candidate: &str,
+) -> Result<PreauthKeyRow> {
+    match parse_auth_key(candidate)? {
+        ParsedAuthKey::Modern { prefix, secret } => {
+            let query = postgres_preauth_key_select("WHERE prefix = $1");
+            let row = sqlx::query_as::<_, PreauthKeyRow>(&query)
+                .bind(prefix)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| DbError::NotFound("preauth_key".into()))?;
+
+            if bcrypt::verify(secret, &row.key_hash).unwrap_or(false) {
+                Ok(row)
+            } else {
+                Err(DbError::NotFound("preauth_key (hash mismatch)".into()))
+            }
+        }
+        ParsedAuthKey::Legacy { key } => {
+            let query = postgres_preauth_key_select("WHERE key = $1");
+            sqlx::query_as::<_, PreauthKeyRow>(&query)
+                .bind(key)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| DbError::NotFound("preauth_key".into()))
+        }
+    }
+}
+
 /// Expire a key by id — sets `expiration = now_unix()`. The row stays
 /// in place so the admin list can still surface it as "expired".
 pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -384,6 +584,32 @@ pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
     .bind(now_unix())
     .bind(id)
     .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(DbError::NotFound(format!("preauth_key id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    expire_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let n = sqlx::query(
+        "
+        UPDATE pre_auth_keys
+        SET expiration = to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
+        WHERE id = $2
+        ",
+    )
+    .bind(now_unix())
+    .bind(id)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
     if n == 0 {
@@ -406,6 +632,39 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
         .await?;
 
     let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_destroy_err)?
+        .rows_affected();
+    if n == 0 {
+        return Err(DbError::NotFound(format!("preauth_key id={id}")));
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    destroy_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let mut tx = conn.begin().await?;
+
+    let has_nodes: bool = sqlx::query_scalar("SELECT to_regclass('nodes') IS NOT NULL")
+        .fetch_one(&mut *tx)
+        .await?;
+    if has_nodes {
+        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await
@@ -442,6 +701,30 @@ pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<Preaut
     Ok(rows)
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_user(pool: &PgPool, user_id: &str) -> Result<Vec<PreauthKeyRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_by_user_on_connection(&mut conn, user_id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_user_on_connection(
+    conn: &mut PgConnection,
+    user_id: &str,
+) -> Result<Vec<PreauthKeyRow>> {
+    let storage_user_id = match resolve_postgres_storage_user_id(conn, user_id).await {
+        Ok(Some(user_id)) => user_id,
+        Ok(None) | Err(DbError::Constraint(_)) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let query = postgres_preauth_key_select("WHERE user_id = $1 ORDER BY created_at DESC, id DESC");
+    let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(storage_user_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows)
+}
+
 /// List every key in the store, newest first. Used by the admin UI's
 /// "all keys" page (which Tailscale's `headscale preauthkey list`
 /// covers via `--user` filtering on the client).
@@ -449,6 +732,23 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<PreauthKeyRow>> {
     let query = preauth_key_select("ORDER BY created_at DESC, id DESC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
         .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_all_postgres(pool: &PgPool) -> Result<Vec<PreauthKeyRow>> {
+    let mut conn = pool.acquire().await?;
+    list_all_postgres_on_connection(&mut conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_all_postgres_on_connection(
+    conn: &mut PgConnection,
+) -> Result<Vec<PreauthKeyRow>> {
+    let query = postgres_preauth_key_select("ORDER BY created_at DESC, id DESC");
+    let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .fetch_all(&mut *conn)
         .await?;
     Ok(rows)
 }
@@ -510,6 +810,68 @@ pub async fn try_use(
             UPDATE pre_auth_keys
             SET used = true
             WHERE id = ? AND used = false
+            ",
+        )
+        .bind(fresh.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| UseError::AlreadyUsed)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(UseError::AlreadyUsed);
+        }
+        PreauthKeyRow {
+            used_at: Some(now),
+            ..fresh
+        }
+    };
+
+    tx.commit().await.map_err(|_| UseError::AlreadyUsed)?;
+    Ok(updated)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn try_use_postgres(
+    pool: &PgPool,
+    candidate: &str,
+) -> std::result::Result<PreauthKeyRow, UseError> {
+    let mut conn = pool.acquire().await.map_err(|_| UseError::NotFound)?;
+    try_use_postgres_on_connection(&mut conn, candidate).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn try_use_postgres_on_connection(
+    conn: &mut PgConnection,
+    candidate: &str,
+) -> std::result::Result<PreauthKeyRow, UseError> {
+    let row = get_postgres_by_token_on_connection(conn, candidate)
+        .await
+        .map_err(|_| UseError::NotFound)?;
+    let mut tx = conn.begin().await.map_err(|_| UseError::NotFound)?;
+
+    let query = postgres_preauth_key_select("WHERE id = $1 FOR UPDATE");
+    let fresh: PreauthKeyRow = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(row.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| UseError::NotFound)?;
+
+    let now = now_unix();
+    if fresh.is_expired(now) {
+        return Err(UseError::Expired);
+    }
+    if !fresh.reusable && fresh.used_at.is_some() {
+        return Err(UseError::AlreadyUsed);
+    }
+
+    let updated = if fresh.reusable {
+        fresh.clone()
+    } else {
+        let affected = sqlx::query(
+            "
+            UPDATE pre_auth_keys
+            SET used = true
+            WHERE id = $1 AND used = false
             ",
         )
         .bind(fresh.id)

@@ -1,14 +1,14 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 08:19 ADT
+Updated: 2026-05-30 08:38 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before the Postgres preauth-key pickup: `e53c882 Refresh parity baseline documentation`
-- Remote: `origin/main` was pushed through `e53c882`
-- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `e53c882`
+- Latest local commit before the Postgres node/route pickup: `Add Postgres preauth key foundation primitives`
+- Remote: `origin/main` should be pushed through the current local `main`
+- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
 
 ## Just Landed
@@ -25,6 +25,9 @@ Recent accepted slices:
   locked fuzz manifest check before building fuzz targets.
 - `e53c882` refreshed parity baseline docs so the pinned v0.29 differential
   harness is no longer described as a v0.28 harness.
+- The current head adds a headscale-go-shaped `pre_auth_keys` migration and
+  Postgres preauth-key primitives for create, get by token, list, expire,
+  delete, and try-use paths.
 
 Verified for the API-key slice:
 
@@ -44,6 +47,18 @@ cargo check --locked --manifest-path headscale-core/fuzz/Cargo.toml --bins
 FUZZ_TARGET=fuzz_stun FUZZ_RUNS=1 ./scripts/fuzz_ci.sh
 cargo fmt --all -- --check
 git diff --check
+```
+
+Verified so far for the preauth-key slice:
+
+```sh
+cargo fmt --all -- --check
+git diff --check
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --test postgres_preauth_keys -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --all-targets -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --all-targets -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --all-targets -- -D warnings
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --features postgres-sqlx --all-targets -- -D warnings
 ```
 
 ## Completed After Pickup
@@ -67,10 +82,10 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 ## Next Safe Slice
 
 The current active slice is expanding the Postgres foundation from
-`database_versions`/`policies`/`users`/`api_keys` to Go-shaped preauth-key
-migration and primitives. After that lands, the next narrow lanes are
-node/route Postgres primitives, current-upstream CLI output drift snapshots, or
-the remaining route/SSH stock-client edge rows.
+`database_versions`/`policies`/`users`/`api_keys`/`pre_auth_keys` to Go-shaped
+node/route migration and primitives. The other narrow lanes remain
+current-upstream CLI output drift snapshots or the remaining route/SSH
+stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 

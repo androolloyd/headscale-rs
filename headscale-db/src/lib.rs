@@ -305,8 +305,8 @@ pub async fn open_postgres_pool(url: &str) -> Result<PgPool> {
 /// Apply the narrow Postgres foundation schema to a pool.
 ///
 /// This creates and stamps the foundation Postgres tables only. It deliberately
-/// does not run the SQLite migrations or enable any user/node/preauth/API-key
-/// stores.
+/// does not run the SQLite migrations or enable Postgres through the runtime
+/// `Database` type.
 #[cfg(feature = "postgres-sqlx")]
 pub async fn migrate_postgres_foundation(pool: &PgPool) -> Result<()> {
     let mut conn = pool.acquire().await?;

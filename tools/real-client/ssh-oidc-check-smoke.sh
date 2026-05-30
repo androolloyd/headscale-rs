@@ -355,6 +355,9 @@ tls_hostname = "host.docker.internal"
 unix_socket = "${headscale_rs_socket_path}"
 unix_socket_permission = 448
 
+[noise]
+private_key_path = "${work_dir}/state/noise_private.key"
+
 [node]
 expiry = "180d"
 

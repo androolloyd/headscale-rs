@@ -176,6 +176,9 @@ server:
   unix_socket_permission: "0700"
   tls_hostname: host.docker.internal
 
+noise:
+  private_key_path: ${work_dir}/state/noise_private.key
+
 prefixes:
   allocation: sequential
 EOF

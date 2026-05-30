@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 12:18 ADT
+Updated: 2026-05-30 12:22 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed baseline before this pickup:
-  `441314f Add Postgres OIDC runtime rekey smoke`
+  `2824150 Add Postgres authkey real-client smoke`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -109,6 +109,12 @@ Recent accepted slices:
   real `headscale server`/headscale-go `serve`, mint an auth key, log in a
   stock Tailscale client, capture `tailscale debug netmap`, and assert the
   persisted node lifecycle. They skip cleanly when the Pg URL is absent.
+- This slice wires the paired `postgres-authkey` stock-client row into
+  `.github/workflows/real-client-parity.yml`: CI now starts a Postgres 16
+  service, installs `postgresql-client`, exports
+  `HEADSCALE_DB_POSTGRES_TEST_URL`, and includes `postgres-authkey` in the PR
+  smoke set. The local environment here has no Docker daemon and no Pg URL, so
+  the full stock-client/Pg execution is deferred to CI.
 
 Current multi-agent split:
 
@@ -124,8 +130,9 @@ Current multi-agent split:
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. A paired env-gated production Pg
   stock-client auth-key smoke is now checked into the real-client matrix.
-  Remaining critical work is CI/Postgres-service enforcement for that lane plus
-  broader production Pg serve coverage beyond the single auth-key/map flow.
+  CI now provisions Postgres and includes that row in the PR real-client job.
+  Remaining critical work is broader production Pg serve coverage beyond the
+  single auth-key/map flow.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -225,11 +232,10 @@ env-gated live-Pg runtime smoke proves register/persist/hydrate behavior without
 adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
 operations against Pg, and direct policy DB bypass now round-trips against
-configured Pg without a running server. The next critical slice is to run the
-paired Pg stock-client lane under CI with a real Postgres service, then broaden
+configured Pg without a running server. The next critical slice is broader
 production Pg serve coverage beyond the single auth-key/map flow. The other
-narrow lanes remain current-upstream CLI output drift snapshots,
-map/session churn parity, and remaining route/SSH stock-client edge rows.
+narrow lanes remain current-upstream CLI output drift snapshots, map/session
+churn parity, and remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
@@ -241,8 +247,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   smoke exist; the first production
   Pg `serve` process smoke covers public health plus local gRPC
   health/user/preauth/policy CLI paths, and a paired env-gated Pg auth-key
-  stock-client smoke is checked into the real-client matrix; CI enforcement and
-  broader Pg stock-client serve smokes remain
+  stock-client smoke is checked into the real-client matrix and PR CI now
+  provisions Postgres for it; broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

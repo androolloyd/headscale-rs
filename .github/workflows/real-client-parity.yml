@@ -45,8 +45,23 @@ jobs:
     name: paired stock-client smokes
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: headscale_ci
+          POSTGRES_USER: headscale
+          POSTGRES_PASSWORD: headscale
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U headscale -d headscale_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
-      PR_SMOKES: authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,route-via,route-via-multiprefix,route-health,route-health-all-unhealthy,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill
+      HEADSCALE_DB_POSTGRES_TEST_URL: postgres://headscale:headscale@127.0.0.1:5432/headscale_ci?sslmode=disable
+      PR_SMOKES: authkey,postgres-authkey,web-register,oidc,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,route-approve,route-via,route-via-multiprefix,route-health,route-health-all-unhealthy,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -61,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y openssl protobuf-compiler ruby sqlite3
+          sudo apt-get install -y openssl postgresql-client protobuf-compiler ruby sqlite3
       - name: Check Docker availability
         run: |
           set -euo pipefail

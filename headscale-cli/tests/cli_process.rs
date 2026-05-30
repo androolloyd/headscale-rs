@@ -2473,8 +2473,8 @@ fn implemented_admin_errors_follow_output_format() {
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serve_postgres_runtime_local_grpc_health_users_policy_smoke() -> BoxTestResult {
-    let Some(database) = TempPostgresServeDatabase::open("health_users_policy").await? else {
+async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("admin_surface").await? else {
         return Ok(());
     };
     let dir = tempfile::tempdir()?;
@@ -2555,6 +2555,33 @@ async fn serve_postgres_runtime_local_grpc_health_users_policy_smoke() -> BoxTes
         );
         assert_eq!(stderr(&preauth), "");
 
+        let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
+        let preauth_json = json_output(&preauth_json);
+        assert_eq!(preauth_json[0]["user"]["name"].as_str(), Some("alice"));
+        assert!(preauth_json[0]["key"].as_str().is_some_and(|key| {
+            key.starts_with("hskey-auth-") || key.starts_with("preauthkey:hskey-auth-")
+        }));
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        let api_key = json_output(&api_key);
+        assert!(
+            api_key
+                .as_str()
+                .is_some_and(|key| key.starts_with("hskey-api-"))
+        );
+
+        let api_keys = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
+        let api_keys = json_output(&api_keys);
+        let api_id = api_keys[0]["id"].as_u64().expect("api key id").to_string();
+        assert!(
+            api_keys[0]["prefix"]
+                .as_str()
+                .is_some_and(|prefix| !prefix.is_empty())
+        );
+
         let policy_path = dir.path().join("pg-policy.hujson");
         fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
         let policy_path = policy_path.to_string_lossy().to_string();
@@ -2578,6 +2605,135 @@ async fn serve_postgres_runtime_local_grpc_health_users_policy_smoke() -> BoxTes
             "{\"tagOwners\":{\"tag:server\":[\"alice@\"]}}\n"
         );
         assert_eq!(stderr(&get_policy), "");
+
+        let auth_register_id = "abababababababababababab";
+        let auth_id = format!("hskey-authreq-{auth_register_id}");
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                &auth_id,
+                "--name",
+                "pg-admin-node",
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let auth_register = headscale_with_config(
+            &config,
+            &["auth", "register", "--user", "alice", "--auth-id", &auth_id],
+        );
+        assert!(
+            auth_register.status.success(),
+            "stderr: {}",
+            stderr(&auth_register)
+        );
+        assert_eq!(stdout(&auth_register), "Node pg-admin-node registered\n");
+        assert_eq!(stderr(&auth_register), "");
+
+        let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        let nodes_json = json_output(&nodes_json);
+        let node_id = nodes_json[0]["id"].as_u64().expect("node id").to_string();
+        assert_eq!(nodes_json[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes_json[0]["given_name"].as_str(), Some("pg-admin-node"));
+        assert!(nodes_json[0]["ip_addresses"].as_array().is_some_and(|ips| {
+            ips.iter()
+                .any(|ip| ip.as_str().is_some_and(|ip| ip.starts_with("100.")))
+        }));
+
+        let rename_node = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "rename",
+                "pg-renamed-node",
+                "--identifier",
+                &node_id,
+            ],
+        );
+        assert!(
+            rename_node.status.success(),
+            "stderr: {}",
+            stderr(&rename_node)
+        );
+        assert_eq!(stdout(&rename_node), "Node renamed\n");
+        assert_eq!(stderr(&rename_node), "");
+
+        let tag_node = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "tag",
+                "--identifier",
+                &node_id,
+                "--tags",
+                "tag:server",
+            ],
+        );
+        assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
+        assert_eq!(stdout(&tag_node), "Node updated\n");
+        assert_eq!(stderr(&tag_node), "");
+
+        let expire_node =
+            headscale_with_config(&config, &["nodes", "expire", "--identifier", &node_id]);
+        assert!(
+            expire_node.status.success(),
+            "stderr: {}",
+            stderr(&expire_node)
+        );
+        assert_eq!(stdout(&expire_node), "Node expired\n");
+        assert_eq!(stderr(&expire_node), "");
+
+        let backfill_ips = headscale_with_config(&config, &["--force", "nodes", "backfillips"]);
+        assert!(
+            backfill_ips.status.success(),
+            "stderr: {}",
+            stderr(&backfill_ips)
+        );
+        assert_eq!(stdout(&backfill_ips), "Node IPs backfilled successfully\n");
+        assert_eq!(stderr(&backfill_ips), "");
+
+        let delete_node = headscale_with_config(
+            &config,
+            &["--force", "nodes", "delete", "--identifier", &node_id],
+        );
+        assert!(
+            delete_node.status.success(),
+            "stderr: {}",
+            stderr(&delete_node)
+        );
+        assert_eq!(stdout(&delete_node), "Node deleted\n");
+        assert_eq!(stderr(&delete_node), "");
+
+        let expire_api_key =
+            headscale_with_config(&config, &["apikeys", "expire", "--id", &api_id]);
+        assert!(
+            expire_api_key.status.success(),
+            "stderr: {}",
+            stderr(&expire_api_key)
+        );
+        assert_eq!(stdout(&expire_api_key), "Key expired\n");
+        assert_eq!(stderr(&expire_api_key), "");
+
+        let delete_api_key =
+            headscale_with_config(&config, &["apikeys", "delete", "--id", &api_id]);
+        assert!(
+            delete_api_key.status.success(),
+            "stderr: {}",
+            stderr(&delete_api_key)
+        );
+        assert_eq!(stdout(&delete_api_key), "Key deleted\n");
+        assert_eq!(stderr(&delete_api_key), "");
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }

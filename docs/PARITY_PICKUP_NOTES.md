@@ -146,7 +146,7 @@ Current multi-agent split:
   Postgres without a running server, an env-gated live-Pg runtime
   construction/register/hydration smoke is covered, and the first production
   Pg `serve` process smoke now covers listeners plus local gRPC/CLI
-  health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
+  health/user/preauth/API-key/policy/node admin operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. Paired env-gated production Pg
   stock-client auth-key, web-registration, route-approval, and OIDC smokes are
@@ -252,10 +252,11 @@ rejects unsupported existing version state before running migrations, and an
 env-gated live-Pg runtime smoke proves register/persist/hydrate behavior without
 adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
-operations against Pg, and direct policy DB bypass now round-trips against
-configured Pg without a running server. The next critical slice is broader
-production Pg serve coverage beyond the auth-key, web-registration, and
-route-approval map flows. The other
+admin operations against Pg, including users, preauth keys, API keys, policy,
+debug node creation, registration, node mutation, backfill, and deletion; direct
+policy DB bypass now round-trips against configured Pg without a running server.
+The next critical slice is broader production Pg serve coverage beyond the
+auth-key, web-registration, route-approval, and OIDC map flows. The other
 narrow lanes remain current-upstream CLI output drift snapshots, map/session
 churn parity, and remaining route/SSH stock-client edge rows.
 
@@ -266,11 +267,11 @@ churn parity, and remaining route/SSH stock-client edge rows.
   import/version guards, backend-aware direct policy DB bypass is wired and
   process-covered against Pg without a running server, and an env-gated live-Pg
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
-  smoke exist; the first production
-  Pg `serve` process smoke covers public health plus local gRPC
-  health/user/preauth/policy CLI paths, and paired env-gated Pg auth-key plus
-  web-registration stock-client smokes are checked into the real-client matrix
-  and push/PR CI now provisions Postgres for them; broader Pg stock-client serve smokes remain
+  smoke exist; the first production Pg `serve` process smoke covers public
+  health plus local gRPC health/user/preauth/API-key/policy/node CLI paths, and
+  paired env-gated Pg auth-key, web-registration, route-approval, and OIDC
+  stock-client smokes are checked into the real-client matrix and push/PR CI now
+  provisions Postgres for them; broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:30 ADT
+Updated: 2026-05-30 09:35 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed implementation commit before the current API-key adapter slice:
-  `f4d98a2 Add Postgres policy health API adapters`
+- Latest pushed implementation commit:
+  `3197a37 Add Postgres API key admin adapter`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -32,13 +32,12 @@ Recent accepted slices:
 - The node slice adds a headscale-go-shaped `nodes` migration and Postgres node
   primitives for create/read/list/update/tag/rename/route/IP/logout/delete
   paths.
-- The current in-progress runtime extraction makes allocator seeding consume
-  backend-loaded node IP rows rather than baking that logic directly into the
-  SQLite pool path.
-- The current in-progress API adapter slice adds feature-gated Postgres
+- `11cb90d` makes allocator seeding consume backend-loaded node IP rows rather
+  than baking that logic directly into the SQLite pool path.
+- `f4d98a2` adds feature-gated Postgres
   policy-persistence and database-health trait implementations for the gRPC
   admin service without removing the explicit Postgres `serve` guard.
-- The current in-progress API-key adapter slice adds a feature-gated
+- `3197a37` adds a feature-gated
   `PersistentPostgresApiKeyAdmin` over the existing Postgres API-key primitives
   while leaving the default SQLite adapter unchanged.
 

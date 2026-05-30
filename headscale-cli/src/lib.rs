@@ -28,6 +28,10 @@
 //! call the same `admin::run_users` dispatcher, so stdout, exit code,
 //! and the stderr `Error: …`/machine-readable error envelope match.
 
+// Keep compatibility with downstream toolchains that predate
+// Duration::from_mins/from_hours while newer clippy versions prefer them.
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 pub mod admin;
 
 use clap::Subcommand;

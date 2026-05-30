@@ -41,6 +41,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
     env:
+      CARGO_FUZZ_INSTALL_TOOLCHAIN: "1.95.0"
+      CARGO_FUZZ_VERSION: "0.13.1"
       FUZZ_TARGET: ${{ matrix.target }}
       FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '900' }}
       FUZZ_TIMEOUT_SECS: "30"
@@ -54,7 +56,12 @@ jobs:
         with:
           workspaces: |
             headscale-core/fuzz -> target
-      - run: cargo install cargo-fuzz --locked
+      # cargo-fuzz v0.13.1's locked rustix dependency does not compile on
+      # nightly 1.96; compile only the driver with pinned stable Rust.
+      - name: Install cargo-fuzz
+        run: |
+          rustup toolchain install "${CARGO_FUZZ_INSTALL_TOOLCHAIN}" --profile minimal
+          cargo "+${CARGO_FUZZ_INSTALL_TOOLCHAIN}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Check fuzz corpus directories
         run: ./scripts/check_fuzz_corpus.sh
       - name: Run fuzz target

@@ -6,6 +6,10 @@
 //! Migrated groups default to the local Unix socket; unmigrated groups still
 //! use the legacy `/api/v1/*` GUI surface.
 
+// Keep compatibility with downstream toolchains that predate
+// Duration::from_mins/from_hours while newer clippy versions prefer them.
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;

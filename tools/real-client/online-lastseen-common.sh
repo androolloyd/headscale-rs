@@ -284,12 +284,20 @@ server:
   unix_socket_permission: "0700"
   tls_hostname: host.docker.internal
 
+noise:
+  private_key_path: ${work_dir}/noise_private.key
+
 prefixes:
   allocation: sequential
   v4: 100.64.0.0/10
 
 dns:
   magic_dns: false
+  override_local_dns: false
+  nameservers:
+    global: []
+    split: {}
+  search_domains: []
 EOF
       ;;
     headscale-go)

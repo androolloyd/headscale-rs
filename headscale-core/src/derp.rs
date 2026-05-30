@@ -838,6 +838,7 @@ mod tests {
             escaped_args_file
         )
         .unwrap();
+        drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

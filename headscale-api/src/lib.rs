@@ -9,6 +9,10 @@
 //! - Health and metrics endpoints
 //! - L7 Resource Gateway for inference, compute, and storage
 
+// Keep compatibility with downstream toolchains that predate
+// Duration::from_mins/from_hours while newer clippy versions prefer them.
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 // Generated protobuf code (gated behind `full`: built from tonic at
 // build time, not needed by Tailscale-wire-only consumers).
 #[cfg(feature = "full")]

@@ -1,4 +1,5 @@
 #![cfg(feature = "full")]
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 use std::{collections::BTreeMap, net::Ipv4Addr, sync::Arc, time::Duration as StdDuration};
 

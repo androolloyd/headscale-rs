@@ -8,6 +8,8 @@
 //!
 //! Closes the P1 entry in `docs/headscale-gap-analysis.md` (§MagicDNS).
 
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;

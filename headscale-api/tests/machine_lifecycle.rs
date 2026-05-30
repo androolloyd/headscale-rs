@@ -229,6 +229,7 @@ async fn wire_full_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, ser
     wire_map_body(wire, node_key_hex, r#"{"Version":113}"#).await
 }
 
+#[cfg(feature = "full")]
 async fn next_stream_map(body: &mut Body) -> headscale_api::tailscale_wire::wire::MapResponse {
     use http_body_util::BodyExt;
 

@@ -1,3 +1,5 @@
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 use std::fs;
 use std::io;
 use std::net::Ipv4Addr;
@@ -1834,6 +1836,7 @@ database:
     );
 }
 
+#[cfg(not(feature = "postgres-sqlx"))]
 #[test]
 fn serve_rejects_unsupported_postgres_before_sqlite_startup() {
     let cwd = tempfile::tempdir().unwrap();

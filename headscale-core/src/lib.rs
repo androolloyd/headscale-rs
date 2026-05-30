@@ -16,6 +16,10 @@
 //! in an external integration crate that consumes `MeteringSnapshot`
 //! events from the `metering` module.
 
+// Keep compatibility with downstream toolchains that predate
+// Duration::from_mins/from_hours while newer clippy versions prefer them.
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
+
 pub mod acl;
 pub mod authorization;
 pub mod config;

@@ -7,6 +7,7 @@
 //! route through `tower::ServiceExt::oneshot`. No socket, no listener.
 
 #![cfg(feature = "admin")]
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 use std::sync::Arc;
 

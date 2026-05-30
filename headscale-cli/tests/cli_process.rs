@@ -3,10 +3,14 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::pin::Pin;
+#[cfg(feature = "postgres-sqlx")]
+use std::process::{Child, Stdio};
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
+#[cfg(feature = "postgres-sqlx")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use headscale_api::admin::{
     PersistentApiKeyAdmin, PersistentMachineAdmin, PersistentPreauthAdmin, PersistentUserAdmin,
@@ -46,6 +50,12 @@ const MOCKOIDC_ENV: &[&str] = &[
     "MOCKOIDC_USERS",
     "MOCKOIDC_ACCESS_TTL",
 ];
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_TEST_URL_ENV: &str = "HEADSCALE_DB_POSTGRES_TEST_URL";
+
+#[cfg(feature = "postgres-sqlx")]
+type BoxTestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn headscale_clean_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
@@ -423,6 +433,209 @@ fn write_remote_grpc_config(dir: &Path, address: &str, api_key: &str) -> std::pa
     )
     .unwrap();
     config
+}
+
+#[cfg(feature = "postgres-sqlx")]
+struct TempPostgresServeDatabase {
+    admin_pool: sqlx::PgPool,
+    fields: PostgresServeConfigFields,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone, Debug)]
+struct PostgresServeConfigFields {
+    host: String,
+    port: u16,
+    name: String,
+    user: String,
+    pass: String,
+    ssl: String,
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl TempPostgresServeDatabase {
+    async fn open(test_name: &str) -> BoxTestResult<Option<Self>> {
+        let Ok(url) = std::env::var(POSTGRES_TEST_URL_ENV) else {
+            eprintln!(
+                "skipping Postgres serve smoke {test_name}: {POSTGRES_TEST_URL_ENV} is not set"
+            );
+            return Ok(None);
+        };
+
+        let parsed = url::Url::parse(&url)?;
+        let Some(host) = parsed.host_str() else {
+            eprintln!("skipping Postgres serve smoke {test_name}: URL must include a TCP host");
+            return Ok(None);
+        };
+        let port = parsed.port().unwrap_or(5432);
+        let user = parsed.username().to_string();
+        let pass = parsed.password().unwrap_or_default().to_string();
+        let ssl = parsed
+            .query_pairs()
+            .find_map(|(key, value)| (key == "sslmode").then(|| value.into_owned()))
+            .unwrap_or_else(|| "false".to_string());
+
+        let admin_pool = headscale_db::open_postgres_pool(&url).await?;
+        let name = temporary_postgres_database_name(test_name);
+        if let Err(err) = sqlx::query(&format!("CREATE DATABASE {}", quote_pg_identifier(&name)))
+            .execute(&admin_pool)
+            .await
+        {
+            eprintln!(
+                "skipping Postgres serve smoke {test_name}: cannot create temporary database: {err}"
+            );
+            admin_pool.close().await;
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            admin_pool,
+            fields: PostgresServeConfigFields {
+                host: host.to_string(),
+                port,
+                name,
+                user,
+                pass,
+                ssl,
+            },
+        }))
+    }
+
+    fn fields(&self) -> &PostgresServeConfigFields {
+        &self.fields
+    }
+
+    async fn cleanup(self) -> BoxTestResult {
+        let database = quote_pg_identifier(&self.fields.name);
+        let _ = sqlx::query(
+            "
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()
+            ",
+        )
+        .bind(&self.fields.name)
+        .execute(&self.admin_pool)
+        .await;
+        if let Err(err) = sqlx::query(&format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
+            .execute(&self.admin_pool)
+            .await
+        {
+            eprintln!(
+                "failed to drop temporary Postgres database {} with FORCE: {err}",
+                self.fields.name
+            );
+            sqlx::query(&format!("DROP DATABASE IF EXISTS {database}"))
+                .execute(&self.admin_pool)
+                .await?;
+        }
+        self.admin_pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn temporary_postgres_database_name(test_name: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after UNIX epoch")
+        .as_nanos();
+    format!(
+        "headscale_rs_pg_serve_{}_{}_{}",
+        std::process::id(),
+        test_name,
+        nanos
+    )
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn quote_pg_identifier(identifier: &str) -> String {
+    format!(r#""{}""#, identifier.replace('"', r#""""#))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn yaml_double_quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn unused_loopback_addr() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn write_postgres_serve_config(
+    dir: &Path,
+    postgres: &PostgresServeConfigFields,
+    listen: std::net::SocketAddr,
+    metrics: std::net::SocketAddr,
+    grpc: std::net::SocketAddr,
+) -> std::path::PathBuf {
+    let config = dir.join("config.yaml");
+    let socket = dir.join("headscale.sock");
+    let noise = dir.join("state").join("noise_private.key");
+    fs::write(
+        &config,
+        format!(
+            r#"
+server_url: "http://{listen}"
+listen_addr: "{listen}"
+metrics_listen_addr: "{metrics}"
+grpc_listen_addr: "{grpc}"
+grpc_allow_insecure: true
+unix_socket: {}
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: postgres
+  postgres:
+    host: {}
+    port: {}
+    name: {}
+    user: {}
+    pass: {}
+    ssl: {}
+policy:
+  mode: database
+"#,
+            yaml_double_quoted(&socket.to_string_lossy()),
+            yaml_double_quoted(&noise.to_string_lossy()),
+            yaml_double_quoted(&postgres.host),
+            postgres.port,
+            yaml_double_quoted(&postgres.name),
+            yaml_double_quoted(&postgres.user),
+            yaml_double_quoted(&postgres.pass),
+            yaml_double_quoted(&postgres.ssl)
+        ),
+    )
+    .unwrap();
+    config
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn spawn_headscale_serve(config: &Path, cwd: &Path) -> BoxTestResult<Child> {
+    let mut command = headscale_clean_command();
+    command
+        .arg("--config")
+        .arg(config)
+        .arg("serve")
+        .current_dir(cwd)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command.spawn()?)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn stop_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn normalize_users_list_stdout(text: &str) -> String {
@@ -2168,6 +2381,123 @@ fn implemented_admin_errors_follow_output_format() {
         stderr(&remote),
         "{\n\t\"error\": \"HEADSCALE_CLI_API_KEY environment variable needs to be set\"\n}\n"
     );
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_local_grpc_health_users_policy_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("health_users_policy").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let public_health = headscale_clean(&["status", "--server", &server_url]);
+        assert!(
+            public_health.status.success(),
+            "stderr: {}",
+            stderr(&public_health)
+        );
+        assert_eq!(
+            stdout(&public_health),
+            format!("Control plane at {server_url} is healthy\n")
+        );
+        assert_eq!(stderr(&public_health), "");
+
+        let health_json = headscale_with_config(&config, &["-o", "json", "health"]);
+        assert!(
+            health_json.status.success(),
+            "stderr: {}",
+            stderr(&health_json)
+        );
+        assert_eq!(
+            json_output(&health_json)["database_connectivity"].as_bool(),
+            Some(true)
+        );
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let list_users = headscale_with_config(&config, &["users", "list"]);
+        assert!(
+            list_users.status.success(),
+            "stderr: {}",
+            stderr(&list_users)
+        );
+        assert!(
+            stdout(&list_users).contains("alice"),
+            "stdout: {}",
+            stdout(&list_users)
+        );
+        assert_eq!(stderr(&list_users), "");
+
+        let preauth = headscale_with_config(
+            &config,
+            &[
+                "preauthkeys",
+                "create",
+                "--user",
+                "alice",
+                "--reusable",
+                "--expiration",
+                "1h",
+            ],
+        );
+        assert!(preauth.status.success(), "stderr: {}", stderr(&preauth));
+        assert!(
+            stdout(&preauth).contains("hskey-auth-"),
+            "stdout: {}",
+            stdout(&preauth)
+        );
+        assert_eq!(stderr(&preauth), "");
+
+        let policy_path = dir.path().join("pg-policy.hujson");
+        fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
+        let policy_path = policy_path.to_string_lossy().to_string();
+        let set_policy = headscale_with_config(&config, &["policy", "set", "--file", &policy_path]);
+        assert!(
+            set_policy.status.success(),
+            "stderr: {}",
+            stderr(&set_policy)
+        );
+        assert_eq!(stdout(&set_policy), "Policy updated.\n");
+        assert_eq!(stderr(&set_policy), "");
+
+        let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+        assert!(
+            get_policy.status.success(),
+            "stderr: {}",
+            stderr(&get_policy)
+        );
+        assert_eq!(
+            stdout(&get_policy),
+            "{\"tagOwners\":{\"tag:server\":[\"alice@\"]}}\n"
+        );
+        assert_eq!(stderr(&get_policy), "");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

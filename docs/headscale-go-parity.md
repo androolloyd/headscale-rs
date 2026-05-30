@@ -128,9 +128,9 @@ Current-head audit overlay, refreshed 2026-05-24:
   closed in `0f0b943`.
 - Active P0 default-scenario regressions against the current-head executable
   baseline: none known from the 2026-05-23 audit. Full replacement parity still
-  has P0 upgrade/drop-in backlog, led by production Postgres serve smokes,
-  canonical map/NodeStore churn, route reload/restart edges, and broader
-  stock-client SSH status coverage.
+  has P0 upgrade/drop-in backlog, led by broader production Postgres serve
+  smokes, canonical map/NodeStore churn, route reload/restart edges, and
+  broader stock-client SSH status coverage.
 - Remaining P1 current-head gaps from the audit: broader paired
   stock-client route-via/route-health edge matrices, broader SSH
   client-facing status/stderr and profile-variant edges beyond the
@@ -138,7 +138,7 @@ Current-head audit overlay, refreshed 2026-05-24:
   stock-client allow/deny snapshots,
   broader TLS-ALPN live-CA ACME smoke coverage beyond the controlled local CA
   issuer/reloader tests and HTTP-01/TLS-ALPN production-listener process smokes,
-  remaining production Postgres serve coverage,
+  remaining broader production Postgres serve coverage,
   native DERP relay decision beyond the supported sidecar boundary, and remaining production backfill/restart
   edges beyond the covered restart-persistence row.
 - Remaining P2 current-head gaps from the audit: broader CLI output/error
@@ -343,9 +343,9 @@ file ownership narrow when splitting them across agents.
 | Wire auth boundary | Done | `headscale-api/src/tailscale_wire/**`, `headscale-cli/src/server.rs`, paired wire tests | Public routers gate `/machine/*`, map/register require Noise peer machine-key context, mismatched Noise machine-key requests are rejected, and the compatibility keyed map route pins upstream Noise `/machine/map` body-`NodeKey` precedence |
 | Address allocation | In flight | `headscale-api/src/tailscale_wire/**`, `headscale-db/**`, Octra adapter tests | Production allocation is now DB-seeded and config-aware for v4/v6, debug/CLI registration allocates at approval time like upstream, direct admin creation rejects duplicate addresses, DB partial unique indexes protect non-empty manual node addresses, `MachineRecord` tolerates IPv4-disabled nodes, upstream IPv6-only prefix config disables the default IPv4 prefix, paired dual-stack/IPv4-only/IPv6-only prefix-family stock-client smokes cover initial configured family allocation cases, paired production-process IPv4-to-dual-stack and dual-stack-to-single-family stock-client smokes cover restart plus `nodes backfillips`, and persistent-admin/gRPC tests cover prefix-family add/remove backfill semantics; broaden multi-address policy/SSH/DNS/route coverage plus Octra-facing structured allocation context cleanup |
 | Runtime/auth parity | In flight | `headscale-api/proto/auth.proto`, `headscale-api/src/grpc.rs`, `headscale-api/src/grpc_gateway.rs`, `headscale-api/src/tailscale_wire/register.rs`, `headscale-api/src/tailscale_wire/ssh.rs`, wire registration tests, `tools/real-client/ssh-oidc-check-smoke.sh`, `tools/real-client/ssh-oidc-check-deny-smoke.sh`, `tools/real-client/ssh-oidc-check-cancel-smoke.sh` | Prefixed auth IDs, prefixed-ID `RegisterNode`/`DebugCreateNode`, rejected web-registration follow-up refresh, web-register AuthURLs/instructions, the `/auth/{auth_id}` approval page, OIDC `/auth/{auth_id}` redirects, OIDC registration confirmation/CSRF, auth OpenAPI entries, CLI structured approve/reject output, CLI/web/OIDC SSH-check approval over `/machine/ssh/action/{src}/to/{dst}` including persistent production OIDC source-owner checks, paired stock-client OIDC SSH `check` approval plus expired-denial and cancel-denial status/stderr against Rust and headscale-go, cancelled SSH plus web-registration follow-up request release without consuming auth sessions, and policy-refresh map churn carrying updated `UserProfiles` without unchanged peer deltas are covered; next split is broader current-upstream auth-request lifecycle beyond the v0.28 registration-cache shim, especially remaining map/NodeStore churn and reason propagation |
-| Persistent runtime smokes | In flight | `tools/real-client/**`, server/runtime tests | Online/LastSeen, restart-persistence with debug batcher state, OIDC restart, OIDC route-approval restart, and web/CLI registration restart stock-client lifecycles are covered; feature-gated Postgres runtime construction now wires OIDC registration and SSH-check approval, and an env-gated live-Pg runtime smoke covers migration plus preauth-key wire registration, policy persistence, and restart hydration; production Postgres `serve` smokes with listeners/local gRPC/CLI calls are still open; broaden production-process restart/mutation smokes for OIDC policy changes and more map-stream churn cases |
+| Persistent runtime smokes | In flight | `tools/real-client/**`, server/runtime tests | Online/LastSeen, restart-persistence with debug batcher state, OIDC restart, OIDC route-approval restart, and web/CLI registration restart stock-client lifecycles are covered; feature-gated Postgres runtime construction now wires OIDC registration and SSH-check approval, an env-gated live-Pg runtime smoke covers migration plus preauth-key wire registration, policy persistence, and restart hydration, and an env-gated production Pg `serve` process smoke starts the real binary to cover public health plus local gRPC health/users/preauth/policy CLI paths; broader production Postgres serve smokes for OIDC/wire registry projection, direct-policy round trips, and stock-client registration/map flows are still open; broaden production-process restart/mutation smokes for OIDC policy changes and more map-stream churn cases |
 | Octra boundary checks | Ready next | `/Users/androolloyd/Development/octra/crates/**`, headscale trait tests | Keep full-Hub admin routing, preauth store unification, embedded CLI docs, and Octra policy terminology on the Octra side unless the generic headscale contract is missing |
-| DB import matrix | Done for SQLite window | `headscale-db/tests/**`, fixture DBs, migration guard | SQLite import fixtures now cover v0.26.0, v0.27.1, v0.28.0-beta.1, v0.28.0-beta.2, and v0.28.0 with explicit accepted/rejected windows; Postgres has feature-gated foundation migrations/primitives for version, policy, user, API-key, preauth-key, and node rows plus matching admin trait adapters for policy/health/users/API keys/preauth keys/machines, Pg foundation migration now rejects unsupported existing version state before SQLx migrations run, a Pg runtime path with OIDC registration/SSH-check approval is wired, direct policy DB bypass is backend-aware, and an env-gated live-Pg runtime register/hydrate smoke covers the runtime builder, but production serve smokes remain before full database parity |
+| DB import matrix | Done for SQLite window | `headscale-db/tests/**`, fixture DBs, migration guard | SQLite import fixtures now cover v0.26.0, v0.27.1, v0.28.0-beta.1, v0.28.0-beta.2, and v0.28.0 with explicit accepted/rejected windows; Postgres has feature-gated foundation migrations/primitives for version, policy, user, API-key, preauth-key, and node rows plus matching admin trait adapters for policy/health/users/API keys/preauth keys/machines, Pg foundation migration now rejects unsupported existing version state before SQLx migrations run, a Pg runtime path with OIDC registration/SSH-check approval is wired, direct policy DB bypass is backend-aware, an env-gated live-Pg runtime register/hydrate smoke covers the runtime builder, and an env-gated production Pg `serve` smoke covers public health plus local gRPC health/users/preauth/policy CLI paths; broader serve smokes remain before full database parity |
 
 | Stream | Scope | Primary files | Exit criteria |
 | --- | --- | --- | --- |
@@ -358,8 +358,10 @@ file ownership narrow when splitting them across agents.
 
 ## Next Implementation Order
 
-1. Finish the remaining Postgres runtime dependency chain: add production
-   Postgres `serve` smokes before claiming full database parity.
+1. Finish the remaining Postgres runtime dependency chain: broaden production
+   Postgres `serve` smokes for OIDC/wire registry projection, direct-policy
+   round trips, and stock-client registration/map flows before claiming full
+   database parity.
 2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for
    the remaining live-server cases and broader auth/server error variants.

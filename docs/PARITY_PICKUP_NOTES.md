@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 10:43 ADT
+Updated: 2026-05-30 10:48 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed implementation commit:
-  `00f72c1 Add Postgres OIDC registration handler`
+  `79a3121 Guard Postgres foundation imports`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -58,14 +58,21 @@ Recent accepted slices:
   handler, wires it into the Pg runtime store, and adds a lazy-Pg-pool smoke
   proving OIDC runtime configuration does not require a live database
   connection.
+- `79a3121` guards Postgres foundation migration with the same
+  headscale-go import/version compatibility checks as SQLite: Rust-managed
+  schemas are accepted, supported v0.28/current migration histories are
+  allowed, unsupported version rows or untracked Go-shaped tables are rejected
+  before SQLx migrations run, and Pg foundation tests cover both rejection and
+  supported-history acceptance paths.
 
 Current multi-agent split:
 
 - Local critical path: Postgres runtime/import wiring. The shared
   server-local backend abstraction and Pg runtime builder now compile behind
   `headscale-cli/postgres-sqlx`, including OIDC registration and SSH-check
-  approval. Remaining critical work is direct policy DB bypass, live Postgres
-  serve smokes, and Postgres import/version-guard semantics.
+  approval, and Postgres foundation migration now has import/version guards.
+  Remaining critical work is direct policy DB bypass and live Postgres serve
+  smokes.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -150,17 +157,18 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 
 The current active slice is now past the first shared backend/runtime path:
 `headscale-cli/postgres-sqlx` compiles a Pg runtime builder with OIDC
-registration and SSH-check approval wired. The next critical slices are direct
-policy DB bypass, Postgres import/version-guard semantics, and live Postgres
-serve smokes. The other narrow lanes remain current-upstream CLI output drift
+registration and SSH-check approval wired, and Postgres foundation migration
+now rejects unsupported existing version state before running migrations. The
+next critical slices are direct policy DB bypass and live Postgres serve
+smokes. The other narrow lanes remain current-upstream CLI output drift
 snapshots or the remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
 - Postgres runtime/import support: feature-gated Pg runtime wiring with OIDC
-  registration/SSH-check approval now compiles, but direct policy DB bypass,
-  live Postgres serve smokes, and Postgres import/version-guard semantics
-  remain
+  registration/SSH-check approval now compiles, and foundation migration has
+  import/version guards, but direct policy DB bypass and live Postgres serve
+  smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn

@@ -2257,18 +2257,6 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
 }
 
 #[test]
-fn implemented_admin_clap_error_matches_snapshot() {
-    let output = headscale_clean(&["users", "list", "--output", "xml"]);
-
-    assert_eq!(output.status.code(), Some(6));
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/invalid_output_format.stderr")
-    );
-}
-
-#[test]
 fn implemented_admin_local_errors_match_snapshots() {
     assert_stderr_snapshot(
         &["preauthkeys", "expire"],
@@ -2427,6 +2415,30 @@ fn implemented_admin_local_errors_match_snapshots() {
         ],
         3,
         include_str!("snapshots/grpc_remote_connection_failure_json.stderr"),
+    );
+}
+
+#[test]
+fn unknown_output_selector_falls_back_to_human_version_output() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+    let output = headscale_in(&["version", "--output", "xml"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).starts_with("headscale version "));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn unknown_output_selector_falls_back_to_human_error_output() {
+    let output = headscale_clean(&["-o", "xml", "preauthkeys", "expire"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/preauthkeys_missing_id.stderr")
     );
 }
 

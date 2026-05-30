@@ -20,7 +20,8 @@ struct ErrorOutput<'a> {
 }
 
 /// The upstream `headscale` CLI accepts an empty human-readable format
-/// plus `json`, `json-line`, and `yaml` through `-o/--output`.
+/// plus `json`, `json-line`, and `yaml` through `-o/--output`. Unknown
+/// selectors fall back to human output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Table,
@@ -35,9 +36,7 @@ impl OutputFormat {
             Some("json") => Ok(Self::Json),
             Some("json-line") => Ok(Self::JsonLine),
             Some("yaml") => Ok(Self::Yaml),
-            Some(other) => Err(AdminError::Local(format!(
-                "unsupported output format '{other}' (valid: json, json-line, yaml)"
-            ))),
+            Some(_) => Ok(Self::Table),
             None => Ok(Self::Table),
         }
     }
@@ -210,7 +209,10 @@ mod tests {
             OutputFormat::from_output(None).unwrap(),
             OutputFormat::Table
         );
-        assert!(OutputFormat::from_output(Some("xml")).is_err());
+        assert_eq!(
+            OutputFormat::from_output(Some("xml")).unwrap(),
+            OutputFormat::Table
+        );
     }
 
     #[test]

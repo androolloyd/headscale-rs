@@ -256,6 +256,8 @@ CLI structured-error snapshot parity was completed after `4d04612`:
 - Add `serve_unsupported_postgres_json_line.stderr` beside `serve_rejects_unsupported_postgres_before_sqlite_startup`
 - Add `grpc_live_health_failure_json_line.stderr` inside `live_local_grpc_health_failure_matches_process_stderr`
 - Add `grpc_remote_auth_failure_json.stderr` beside `live_remote_grpc_config_success_and_auth_errors_match_process_output`
+- Unknown `-o/--output` selectors now match upstream by falling back to human
+  output/error formatting instead of failing local validation.
 
 Verified test targets for that slice:
 

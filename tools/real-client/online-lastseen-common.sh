@@ -272,7 +272,8 @@ EOF
 write_config() {
   case "${target}" in
     rust)
-      tls_cert_path="${work_dir}/state/tls.crt"
+      tls_cert_path="${work_dir}/tls.crt"
+      tls_key_path="${work_dir}/tls.key"
       cat >"${config_path}" <<EOF
 server:
   server_url: ${control_url}

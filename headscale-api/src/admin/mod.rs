@@ -97,6 +97,8 @@ pub use api_keys::{
     NoopApiKeyAdmin, PersistentApiKeyAdmin,
 };
 pub use auth::{AdminAuth, AuthOutcome, SESSION_COOKIE, SESSION_TTL_SECS};
+#[cfg(feature = "postgres-sqlx")]
+pub use machines::PersistentPostgresMachineAdmin;
 pub use machines::{
     MachineAdmin, MachineAdminError, MachineAdminRecord, PersistentMachineAdmin,
     PersistentOidcRegistrationHandler, WireMachineAdmin,

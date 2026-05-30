@@ -53,6 +53,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::PgPool;
 use sqlx::SqlitePool;
 
 use crate::policy::{PolicyStore, validate_requested_tags_for_node};
@@ -413,6 +415,20 @@ fn optional_ipv4_string(value: &str) -> Option<String> {
 #[derive(Clone)]
 pub struct PersistentMachineAdmin {
     pool: SqlitePool,
+    users: Option<Arc<dyn UserAdmin>>,
+    wire_registry: Option<Arc<MachineRegistry>>,
+}
+
+/// Postgres-backed node admin adapter over the canonical headscale-go
+/// `nodes` table.
+///
+/// This is feature-gated for the Postgres runtime parity path. It
+/// intentionally does not change the default SQLite `headscale server`
+/// wiring or remove the explicit Postgres serve guard.
+#[cfg(feature = "postgres-sqlx")]
+#[derive(Clone)]
+pub struct PersistentPostgresMachineAdmin {
+    pool: PgPool,
     users: Option<Arc<dyn UserAdmin>>,
     wire_registry: Option<Arc<MachineRegistry>>,
 }
@@ -915,6 +931,477 @@ impl PersistentMachineAdmin {
     }
 }
 
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresMachineAdmin {
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            users: None,
+            wire_registry: None,
+        }
+    }
+
+    pub fn with_user_admin(mut self, users: Arc<dyn UserAdmin>) -> Self {
+        self.users = Some(users);
+        self
+    }
+
+    pub fn with_wire_registry(mut self, registry: Arc<MachineRegistry>) -> Self {
+        self.wire_registry = Some(registry);
+        self
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub async fn hydrate_wire_registry(
+        &self,
+        registry: &MachineRegistry,
+    ) -> Result<usize, MachineAdminError> {
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+        let mut hydrated = 0usize;
+        for row in rows {
+            let wire = self.row_to_wire_record(row).await?;
+            registry.upsert(wire.node_key_hex.clone(), wire);
+            hydrated += 1;
+        }
+        Ok(hydrated)
+    }
+
+    pub async fn create_or_update_auth_path(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_inner(record, policy, None, None, true, None)
+            .await
+    }
+
+    pub async fn create_or_update_auth_key_path(
+        &self,
+        record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let wire_record = record;
+        let mut record = machine_admin_record_from_wire(&wire_record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        self.create_or_update_auth_path_inner(
+            record,
+            policy,
+            auth_key_id,
+            None,
+            false,
+            Some(&wire_record),
+        )
+        .await
+    }
+
+    async fn create_or_update_auth_path_inner(
+        &self,
+        mut record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        if record.id.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "node key must not be empty".into(),
+            ));
+        }
+        let ipv4 = optional_ipv4(&record.ipv4)?;
+        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+        require_any_address(ipv4, ipv6)?;
+        let user_id = match user_id_override {
+            Some(user_id) => Some(user_id),
+            None => self.user_id_for_record(&record).await?,
+        };
+        if validate_requested_tags
+            && validate_requested_tags_for_node(
+                policy,
+                &primary_admin_addr(&record),
+                record.user.as_str(),
+                &mut record.tags,
+            )
+            .map_err(MachineAdminError::BadRequest)?
+        {
+            record.expiry = None;
+        }
+        let node_key = key_with_prefix("nodekey:", record.id.trim());
+        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
+
+        let existing_for_user = match user_id {
+            Some(user_id) => {
+                match headscale_db::headscale_nodes::get_postgres_by_machine_key_and_user(
+                    &self.pool,
+                    &machine_key,
+                    user_id,
+                )
+                .await
+                {
+                    Ok(row) => Some(row),
+                    Err(headscale_db::DbError::NotFound(_)) => None,
+                    Err(e) => return Err(db_error_to_machine(e, &record.id)),
+                }
+            }
+            None => None,
+        };
+        let existing_for_machine = match headscale_db::headscale_nodes::get_postgres_by_machine_key(
+            &self.pool,
+            &machine_key,
+        )
+        .await
+        {
+            Ok(row) => Some(row),
+            Err(headscale_db::DbError::NotFound(_)) => None,
+            Err(e) => return Err(db_error_to_machine(e, &record.id)),
+        };
+        let existing = existing_for_user.or_else(|| {
+            existing_for_machine
+                .as_ref()
+                .filter(|row| !row.tag_list().is_empty())
+                .cloned()
+        });
+
+        if let Some(existing) = existing {
+            let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
+            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+                .await
+            {
+                Ok(row) if row.id != existing.id => {
+                    return Err(MachineAdminError::BadRequest("node already exists".into()));
+                }
+                Ok(_) | Err(headscale_db::DbError::NotFound(_)) => {}
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            }
+            if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
+                record.ipv4.clone_from(ipv4);
+            }
+            if let Some(ipv6) = existing.ipv6.as_ref().filter(|value| !value.is_empty()) {
+                record.ipv6 = Some(ipv6.clone());
+            }
+            self.reject_duplicate_addresses(Some(existing.id), &record)
+                .await?;
+            let mut approved = existing.approved_route_list();
+            approved.extend(record.approved_routes.clone());
+            record.approved_routes = auto_approved_routes_for_node(
+                policy,
+                &primary_admin_addr(&record),
+                Some(&record.user),
+                &record.tags,
+                &approved,
+                &record.routes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+
+            let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
+                &self.pool,
+                existing.id,
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            let record = self.row_to_record(row).await;
+            Ok(AuthPathRegistrationResult {
+                replaced_node_key_hex: (replaced_node_key_hex != record.id)
+                    .then_some(replaced_node_key_hex),
+                record,
+                new_node: false,
+            })
+        } else {
+            record.approved_routes = auto_approved_routes_for_node(
+                policy,
+                &primary_admin_addr(&record),
+                Some(&record.user),
+                &record.tags,
+                &record.approved_routes,
+                &record.routes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+            self.reject_duplicate_addresses(None, &record).await?;
+            let row = headscale_db::headscale_nodes::create_postgres(
+                &self.pool,
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            let record = self.row_to_record(row).await;
+            Ok(AuthPathRegistrationResult {
+                record,
+                new_node: true,
+                replaced_node_key_hex: None,
+            })
+        }
+    }
+
+    async fn row_by_slug(
+        &self,
+        id: &str,
+    ) -> Result<headscale_db::headscale_nodes::HeadscaleNodeRow, MachineAdminError> {
+        let node_key = key_with_prefix("nodekey:", id);
+        match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key).await {
+            Ok(row) => Ok(row),
+            Err(headscale_db::DbError::NotFound(_)) => {
+                if let Ok(node_id) = id.parse::<i64>() {
+                    headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, node_id)
+                        .await
+                        .map_err(|e| db_error_to_machine(e, id))
+                } else {
+                    Err(MachineAdminError::NotFound(id.to_string()))
+                }
+            }
+            Err(e) => Err(db_error_to_machine(e, id)),
+        }
+    }
+
+    async fn user_id_for_record(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<i64>, MachineAdminError> {
+        if record.user.trim().is_empty() {
+            return Ok(None);
+        }
+        let Some(users) = &self.users else {
+            return Ok(record.user.parse::<i64>().ok());
+        };
+        let user = users
+            .get(&record.user)
+            .await
+            .map_err(|e| MachineAdminError::BadRequest(e.to_string()))?
+            .ok_or_else(|| MachineAdminError::BadRequest("user not found".to_string()))?;
+        i64::try_from(user.id)
+            .map(Some)
+            .map_err(|_| MachineAdminError::BadRequest("user id out of range".to_string()))
+    }
+
+    async fn reject_duplicate_addresses(
+        &self,
+        current_row_id: Option<i64>,
+        record: &MachineAdminRecord,
+    ) -> Result<(), MachineAdminError> {
+        let ipv4 = (!record.ipv4.trim().is_empty()).then_some(record.ipv4.trim());
+        let ipv6 = record
+            .ipv6
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if ipv4.is_none() && ipv6.is_none() {
+            return Ok(());
+        }
+
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+        for row in rows {
+            if current_row_id == Some(row.id) {
+                continue;
+            }
+            if let Some(candidate) = ipv4
+                && row.ipv4.as_deref().map(str::trim) == Some(candidate)
+            {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv4 address {candidate} already in use"
+                )));
+            }
+            if let Some(candidate) = ipv6
+                && row.ipv6.as_deref().map(str::trim) == Some(candidate)
+            {
+                return Err(MachineAdminError::BadRequest(format!(
+                    "IPv6 address {candidate} already in use"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn user_identity_for_row(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> UserIdentity {
+        let Some(user_id) = row.user_id else {
+            return UserIdentity::default();
+        };
+        let fallback_id = u64::try_from(user_id).ok();
+        let Some(users) = &self.users else {
+            let id = user_id.to_string();
+            return UserIdentity {
+                id: fallback_id,
+                login_name: id.clone(),
+                display_name: id,
+                profile_pic_url: String::new(),
+            };
+        };
+        match fallback_id.map(|id| users.get_by_id(id)) {
+            Some(fut) => {
+                if let Ok(Some(user)) = fut.await {
+                    user_identity_from_record(&user)
+                } else {
+                    let id = user_id.to_string();
+                    UserIdentity {
+                        id: fallback_id,
+                        login_name: id.clone(),
+                        display_name: id,
+                        profile_pic_url: String::new(),
+                    }
+                }
+            }
+            None => UserIdentity::default(),
+        }
+    }
+
+    async fn row_to_record(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> MachineAdminRecord {
+        let host_info = row.host_info_value();
+        let routes = routes_from_host_info(&host_info);
+        let now = now_unix() as i64;
+        let expired = row.expiry.is_some_and(|expiry| expiry <= now);
+        let name = if row.given_name.is_empty() {
+            row.hostname.clone()
+        } else {
+            row.given_name.clone()
+        };
+        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+        let live = self.wire_registry.as_ref().and_then(|registry| {
+            let record = registry.get(&node_key_hex)?;
+            let online = registry
+                .online_states()
+                .get(&record.stable_node_id())
+                .copied()
+                .unwrap_or(false);
+            Some((online, record.last_seen.timestamp().max(0) as u64))
+        });
+        let user_identity = self.user_identity_for_row(&row).await;
+        MachineAdminRecord {
+            node_id: u64::try_from(row.id).unwrap_or_default(),
+            id: node_key_hex,
+            name,
+            user: user_identity.login_name,
+            ipv4: row.ipv4.clone().unwrap_or_default(),
+            ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
+            online: live.map_or(!expired, |(online, _)| online && !expired),
+            last_seen: live.map_or_else(
+                || row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+                |(_, last_seen)| last_seen,
+            ),
+            created_at: row.created_at.max(0) as u64,
+            expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
+            machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
+            os: os_from_host_info(&host_info),
+            version: version_from_host_info(&host_info),
+            tags: row.tag_list(),
+            routes,
+            approved_routes: row.approved_route_list(),
+            register_method: register_method_from_db(&row.register_method),
+            expired,
+        }
+    }
+
+    async fn row_to_wire_record(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<MachineRecord, MachineAdminError> {
+        let host_info = row.host_info_value();
+        let node_key = key_without_prefix("nodekey:", &row.node_key);
+        if node_key.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "persisted node has empty node key".to_string(),
+            ));
+        }
+        let created_at =
+            unix_timestamp_for_record(row.created_at.max(0) as u64, &node_key, "created_at")?;
+        let last_seen = unix_timestamp_for_record(
+            row.last_seen.unwrap_or(row.created_at).max(0) as u64,
+            &node_key,
+            "last_seen",
+        )?;
+        let ipv4 = row
+            .ipv4
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value.parse::<Ipv4Addr>().map_err(|e| {
+                    MachineAdminError::BadRequest(format!(
+                        "persisted node {node_key} has invalid IPv4 '{value}': {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let ipv6 = row
+            .ipv6
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value.parse::<Ipv6Addr>().map_err(|e| {
+                    MachineAdminError::BadRequest(format!(
+                        "persisted node {node_key} has invalid IPv6 '{value}': {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        require_any_address(ipv4, ipv6)?;
+        let name = if row.given_name.is_empty() {
+            row.hostname.clone()
+        } else {
+            row.given_name.clone()
+        };
+        let user_identity = self.user_identity_for_row(&row).await;
+        let mut record = MachineRecord::new_at_with_addresses(
+            created_at,
+            node_key.clone(),
+            key_without_prefix("mkey:", &row.machine_key),
+            user_identity.login_name.clone(),
+            name.clone(),
+            ipv4,
+            ipv6,
+            false,
+        );
+        record.node_id = u64::try_from(row.id).ok();
+        record.set_user_identity(
+            user_identity.id,
+            user_identity.login_name,
+            user_identity.display_name,
+            user_identity.profile_pic_url,
+        );
+        record.replace_host_info(host_info_from_value(&host_info));
+        record.os = os_from_host_info(&host_info);
+        record.os_version = version_from_host_info(&host_info);
+        if !name.is_empty() {
+            record.hostname = name;
+        }
+        record.disco_key = (!row.disco_key.is_empty()).then_some(row.disco_key.clone());
+        record.endpoints = row.endpoint_list();
+        record.home_derp = preferred_derp_from_host_info(&host_info);
+        record.expiry = row
+            .expiry
+            .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
+            .transpose()?;
+        record.last_seen = last_seen;
+        record.forced_tags = row.tag_list();
+        record.approved_routes = row.approved_route_list();
+        record.register_method = register_method_from_db(&row.register_method);
+        Ok(record)
+    }
+
+    async fn sync_wire_row(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<(), MachineAdminError> {
+        let Some(registry) = &self.wire_registry else {
+            return Ok(());
+        };
+        let record = self.row_to_wire_record(row).await?;
+        registry.upsert(record.node_key_hex.clone(), record);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler {
     async fn complete_oidc_registration(
@@ -1095,6 +1582,73 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
         let row = headscale_db::headscale_nodes::update_from_auth_path(&self.pool, row.id, params)
             .await
             .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let record = self
+            .row_to_wire_record(row)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: None,
+        })
+    }
+
+    async fn delete_machine_registration(&self, node_key_hex: &str) -> Result<(), String> {
+        self.delete(node_key_hex)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
+    async fn create_or_update_auth_key_registration(
+        &self,
+        record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let wire_record = record.clone();
+        let result = self
+            .create_or_update_auth_key_path(record, policy, auth_key_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let row = self
+            .row_by_slug(&result.record.id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut record = self
+            .row_to_wire_record(row)
+            .await
+            .map_err(|err| err.to_string())?;
+        record.disco_key = wire_record.disco_key;
+        record.endpoints = wire_record.endpoints;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: result.replaced_node_key_hex,
+        })
+    }
+
+    async fn sync_runtime_machine_state(
+        &self,
+        record: MachineRecord,
+        _policy: &PolicyStore,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
+        let row = headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let user_id = self
+            .user_id_for_record(&machine_admin_record_from_wire(&record))
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
+        params.ipv6 = row.ipv6.clone();
+        let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
+            &self.pool, row.id, params,
+        )
+        .await
+        .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
             .row_to_wire_record(row)
             .await
@@ -1377,6 +1931,289 @@ impl MachineAdmin for PersistentMachineAdmin {
         let row = self.row_by_slug(id).await?;
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         headscale_db::headscale_nodes::destroy(&self.pool, row.id)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))?;
+        if let Some(registry) = &self.wire_registry {
+            registry.delete(&node_key_hex);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[async_trait]
+impl MachineAdmin for PersistentPostgresMachineAdmin {
+    async fn list(&self) -> Vec<MachineAdminRecord> {
+        match headscale_db::headscale_nodes::list_postgres(&self.pool).await {
+            Ok(rows) => {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    out.push(self.row_to_record(row).await);
+                }
+                out
+            }
+            Err(e) => {
+                tracing::warn!(?e, "persistent postgres machine list failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn get(&self, id: &str) -> Option<MachineAdminRecord> {
+        match self.row_by_slug(id).await {
+            Ok(row) => Some(self.row_to_record(row).await),
+            Err(MachineAdminError::NotFound(_)) => None,
+            Err(e) => {
+                tracing::warn!(?e, id, "persistent postgres machine get failed");
+                None
+            }
+        }
+    }
+
+    async fn existing_auth_path_record(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Option<MachineAdminRecord> {
+        let user_id = self.user_id_for_record(record).await.ok().flatten();
+        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
+        let existing_for_user = match user_id {
+            Some(user_id) => {
+                match headscale_db::headscale_nodes::get_postgres_by_machine_key_and_user(
+                    &self.pool,
+                    &machine_key,
+                    user_id,
+                )
+                .await
+                {
+                    Ok(row) => Some(row),
+                    Err(headscale_db::DbError::NotFound(_)) => None,
+                    Err(_) => return None,
+                }
+            }
+            None => None,
+        };
+        let existing_for_machine = match headscale_db::headscale_nodes::get_postgres_by_machine_key(
+            &self.pool,
+            &machine_key,
+        )
+        .await
+        {
+            Ok(row) => Some(row),
+            Err(headscale_db::DbError::NotFound(_)) => None,
+            Err(_) => return None,
+        };
+        let existing = existing_for_user.or_else(|| {
+            existing_for_machine
+                .as_ref()
+                .filter(|row| !row.tag_list().is_empty())
+                .cloned()
+        })?;
+        Some(self.row_to_record(existing).await)
+    }
+
+    async fn create(
+        &self,
+        record: MachineAdminRecord,
+    ) -> Result<MachineAdminRecord, MachineAdminError> {
+        if record.id.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "node key must not be empty".into(),
+            ));
+        }
+        let node_key = key_with_prefix("nodekey:", record.id.trim());
+        match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key).await {
+            Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
+            Err(headscale_db::DbError::NotFound(_)) => {}
+            Err(e) => return Err(db_error_to_machine(e, &record.id)),
+        }
+        let ipv4 = optional_ipv4(&record.ipv4)?;
+        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+        require_any_address(ipv4, ipv6)?;
+        self.reject_duplicate_addresses(None, &record).await?;
+        let user_id = self.user_id_for_record(&record).await?;
+        let row = headscale_db::headscale_nodes::create_postgres(
+            &self.pool,
+            create_params_for_record(&record, user_id),
+        )
+        .await
+        .map_err(|e| db_error_to_machine(e, &record.id))?;
+        self.sync_wire_row(row.clone()).await?;
+        Ok(self.row_to_record(row).await)
+    }
+
+    async fn complete_registration(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_inner(
+            record,
+            policy,
+            None,
+            None,
+            true,
+            wire_record.as_ref(),
+        )
+        .await
+    }
+
+    async fn expire_at(
+        &self,
+        id: &str,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
+        let row =
+            headscale_db::headscale_nodes::set_postgres_expiry(&self.pool, row.id, Some(stamp))
+                .await
+                .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let row = headscale_db::headscale_nodes::set_postgres_expiry(&self.pool, row.id, None)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let row = headscale_db::headscale_nodes::logout_postgres(&self.pool, row.id)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        if hostname.trim().is_empty() {
+            return Err(MachineAdminError::BadRequest(
+                "hostname must not be empty".into(),
+            ));
+        }
+        let row = self.row_by_slug(id).await?;
+        let row = headscale_db::headscale_nodes::rename_postgres(&self.pool, row.id, hostname)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let row = headscale_db::headscale_nodes::set_postgres_tags(&self.pool, row.id, tags)
+            .await
+            .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn set_approved_routes(
+        &self,
+        id: &str,
+        routes: Vec<String>,
+    ) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let row =
+            headscale_db::headscale_nodes::set_postgres_approved_routes(&self.pool, row.id, routes)
+                .await
+                .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let row = headscale_db::headscale_nodes::set_postgres_host_info_routable_ips(
+            &self.pool, row.id, routes,
+        )
+        .await
+        .map_err(|e| db_error_to_machine(e, id))?;
+        self.sync_wire_row(row).await
+    }
+
+    async fn backfill_node_ips(
+        &self,
+        ip_allocator: Option<&dyn IpAllocator>,
+    ) -> Result<Vec<String>, MachineAdminError> {
+        let Some(ip_allocator) = ip_allocator else {
+            return Ok(Vec::new());
+        };
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+        let mut changes = Vec::new();
+        for row in rows {
+            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+            let alloc_input = if node_key_hex.is_empty() {
+                row.id.to_string()
+            } else {
+                node_key_hex
+            };
+            let mut next_ipv4 = row.ipv4.clone();
+            let mut next_ipv6 = row.ipv6.clone();
+            let mut changed = false;
+            if !ip_allocator.ipv4_enabled()
+                && let Some(ipv4) = row.ipv4.as_deref().filter(|value| !value.is_empty())
+            {
+                next_ipv4 = None;
+                changed = true;
+                changes.push(format!(
+                    "removing IPv4 \"{ipv4}\" from Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
+            if row.ipv4.as_deref().is_none_or(str::is_empty) && ip_allocator.ipv4_enabled() {
+                let ipv4 = ip_allocator
+                    .allocate(&alloc_input)
+                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv4: {e}")))?
+                    .to_string();
+                next_ipv4 = Some(ipv4.clone());
+                changed = true;
+                changes.push(format!(
+                    "assigned IPv4 \"{ipv4}\" to Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
+            if !ip_allocator.ipv6_enabled()
+                && let Some(ipv6) = row.ipv6.as_deref().filter(|value| !value.is_empty())
+            {
+                next_ipv6 = None;
+                changed = true;
+                changes.push(format!(
+                    "removing IPv6 \"{ipv6}\" from Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
+            if row.ipv6.as_deref().is_none_or(str::is_empty)
+                && ip_allocator.ipv6_enabled()
+                && let Some(ipv6) = ip_allocator
+                    .allocate_ipv6(&alloc_input)
+                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv6: {e}")))?
+            {
+                next_ipv6 = Some(ipv6.to_string());
+                changed = true;
+                changes.push(format!(
+                    "assigned IPv6 \"{ipv6}\" to Node({}) \"{}\"",
+                    row.id, row.hostname
+                ));
+            }
+            if changed {
+                let row = headscale_db::headscale_nodes::set_postgres_ip_addresses(
+                    &self.pool, row.id, next_ipv4, next_ipv6,
+                )
+                .await
+                .map_err(|e| db_error_to_machine(e, &row.id.to_string()))?;
+                self.sync_wire_row(row).await?;
+            }
+        }
+        Ok(changes)
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
+        let row = self.row_by_slug(id).await?;
+        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+        headscale_db::headscale_nodes::destroy_postgres(&self.pool, row.id)
             .await
             .map_err(|e| db_error_to_machine(e, id))?;
         if let Some(registry) = &self.wire_registry {

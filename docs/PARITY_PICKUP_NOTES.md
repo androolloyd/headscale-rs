@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 09:54 ADT
+Updated: 2026-05-30 10:04 ADT
 
 ## Current State
 
@@ -44,12 +44,16 @@ Recent accepted slices:
   `PersistentPostgresUserAdmin` and `PersistentPostgresPreauthAdmin`
   adapters, and aligns Postgres user deletion with the SQLite/headscale-go
   non-empty-user and owned-preauth cleanup semantics.
+- The current Postgres machine-adapter slice adds a feature-gated
+  `PersistentPostgresMachineAdmin` over the existing Postgres node primitives,
+  including admin node mutations, auth-key registration persistence, runtime
+  state sync, wire-registry hydration, route/address mutation, and node delete.
 
 Current multi-agent split:
 
 - Local critical path: Postgres runtime/import wiring, starting from the
-  remaining machine/node admin adapter and the SQLite-only `Database`/server
-  runtime boundary.
+  shared backend abstraction and the SQLite-only `Database`/server runtime
+  boundary.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome: runtime still opens SQLite unconditionally,
   `headscale-db::Database` is SQLite-only, and the existing persistent admin
@@ -63,9 +67,8 @@ Current multi-agent split:
   OIDC SSH-check denial smoke slice added for Rust and headscale-go.
 - Explorer lane: Postgres machine admin next-slice inventory. Outcome:
   `headscale_db::headscale_nodes` already exposes the needed Postgres node
-  primitives; the next safe slice is a feature-gated
-  `PersistentPostgresMachineAdmin`, while the full runtime backend abstraction
-  should wait until the remaining admin adapters are stable.
+  primitives; the feature-gated `PersistentPostgresMachineAdmin` is the safe
+  adapter slice before the full runtime backend abstraction.
 
 Verified for the API-key slice:
 

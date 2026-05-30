@@ -10,6 +10,8 @@ use crate::{DbError, Result};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::{PgConnection, PgPool};
 
 pub const API_KEY_PREFIX: &str = "hskey-api-";
 pub const API_KEY_PREFIX_LEN: usize = 12;
@@ -45,6 +47,21 @@ const API_KEY_COLUMNS: &str = r"
 
 fn api_key_select(suffix: &str) -> String {
     format!("SELECT {API_KEY_COLUMNS} FROM api_keys {suffix}")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_API_KEY_COLUMNS: &str = r"
+        id,
+        prefix,
+        convert_from(hash, 'UTF8') AS secret_hash,
+        FLOOR(EXTRACT(EPOCH FROM expiration))::BIGINT AS expiration,
+        COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        FLOOR(EXTRACT(EPOCH FROM last_seen))::BIGINT AS last_seen
+";
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_api_key_select(suffix: &str) -> String {
+    format!("SELECT {POSTGRES_API_KEY_COLUMNS} FROM api_keys {suffix}")
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
@@ -242,6 +259,209 @@ pub async fn destroy_by_prefix(pool: &SqlitePool, display_prefix: &str) -> Resul
     destroy(pool, row.id).await
 }
 
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres(pool: &PgPool, params: CreateParams) -> Result<Created> {
+    create_postgres_with_cost(pool, params, BCRYPT_COST_DEFAULT).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_for_test(pool: &PgPool, params: CreateParams) -> Result<Created> {
+    create_postgres_with_cost(pool, params, BCRYPT_COST_TEST).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost(
+    pool: &PgPool,
+    params: CreateParams,
+    cost: u32,
+) -> Result<Created> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_with_cost_on_connection(&mut conn, params, cost).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_for_test_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+) -> Result<Created> {
+    create_postgres_with_cost_on_connection(conn, params, BCRYPT_COST_TEST).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+    cost: u32,
+) -> Result<Created> {
+    let (plaintext, prefix, secret) = generate_plaintext();
+    let secret_hash =
+        bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
+    let created_at = now_unix();
+    let id: i64 = sqlx::query_scalar(
+        "
+        INSERT INTO api_keys
+            (prefix, hash, expiration, created_at, last_seen)
+        VALUES (
+            $1,
+            $2,
+            CASE WHEN $3::BIGINT IS NULL THEN NULL ELSE to_timestamp($3::BIGINT) END,
+            to_timestamp($4),
+            NULL
+        )
+        RETURNING id
+        ",
+    )
+    .bind(&prefix)
+    .bind(secret_hash.as_bytes())
+    .bind(params.expiration)
+    .bind(created_at)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(Created {
+        plaintext,
+        row: ApiKeyRow {
+            id,
+            prefix,
+            secret_hash,
+            expiration: params.expiration,
+            created_at,
+            last_seen: None,
+        },
+    })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<ApiKeyRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_id_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_id_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<ApiKeyRow> {
+    let query = postgres_api_key_select("WHERE id = $1");
+    sqlx::query_as::<_, ApiKeyRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("api_key id={id}")),
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_prefix(pool: &PgPool, display_prefix: &str) -> Result<ApiKeyRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_prefix_on_connection(&mut conn, display_prefix).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_prefix_on_connection(
+    conn: &mut PgConnection,
+    display_prefix: &str,
+) -> Result<ApiKeyRow> {
+    let prefix = parse_display_prefix(display_prefix)?;
+    let query = postgres_api_key_select("WHERE prefix = $1");
+    sqlx::query_as::<_, ApiKeyRow>(&query)
+        .bind(&prefix)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => {
+                DbError::NotFound(format!("api_key prefix={display_prefix}"))
+            }
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres(pool: &PgPool) -> Result<Vec<ApiKeyRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_on_connection(&mut conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<ApiKeyRow>> {
+    let query = postgres_api_key_select("ORDER BY created_at DESC, id DESC");
+    sqlx::query_as::<_, ApiKeyRow>(&query)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    expire_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let n = sqlx::query("UPDATE api_keys SET expiration = to_timestamp($1) WHERE id = $2")
+        .bind(now_unix())
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(DbError::NotFound(format!("api_key id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres_by_prefix(pool: &PgPool, display_prefix: &str) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    expire_postgres_by_prefix_on_connection(&mut conn, display_prefix).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn expire_postgres_by_prefix_on_connection(
+    conn: &mut PgConnection,
+    display_prefix: &str,
+) -> Result<()> {
+    let row = get_postgres_by_prefix_on_connection(conn, display_prefix).await?;
+    expire_postgres_on_connection(conn, row.id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    destroy_postgres_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let n = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(DbError::NotFound(format!("api_key id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_by_prefix(pool: &PgPool, display_prefix: &str) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    destroy_postgres_by_prefix_on_connection(&mut conn, display_prefix).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_by_prefix_on_connection(
+    conn: &mut PgConnection,
+    display_prefix: &str,
+) -> Result<()> {
+    let row = get_postgres_by_prefix_on_connection(conn, display_prefix).await?;
+    destroy_postgres_on_connection(conn, row.id).await
+}
+
 pub fn parse_display_prefix(display_prefix: &str) -> Result<String> {
     if display_prefix.len() == API_KEY_PREFIX_LEN && is_valid_urlsafe(display_prefix) {
         return Ok(display_prefix.to_string());
@@ -305,6 +525,45 @@ pub async fn validate(pool: &SqlitePool, candidate: &str) -> std::result::Result
     let row = sqlx::query_as::<_, ApiKeyRow>(&query)
         .bind(prefix)
         .fetch_one(pool)
+        .await
+        .map_err(|_| ApiKeyError::NotFound)?;
+
+    bcrypt::verify(secret, &row.secret_hash)
+        .map_err(|_| ApiKeyError::Invalid)?
+        .then_some(())
+        .ok_or(ApiKeyError::Invalid)?;
+
+    if row.is_expired(now_unix()) {
+        return Err(ApiKeyError::Expired);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn validate_postgres(
+    pool: &PgPool,
+    candidate: &str,
+) -> std::result::Result<(), ApiKeyError> {
+    let mut conn = pool.acquire().await.map_err(|_| ApiKeyError::NotFound)?;
+    validate_postgres_on_connection(&mut conn, candidate).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn validate_postgres_on_connection(
+    conn: &mut PgConnection,
+    candidate: &str,
+) -> std::result::Result<(), ApiKeyError> {
+    let parsed = parse_api_key(candidate)?;
+    let (prefix, secret) = match parsed {
+        ParsedKey::Modern { prefix, secret } | ParsedKey::Legacy { prefix, secret } => {
+            (prefix, secret)
+        }
+    };
+    let query = postgres_api_key_select("WHERE prefix = $1");
+    let row = sqlx::query_as::<_, ApiKeyRow>(&query)
+        .bind(prefix)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|_| ApiKeyError::NotFound)?;
 

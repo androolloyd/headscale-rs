@@ -1,7 +1,7 @@
 #![cfg(feature = "postgres-sqlx")]
 
 use headscale_db::{
-    HEADSCALE_GO_CURRENT_VERSION, check_postgres_health_on_connection,
+    HEADSCALE_GO_CURRENT_VERSION, api_keys, check_postgres_health_on_connection,
     migrate_postgres_foundation_on_connection, open_postgres_pool, policies, users,
 };
 use sqlx::{PgConnection, PgPool};
@@ -295,6 +295,140 @@ async fn postgres_oidc_user_primitives_match_upsert_contract() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
+    let Some(mut schema) = TempSchema::open("api_keys").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let created = api_keys::create_postgres_for_test_on_connection(
+            &mut schema.conn,
+            api_keys::CreateParams { expiration: None },
+        )
+        .await?;
+        assert!(created.plaintext.starts_with(api_keys::API_KEY_PREFIX));
+        let rest = created
+            .plaintext
+            .strip_prefix(api_keys::API_KEY_PREFIX)
+            .expect("generated API key prefix");
+        assert_eq!(rest.as_bytes()[api_keys::API_KEY_PREFIX_LEN], b'-');
+        assert_eq!(created.row.prefix, &rest[..api_keys::API_KEY_PREFIX_LEN]);
+        assert_eq!(
+            created.row.display_prefix(),
+            format!("{}{}-***", api_keys::API_KEY_PREFIX, created.row.prefix)
+        );
+        assert!(created.row.created_at > 0);
+        assert!(created.row.last_seen.is_none());
+
+        api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
+            .await
+            .map_err(|e| headscale_db::DbError::General(e.to_string()))?;
+        assert_eq!(
+            api_keys::get_postgres_by_id_on_connection(&mut schema.conn, created.row.id)
+                .await?
+                .prefix,
+            created.row.prefix
+        );
+        assert_eq!(
+            api_keys::get_postgres_by_prefix_on_connection(
+                &mut schema.conn,
+                &created.row.display_prefix(),
+            )
+            .await?
+            .id,
+            created.row.id
+        );
+        assert_eq!(
+            api_keys::list_postgres_on_connection(&mut schema.conn)
+                .await?
+                .len(),
+            1
+        );
+
+        api_keys::expire_postgres_by_prefix_on_connection(
+            &mut schema.conn,
+            &created.row.display_prefix(),
+        )
+        .await?;
+        let expired =
+            api_keys::get_postgres_by_id_on_connection(&mut schema.conn, created.row.id).await?;
+        assert!(expired.expiration.is_some());
+        assert_eq!(
+            api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
+                .await
+                .unwrap_err(),
+            api_keys::ApiKeyError::Expired
+        );
+
+        api_keys::destroy_postgres_by_prefix_on_connection(
+            &mut schema.conn,
+            &created.row.display_prefix(),
+        )
+        .await?;
+        assert!(
+            api_keys::list_postgres_on_connection(&mut schema.conn)
+                .await?
+                .is_empty()
+        );
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_api_key_validation_accepts_legacy_hash_rows() -> TestResult {
+    let Some(mut schema) = TempSchema::open("legacy_api_keys").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let prefix = "legacy1";
+        let secret = "s".repeat(api_keys::LEGACY_API_KEY_SECRET_LEN);
+        let hash = bcrypt::hash(&secret, api_keys::BCRYPT_COST_TEST)
+            .map_err(|e| headscale_db::DbError::General(e.to_string()))?;
+        let now = temporary_timestamp();
+        sqlx::query(
+            "
+            INSERT INTO api_keys (prefix, hash, expiration, last_seen, created_at)
+            VALUES ($1, $2, to_timestamp($3), to_timestamp($4), to_timestamp($5))
+            ",
+        )
+        .bind(prefix)
+        .bind(hash.as_bytes())
+        .bind(now + 3600)
+        .bind(now - 60)
+        .bind(now)
+        .execute(&mut schema.conn)
+        .await?;
+
+        api_keys::validate_postgres_on_connection(&mut schema.conn, &format!("{prefix}.{secret}"))
+            .await
+            .map_err(|e| headscale_db::DbError::General(e.to_string()))?;
+        let row = api_keys::get_postgres_by_prefix_on_connection(&mut schema.conn, prefix).await?;
+        assert_eq!(row.secret_hash, hash);
+        assert_eq!(row.expiration, Some(now + 3600));
+        assert_eq!(row.last_seen, Some(now - 60));
+        assert_eq!(row.created_at, now);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
 struct TempSchema {
     pool: PgPool,
     conn: PgConnection,
@@ -353,6 +487,13 @@ fn temporary_schema_name(test_name: &str) -> String {
         test_name,
         nanos
     )
+}
+
+fn temporary_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after UNIX epoch")
+        .as_secs() as i64
 }
 
 fn quote_pg_identifier(identifier: &str) -> String {

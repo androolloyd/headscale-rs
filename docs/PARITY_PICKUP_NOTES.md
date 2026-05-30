@@ -1,39 +1,36 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 08:01 ADT
+Updated: 2026-05-30 08:09 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before the Postgres users pickup: `018b50a Expand parity coverage for CLI SSH and Postgres`
-- Remote: `origin/main` was pushed through `018b50a`
-- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `018b50a`
+- Latest pushed commit before the Postgres API-key pickup: `033765d Add Postgres user foundation primitives`
+- Remote: `origin/main` was pushed through `033765d`
+- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `033765d`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
 
 ## Just Landed
 
-`018b50a` closes the latest accepted multi-agent parity slice:
+`033765d` closes the latest accepted Postgres foundation slice:
 
-- Added exact CLI/OpenAPI drift fixes for `disableExpiry`, deprecated `nodes register`, completion shell help, `mockoidc`, and `dumpConfig`.
-- Added paired stock-client SSH `check` smokes for CLI approval and wrong-user OIDC denial.
-- Expanded the feature-gated Postgres foundation with `policies` migration/primitives and health checks.
-- Updated the parity matrix and docs for those accepted coverage slices.
+- Added a headscale-go-shaped `users` migration for feature-gated Postgres work.
+- Added Postgres user/OIDC foundation primitives for create, upsert, get/list,
+  rename, touch, and destroy paths.
+- Added isolated Postgres foundation tests that skip cleanly when
+  `HEADSCALE_DB_POSTGRES_TEST_URL` is not set.
+- Updated the parity matrix and docs for the accepted user-store slice.
 
 Verified before commit:
 
 ```sh
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-cli raw_exact_help_matches_cobra_forms -- --nocapture
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process exact_help_aliases_match_current_upstream_snapshots -- --nocapture
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process operator_top_level_command_help_matches_snapshots -- --nocapture
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process mockoidc_help_and_missing_env_do_not_load_config -- --nocapture
-CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-api --lib swagger_api_v1_serves_upstream_openapi_document -- --nocapture
-CARGO_TARGET_DIR=target/codex-verify-db CARGO_INCREMENTAL=0 cargo test -p headscale-db --all-targets -- --nocapture
-CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --all-targets -- --nocapture
-CARGO_TARGET_DIR=target/codex-verify-clippy CARGO_INCREMENTAL=0 cargo clippy -p headscale-cli -p headscale-api -p headscale-db --all-targets -- -D warnings
-CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --features postgres-sqlx --all-targets -- -D warnings
 cargo fmt --all -- --check
 git diff --check
+CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --all-targets -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --all-targets -- --nocapture
+CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --all-targets -- -D warnings
+CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --features postgres-sqlx --all-targets -- -D warnings
 ```
 
 ## Completed After Pickup
@@ -57,10 +54,11 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 ## Next Safe Slice
 
 The current active slice is expanding the Postgres foundation from
-`database_versions`/`policies` to Go-shaped `users` migration and user/OIDC
-CRUD primitives. After that lands, the next narrow lanes are API-key/preauth
-Postgres primitives, node/route Postgres primitives, current-upstream CLI output
-drift snapshots, or the remaining route/SSH stock-client edge rows.
+`database_versions`/`policies`/`users` to Go-shaped `api_keys` migration and
+API-key create/list/expire/delete plus modern and legacy validation primitives.
+After that lands, the next narrow lanes are preauth-key Postgres primitives,
+node/route Postgres primitives, current-upstream CLI output drift snapshots, or
+the remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 

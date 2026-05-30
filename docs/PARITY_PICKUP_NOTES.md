@@ -1,28 +1,32 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 08:12 ADT
+Updated: 2026-05-30 08:19 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before the Postgres preauth-key pickup: `b7380f6 Add Postgres API key foundation primitives`
-- Remote: `origin/main` was pushed through `b7380f6`
-- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `b7380f6`
+- Latest pushed commit before the Postgres preauth-key pickup: `e53c882 Refresh parity baseline documentation`
+- Remote: `origin/main` was pushed through `e53c882`
+- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `e53c882`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
 
 ## Just Landed
 
-`b7380f6` closes the latest accepted Postgres foundation slice:
+Recent accepted slices:
 
-- Added a headscale-go-shaped `api_keys` migration for feature-gated Postgres work.
-- Added Postgres API-key foundation primitives for create, get/list, expire,
-  delete, and modern/legacy key validation paths.
-- Extended isolated Postgres foundation tests; they skip cleanly when
+- `b7380f6` added a headscale-go-shaped `api_keys` migration for
+  feature-gated Postgres work.
+- `b7380f6` added Postgres API-key foundation primitives for create, get/list,
+  expire, delete, and modern/legacy key validation paths.
+- `b7380f6` extended isolated Postgres foundation tests; they skip cleanly when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is not set.
-- Updated the parity matrix and docs for the accepted API-key store slice.
+- `d9b8ec9` refreshed the fuzz lockfile and made `scripts/fuzz_ci.sh` run a
+  locked fuzz manifest check before building fuzz targets.
+- `e53c882` refreshed parity baseline docs so the pinned v0.29 differential
+  harness is no longer described as a v0.28 harness.
 
-Verified before commit:
+Verified for the API-key slice:
 
 ```sh
 cargo fmt --all -- --check
@@ -31,6 +35,15 @@ CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 c
 CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test -p headscale-db --features postgres-sqlx --all-targets -- --nocapture
 CARGO_TARGET_DIR=target/codex-verify-db CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --all-targets -- -D warnings
 CARGO_TARGET_DIR=target/codex-verify-db-pg CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo clippy -p headscale-db --features postgres-sqlx --all-targets -- -D warnings
+```
+
+Verified for follow-up CI/docs slices:
+
+```sh
+cargo check --locked --manifest-path headscale-core/fuzz/Cargo.toml --bins
+FUZZ_TARGET=fuzz_stun FUZZ_RUNS=1 ./scripts/fuzz_ci.sh
+cargo fmt --all -- --check
+git diff --check
 ```
 
 ## Completed After Pickup

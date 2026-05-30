@@ -93,6 +93,13 @@ pub enum ExitCode {
     Server = 6,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectPolicyDatabase {
+    Sqlite { path: PathBuf },
+    Postgres { url: String },
+    Unavailable { reason: String },
+}
+
 impl AdminError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
@@ -156,11 +163,11 @@ pub struct ConnectArgs {
     /// Disable prompts and forces the execution.
     #[arg(long, global = true)]
     pub force: bool,
-    /// SQLite DB path from the loaded headscale config. This is not a
-    /// CLI flag; it lets `policy --bypass-grpc-and-access-database-directly`
-    /// match upstream's config-driven recovery path.
+    /// Database descriptor from the loaded headscale config. This is not a CLI
+    /// flag; it lets `policy --bypass-grpc-and-access-database-directly` match
+    /// upstream's config-driven recovery path.
     #[arg(skip)]
-    pub direct_database_path: Option<PathBuf>,
+    pub direct_database: Option<DirectPolicyDatabase>,
     /// Upstream `cli.timeout`, populated from config or
     /// `HEADSCALE_CLI_TIMEOUT`; this is not a Rust-only CLI flag.
     #[arg(skip)]
@@ -850,15 +857,15 @@ pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), Admin
     let fmt = conn.fmt()?;
     if cmd.bypasses_direct_database() {
         policy::confirm_direct_database_access(conn.force)?;
-        let db_path = conn.direct_database_path.as_deref().ok_or_else(|| {
+        let database = conn.direct_database.as_ref().ok_or_else(|| {
             AdminError::Local(
                 "direct database policy access requires a loaded headscale config".into(),
             )
         })?;
         return match cmd {
-            PolicyCmd::Check { path, .. } => policy::check_direct_db(db_path, path).await,
-            PolicyCmd::Get { .. } => policy::get_direct_db(db_path, fmt).await,
-            PolicyCmd::Set { path, .. } => policy::set_direct_db(db_path, path, fmt).await,
+            PolicyCmd::Check { path, .. } => policy::check_direct_db(database, path).await,
+            PolicyCmd::Get { .. } => policy::get_direct_db(database, fmt).await,
+            PolicyCmd::Set { path, .. } => policy::set_direct_db(database, path, fmt).await,
         };
     }
 
@@ -1055,7 +1062,7 @@ mod tests {
             insecure: false,
             output: None,
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: None,
         };
         let e = conn.build_client().unwrap_err();
@@ -1073,7 +1080,7 @@ mod tests {
             insecure: false,
             output: None,
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: None,
         };
         assert!(conn.build_client().is_ok());
@@ -1090,7 +1097,7 @@ mod tests {
             insecure: false,
             output: Some("json-line".into()),
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: None,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
@@ -1107,7 +1114,7 @@ mod tests {
             insecure: false,
             output: None,
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: None,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());

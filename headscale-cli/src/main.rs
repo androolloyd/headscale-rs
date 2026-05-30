@@ -25,9 +25,10 @@ mod server;
 
 use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
-    self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, NodesCmd, OutputFormat,
-    PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
+    self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, DirectPolicyDatabase, NodesCmd,
+    OutputFormat, PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
 };
+use headscale_db::DatabaseBackend;
 
 #[derive(Parser)]
 #[command(name = "headscale")]
@@ -616,14 +617,106 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
                 .map(|server| server.unix_socket.clone())
         });
     }
-    if merged.direct_database_path.is_none() {
-        merged.direct_database_path = Some(config.server.as_ref().map_or_else(
-            || ServerConfig::default().db_path,
-            |server| server.db_path.clone(),
-        ));
+    if merged.direct_database.is_none() {
+        merged.direct_database = Some(direct_policy_database_from_config(config));
     }
 
     merged
+}
+
+fn direct_policy_database_from_config(config: &CliConfig) -> DirectPolicyDatabase {
+    match config
+        .database
+        .as_ref()
+        .and_then(config::UpstreamDatabaseConfig::runtime_backend)
+    {
+        Some(DatabaseBackend::Postgres) => {
+            let Some(database) = config.database.as_ref() else {
+                return DirectPolicyDatabase::Unavailable {
+                    reason: "direct database policy access for Postgres requires a database block"
+                        .into(),
+                };
+            };
+            direct_postgres_policy_database(database)
+        }
+        Some(DatabaseBackend::Sqlite) | None => DirectPolicyDatabase::Sqlite {
+            path: config.server.as_ref().map_or_else(
+                || ServerConfig::default().db_path,
+                |server| server.db_path.clone(),
+            ),
+        },
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn direct_postgres_policy_database(
+    database: &config::UpstreamDatabaseConfig,
+) -> DirectPolicyDatabase {
+    match postgres_url_from_config(database.debug_postgres()) {
+        Ok(url) => DirectPolicyDatabase::Postgres { url },
+        Err(err) => DirectPolicyDatabase::Unavailable {
+            reason: format!("direct database policy access for Postgres: {err:#}"),
+        },
+    }
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+fn direct_postgres_policy_database(
+    _database: &config::UpstreamDatabaseConfig,
+) -> DirectPolicyDatabase {
+    DirectPolicyDatabase::Unavailable {
+        reason: "direct database policy access for Postgres requires the postgres-sqlx feature"
+            .into(),
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_url_from_config(postgres: &config::UpstreamPostgresConfig) -> Result<String> {
+    let host = non_empty_str(Some(postgres.host())).unwrap_or("localhost");
+    let port = postgres_config_port(postgres).context("database.postgres.port out of range")?;
+    let name = non_empty_str(Some(postgres.name())).unwrap_or("headscale");
+    let mut url = url::Url::parse("postgres://localhost/headscale")
+        .context("build default Postgres database URL")?;
+    url.set_host(Some(host))
+        .map_err(|err| anyhow::anyhow!("database.postgres.host {host:?} is invalid: {err}"))?;
+    url.set_port(Some(port))
+        .map_err(|()| anyhow::anyhow!("database.postgres.port {port} is invalid"))?;
+    url.set_path(name);
+    if let Some(user) = non_empty_str(Some(postgres.user())) {
+        url.set_username(user)
+            .map_err(|()| anyhow::anyhow!("database.postgres.user is invalid"))?;
+    }
+    if let Some(pass) = non_empty_str(Some(postgres.pass())) {
+        url.set_password(Some(pass))
+            .map_err(|()| anyhow::anyhow!("database.postgres.pass is invalid"))?;
+    }
+    if let Some(sslmode) = postgres_sslmode(postgres.ssl()) {
+        url.query_pairs_mut().append_pair("sslmode", sslmode);
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_config_port(postgres: &config::UpstreamPostgresConfig) -> Result<u16> {
+    let port = postgres.port();
+    if port <= 0 {
+        return Ok(5432);
+    }
+    u16::try_from(port).context("database.postgres.port must be between 1 and 65535")
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_sslmode(value: &str) -> Option<&str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "false" | "disable" => Some("disable"),
+        "true" | "require" => Some("require"),
+        "allow" => Some("allow"),
+        "prefer" => Some("prefer"),
+        "verify-ca" => Some("verify-ca"),
+        "verify-full" => Some("verify-full"),
+        _ => Some(value.trim()),
+    }
 }
 
 fn option_is_empty(value: Option<&String>) -> bool {
@@ -632,6 +725,11 @@ fn option_is_empty(value: Option<&String>) -> bool {
 
 fn non_empty_clone(value: Option<&String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty()).cloned()
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn non_empty_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn raw_args_skip_config_load<I, S>(args: I) -> bool
@@ -2780,7 +2878,7 @@ dns:
             insecure: false,
             output: None,
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: None,
         };
         let config = CliConfig {
@@ -2807,6 +2905,12 @@ dns:
             merged.unix_socket.as_deref(),
             Some(PathBuf::from("/run/headscale/admin.sock").as_path())
         );
+        assert_eq!(
+            merged.direct_database,
+            Some(DirectPolicyDatabase::Sqlite {
+                path: ServerConfig::default().db_path
+            })
+        );
     }
 
     #[test]
@@ -2820,7 +2924,7 @@ dns:
             insecure: true,
             output: None,
             force: false,
-            direct_database_path: None,
+            direct_database: None,
             timeout_secs: Some(11),
         };
         let config = CliConfig {
@@ -2844,5 +2948,78 @@ dns:
         );
         assert!(merged.insecure);
         assert_eq!(merged.timeout_secs, Some(11));
+    }
+
+    #[test]
+    fn admin_connect_args_resolves_direct_policy_sqlite_database_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let connect = ConnectArgs {
+            server: None,
+            token: None,
+            address: None,
+            api_key: None,
+            unix_socket: None,
+            insecure: false,
+            output: None,
+            force: false,
+            direct_database: None,
+            timeout_secs: None,
+        };
+        let config = CliConfig {
+            server: Some(ServerConfig {
+                db_path: db_path.clone(),
+                ..ServerConfig::default()
+            }),
+            ..CliConfig::default()
+        };
+
+        let merged = merged_connect_args(&connect, Some(&config));
+
+        assert_eq!(
+            merged.direct_database,
+            Some(DirectPolicyDatabase::Sqlite { path: db_path })
+        );
+    }
+
+    #[test]
+    fn admin_connect_args_reports_direct_policy_postgres_database_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r"
+database:
+  type: postgres
+  postgres:
+    host: db.example
+    port: 15432
+    name: headscale
+    user: hs
+    pass: secret
+    ssl: require
+",
+        )
+        .unwrap();
+        let config = CliConfig::load(&config_path).unwrap();
+
+        let database = direct_policy_database_from_config(&config);
+
+        #[cfg(feature = "postgres-sqlx")]
+        assert_eq!(
+            database,
+            DirectPolicyDatabase::Postgres {
+                url: "postgres://hs:secret@db.example:15432/headscale?sslmode=require".into()
+            }
+        );
+        #[cfg(not(feature = "postgres-sqlx"))]
+        assert_eq!(
+            database,
+            DirectPolicyDatabase::Unavailable {
+                reason:
+                    "direct database policy access for Postgres requires the postgres-sqlx feature"
+                        .into()
+            }
+        );
     }
 }

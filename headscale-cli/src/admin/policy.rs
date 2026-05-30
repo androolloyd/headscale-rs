@@ -10,16 +10,18 @@ use std::sync::Arc;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::{MachineAdmin, PersistentMachineAdmin, PersistentUserAdmin};
+#[cfg(feature = "postgres-sqlx")]
+use headscale_api::admin::{PersistentPostgresMachineAdmin, PersistentPostgresUserAdmin};
 use headscale_api::generated::{GetPolicyResponse, SetPolicyResponse};
 use headscale_api::policy::{PolicyCheckNode, check_policy_semantics, parse_hujson_policy};
 use headscale_api::tailscale_wire::wire::stable_id_from_key;
 use headscale_db::Database;
 use serde::Serialize;
 
-use super::AdminError;
 use super::client::AdminClient;
 use super::grpc_client::GrpcAdminClient;
 use super::output::{OutputFormat, print_structured};
+use super::{AdminError, DirectPolicyDatabase};
 
 pub async fn get(client: &AdminClient, _fmt: OutputFormat) -> Result<(), AdminError> {
     let value: serde_json::Value = client.get_json("/policy").await?;
@@ -33,20 +35,15 @@ pub async fn get_grpc(client: &mut GrpcAdminClient, _fmt: OutputFormat) -> Resul
     Ok(())
 }
 
-pub async fn get_direct_db(db_path: &Path, _fmt: OutputFormat) -> Result<(), AdminError> {
-    let db = open_policy_database(db_path).await?;
-    let policy = headscale_db::policies::get_latest(db.pool())
-        .await
-        .map_err(|e| AdminError::Local(format!("loading ACL from database: {e}")))?
-        .ok_or_else(|| {
-            AdminError::Local("loading ACL from database: acl policy not found".into())
-        })?;
-    let response = PolicyOutput {
-        policy: policy.data,
-        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
-    };
-    print_policy_text(&response.policy);
-    Ok(())
+pub async fn get_direct_db(
+    database: &DirectPolicyDatabase,
+    _fmt: OutputFormat,
+) -> Result<(), AdminError> {
+    match database {
+        DirectPolicyDatabase::Sqlite { path } => get_direct_sqlite(path).await,
+        DirectPolicyDatabase::Postgres { url } => get_direct_postgres(url).await,
+        DirectPolicyDatabase::Unavailable { reason } => Err(AdminError::Local(reason.clone())),
+    }
 }
 
 pub async fn set(client: &AdminClient, path: &Path, fmt: OutputFormat) -> Result<(), AdminError> {
@@ -85,16 +82,18 @@ pub async fn set_grpc(
 }
 
 pub async fn set_direct_db(
-    db_path: &Path,
+    database: &DirectPolicyDatabase,
     path: &Path,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let body = read_policy_file(path)?;
-    let db = open_policy_database(db_path).await?;
-    validate_policy_with_database(db.pool(), &body, "setting policy").await?;
-    let policy = headscale_db::policies::set(db.pool(), &body)
-        .await
-        .map_err(|e| AdminError::Local(format!("persisting policy to database: {e}")))?;
+    let policy = match database {
+        DirectPolicyDatabase::Sqlite { path } => set_direct_sqlite(path, &body).await?,
+        DirectPolicyDatabase::Postgres { url } => set_direct_postgres(url, &body).await?,
+        DirectPolicyDatabase::Unavailable { reason } => {
+            return Err(AdminError::Local(reason.clone()));
+        }
+    };
     let response = PolicySetOutput {
         applied: true,
         policy: policy.data,
@@ -127,10 +126,23 @@ pub async fn check_grpc(client: &mut GrpcAdminClient, path: &Path) -> Result<(),
     Ok(())
 }
 
-pub async fn check_direct_db(db_path: &Path, path: &Path) -> Result<(), AdminError> {
+pub async fn check_direct_db(
+    database: &DirectPolicyDatabase,
+    path: &Path,
+) -> Result<(), AdminError> {
     let raw = read_policy_file(path)?;
-    let db = open_policy_database(db_path).await?;
-    validate_policy_with_database(db.pool(), &raw, "checking policy").await?;
+    match database {
+        DirectPolicyDatabase::Sqlite { path } => {
+            let db = open_policy_database(path).await?;
+            validate_sqlite_policy_with_database(db.pool(), &raw, "checking policy").await?;
+        }
+        DirectPolicyDatabase::Postgres { url } => {
+            check_direct_postgres(url, &raw).await?;
+        }
+        DirectPolicyDatabase::Unavailable { reason } => {
+            return Err(AdminError::Local(reason.clone()));
+        }
+    }
     println!("Policy is valid");
     Ok(())
 }
@@ -189,21 +201,25 @@ fn print_policy_text(policy: &str) {
     }
 }
 
-async fn validate_policy_with_database(
+async fn validate_sqlite_policy_with_database(
     pool: &sqlx::SqlitePool,
     raw: &str,
     context: &str,
 ) -> Result<(), AdminError> {
     let doc = parse_hujson_policy(raw).map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
-    let nodes = policy_check_nodes(pool).await;
+    let nodes = sqlite_policy_check_nodes(pool).await;
     check_policy_semantics(&doc, &nodes)
         .map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
     Ok(())
 }
 
-async fn policy_check_nodes(pool: &sqlx::SqlitePool) -> Vec<PolicyCheckNode> {
+async fn sqlite_policy_check_nodes(pool: &sqlx::SqlitePool) -> Vec<PolicyCheckNode> {
     let users = Arc::new(PersistentUserAdmin::new(pool.clone()));
     let machines = PersistentMachineAdmin::new(pool.clone()).with_user_admin(users);
+    policy_check_nodes(&machines).await
+}
+
+async fn policy_check_nodes(machines: &dyn MachineAdmin) -> Vec<PolicyCheckNode> {
     machines
         .list()
         .await
@@ -241,6 +257,119 @@ fn node_ip_addresses(machine: &headscale_api::admin::MachineAdminRecord) -> Vec<
         addresses.push(ipv6.clone());
     }
     addresses
+}
+
+async fn get_direct_sqlite(path: &Path) -> Result<(), AdminError> {
+    let db = open_policy_database(path).await?;
+    let policy = headscale_db::policies::get_latest(db.pool())
+        .await
+        .map_err(|e| AdminError::Local(format!("loading ACL from database: {e}")))?
+        .ok_or_else(|| {
+            AdminError::Local("loading ACL from database: acl policy not found".into())
+        })?;
+    let response = PolicyOutput {
+        policy: policy.data,
+        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
+    };
+    print_policy_text(&response.policy);
+    Ok(())
+}
+
+async fn set_direct_sqlite(
+    path: &Path,
+    body: &str,
+) -> Result<headscale_db::policies::PolicyRow, AdminError> {
+    let db = open_policy_database(path).await?;
+    validate_sqlite_policy_with_database(db.pool(), body, "setting policy").await?;
+    headscale_db::policies::set(db.pool(), body)
+        .await
+        .map_err(|e| AdminError::Local(format!("persisting policy to database: {e}")))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn get_direct_postgres(url: &str) -> Result<(), AdminError> {
+    let pool = open_postgres_policy_pool(url).await?;
+    let policy = headscale_db::policies::get_latest_postgres(&pool)
+        .await
+        .map_err(|e| AdminError::Local(format!("loading ACL from Postgres database: {e}")))?
+        .ok_or_else(|| {
+            AdminError::Local("loading ACL from Postgres database: acl policy not found".into())
+        })?;
+    let response = PolicyOutput {
+        policy: policy.data,
+        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
+    };
+    print_policy_text(&response.policy);
+    Ok(())
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+async fn get_direct_postgres(_url: &str) -> Result<(), AdminError> {
+    Err(postgres_feature_error())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn set_direct_postgres(
+    url: &str,
+    body: &str,
+) -> Result<headscale_db::policies::PolicyRow, AdminError> {
+    let pool = open_postgres_policy_pool(url).await?;
+    validate_postgres_policy_with_database(&pool, body, "setting policy").await?;
+    headscale_db::policies::set_postgres(&pool, body)
+        .await
+        .map_err(|e| AdminError::Local(format!("persisting policy to Postgres database: {e}")))
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+async fn set_direct_postgres(
+    _url: &str,
+    _body: &str,
+) -> Result<headscale_db::policies::PolicyRow, AdminError> {
+    Err(postgres_feature_error())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn check_direct_postgres(url: &str, raw: &str) -> Result<(), AdminError> {
+    let pool = open_postgres_policy_pool(url).await?;
+    validate_postgres_policy_with_database(&pool, raw, "checking policy").await
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+async fn check_direct_postgres(_url: &str, _raw: &str) -> Result<(), AdminError> {
+    Err(postgres_feature_error())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn validate_postgres_policy_with_database(
+    pool: &sqlx::PgPool,
+    raw: &str,
+    context: &str,
+) -> Result<(), AdminError> {
+    let doc = parse_hujson_policy(raw).map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
+    let users = Arc::new(PersistentPostgresUserAdmin::new(pool.clone()));
+    let machines = PersistentPostgresMachineAdmin::new(pool.clone()).with_user_admin(users);
+    let nodes = policy_check_nodes(&machines).await;
+    check_policy_semantics(&doc, &nodes)
+        .map_err(|e| AdminError::Local(format!("{context}: {e}")))?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn open_postgres_policy_pool(url: &str) -> Result<sqlx::PgPool, AdminError> {
+    let pool = headscale_db::open_postgres_pool(url)
+        .await
+        .map_err(|e| AdminError::Local(format!("open Postgres database: {e}")))?;
+    headscale_db::migrate_postgres_foundation(&pool)
+        .await
+        .map_err(|e| AdminError::Local(format!("migrate Postgres database: {e}")))?;
+    Ok(pool)
+}
+
+#[cfg(not(feature = "postgres-sqlx"))]
+fn postgres_feature_error() -> AdminError {
+    AdminError::Local(
+        "direct database policy access for Postgres requires the postgres-sqlx feature".into(),
+    )
 }
 
 async fn open_policy_database(path: &Path) -> Result<Database, AdminError> {

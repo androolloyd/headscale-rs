@@ -1,26 +1,26 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 08:09 ADT
+Updated: 2026-05-30 08:12 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
-- Latest pushed commit before the Postgres API-key pickup: `033765d Add Postgres user foundation primitives`
-- Remote: `origin/main` was pushed through `033765d`
-- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `033765d`
+- Latest pushed commit before the Postgres preauth-key pickup: `b7380f6 Add Postgres API key foundation primitives`
+- Remote: `origin/main` was pushed through `b7380f6`
+- Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` was fast-forwarded to `b7380f6`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
 
 ## Just Landed
 
-`033765d` closes the latest accepted Postgres foundation slice:
+`b7380f6` closes the latest accepted Postgres foundation slice:
 
-- Added a headscale-go-shaped `users` migration for feature-gated Postgres work.
-- Added Postgres user/OIDC foundation primitives for create, upsert, get/list,
-  rename, touch, and destroy paths.
-- Added isolated Postgres foundation tests that skip cleanly when
+- Added a headscale-go-shaped `api_keys` migration for feature-gated Postgres work.
+- Added Postgres API-key foundation primitives for create, get/list, expire,
+  delete, and modern/legacy key validation paths.
+- Extended isolated Postgres foundation tests; they skip cleanly when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is not set.
-- Updated the parity matrix and docs for the accepted user-store slice.
+- Updated the parity matrix and docs for the accepted API-key store slice.
 
 Verified before commit:
 
@@ -54,9 +54,8 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 ## Next Safe Slice
 
 The current active slice is expanding the Postgres foundation from
-`database_versions`/`policies`/`users` to Go-shaped `api_keys` migration and
-API-key create/list/expire/delete plus modern and legacy validation primitives.
-After that lands, the next narrow lanes are preauth-key Postgres primitives,
+`database_versions`/`policies`/`users`/`api_keys` to Go-shaped preauth-key
+migration and primitives. After that lands, the next narrow lanes are
 node/route Postgres primitives, current-upstream CLI output drift snapshots, or
 the remaining route/SSH stock-client edge rows.
 

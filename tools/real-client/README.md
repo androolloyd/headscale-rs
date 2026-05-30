@@ -80,7 +80,12 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
+| Database | `postgres-web-register-route-approve` | `postgres-web-register-route-approve-smoke.sh` | `postgres-web-register-route-approve-headscale-go-smoke.sh` | Production Postgres web registration with route advertisement/approval |
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
+| Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
+| Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
+| Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
+| Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
@@ -156,7 +161,9 @@ The real-client smokes require a Docker daemon that supports
 `--add-host host.docker.internal:host-gateway`, plus `cargo`, `curl`, and
 `ruby`. The headscale-go target also needs either `go` or `HEADSCALE_GO_BIN`;
 TLS-backed headscale-go runs need `openssl`. The OIDC and prefix-family
-backfill rows also use `sqlite3`.
+backfill rows also use `sqlite3`. Postgres rows also need `psql` and
+`HEADSCALE_DB_POSTGRES_TEST_URL`; they create and drop a temporary database for
+each run and skip cleanly when that URL is absent.
 
 Run a quick paired gate:
 

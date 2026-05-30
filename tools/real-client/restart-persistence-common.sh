@@ -16,6 +16,7 @@ esac
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"
 route_b="${REAL_CLIENT_RESTART_ROUTE_B:-${REAL_CLIENT_ROUTE_B:-10.88.0.0/24}}"
 exit_routes="${REAL_CLIENT_RESTART_EXIT_ROUTES:-${REAL_CLIENT_EXIT_ROUTES:-0.0.0.0/0,::/0}}"
@@ -31,7 +32,14 @@ web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
-run_id="hs-restart-${target}-$(date +%s)-$$"
+run_id="hs-restart-${target}-${database_backend}-$(date +%s)-$$"
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
 case "${route_via_restart}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     route_via_restart_flag=1
@@ -195,6 +203,14 @@ headscale_bin=""
 authkey=""
 router_a_authkey=""
 router_b_authkey=""
+postgres_admin_url=""
+postgres_database_name=""
+postgres_host=""
+postgres_port=""
+postgres_user=""
+postgres_pass=""
+postgres_sslmode=""
+postgres_database_created=0
 
 cleanup() {
   docker rm -f "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" "${exit_name}" >/dev/null 2>&1 || true
@@ -202,6 +218,7 @@ cleanup() {
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
   fi
+  drop_postgres_database || true
   rm -f "${socket_path}"
 }
 trap cleanup EXIT
@@ -215,6 +232,83 @@ need() {
 
 free_port() {
   ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
+}
+
+yaml_string() {
+  ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
+}
+
+parse_postgres_test_url() {
+  eval "$(
+    ruby -ruri -rshellwords -e '
+      url = URI.parse(ARGV.fetch(0))
+      database_name = ARGV.fetch(1)
+      abort("HEADSCALE_DB_POSTGRES_TEST_URL must include a TCP host") if url.host.to_s.empty?
+      query = URI.decode_www_form(url.query.to_s).to_h
+      sslmode = query.fetch("sslmode", "false")
+      admin_db = url.path.to_s.sub(%r{\A/}, "")
+      admin_db = "postgres" if admin_db.empty?
+      admin = url.dup
+      admin.path = "/#{admin_db}"
+      {
+        postgres_admin_url: admin.to_s,
+        postgres_database_name: database_name,
+        postgres_host: url.host.to_s,
+        postgres_port: (url.port || 5432).to_s,
+        postgres_user: URI.decode_www_form_component(url.user.to_s),
+        postgres_pass: URI.decode_www_form_component(url.password.to_s),
+        postgres_sslmode: sslmode,
+      }.each do |key, value|
+        puts "#{key}=#{Shellwords.escape(value)}"
+      end
+    ' "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" "${postgres_database_name}"
+  )"
+}
+
+prepare_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  if [[ -z "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" ]]; then
+    echo "skipping Postgres restart real-client smoke: HEADSCALE_DB_POSTGRES_TEST_URL is not set" >&2
+    exit 0
+  fi
+  need psql
+  postgres_database_name="headscale_rs_pg_restart_${target//[^a-zA-Z0-9]/_}_$(date +%s)_$$"
+  parse_postgres_test_url
+  if ! [[ "${postgres_database_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "internal temporary Postgres database name is invalid: ${postgres_database_name}" >&2
+    exit 2
+  fi
+  echo "::group::create temporary Postgres database"
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${postgres_database_name}" >"${work_dir}/postgres-create.stdout" 2>"${work_dir}/postgres-create.stderr"; then
+    echo "skipping Postgres restart real-client smoke: cannot create temporary database ${postgres_database_name}" >&2
+    cat "${work_dir}/postgres-create.stderr" >&2 || true
+    echo "::endgroup::"
+    exit 0
+  fi
+  postgres_database_created=1
+  echo "created ${postgres_database_name}"
+  echo "::endgroup::"
+}
+
+drop_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  ((postgres_database_created)) || return 0
+  echo "::group::drop temporary Postgres database"
+  psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${postgres_database_name}' AND pid <> pg_backend_pid()" \
+    >"${work_dir}/postgres-terminate.stdout" \
+    2>"${work_dir}/postgres-terminate.stderr" || true
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${postgres_database_name} WITH (FORCE)" \
+    >"${work_dir}/postgres-drop.stdout" \
+    2>"${work_dir}/postgres-drop.stderr"; then
+    psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${postgres_database_name}" \
+      >>"${work_dir}/postgres-drop.stdout" \
+      2>>"${work_dir}/postgres-drop.stderr"
+  fi
+  postgres_database_created=0
+  echo "::endgroup::"
 }
 
 wait_for() {
@@ -276,7 +370,11 @@ install_or_build_headscale() {
   case "${target}" in
     rust)
       echo "::group::build headscale-rs CLI"
-      cargo build --quiet -p headscale-cli --bin headscale
+      if [[ "${database_backend}" == "postgres" ]]; then
+        cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+      else
+        cargo build --quiet -p headscale-cli --bin headscale
+      fi
       headscale_bin="${repo_root}/target/debug/headscale"
       echo "::endgroup::"
       ;;
@@ -477,6 +575,36 @@ write_route_health_reload_policy() {
   ' "${route}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
 }
 
+write_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      if [[ "${target}" == "headscale-go" ]]; then
+        cat <<EOF
+
+database:
+  type: sqlite
+  sqlite:
+    path: ${db_path}
+EOF
+      fi
+      ;;
+    postgres)
+      cat <<EOF
+
+database:
+  type: postgres
+  postgres:
+    host: $(yaml_string "${postgres_host}")
+    port: ${postgres_port}
+    name: $(yaml_string "${postgres_database_name}")
+    user: $(yaml_string "${postgres_user}")
+    pass: $(yaml_string "${postgres_pass}")
+    ssl: $(yaml_string "${postgres_sslmode}")
+EOF
+      ;;
+  esac
+}
+
 write_config() {
   case "${target}" in
     rust)
@@ -533,11 +661,6 @@ prefixes:
   allocation: sequential
   v4: 100.64.0.0/10
 
-database:
-  type: sqlite
-  sqlite:
-    path: ${db_path}
-
 dns:
   magic_dns: false
   base_domain: "${base_domain}"
@@ -574,6 +697,7 @@ policy:
 EOF
       ;;
   esac
+  write_database_config >>"${config_path}"
   if ((route_health_restart_flag)); then
     cat >>"${config_path}" <<EOF
 
@@ -1855,6 +1979,7 @@ wait_for_debug_batcher_nodes() {
 need curl
 need docker
 need ruby
+prepare_postgres_database
 case "${target}" in
   rust) need cargo ;;
   headscale-go)

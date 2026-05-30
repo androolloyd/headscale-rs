@@ -71,9 +71,12 @@ smoke_ids=(
   postgres-authkey
   postgres-web-register
   postgres-route-approve
+  postgres-web-register-route-approve
   postgres-oidc
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
+  postgres-web-register-restart
+  postgres-restart-persistence
   ping-lifecycle
   web-register
   web-register-tags
@@ -146,6 +149,9 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
+  database
+  database
   database
   database
   database
@@ -227,9 +233,12 @@ smoke_rust_scripts=(
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-web-register-smoke.sh
   tools/real-client/postgres-route-approve-smoke.sh
+  tools/real-client/postgres-web-register-route-approve-smoke.sh
   tools/real-client/postgres-oidc-smoke.sh
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
+  tools/real-client/postgres-web-register-restart-smoke.sh
+  tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/ping-lifecycle-smoke.sh
   tools/real-client/web-register-smoke.sh
   tools/real-client/web-register-tags-smoke.sh
@@ -305,9 +314,12 @@ smoke_go_scripts=(
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-headscale-go-smoke.sh
   tools/real-client/postgres-route-approve-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-route-approve-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/web-register-headscale-go-smoke.sh
   tools/real-client/web-register-tags-headscale-go-smoke.sh
@@ -383,9 +395,12 @@ smoke_assertions=(
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen"
+  "production Postgres web registration with route advertisement/approval"
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"
+  "production Postgres web registration survives server restart"
+  "production Postgres restart persistence and route/tag map churn"
   "debug PingRequest dispatch and public HEAD callback correlation"
   "no-auth pending registration and CLI approval"
   "web registration with owned requested tag"

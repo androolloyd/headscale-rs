@@ -141,6 +141,16 @@ Recent accepted slices:
   reconnect, Pg-backed node/user/profile state, CLI projection, and OIDC
   route-approval state survive a real server restart, and they are included in
   the bounded push/PR real-client smoke set.
+- This slice makes the production restart-persistence stock-client harness
+  backend-aware and adds paired `postgres-web-register-restart` and
+  `postgres-restart-persistence` Rust/headscale-go rows. They prove Postgres
+  web/CLI registration reconnects across a real server restart and that
+  Pg-backed route approval, tag mutation, peer map churn, and `/debug/batcher`
+  connected-state recovery survive the same production restart boundary.
+- This slice also adds paired `postgres-web-register-route-approve`
+  Rust/headscale-go rows over the existing online/LastSeen harness, covering the
+  cross-path where a web-registration pending cache carries advertised route
+  metadata before Postgres-backed CLI route approval.
 
 Current multi-agent split:
 
@@ -155,12 +165,14 @@ Current multi-agent split:
   health/user/preauth/API-key/policy/node admin operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. Paired env-gated production Pg
-  stock-client auth-key, web-registration, route-approval, OIDC, OIDC restart,
-  and OIDC route-approval restart smokes are now checked into the real-client
-  matrix. CI now provisions Postgres and includes those rows in the push/PR
-  real-client job.
+  stock-client auth-key, web-registration, route-approval, web-registration
+  route-approval, OIDC, OIDC restart, OIDC route-approval restart,
+  web-registration restart, and restart-persistence smokes are now checked into
+  the real-client matrix. CI now provisions Postgres and includes those rows in
+  the push/PR real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
-  auth-key, web-registration, route-approval, OIDC map, and OIDC restart flows.
+  covered auth-key, web-registration, route-approval, OIDC map/restart, and
+  route/tag restart-persistence flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -280,10 +292,11 @@ churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production Pg `serve` process smoke covers public
   health plus local gRPC health/user/preauth/API-key/policy/node CLI paths, and
-  paired env-gated Pg auth-key, web-registration, route-approval, OIDC, OIDC
-  restart, and OIDC route-approval restart stock-client smokes are checked into
-  the real-client matrix and push/PR CI now provisions Postgres for them; broader
-  Pg stock-client serve smokes remain
+  paired env-gated Pg auth-key, web-registration, route-approval,
+  web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
+  restart, web-registration restart, and restart-persistence stock-client smokes
+  are checked into the real-client matrix and push/PR CI now provisions Postgres
+  for them; broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

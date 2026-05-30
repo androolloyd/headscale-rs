@@ -18,6 +18,10 @@ headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
+advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
+expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
+expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
@@ -548,6 +552,9 @@ login_client() {
   if [[ "${login_mode}" == "authkey" ]]; then
     up_args+=("--authkey=${authkey}")
   fi
+  if [[ -n "${advertise_routes}" ]]; then
+    up_args+=("--advertise-routes=${advertise_routes}")
+  fi
 
   up_status=0
   if [[ "${login_mode}" == "web" ]]; then
@@ -596,19 +603,121 @@ assert_client_netmap() {
   ruby -rjson -e '
     netmap = JSON.parse(File.read(ARGV.fetch(0)))
     client_name = ARGV.fetch(1)
+    expected_allowed = ARGV.fetch(2).split(",").reject(&:empty?)
     self_node = netmap["SelfNode"] || netmap["Node"] || {}
     hostname = self_node["HostName"] || self_node["Name"] || self_node["DNSName"]
     ips = Array(self_node["Addresses"] || self_node["AllowedIPs"] || self_node["AllowedIps"])
+    allowed_ips = Array(
+      self_node["AllowedIPs"] ||
+      self_node["AllowedIps"] ||
+      self_node["allowedIPs"] ||
+      self_node["allowed_ips"]
+    ).map(&:to_s)
     abort("expected self node in netmap, got #{netmap.inspect}") if self_node.empty?
     abort("expected self hostname to include #{client_name.inspect}, got #{hostname.inspect}") unless hostname.to_s.include?(client_name)
     abort("expected self node addresses/AllowedIPs in #{self_node.inspect}") if ips.empty?
+    expected_allowed.each do |route|
+      abort("expected self AllowedIPs to include approved route #{route.inspect}, got #{allowed_ips.inspect}") unless allowed_ips.include?(route)
+    end
     puts JSON.pretty_generate({
       hostname: hostname,
       ips: ips,
+      allowed_ips: allowed_ips,
       peers: Array(netmap["Peers"] || netmap["peers"]).length,
     })
-  ' "${netmap_path}" "${client_name}" >"${work_dir}/${client_name}.netmap-summary.json"
+  ' "${netmap_path}" "${client_name}" "${expected_approved_routes}" >"${work_dir}/${client_name}.netmap-summary.json"
   cat "${work_dir}/${client_name}.netmap-summary.json"
+}
+
+wait_for_client_netmap() {
+  wait_for "client netmap" "assert_client_netmap" || {
+    dump_debug
+    return 1
+  }
+}
+
+node_id_for_client() {
+  local path="$1"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).any? { |name| name == client_name || name.include?(client_name) }
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    id = node["id"] || node["ID"]
+    abort("expected node id in #{node.inspect}") if id.nil? || id.to_s.empty?
+    puts id
+  ' "${path}" "${client_name}"
+}
+
+assert_node_routes_file() {
+  local path="$1"
+  local expected_available="$2"
+  local expected_approved="$3"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    expected_available = ARGV.fetch(2).split(",").reject(&:empty?).sort
+    expected_approved = ARGV.fetch(3).split(",").reject(&:empty?).sort
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).any? { |name| name == client_name || name.include?(client_name) }
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    available = Array(
+      node["availableRoutes"] ||
+      node["available_routes"] ||
+      node["routes"]
+    ).map(&:to_s).sort
+    approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+    subnet = Array(node["subnetRoutes"] || node["subnet_routes"]).map(&:to_s).sort
+    abort("expected available routes #{expected_available.inspect}, got #{available.inspect} in #{node.inspect}") unless available == expected_available
+    abort("expected approved routes #{expected_approved.inspect}, got #{approved.inspect} in #{node.inspect}") unless approved == expected_approved
+    expected_approved.each do |route|
+      abort("expected subnet routes to include #{route.inspect}, got #{subnet.inspect}") unless subnet.include?(route)
+    end
+    puts JSON.pretty_generate({name: client_name, available_routes: available, approved_routes: approved, subnet_routes: subnet, node: node})
+  ' "${path}" "${client_name}" "${expected_available}" "${expected_approved}"
+}
+
+wait_for_node_routes() {
+  local expected_available="$1"
+  local expected_approved="$2"
+  local label="$3"
+  local path="${work_dir}/nodes-${label//[^a-zA-Z0-9_-]/-}.json"
+  wait_for "${label}" "headscale_cmd -o json nodes list >'${path}' && assert_node_routes_file '${path}' '${expected_available}' '${expected_approved}'" || {
+    dump_debug
+    return 1
+  }
+}
+
+approve_routes_if_requested() {
+  [[ -n "${advertise_routes}" || -n "${approve_routes}" ]] || return 0
+  wait_for_node_routes "${expected_available_routes}" "" "advertised routes"
+  [[ -n "${approve_routes}" ]] || return 0
+
+  echo "::group::approve routes"
+  local nodes_path="${work_dir}/nodes-before-approve.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  local node_id
+  node_id="$(node_id_for_client "${nodes_path}")"
+  headscale_cmd -o json nodes approve-routes --identifier "${node_id}" --routes "${approve_routes}" \
+    >"${work_dir}/approved-routes.json"
+  echo "::endgroup::"
+
+  wait_for_node_routes "${expected_available_routes}" "${expected_approved_routes}" "approved routes"
 }
 
 assert_node_lifecycle_file() {
@@ -704,7 +813,8 @@ start_server
 create_user_and_key
 start_client
 login_client
-assert_client_netmap
+approve_routes_if_requested
+wait_for_client_netmap
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled

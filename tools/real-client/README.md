@@ -79,6 +79,7 @@ predates the executable PingRequest lifecycle.
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
+| Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
@@ -561,6 +562,19 @@ Additional knobs:
 - `REAL_CLIENT_APPROVE_ROUTES` defaults to `REAL_CLIENT_ROUTE` in the approval
   wrappers.
 - `REAL_CLIENT_EXPECT_APPROVED_ROUTES` defaults to the approved routes.
+
+The Postgres route-approval scenario runs the same single-node route
+advertisement and approval flow through production `headscale server`/headscale-go
+`serve` processes backed by a temporary Postgres database:
+
+```sh
+tools/real-client/postgres-route-approve-smoke.sh
+tools/real-client/postgres-route-approve-headscale-go-smoke.sh
+```
+
+It uses `HEADSCALE_DB_POSTGRES_TEST_URL`, skips cleanly when that URL is not
+set, and asserts the CLI route state, approved-route netmap projection, online
+state, and LastSeen transition after disconnect.
 
 The primary-route scenario starts two stock clients, advertises and approves
 the same subnet route on both, and asserts that exactly one node is selected as

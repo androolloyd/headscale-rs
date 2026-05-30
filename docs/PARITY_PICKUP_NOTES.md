@@ -120,6 +120,14 @@ Recent accepted slices:
   headscale-go rows. The shared online/LastSeen harness can now run either
   auth-key or web registration against a temporary Pg database, and CI includes
   both Postgres rows in the bounded push/PR smoke set.
+- This slice extends that production Postgres stock-client harness again for
+  route advertisement and approval with paired `postgres-route-approve` Rust and
+  headscale-go rows. The shared harness now passes `--advertise-routes`, approves
+  the route through `headscale nodes approve-routes`, verifies CLI available,
+  approved, and serving route state, checks the approved route in the stock
+  client's netmap `AllowedIPs`, and keeps the online/LastSeen disconnect
+  assertion. CI includes this Postgres route row in the bounded push/PR smoke
+  set.
 
 Current multi-agent split:
 
@@ -134,11 +142,11 @@ Current multi-agent split:
   health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. Paired env-gated production Pg
-  stock-client auth-key and web-registration smokes are now checked into the
-  real-client matrix. CI now provisions Postgres and includes both rows in the
-  push/PR real-client job.
+  stock-client auth-key, web-registration, and route-approval smokes are now
+  checked into the real-client matrix. CI now provisions Postgres and includes
+  those rows in the push/PR real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
-  auth-key and web-registration map flows.
+  auth-key, web-registration, and route-approval map flows.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -239,7 +247,8 @@ adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
 operations against Pg, and direct policy DB bypass now round-trips against
 configured Pg without a running server. The next critical slice is broader
-production Pg serve coverage beyond auth-key and web-registration map flows. The other
+production Pg serve coverage beyond the auth-key, web-registration, and
+route-approval map flows. The other
 narrow lanes remain current-upstream CLI output drift snapshots, map/session
 churn parity, and remaining route/SSH stock-client edge rows.
 

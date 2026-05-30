@@ -793,13 +793,23 @@ pub(crate) mod test_support {
     use hyper_util::rt::TokioIo;
     use serde_json::{Value, json};
     use tempfile::tempdir;
-    use tokio_rustls::TlsAcceptor;
+    use tokio::net::TcpStream;
     use tokio_rustls::rustls;
+    use tokio_rustls::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use tokio_rustls::rustls::{
+        ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme,
+    };
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
     use tower::ServiceExt;
 
     pub(crate) const LOCAL_ACME_HOSTNAME: &str = "headscale.test";
     pub(crate) const LOCAL_ACME_TOKEN: &str = "hsrs-token";
     const REPLAY_NONCE: HeaderName = HeaderName::from_static("replay-nonce");
+    const ACME_IDENTIFIER_OID_DER: &[u8] =
+        &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x1f];
 
     #[derive(Clone, Copy)]
     enum LocalAcmeChallenge {
@@ -821,6 +831,7 @@ pub(crate) mod test_support {
         HttpStore(AcmeHttp01ChallengeStore),
         HttpListener { addr: SocketAddr, host: String },
         TlsResolver(Arc<AcmeTlsAlpnChallengeResolver>),
+        TlsListener { addr: SocketAddr },
     }
 
     struct LocalAcmeCa {
@@ -882,6 +893,7 @@ pub(crate) mod test_support {
         challenge: LocalAcmeChallenge,
         ca: Arc<LocalAcmeCa>,
         validation: LocalAcmeValidation,
+        account_thumbprint: Arc<Mutex<Option<String>>>,
         challenge_seen: Arc<AtomicBool>,
         finalized: Arc<AtomicBool>,
         cert_pem: Arc<Mutex<Option<String>>>,
@@ -919,6 +931,16 @@ pub(crate) mod test_support {
                     "status": status
                 }]
             })
+        }
+
+        fn key_authorization(&self) -> Result<String> {
+            let thumbprint = self
+                .account_thumbprint
+                .lock()
+                .unwrap()
+                .clone()
+                .context("ACME account thumbprint was not captured")?;
+            Ok(format!("{LOCAL_ACME_TOKEN}.{thumbprint}"))
         }
 
         async fn validate_challenge_material(&self) -> Result<()> {
@@ -966,6 +988,10 @@ pub(crate) mod test_support {
                         bail!("TLS-ALPN challenge certificate was not installed");
                     }
                 }
+                (LocalAcmeChallenge::TlsAlpn01, LocalAcmeValidation::TlsListener { addr }) => {
+                    let cert_der = fetch_tls_alpn_certificate_from_listener(*addr).await?;
+                    assert_acme_identifier_extension(&cert_der, &self.key_authorization()?)?;
+                }
                 _ => bail!("ACME local validation target does not match challenge type"),
             }
             Ok(())
@@ -1012,6 +1038,14 @@ pub(crate) mod test_support {
             .await
         }
 
+        pub(crate) async fn spawn_tls_alpn_listener(addr: SocketAddr) -> Self {
+            Self::spawn(
+                LocalAcmeChallenge::TlsAlpn01,
+                LocalAcmeValidation::TlsListener { addr },
+            )
+            .await
+        }
+
         async fn spawn(challenge: LocalAcmeChallenge, validation: LocalAcmeValidation) -> Self {
             install_test_crypto_provider();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1029,6 +1063,7 @@ pub(crate) mod test_support {
                 challenge,
                 ca,
                 validation,
+                account_thumbprint: Arc::new(Mutex::new(None)),
                 challenge_seen: challenge_seen.clone(),
                 finalized: finalized.clone(),
                 cert_pem: Arc::new(Mutex::new(None)),
@@ -1128,7 +1163,16 @@ pub(crate) mod test_support {
         response
     }
 
-    async fn local_acme_new_account(State(state): State<LocalAcmeState>) -> Response {
+    async fn local_acme_new_account(
+        State(state): State<LocalAcmeState>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        match decode_jose_protected_header(&body).and_then(|header| account_thumbprint(&header)) {
+            Ok(thumbprint) => {
+                *state.account_thumbprint.lock().unwrap() = Some(thumbprint);
+            }
+            Err(err) => return problem_response(&format!("{err:#}")),
+        }
         json_response(StatusCode::CREATED, Some(state.url("account/1")), json!({}))
     }
 
@@ -1274,8 +1318,136 @@ pub(crate) mod test_support {
         serde_json::from_slice(&decoded).context("parse JWS payload")
     }
 
+    fn decode_jose_protected_header(body: &Value) -> Result<Value> {
+        let protected = body
+            .get("protected")
+            .and_then(Value::as_str)
+            .context("missing JWS protected header")?;
+        let decoded = URL_SAFE_NO_PAD
+            .decode(protected.as_bytes())
+            .context("decode JWS protected header")?;
+        serde_json::from_slice(&decoded).context("parse JWS protected header")
+    }
+
+    fn account_thumbprint(header: &Value) -> Result<String> {
+        let jwk = header.get("jwk").context("missing JWS JWK")?;
+        let crv = jwk.get("crv").and_then(Value::as_str).context("JWK crv")?;
+        let kty = jwk.get("kty").and_then(Value::as_str).context("JWK kty")?;
+        let x = jwk.get("x").and_then(Value::as_str).context("JWK x")?;
+        let y = jwk.get("y").and_then(Value::as_str).context("JWK y")?;
+        let canonical = format!(r#"{{"crv":"{crv}","kty":"{kty}","x":"{x}","y":"{y}"}}"#);
+        Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes())))
+    }
+
+    async fn fetch_tls_alpn_certificate_from_listener(addr: SocketAddr) -> Result<Vec<u8>> {
+        install_test_crypto_provider();
+        let stream = TcpStream::connect(addr)
+            .await
+            .with_context(|| format!("connect to production TLS-ALPN listener {addr}"))?;
+        let server_name = ServerName::try_from(LOCAL_ACME_HOSTNAME.to_string())
+            .context("build TLS-ALPN SNI server name")?;
+        let mut config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_no_client_auth();
+        config
+            .alpn_protocols
+            .push(tls::ACME_TLS_ALPN_PROTOCOL.to_vec());
+        let tls_stream = TlsConnector::from(Arc::new(config))
+            .connect(server_name, stream)
+            .await
+            .context("perform TLS-ALPN validation handshake with production listener")?;
+        let (_io, connection) = tls_stream.get_ref();
+        if connection.alpn_protocol() != Some(tls::ACME_TLS_ALPN_PROTOCOL) {
+            bail!(
+                "production TLS listener did not negotiate ACME TLS-ALPN protocol; got {:?}",
+                connection.alpn_protocol()
+            );
+        }
+        let certs = connection
+            .peer_certificates()
+            .context("production TLS-ALPN listener did not return peer certificates")?;
+        let leaf = certs
+            .first()
+            .context("production TLS-ALPN listener returned an empty certificate chain")?;
+        Ok(leaf.as_ref().to_vec())
+    }
+
+    fn assert_acme_identifier_extension(cert_der: &[u8], key_authorization: &str) -> Result<()> {
+        let oid_offset = find_subslice(cert_der, ACME_IDENTIFIER_OID_DER)
+            .context("TLS-ALPN peer certificate did not contain acmeIdentifier OID")?;
+        let digest = Sha256::digest(key_authorization.as_bytes());
+        let mut expected_extn_value = vec![0x04, 0x22, 0x04, 0x20];
+        expected_extn_value.extend_from_slice(&digest);
+        let after_oid = &cert_der[oid_offset + ACME_IDENTIFIER_OID_DER.len()..];
+        let value_offset = find_subslice(after_oid, &expected_extn_value)
+            .context("TLS-ALPN peer certificate acmeIdentifier did not match key authorization")?;
+        if find_subslice(&after_oid[..value_offset], &[0x01, 0x01, 0xff]).is_none() {
+            bail!("TLS-ALPN peer certificate acmeIdentifier extension was not critical");
+        }
+        Ok(())
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
     fn install_test_crypto_provider() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
+    #[derive(Debug)]
+    struct NoCertificateVerification;
+
+    impl ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, TlsError> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, TlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, TlsError> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::RSA_PKCS1_SHA1,
+                SignatureScheme::ECDSA_SHA1_Legacy,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+                SignatureScheme::ED25519,
+                SignatureScheme::ED448,
+            ]
+        }
     }
 
     #[test]

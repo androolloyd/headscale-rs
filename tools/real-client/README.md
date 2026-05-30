@@ -83,6 +83,7 @@ predates the executable PingRequest lifecycle.
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
+| SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | Lifecycle | `oidc-restart` | `oidc-restart-smoke.sh` | `oidc-restart-headscale-go-smoke.sh` | Production OIDC registration survives server restart |
 | Lifecycle | `oidc-route-approve-restart` | `oidc-route-approve-restart-smoke.sh` | `oidc-route-approve-restart-headscale-go-smoke.sh` | Production OIDC route approval survives server restart |
 | Lifecycle | `web-register-restart` | `web-register-restart-smoke.sh` | `web-register-restart-headscale-go-smoke.sh` | Production web/CLI registration survives server restart |
@@ -116,6 +117,7 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-primary-withdraw` | `route-primary-withdraw-smoke.sh` | `route-primary-withdraw-headscale-go-smoke.sh` | Withdrawn primary route failover and approval preservation |
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
+| Routes | `route-via-same-tag` | `route-via-same-tag-smoke.sh` | `route-via-same-tag-headscale-go-smoke.sh` | Current-head same-tag multi-router `grants[].via` election |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
@@ -627,6 +629,15 @@ tools/real-client/route-via-smoke.sh
 tools/real-client/route-via-headscale-go-smoke.sh
 ```
 
+The same-tag route-via variant has two routers with `tag:router-ha` advertise
+the same subnet, then asserts Alice and Bob both see only the first registered
+router as the stock-client route owner for that shared `via` tag:
+
+```sh
+tools/real-client/route-via-same-tag-smoke.sh
+tools/real-client/route-via-same-tag-headscale-go-smoke.sh
+```
+
 The route-via reload variant starts from the same two-router state, reloads the
 policy so Alice's `via` grant moves from `tag:router-a` to `tag:router-b`, and
 asserts the stock-client netmap moves that route owner after reload:
@@ -769,6 +780,20 @@ tools/real-client/ssh-smoke.sh
 tools/real-client/ssh-headscale-go-smoke.sh
 ```
 
+The OIDC `check` wrappers drive the stock client through the Headscale SSH
+`HoldAndDelegate` path. The approval row follows the browser `/auth/{auth_id}`
+flow and expects hostname output. The denial row sets a short
+`tuning.register_cache_expiration`, lets the check auth request expire, and
+asserts status `255`, empty stdout, the first stderr line, and an access-denied
+stderr regex:
+
+```sh
+tools/real-client/ssh-oidc-check-smoke.sh
+tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-check-deny-smoke.sh
+tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
+```
+
 The current-head localpart wrappers exercise `localpart:*@domain` login users
 with profile emails. The profile-variant row also checks split username/email
 profiles against headscale-go, wrong-domain profile emails, bare usernames with
@@ -793,3 +818,8 @@ Useful knobs:
 - `REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS` defaults to `30`; this fails fast
   when a control server does not re-emit peer `sshHostKeys`, which the
   `tailscale ssh` wrapper needs for strict host-key checking.
+- `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=expire` reuses
+  `ssh-oidc-check-smoke.sh` for the denied check path; the wrapper defaults
+  `REAL_CLIENT_REGISTER_CACHE_EXPIRATION=10s`,
+  `REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS=45`, status `255`, first stderr line
+  `# Headscale SSH requires an additional check.`, and an access-denied regex.

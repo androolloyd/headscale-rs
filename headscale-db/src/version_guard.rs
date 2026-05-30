@@ -5,6 +5,8 @@
 //! not attempt arbitrary headscale-go upgrades or downgrades.
 
 use crate::{DbError, Result};
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::PgConnection;
 use sqlx::SqlitePool;
 
 pub const HEADSCALE_GO_IMPORT_BASELINE: &str = "v0.28.0";
@@ -17,6 +19,10 @@ const REQUIRED_GO_MIGRATION: &str = "202601121700-migrate-hostinfo-request-tags"
 const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str = "202602201200-clear-tagged-node-user-id";
 
 const GO_SHAPED_TABLES: &[&str] = &["users", "pre_auth_keys", "api_keys", "nodes", "policies"];
+
+#[cfg(feature = "postgres-sqlx")]
+const POSTGRES_DATABASE_VERSIONS_SCHEMA: &str =
+    include_str!("../migrations/postgres/20260530000001_create_database_versions.sql");
 
 const KNOWN_GO_MIGRATIONS_THROUGH_V028: &[&str] = &[
     "202312101416",
@@ -95,6 +101,32 @@ pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Re
     )
     .bind(HEADSCALE_GO_CURRENT_VERSION)
     .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub(crate) async fn migrate_postgres_foundation_on_connection(
+    conn: &mut PgConnection,
+) -> Result<()> {
+    sqlx::raw_sql(POSTGRES_DATABASE_VERSIONS_SCHEMA)
+        .execute(&mut *conn)
+        .await?;
+    stamp_postgres_database_version(conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn stamp_postgres_database_version(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT INTO database_versions (id, version, updated_at)
+        VALUES (1, $1, CURRENT_TIMESTAMP)
+        ON CONFLICT (id) DO NOTHING
+        ",
+    )
+    .bind(HEADSCALE_GO_CURRENT_VERSION)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

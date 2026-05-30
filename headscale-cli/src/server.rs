@@ -3420,6 +3420,57 @@ regions:
         assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
     }
 
+    #[tokio::test]
+    async fn run_server_tls_alpn_acme_issues_through_production_tls_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let public_tls_addr = unused_loopback_addr();
+        let cache_dir = dir.path().join("acme-cache");
+        let acme_server = LocalAcmeServer::spawn_tls_alpn_listener(public_tls_addr).await;
+        let mut cfg = test_run_server_config(&dir);
+        cfg.listen = public_tls_addr.to_string();
+        cfg.grpc_listen_addr = unused_loopback_addr().to_string();
+        cfg.metrics_listen_addr = None;
+        cfg.server_url = Some(format!("https://{LOCAL_ACME_HOSTNAME}"));
+        cfg.disable_check_updates = true;
+        cfg.tls = TlsRuntimeConfig {
+            acme_url: Some(acme_server.directory_url.clone()),
+            acme_email: Some("ops@example.com".into()),
+            acme_ca_root_path: Some(acme_server.ca_root_path.clone()),
+            letsencrypt_hostname: Some(LOCAL_ACME_HOSTNAME.into()),
+            letsencrypt_cache_dir: Some(cache_dir.clone()),
+            letsencrypt_challenge_type: Some("TLS-ALPN-01".into()),
+            ..TlsRuntimeConfig::default()
+        };
+
+        let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
+        let mut server_task = tokio::spawn(run_server(cfg));
+        let wait_for_issuance = async {
+            loop {
+                if acme_server.finalized() && cache_path.exists() {
+                    break;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut server_task => {
+                panic!("headscale server exited before TLS-ALPN issuance completed: {outcome:?}");
+            }
+            waited = timeout(Duration::from_secs(15), wait_for_issuance) => {
+                waited.expect("TLS-ALPN issuance through production TLS listener timed out");
+            }
+        }
+
+        server_task.abort();
+        let _ = server_task.await;
+        assert!(acme_server.challenge_seen());
+        assert!(acme_server.finalized());
+        let material =
+            tls::load_from_autocert_cache_with_tls_alpn(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
+        assert!(material.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(material.acme_tls_alpn_resolver.is_some());
+    }
+
     #[test]
     fn runtime_config_allows_http01_acme_cache_mode() {
         let dir = tempfile::tempdir().unwrap();

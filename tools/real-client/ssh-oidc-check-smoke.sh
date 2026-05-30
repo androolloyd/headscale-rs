@@ -22,6 +22,11 @@ oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
 check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
+check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
+register_cache_expiration="${REAL_CLIENT_REGISTER_CACHE_EXPIRATION:-}"
+ssh_deny_status="${REAL_CLIENT_OIDC_SSH_DENY_STATUS:-255}"
+ssh_deny_stderr_first_line="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_FIRST_LINE:-}"
+ssh_deny_stderr_regex="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_REGEX:-tailscale: access denied|Permission denied \(tailscale\)}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/ssh-oidc-check-smoke}"
 run_id="hs-ssh-oidc-${target}-$(date +%s)-$$"
@@ -40,6 +45,27 @@ case "${check_period_cache}" in
     exit 2
     ;;
 esac
+
+case "${check_result}" in
+  approve | expire) ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_RESULT must be approve or expire, got ${check_result}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${check_result}" == "expire" ]]; then
+  register_cache_expiration="${register_cache_expiration:-10s}"
+  if ((check_period_cache_flag)); then
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE cannot be true when REAL_CLIENT_OIDC_SSH_CHECK_RESULT=expire" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" && ! "${ssh_deny_status}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_OIDC_SSH_DENY_STATUS must be empty, any, or a non-negative integer, got ${ssh_deny_status}" >&2
+  exit 2
+fi
 
 if ((check_period_cache_flag)); then
   default_policy_path="tools/real-client/fixtures/ssh-check-period.hujson"
@@ -180,6 +206,16 @@ oidc_allowed_domains_yaml() {
   ' "${oidc_allowed_domains}"
 }
 
+register_cache_toml() {
+  [[ -z "${register_cache_expiration}" ]] && return 0
+  ruby -rjson -e 'puts "[tuning]\nregister_cache_expiration = #{JSON.generate(ARGV.fetch(0))}"' "${register_cache_expiration}"
+}
+
+register_cache_yaml() {
+  [[ -z "${register_cache_expiration}" ]] && return 0
+  ruby -rjson -e 'puts "tuning:\n  register_cache_expiration: #{JSON.generate(ARGV.fetch(0))}"' "${register_cache_expiration}"
+}
+
 install_headscale_go() {
   if [[ -n "${HEADSCALE_GO_BIN:-}" ]]; then
     return
@@ -257,6 +293,8 @@ unix_socket_permission = 448
 
 [node]
 expiry = "180d"
+
+$(register_cache_toml)
 
 [policy]
 mode = "file"
@@ -360,6 +398,8 @@ logtail:
 
 cli:
   timeout: 5s
+
+$(register_cache_yaml)
 
 log:
   level: info
@@ -591,8 +631,48 @@ run_cached_ssh_check() {
   echo "::endgroup::"
 }
 
+assert_denied_ssh_check() {
+  local status="$1"
+  printf '%s\n' "${status}" >"${work_dir}/ssh-check.status"
+  if ((status == 0)); then
+    echo "expected Tailscale SSH check to be denied" >&2
+    cat "${work_dir}/ssh-check.stdout" >&2 || true
+    cat "${work_dir}/ssh-check.stderr" >&2 || true
+    exit 1
+  fi
+  if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" ]] &&
+    ((status != ssh_deny_status)); then
+    echo "expected denied Tailscale SSH check status ${ssh_deny_status}, got ${status}" >&2
+    cat "${work_dir}/ssh-check.stderr" >&2 || true
+    exit 1
+  fi
+  if [[ -s "${work_dir}/ssh-check.stdout" ]]; then
+    echo "expected denied Tailscale SSH check stdout to be empty, got:" >&2
+    cat "${work_dir}/ssh-check.stdout" >&2 || true
+    exit 1
+  fi
+  if [[ -n "${ssh_deny_stderr_first_line}" ]]; then
+    local first_line
+    first_line="$(sed -n '1p' "${work_dir}/ssh-check.stderr")"
+    if [[ "${first_line}" != "${ssh_deny_stderr_first_line}" ]]; then
+      echo "expected denied Tailscale SSH check first stderr line '${ssh_deny_stderr_first_line}', got '${first_line}':" >&2
+      cat "${work_dir}/ssh-check.stderr" >&2 || true
+      exit 1
+    fi
+  fi
+  if [[ -n "${ssh_deny_stderr_regex}" ]] && ! grep -Eq "${ssh_deny_stderr_regex}" "${work_dir}/ssh-check.stderr"; then
+    echo "expected denied Tailscale SSH check stderr to match ${ssh_deny_stderr_regex}, got:" >&2
+    cat "${work_dir}/ssh-check.stderr" >&2 || true
+    exit 1
+  fi
+}
+
 run_ssh_check() {
-  echo "::group::approve Tailscale SSH check with OIDC"
+  if [[ "${check_result}" == "expire" ]]; then
+    echo "::group::assert expired Tailscale SSH check denial"
+  else
+    echo "::group::approve Tailscale SSH check with OIDC"
+  fi
   wait_for_ssh_host_keys "${client_one}" "${client_two}"
   docker exec "${client_one}" tailscale status --json >"${work_dir}/${client_one}.pre-ssh-status.json"
   docker exec "${client_one}" tailscale debug netmap >"${work_dir}/${client_one}.pre-ssh-netmap.json" 2>"${work_dir}/${client_one}.pre-ssh-netmap.err" || true
@@ -617,6 +697,15 @@ run_ssh_check() {
   fi
   local auth_id
   auth_id="$(cat "${work_dir}/ssh-check.auth-id")"
+  if [[ "${check_result}" == "expire" ]]; then
+    local ssh_status=0
+    wait_pid_with_timeout "tailscale ssh check denial" "${ssh_pid}" || ssh_status="$?"
+    ssh_pid=""
+    assert_denied_ssh_check "${ssh_status}"
+    echo "expired_auth_id=${auth_id}"
+    echo "::endgroup::"
+    return
+  fi
   approve_ssh_check_with_oidc "${auth_id}"
   wait_pid_with_timeout "tailscale ssh check completion" "${ssh_pid}"
   ssh_pid=""
@@ -660,6 +749,8 @@ run_ssh_check
 
 if ((check_period_cache_flag)); then
   echo "${target} OIDC SSH checkPeriod cache real-client smoke passed"
+elif [[ "${check_result}" == "expire" ]]; then
+  echo "${target} expired OIDC SSH check denial real-client smoke passed"
 else
   echo "${target} OIDC SSH check real-client smoke passed"
 fi

@@ -2,9 +2,16 @@
 //!
 //! This crate provides SQLite-based persistence for nodes, transactions,
 //! resources, and sessions using sqlx for connection pooling and migrations.
+//! With the `postgres-sqlx` feature, it also exposes a narrow Postgres
+//! foundation API for schema parity smoke tests. That API does not enable
+//! Postgres use through the server/runtime `Database` type.
 
 use sqlx::SqlitePool;
+#[cfg(feature = "postgres-sqlx")]
+use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
+#[cfg(feature = "postgres-sqlx")]
+pub use sqlx::{PgConnection, PgPool};
 use std::time::Duration;
 
 pub mod api_keys;
@@ -103,6 +110,13 @@ impl DatabaseBackend {
 
     pub const fn headscale_db_supported(self) -> bool {
         matches!(self, Self::Sqlite)
+    }
+
+    pub const fn headscale_db_foundation_supported(self) -> bool {
+        match self {
+            Self::Sqlite => true,
+            Self::Postgres => cfg!(feature = "postgres-sqlx"),
+        }
     }
 
     pub const fn sqlite_import_supported(self) -> bool {
@@ -263,6 +277,50 @@ impl Database {
     }
 }
 
+/// Open a Postgres pool for foundation-only parity checks.
+///
+/// This is intentionally separate from [`Database`]. The headscale server
+/// runtime remains SQLite-only until the higher-level stores are ported.
+#[cfg(feature = "postgres-sqlx")]
+pub async fn open_postgres_pool(url: &str) -> Result<PgPool> {
+    match DatabaseBackend::from_url(url) {
+        Some(DatabaseBackend::Postgres) => {}
+        Some(DatabaseBackend::Sqlite) | None => {
+            return Err(DbError::UnsupportedDatabaseBackend(
+                "expected a postgres: or postgresql: URL for Postgres foundation checks".into(),
+            ));
+        }
+    }
+
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .idle_timeout(Duration::from_secs(300))
+        .connect(url)
+        .await?;
+
+    Ok(pool)
+}
+
+/// Apply the narrow Postgres foundation schema to a pool.
+///
+/// This creates and stamps `database_versions` only. It deliberately does not
+/// run the SQLite migrations or enable any user/node/preauth/API-key stores.
+#[cfg(feature = "postgres-sqlx")]
+pub async fn migrate_postgres_foundation(pool: &PgPool) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    migrate_postgres_foundation_on_connection(&mut conn).await
+}
+
+/// Apply the narrow Postgres foundation schema on an existing connection.
+///
+/// Tests use this to run the smoke path in a temporary schema without changing
+/// unrelated tables in the configured database.
+#[cfg(feature = "postgres-sqlx")]
+pub async fn migrate_postgres_foundation_on_connection(conn: &mut PgConnection) -> Result<()> {
+    version_guard::migrate_postgres_foundation_on_connection(conn).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +416,14 @@ mod tests {
         assert!(DatabaseBackend::Postgres.headscale_go_supported());
         assert!(!DatabaseBackend::Postgres.headscale_db_supported());
         assert!(!DatabaseBackend::Postgres.sqlite_import_supported());
+        assert_eq!(
+            DatabaseBackend::Postgres.headscale_db_foundation_supported(),
+            cfg!(feature = "postgres-sqlx")
+        );
+        assert_eq!(
+            DatabaseBackend::Postgres.sqlx_driver_compiled(),
+            cfg!(feature = "postgres-sqlx")
+        );
         assert_eq!(DatabaseBackend::Postgres.upstream_name(), "postgres");
         assert_eq!(
             DatabaseBackend::Postgres.url_schemes(),

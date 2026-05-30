@@ -74,6 +74,7 @@ smoke_ids=(
   web-register-unowned-tag
   oidc
   ssh-oidc-check
+  ssh-oidc-check-deny
   oidc-restart
   oidc-route-approve-restart
   web-register-restart
@@ -107,6 +108,7 @@ smoke_ids=(
   route-primary-withdraw
   route-exit-node
   route-via
+  route-via-same-tag
   route-via-reload
   route-via-restart
   route-via-multiprefix
@@ -139,6 +141,7 @@ smoke_areas=(
   registration
   registration
   ssh
+  ssh
   lifecycle
   lifecycle
   lifecycle
@@ -164,6 +167,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -204,6 +208,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-unowned-tag-smoke.sh
   tools/real-client/oidc-smoke.sh
   tools/real-client/ssh-oidc-check-smoke.sh
+  tools/real-client/ssh-oidc-check-deny-smoke.sh
   tools/real-client/oidc-restart-smoke.sh
   tools/real-client/oidc-route-approve-restart-smoke.sh
   tools/real-client/web-register-restart-smoke.sh
@@ -237,6 +242,7 @@ smoke_rust_scripts=(
   tools/real-client/route-primary-withdraw-smoke.sh
   tools/real-client/route-exit-node-smoke.sh
   tools/real-client/route-via-smoke.sh
+  tools/real-client/route-via-same-tag-smoke.sh
   tools/real-client/route-via-reload-smoke.sh
   tools/real-client/route-via-restart-smoke.sh
   tools/real-client/route-via-multiprefix-smoke.sh
@@ -269,6 +275,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
+  tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
   tools/real-client/oidc-restart-headscale-go-smoke.sh
   tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/web-register-restart-headscale-go-smoke.sh
@@ -302,6 +309,7 @@ smoke_go_scripts=(
   tools/real-client/route-primary-withdraw-headscale-go-smoke.sh
   tools/real-client/route-exit-node-headscale-go-smoke.sh
   tools/real-client/route-via-headscale-go-smoke.sh
+  tools/real-client/route-via-same-tag-headscale-go-smoke.sh
   tools/real-client/route-via-reload-headscale-go-smoke.sh
   tools/real-client/route-via-restart-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
@@ -334,6 +342,7 @@ smoke_assertions=(
   "web registration rejects unowned requested tag"
   "OIDC callback, node row, and user profile"
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
+  "expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "Production OIDC registration survives server restart"
   "Production OIDC route approval survives server restart"
   "Production web/CLI registration survives server restart"
@@ -367,6 +376,7 @@ smoke_assertions=(
   "withdrawn primary route failover"
   "exit-node route advertisement and approval"
   "current-head route steering with grants via"
+  "current-head same-tag multi-router grants via election"
   "current-head route steering policy reload moves grants via ownership"
   "current-head route steering with grants via survives server restart"
   "current-head multi-prefix route steering with grants via"

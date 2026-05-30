@@ -50,13 +50,13 @@ CARGO_INCREMENTAL=0 cargo test -p headscale-cli --test cli_process live_local_gr
 
 ## Next Safe Slice
 
-The next narrow lanes are either TLS-ALPN controlled-CA production-process
-coverage through the real public TLS listener, or broader current-upstream CLI
-output drift snapshots once a fresh headscale-go comparison target is selected.
+The TLS-ALPN controlled-CA production-process coverage through the real public
+TLS listener is now implemented. The next narrow lanes are broader
+current-upstream CLI output drift snapshots, Postgres runtime foundation beyond
+the version-table smoke, or the remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 
-- TLS-ALPN controlled-CA production-process smoke through the real public TLS listener
 - Postgres runtime/import support, if full replacement parity includes Postgres rather than SQLite-only compatibility
 - Broader paired route-via and route-health reload/restart stock-client matrices
 - Broader Tailscale SSH current-head client status/stderr/profile variants

@@ -40,6 +40,116 @@ async fn postgres_foundation_creates_and_stamps_database_versions() -> TestResul
 }
 
 #[tokio::test]
+async fn postgres_foundation_rejects_newer_database_versions_before_migration() -> TestResult {
+    let Some(mut schema) = TempSchema::open("reject_newer_database_versions").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY,
+                version TEXT NOT NULL,
+                updated_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.99.0', CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        let err = migrate_postgres_foundation_on_connection(&mut schema.conn)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            headscale_db::DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+        ));
+        assert!(err.to_string().contains("newer headscale-go"));
+        assert!(!postgres_table_exists(&mut schema.conn, "_sqlx_migrations").await?);
+        assert!(!postgres_table_exists(&mut schema.conn, "users").await?);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_foundation_accepts_supported_go_version_history() -> TestResult {
+    let Some(mut schema) = TempSchema::open("accept_supported_go_history").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY,
+                version TEXT NOT NULL,
+                updated_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE migrations (
+                id TEXT PRIMARY KEY
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.28.0', CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO migrations (id)
+            VALUES ('202601121700-migrate-hostinfo-request-tags')
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        assert!(postgres_table_exists(&mut schema.conn, "_sqlx_migrations").await?);
+        assert!(postgres_table_exists(&mut schema.conn, "users").await?);
+        let version: String =
+            sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
+                .fetch_one(&mut schema.conn)
+                .await?;
+        assert_eq!(version, "v0.28.0");
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_policy_primitives_append_read_and_ignore_deleted_rows() -> TestResult {
     let Some(mut schema) = TempSchema::open("policies").await? else {
         return Ok(());
@@ -494,6 +604,16 @@ fn temporary_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock after UNIX epoch")
         .as_secs() as i64
+}
+
+async fn postgres_table_exists(
+    conn: &mut PgConnection,
+    table: &str,
+) -> Result<bool, headscale_db::DbError> {
+    Ok(sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await?)
 }
 
 fn quote_pg_identifier(identifier: &str) -> String {

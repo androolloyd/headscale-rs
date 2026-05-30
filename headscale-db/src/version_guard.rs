@@ -110,8 +110,35 @@ pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Re
 pub(crate) async fn migrate_postgres_foundation_on_connection(
     conn: &mut PgConnection,
 ) -> Result<()> {
+    check_postgres_headscale_go_import_compatibility(conn).await?;
     POSTGRES_FOUNDATION_MIGRATOR.run(&mut *conn).await?;
     stamp_postgres_database_version(conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub(crate) async fn check_postgres_headscale_go_import_compatibility(
+    conn: &mut PgConnection,
+) -> Result<HeadscaleGoImportCompatibility> {
+    if postgres_table_exists(conn, "_sqlx_migrations").await? {
+        return Ok(HeadscaleGoImportCompatibility::RustManaged);
+    }
+
+    if postgres_table_exists(conn, "database_versions").await? {
+        return check_postgres_database_versions_table(conn).await;
+    }
+
+    if postgres_table_exists(conn, "migrations").await? {
+        return check_postgres_go_migrations_table(conn).await;
+    }
+
+    if postgres_has_any_go_shaped_table(conn).await? {
+        return unsupported(
+            "Go-shaped Postgres tables are present, but neither database_versions nor \
+             headscale-go migrations identify a supported v0.28 import",
+        );
+    }
+
+    Ok(HeadscaleGoImportCompatibility::Fresh)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -128,6 +155,201 @@ async fn stamp_postgres_database_version(conn: &mut PgConnection) -> Result<()> 
     .await?;
 
     Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn check_postgres_database_versions_table(
+    conn: &mut PgConnection,
+) -> Result<HeadscaleGoImportCompatibility> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, version FROM database_versions ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await?;
+
+    if rows.is_empty() {
+        if postgres_table_exists(conn, "_sqlx_migrations").await? {
+            return Ok(HeadscaleGoImportCompatibility::RustManaged);
+        }
+        if postgres_table_exists(conn, "migrations").await? {
+            return check_postgres_go_migrations_table(conn).await;
+        }
+        if postgres_has_any_go_shaped_table(conn).await? {
+            return unsupported(
+                "database_versions is empty for an existing Go-shaped Postgres database, and no \
+                 supported headscale-go migration history is present",
+            );
+        }
+
+        return Ok(HeadscaleGoImportCompatibility::Fresh);
+    }
+
+    if rows.len() != 1 || rows[0].0 != 1 {
+        return unsupported(
+            "database_versions must contain at most the upstream single row with id=1",
+        );
+    }
+
+    let stored_version = rows[0].1.trim();
+    if stored_version.is_empty() {
+        return unsupported("database_versions.version is empty");
+    }
+
+    if is_development_version(stored_version) {
+        return check_postgres_database_versions_without_comparable_version(conn, stored_version)
+            .await;
+    }
+
+    let stored = parse_version(stored_version).map_err(|message| {
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(format!(
+            "cannot parse database_versions.version {stored_version:?}: {message}"
+        ))
+    })?;
+
+    match (stored.major == SUPPORTED_MAJOR, stored.minor) {
+        (true, SUPPORTED_MINOR) => {
+            validate_postgres_versioned_go_shape(conn, stored_version).await?;
+            Ok(HeadscaleGoImportCompatibility::Versioned {
+                stored_version: stored_version.to_string(),
+            })
+        }
+        (true, CURRENT_UPSTREAM_MINOR) => {
+            validate_postgres_current_upstream_go_shape(conn, stored_version).await?;
+            Ok(HeadscaleGoImportCompatibility::Versioned {
+                stored_version: stored_version.to_string(),
+            })
+        }
+        (false, _) => unsupported(format!(
+            "database was last used by headscale-go {stored_version}, but this crate only \
+             imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible Postgres schemas"
+        )),
+        (true, minor) if minor < SUPPORTED_MINOR => unsupported(format!(
+            "database was last used by headscale-go {stored_version}; upgrade it with \
+             headscale-go {HEADSCALE_GO_IMPORT_BASELINE} before importing"
+        )),
+        (true, _) => unsupported(format!(
+            "database was last used by newer headscale-go {stored_version}; this crate only \
+             imports {HEADSCALE_GO_IMPORT_BASELINE}-compatible Postgres schemas"
+        )),
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn check_postgres_database_versions_without_comparable_version(
+    conn: &mut PgConnection,
+    stored_version: &str,
+) -> Result<HeadscaleGoImportCompatibility> {
+    if postgres_table_exists(conn, "migrations").await? {
+        return check_postgres_go_migrations_table(conn).await;
+    }
+
+    if postgres_has_any_go_shaped_table(conn).await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but a Go-shaped Postgres database \
+             without supported headscale-go migration history cannot be imported"
+        ));
+    }
+
+    Ok(HeadscaleGoImportCompatibility::DevelopmentVersion {
+        stored_version: stored_version.to_string(),
+    })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn validate_postgres_versioned_go_shape(
+    conn: &mut PgConnection,
+    stored_version: &str,
+) -> Result<()> {
+    if postgres_table_exists(conn, "migrations").await? {
+        check_postgres_go_migrations_table(conn).await?;
+        return Ok(());
+    }
+
+    if postgres_has_any_go_shaped_table(conn).await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but Go-shaped Postgres tables are \
+             present without headscale-go migration history through {REQUIRED_GO_MIGRATION}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn validate_postgres_current_upstream_go_shape(
+    conn: &mut PgConnection,
+    stored_version: &str,
+) -> Result<()> {
+    if !postgres_table_exists(conn, "migrations").await? {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but current headscale-go Postgres \
+             imports require migration history through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+
+    let migration_ids = postgres_go_migration_ids(conn).await?;
+    validate_known_go_migrations(&migration_ids)?;
+    if !migration_ids.iter().any(|id| id == REQUIRED_GO_MIGRATION) {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {REQUIRED_GO_MIGRATION}"
+        ));
+    }
+    if !migration_ids
+        .iter()
+        .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
+    {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn check_postgres_go_migrations_table(
+    conn: &mut PgConnection,
+) -> Result<HeadscaleGoImportCompatibility> {
+    let migration_ids = postgres_go_migration_ids(conn).await?;
+
+    if migration_ids.is_empty() {
+        if postgres_has_any_go_shaped_table(conn).await? {
+            return unsupported(
+                "headscale-go migrations table is empty for an existing Go-shaped Postgres database",
+            );
+        }
+
+        return Ok(HeadscaleGoImportCompatibility::Fresh);
+    }
+
+    validate_known_go_migrations(&migration_ids)?;
+
+    if !migration_ids.iter().any(|id| id == REQUIRED_GO_MIGRATION) {
+        return unsupported(format!(
+            "headscale-go migrations table is not migrated through {REQUIRED_GO_MIGRATION}; \
+             upgrade with headscale-go {HEADSCALE_GO_IMPORT_BASELINE} before importing"
+        ));
+    }
+
+    let required_migration = if migration_ids
+        .iter()
+        .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
+    {
+        CLEAR_TAGGED_NODE_USER_ID_MIGRATION
+    } else {
+        REQUIRED_GO_MIGRATION
+    };
+    Ok(HeadscaleGoImportCompatibility::GoMigrations {
+        required_migration: required_migration.to_string(),
+    })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn postgres_go_migration_ids(conn: &mut PgConnection) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT id FROM migrations ORDER BY id")
+        .fetch_all(&mut *conn)
+        .await?)
 }
 
 async fn check_database_versions_table(
@@ -345,6 +567,25 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {
 async fn has_any_go_shaped_table(pool: &SqlitePool) -> Result<bool> {
     for table in GO_SHAPED_TABLES {
         if table_exists(pool, table).await? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn postgres_table_exists(conn: &mut PgConnection, table: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await?)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn postgres_has_any_go_shaped_table(conn: &mut PgConnection) -> Result<bool> {
+    for table in GO_SHAPED_TABLES {
+        if postgres_table_exists(conn, table).await? {
             return Ok(true);
         }
     }

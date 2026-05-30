@@ -16,10 +16,19 @@ esac
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
-run_id="hs-online-lastseen-${target}-$(date +%s)-$$"
+run_id="hs-online-lastseen-${target}-${database_backend}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -42,6 +51,14 @@ tls_key_path=""
 health_curl_opts="-fsS"
 headscale_bin=""
 authkey=""
+postgres_admin_url=""
+postgres_database_name=""
+postgres_host=""
+postgres_port=""
+postgres_user=""
+postgres_pass=""
+postgres_sslmode=""
+postgres_database_created=0
 
 cleanup() {
   docker rm -f "${client_name}" >/dev/null 2>&1 || true
@@ -49,6 +66,7 @@ cleanup() {
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
   fi
+  drop_postgres_database || true
   rm -f "${socket_path}"
 }
 trap cleanup EXIT
@@ -62,6 +80,83 @@ need() {
 
 free_port() {
   ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
+}
+
+yaml_string() {
+  ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
+}
+
+parse_postgres_test_url() {
+  eval "$(
+    ruby -ruri -rshellwords -e '
+      url = URI.parse(ARGV.fetch(0))
+      database_name = ARGV.fetch(1)
+      abort("HEADSCALE_DB_POSTGRES_TEST_URL must include a TCP host") if url.host.to_s.empty?
+      query = URI.decode_www_form(url.query.to_s).to_h
+      sslmode = query.fetch("sslmode", "false")
+      admin_db = url.path.to_s.sub(%r{\A/}, "")
+      admin_db = "postgres" if admin_db.empty?
+      admin = url.dup
+      admin.path = "/#{admin_db}"
+      {
+        postgres_admin_url: admin.to_s,
+        postgres_database_name: database_name,
+        postgres_host: url.host.to_s,
+        postgres_port: (url.port || 5432).to_s,
+        postgres_user: URI.decode_www_form_component(url.user.to_s),
+        postgres_pass: URI.decode_www_form_component(url.password.to_s),
+        postgres_sslmode: sslmode,
+      }.each do |key, value|
+        puts "#{key}=#{Shellwords.escape(value)}"
+      end
+    ' "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" "${postgres_database_name}"
+  )"
+}
+
+prepare_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  if [[ -z "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" ]]; then
+    echo "skipping Postgres real-client smoke: HEADSCALE_DB_POSTGRES_TEST_URL is not set" >&2
+    exit 0
+  fi
+  need psql
+  postgres_database_name="headscale_rs_pg_real_${target//[^a-zA-Z0-9]/_}_$(date +%s)_$$"
+  parse_postgres_test_url
+  if ! [[ "${postgres_database_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "internal temporary Postgres database name is invalid: ${postgres_database_name}" >&2
+    exit 2
+  fi
+  echo "::group::create temporary Postgres database"
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${postgres_database_name}" >"${work_dir}/postgres-create.stdout" 2>"${work_dir}/postgres-create.stderr"; then
+    echo "skipping Postgres real-client smoke: cannot create temporary database ${postgres_database_name}" >&2
+    cat "${work_dir}/postgres-create.stderr" >&2 || true
+    echo "::endgroup::"
+    exit 0
+  fi
+  postgres_database_created=1
+  echo "created ${postgres_database_name}"
+  echo "::endgroup::"
+}
+
+drop_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  ((postgres_database_created)) || return 0
+  echo "::group::drop temporary Postgres database"
+  psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${postgres_database_name}' AND pid <> pg_backend_pid()" \
+    >"${work_dir}/postgres-terminate.stdout" \
+    2>"${work_dir}/postgres-terminate.stderr" || true
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${postgres_database_name} WITH (FORCE)" \
+    >"${work_dir}/postgres-drop.stdout" \
+    2>"${work_dir}/postgres-drop.stderr"; then
+    psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${postgres_database_name}" \
+      >>"${work_dir}/postgres-drop.stdout" \
+      2>>"${work_dir}/postgres-drop.stderr"
+  fi
+  postgres_database_created=0
+  echo "::endgroup::"
 }
 
 wait_for() {
@@ -87,7 +182,11 @@ install_or_build_headscale() {
   case "${target}" in
     rust)
       echo "::group::build headscale-rs CLI"
-      cargo build --quiet -p headscale-cli --bin headscale
+      if [[ "${database_backend}" == "postgres" ]]; then
+        cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+      else
+        cargo build --quiet -p headscale-cli --bin headscale
+      fi
       headscale_bin="${repo_root}/target/debug/headscale"
       echo "::endgroup::"
       ;;
@@ -117,6 +216,39 @@ generate_headscale_go_tls() {
     >"${work_dir}/openssl.stdout" \
     2>"${work_dir}/openssl.stderr"
   echo "::endgroup::"
+}
+
+write_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      if [[ "${target}" == "headscale-go" ]]; then
+        cat <<EOF
+
+database:
+  type: sqlite
+  sqlite:
+    path: ${db_path}
+EOF
+      fi
+      ;;
+    postgres)
+      cat <<EOF
+
+database:
+  type: postgres
+  postgres:
+    host: $(yaml_string "${postgres_host}")
+    port: ${postgres_port}
+    name: $(yaml_string "${postgres_database_name}")
+    user: $(yaml_string "${postgres_user}")
+    pass: $(yaml_string "${postgres_pass}")
+    ssl: $(yaml_string "${postgres_sslmode}")
+
+policy:
+  mode: database
+EOF
+      ;;
+  esac
 }
 
 write_derp_map() {
@@ -178,11 +310,6 @@ prefixes:
   allocation: sequential
   v4: 100.64.0.0/10
 
-database:
-  type: sqlite
-  sqlite:
-    path: ${db_path}
-
 dns:
   magic_dns: false
   base_domain: "${base_domain}"
@@ -215,6 +342,7 @@ tls_key_path: ${tls_key_path}
 EOF
       ;;
   esac
+  write_database_config >>"${config_path}"
 }
 
 headscale_cmd() {
@@ -312,6 +440,27 @@ login_client() {
   echo "::endgroup::"
 }
 
+assert_client_netmap() {
+  local netmap_path="${work_dir}/${client_name}.netmap.json"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${netmap_path}.err"
+  ruby -rjson -e '
+    netmap = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    self_node = netmap["SelfNode"] || netmap["Node"] || {}
+    hostname = self_node["HostName"] || self_node["Name"] || self_node["DNSName"]
+    ips = Array(self_node["Addresses"] || self_node["AllowedIPs"] || self_node["AllowedIps"])
+    abort("expected self node in netmap, got #{netmap.inspect}") if self_node.empty?
+    abort("expected self hostname to include #{client_name.inspect}, got #{hostname.inspect}") unless hostname.to_s.include?(client_name)
+    abort("expected self node addresses/AllowedIPs in #{self_node.inspect}") if ips.empty?
+    puts JSON.pretty_generate({
+      hostname: hostname,
+      ips: ips,
+      peers: Array(netmap["Peers"] || netmap["peers"]).length,
+    })
+  ' "${netmap_path}" "${client_name}" >"${work_dir}/${client_name}.netmap-summary.json"
+  cat "${work_dir}/${client_name}.netmap-summary.json"
+}
+
 assert_node_lifecycle_file() {
   local path="$1"
   local expected_online="$2"
@@ -368,9 +517,10 @@ stop_tailscaled() {
   echo "::endgroup::"
 }
 
+need ruby
+prepare_postgres_database
 need curl
 need docker
-need ruby
 case "${target}" in
   rust) need cargo ;;
   headscale-go)
@@ -404,6 +554,7 @@ start_server
 create_user_and_key
 start_client
 login_client
+assert_client_netmap
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled

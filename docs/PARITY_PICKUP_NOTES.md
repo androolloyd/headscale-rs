@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 12:08 ADT
+Updated: 2026-05-30 12:18 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed baseline before this pickup:
-  `5fdf1ee Pin map session resume parity`
+  `441314f Add Postgres OIDC runtime rekey smoke`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -101,6 +101,14 @@ Recent accepted slices:
   hostinfo preservation, runs a full map against the rekeyed node, and rebuilds
   the Pg runtime to prove restart hydration. The smoke skips cleanly when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is absent.
+- This slice adds paired env-gated production Postgres stock-client smoke
+  scripts under `tools/real-client/postgres-authkey-*.sh` and a
+  `postgres-authkey` row in `tools/real-client/smoke-matrix.sh`. The scripts
+  reuse the production online/LastSeen harness with a temporary Pg database
+  from `HEADSCALE_DB_POSTGRES_TEST_URL`, build Rust with `postgres-sqlx`, run
+  real `headscale server`/headscale-go `serve`, mint an auth key, log in a
+  stock Tailscale client, capture `tailscale debug netmap`, and assert the
+  persisted node lifecycle. They skip cleanly when the Pg URL is absent.
 
 Current multi-agent split:
 
@@ -114,8 +122,10 @@ Current multi-agent split:
   Pg `serve` process smoke now covers listeners plus local gRPC/CLI
   health/user/preauth/policy operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
-  map output, and restart hydration. Remaining critical work is broader
-  production Pg serve coverage for stock-client map/registration flows.
+  map output, and restart hydration. A paired env-gated production Pg
+  stock-client auth-key smoke is now checked into the real-client matrix.
+  Remaining critical work is CI/Postgres-service enforcement for that lane plus
+  broader production Pg serve coverage beyond the single auth-key/map flow.
 - Explorer lane: Postgres runtime/import blocker inventory and safe file-by-file
   backend abstraction plan. Outcome before the runtime-abstraction slice:
   server startup opened SQLite unconditionally, `headscale-db::Database` was
@@ -215,8 +225,9 @@ env-gated live-Pg runtime smoke proves register/persist/hydrate behavior without
 adding non-upstream config. The first production Postgres `serve` process smoke
 now starts the real binary and exercises public health plus local gRPC CLI
 operations against Pg, and direct policy DB bypass now round-trips against
-configured Pg without a running server. The next critical slice is broader
-production Pg serve coverage for stock-client registration/map flows. The other
+configured Pg without a running server. The next critical slice is to run the
+paired Pg stock-client lane under CI with a real Postgres service, then broaden
+production Pg serve coverage beyond the single auth-key/map flow. The other
 narrow lanes remain current-upstream CLI output drift snapshots,
 map/session churn parity, and remaining route/SSH stock-client edge rows.
 
@@ -229,7 +240,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production
   Pg `serve` process smoke covers public health plus local gRPC
-  health/user/preauth/policy CLI paths, while stock-client serve smokes remain
+  health/user/preauth/policy CLI paths, and a paired env-gated Pg auth-key
+  stock-client smoke is checked into the real-client matrix; CI enforcement and
+  broader Pg stock-client serve smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

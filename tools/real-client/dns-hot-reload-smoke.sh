@@ -66,7 +66,8 @@ wait_for() {
 }
 
 headscale_cmd() {
-  "${headscale_bin}" --config "${config_path}" "$@"
+  env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
+    "${headscale_bin}" --config "${config_path}" --unix-socket "${socket_path}" "$@"
 }
 
 dump_debug() {

@@ -661,7 +661,10 @@ dump_client_debug() {
 
 headscale_cmd() {
   case "${target}" in
-    rust) target/debug/headscale --config "${config_path}" "$@" ;;
+    rust)
+      env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
+        target/debug/headscale --config "${config_path}" --unix-socket "${socket_path}" "$@"
+      ;;
     headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
   esac
 }

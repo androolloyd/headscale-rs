@@ -269,7 +269,8 @@ dump_client_debug() {
 
 headscale_cmd() {
   if [[ "${target}" == "rust" ]]; then
-    target/debug/headscale --config "${config_path}" "$@"
+    env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
+      target/debug/headscale --config "${config_path}" --unix-socket "${socket_path}" "$@"
   else
     "${headscale_bin}" -c "${config_path}" "$@"
   fi

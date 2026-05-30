@@ -266,7 +266,10 @@ EOF
 
 headscale_cmd() {
   case "${target}" in
-    rust) "${headscale_bin}" --config "${config_path}" "$@" ;;
+    rust)
+      env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
+        "${headscale_bin}" --config "${config_path}" --unix-socket "${socket_path}" "$@"
+      ;;
     headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
   esac
 }

@@ -10,13 +10,14 @@ use sqlx::PgConnection;
 use sqlx::SqlitePool;
 
 pub const HEADSCALE_GO_IMPORT_BASELINE: &str = "v0.28.0";
-pub const HEADSCALE_GO_CURRENT_VERSION: &str = "v0.29.0-beta.1.0.20260522122924-4483fd0cad38";
+pub const HEADSCALE_GO_CURRENT_VERSION: &str = "v0.29.0-beta.2";
 
 const SUPPORTED_MAJOR: u64 = 0;
 const SUPPORTED_MINOR: u64 = 28;
 const CURRENT_UPSTREAM_MINOR: u64 = 29;
 const REQUIRED_GO_MIGRATION: &str = "202601121700-migrate-hostinfo-request-tags";
 const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str = "202602201200-clear-tagged-node-user-id";
+const CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION: &str = "202605221435-clear-zero-time-node-expiry";
 
 const GO_SHAPED_TABLES: &[&str] = &["users", "pre_auth_keys", "api_keys", "nodes", "policies"];
 
@@ -24,7 +25,7 @@ const GO_SHAPED_TABLES: &[&str] = &["users", "pre_auth_keys", "api_keys", "nodes
 static POSTGRES_FOUNDATION_MIGRATOR: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/postgres");
 
-const KNOWN_GO_MIGRATIONS_THROUGH_V028: &[&str] = &[
+const KNOWN_GO_MIGRATIONS: &[&str] = &[
     "202312101416",
     "202312101430",
     "202402151347",
@@ -48,6 +49,7 @@ const KNOWN_GO_MIGRATIONS_THROUGH_V028: &[&str] = &[
     "202511131445-node-forced-tags-to-tags",
     REQUIRED_GO_MIGRATION,
     CLEAR_TAGGED_NODE_USER_ID_MIGRATION,
+    CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,10 +234,6 @@ async fn check_postgres_database_versions_table(
     }
 
     let stored_version = rows[0].1.trim();
-    if stored_version.is_empty() {
-        return unsupported("database_versions.version is empty");
-    }
-
     if is_development_version(stored_version) {
         return check_postgres_database_versions_without_comparable_version(conn, stored_version)
             .await;
@@ -333,7 +331,7 @@ async fn validate_postgres_current_upstream_go_shape(
     if !postgres_table_exists(conn, "migrations").await? {
         return unsupported(format!(
             "database_versions.version is {stored_version}, but current headscale-go Postgres \
-             imports require migration history through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+             imports require migration history through {CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION}"
         ));
     }
 
@@ -352,6 +350,15 @@ async fn validate_postgres_current_upstream_go_shape(
         return unsupported(format!(
             "database_versions.version is {stored_version}, but headscale-go migrations table is \
              not migrated through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+    if !migration_ids
+        .iter()
+        .any(|id| id == CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION)
+    {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION}"
         ));
     }
 
@@ -384,6 +391,11 @@ async fn check_postgres_go_migrations_table(
     }
 
     let required_migration = if migration_ids
+        .iter()
+        .any(|id| id == CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION)
+    {
+        CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION
+    } else if migration_ids
         .iter()
         .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
     {
@@ -435,10 +447,6 @@ async fn check_database_versions_table(
     }
 
     let stored_version = rows[0].1.trim();
-    if stored_version.is_empty() {
-        return unsupported("database_versions.version is empty");
-    }
-
     if is_development_version(stored_version) {
         return check_database_versions_without_comparable_version(pool, stored_version).await;
     }
@@ -517,7 +525,7 @@ async fn validate_current_upstream_go_shape(pool: &SqlitePool, stored_version: &
     if !table_exists(pool, "migrations").await? {
         return unsupported(format!(
             "database_versions.version is {stored_version}, but current headscale-go imports \
-             require migration history through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+             require migration history through {CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION}"
         ));
     }
 
@@ -536,6 +544,15 @@ async fn validate_current_upstream_go_shape(pool: &SqlitePool, stored_version: &
         return unsupported(format!(
             "database_versions.version is {stored_version}, but headscale-go migrations table is \
              not migrated through {CLEAR_TAGGED_NODE_USER_ID_MIGRATION}"
+        ));
+    }
+    if !migration_ids
+        .iter()
+        .any(|id| id == CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION)
+    {
+        return unsupported(format!(
+            "database_versions.version is {stored_version}, but headscale-go migrations table is \
+             not migrated through {CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION}"
         ));
     }
 
@@ -566,6 +583,11 @@ async fn check_go_migrations_table(pool: &SqlitePool) -> Result<HeadscaleGoImpor
 
     let required_migration = if migration_ids
         .iter()
+        .any(|id| id == CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION)
+    {
+        CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION
+    } else if migration_ids
+        .iter()
         .any(|id| id == CLEAR_TAGGED_NODE_USER_ID_MIGRATION)
     {
         CLEAR_TAGGED_NODE_USER_ID_MIGRATION
@@ -587,7 +609,7 @@ fn validate_known_go_migrations(migration_ids: &[String]) -> Result<()> {
     let unknown: Vec<&str> = migration_ids
         .iter()
         .map(String::as_str)
-        .filter(|id| !KNOWN_GO_MIGRATIONS_THROUGH_V028.contains(id))
+        .filter(|id| !KNOWN_GO_MIGRATIONS.contains(id))
         .collect();
 
     if !unknown.is_empty() {
@@ -645,7 +667,80 @@ async fn postgres_has_any_go_shaped_table(conn: &mut PgConnection) -> Result<boo
 }
 
 fn is_development_version(version: &str) -> bool {
-    matches!(version, "dev" | "(devel)")
+    version.is_empty() || matches!(version, "dev" | "(devel)") || is_go_pseudo_version(version)
+}
+
+fn is_go_pseudo_version(version: &str) -> bool {
+    let Some((prefix, hash)) = version.rsplit_once('-') else {
+        return false;
+    };
+    if hash.len() != 12
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+    if prefix.len() < 15 {
+        return false;
+    }
+
+    let timestamp_start = prefix.len() - 14;
+    let Some(separator) = prefix.as_bytes().get(timestamp_start - 1).copied() else {
+        return false;
+    };
+    if !matches!(separator, b'-' | b'.') {
+        return false;
+    }
+
+    let timestamp = &prefix[timestamp_start..];
+    timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        && is_valid_pseudo_version_timestamp(timestamp)
+}
+
+fn is_valid_pseudo_version_timestamp(timestamp: &str) -> bool {
+    if timestamp.len() != 14 {
+        return false;
+    }
+
+    let Ok(year) = timestamp[0..4].parse::<u32>() else {
+        return false;
+    };
+    let Ok(month) = timestamp[4..6].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = timestamp[6..8].parse::<u32>() else {
+        return false;
+    };
+    let Ok(hour) = timestamp[8..10].parse::<u32>() else {
+        return false;
+    };
+    let Ok(minute) = timestamp[10..12].parse::<u32>() else {
+        return false;
+    };
+    let Ok(second) = timestamp[12..14].parse::<u32>() else {
+        return false;
+    };
+
+    let Some(max_day) = days_in_month(year, month) else {
+        return false;
+    };
+
+    day >= 1 && day <= max_day && hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn days_in_month(year: u32, month: u32) -> Option<u32> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+const fn is_leap_year(year: u32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn parse_version(version: &str) -> std::result::Result<Semver, String> {
@@ -711,5 +806,28 @@ mod tests {
         assert!(parse_version("dev").is_err());
         assert!(parse_version("v0.28").is_err());
         assert!(parse_version("v0.28.0.1").is_err());
+    }
+
+    #[test]
+    fn development_version_matches_go_pseudo_versions() {
+        assert!(is_development_version(""));
+        assert!(is_development_version("dev"));
+        assert!(is_development_version("(devel)"));
+        assert!(is_development_version("v0.0.0-20260522092201-58a85b68b3d9"));
+        assert!(is_development_version(
+            "v0.29.0-beta.1.0.20260522092201-58a85b68b3d9"
+        ));
+        assert!(is_development_version(
+            "v0.29.1-0.20260522092201-58a85b68b3d9"
+        ));
+
+        assert!(!is_development_version("v0.29.0-beta.2"));
+        assert!(!is_development_version(
+            "v0.0.0-20261322092201-58a85b68b3d9"
+        ));
+        assert!(!is_development_version(
+            "v0.0.0-20260522092201-58A85B68B3D9"
+        ));
+        assert!(!is_development_version("v0.0.0-20260522092201-58a85b68b3d"));
     }
 }

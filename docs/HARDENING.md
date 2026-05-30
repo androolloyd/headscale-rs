@@ -90,9 +90,9 @@ stock-client smokes, not comments. The current fixtures cover:
 
 - preauth persistence semantics against upstream headscale-go test names;
 - `tools/parity/scenarios/*.json` differential cases against pinned
-  `github.com/juanfont/headscale v0.29.0-beta.1.0.20260522122924-4483fd0cad38`
+  `github.com/juanfont/headscale v0.29.0-beta.2`
   policy, peer-map, route auto-approval, SSH-policy, and `tailcfg` JSON output;
-- `tools/parity/golden/headscale-go-v0.29.0-beta.1.0.20260522122924-4483fd0cad38.json`,
+- `tools/parity/golden/headscale-go-v0.29.0-beta.2.json`,
   which snapshots the normalized pinned differential output after Rust and Go
   agree;
 - `tools/parity/current-head/*.json` plus

@@ -6,8 +6,8 @@ This harness compares observable policy and wire output between:
 - `headscale-go` current head, via `tools/parity/headscale-go`
 
 The checked-in Go harness pins `github.com/juanfont/headscale` to
-`v0.29.0-beta.1.0.20260522122924-4483fd0cad38`, the Go pseudo-version for
-upstream commit `4483fd0cad38717913e7509fc50f9d48c691b02b`.
+`v0.29.0-beta.2`, which resolves to upstream commit
+`171fd7a3c54156965753a63639cdcafcd50c8d67`.
 
 Run it from the repository root:
 
@@ -54,7 +54,7 @@ coverage for that field, and do not add positive `ipset:` alias scenarios unless
 a future upstream baseline adds the same surface.
 
 The default differential run also checks
-`tools/parity/golden/headscale-go-v0.29.0-beta.1.0.20260522122924-4483fd0cad38.json`
+`tools/parity/golden/headscale-go-v0.29.0-beta.2.json`
 after confirming the Rust and Go outputs match. Refresh it with
 `PARITY_UPDATE_GOLDEN=1 ./scripts/headscale_go_diff.sh` only after reviewing the
 semantic change.

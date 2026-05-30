@@ -1,6 +1,6 @@
 # Pinned parity goldens
 
-`headscale-go-v0.29.0-beta.1.0.20260522122924-4483fd0cad38.json` is the
+`headscale-go-v0.29.0-beta.2.json` is the
 normalized output from the pinned `tools/parity/scenarios/*.json` differential
 suite. The default parity script still compares `headscale-rs` against the
 pinned Go harness first; this golden adds a second guard against accidental

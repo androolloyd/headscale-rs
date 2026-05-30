@@ -4232,6 +4232,90 @@ mod registry_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn route_health_probe_all_unhealthy_retains_last_known_primary() {
+        let state = test_state();
+        let keys = stable_sorted_keys(&[
+            "route-health-all-unhealthy-a",
+            "route-health-all-unhealthy-b",
+        ]);
+        let route = "10.0.0.0/24";
+        state
+            .machines
+            .upsert(keys[0].clone(), route_record(&keys[0], 10, route));
+        state
+            .machines
+            .upsert(keys[1].clone(), route_record(&keys[1], 11, route));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[0]),
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            stable_id_from_key(&keys[1]),
+            Duration::ZERO,
+        );
+        let node_a = stable_id_from_key(&keys[0]);
+        let node_b = stable_id_from_key(&keys[1]);
+
+        let first = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            first.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!first.contains_key(&keys[1]));
+
+        let prime_probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        complete_next_pending_ping_for_node(&state, node_a).await;
+        complete_next_pending_ping_for_node(&state, node_b).await;
+        let prime_results = prime_probe.await.unwrap();
+        assert_eq!(prime_results.len(), 2);
+
+        let probe = tokio::spawn({
+            let state = state.clone();
+            async move { run_route_health_probe_once(&state, Duration::from_secs(5)).await }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let results = probe.await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| !result.healthy));
+        assert!(!state.machines.is_route_candidate_healthy(node_a));
+        assert!(!state.machines.is_route_candidate_healthy(node_b));
+
+        let retained = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            retained.get(&keys[0]).cloned().unwrap_or_default(),
+            vec![route]
+        );
+        assert!(!retained.contains_key(&keys[1]));
+
+        let debug_routes = state
+            .machines
+            .debug_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            debug_routes.available_routes.get(&node_a).cloned(),
+            Some(vec![route.to_string()])
+        );
+        assert_eq!(
+            debug_routes.available_routes.get(&node_b).cloned(),
+            Some(vec![route.to_string()])
+        );
+        assert_eq!(
+            debug_routes.primary_routes.get(route).copied(),
+            Some(node_a)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn route_health_probe_fresh_session_timeout_defers_one_cycle() {
         let state = test_state();
         let keys = stable_sorted_keys(&["route-health-fresh-a", "route-health-fresh-b"]);

@@ -3,7 +3,9 @@ module github.com/androolloyd/headscale-rs/tools/parity/headscale-go
 go 1.26.3
 
 require (
-	github.com/juanfont/headscale v0.29.0-beta.1.0.20260522122924-4483fd0cad38
+	github.com/juanfont/headscale v0.29.0-beta.2
+	github.com/rs/zerolog v1.35.1
+	github.com/spf13/viper v1.21.0
 	gorm.io/gorm v1.31.1
 	tailscale.com v1.98.3
 )
@@ -23,13 +25,11 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/spf13/viper v1.21.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect

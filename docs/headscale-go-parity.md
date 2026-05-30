@@ -1,14 +1,14 @@
 # Headscale-go Parity Ledger
 
 Baseline: `github.com/juanfont/headscale` at
-`v0.29.0-beta.1.0.20260522122924-4483fd0cad38`, pinned by
-`tools/parity/headscale-go/go.mod`. This Go pseudo-version resolves to upstream
-commit `4483fd0cad38717913e7509fc50f9d48c691b02b`.
+`v0.29.0-beta.2`, pinned by
+`tools/parity/headscale-go/go.mod`. This upstream tag resolves to
+commit `171fd7a3c54156965753a63639cdcafcd50c8d67`.
 
-Current-head audit overlay, refreshed 2026-05-24:
+Current-head audit overlay, refreshed 2026-05-30:
 
 - Current upstream `juanfont/headscale` HEAD used for the live parity
-  audit is `4483fd0cad38717913e7509fc50f9d48c691b02b`.
+  audit is `171fd7a3c54156965753a63639cdcafcd50c8d67`.
 - The checked-in differential harness now targets the current-head baseline
   above. Treat rows below as executable default-scenario coverage plus explicit
   current-head deltas that still live outside the default scenario set.
@@ -163,10 +163,10 @@ The default differential gate is:
 ```
 
 It compares `tools/parity/headscale-rs` with headscale-go at commit
-`4483fd0cad38717913e7509fc50f9d48c691b02b` over every checked-in
+`171fd7a3c54156965753a63639cdcafcd50c8d67` over every checked-in
 `tools/parity/scenarios/*.json` scenario, then checks the normalized current-head
 golden at
-`tools/parity/golden/headscale-go-v0.29.0-beta.1.0.20260522122924-4483fd0cad38.json`.
+`tools/parity/golden/headscale-go-v0.29.0-beta.2.json`.
 Current-head-only scenarios such as `grants[].via` route steering live under
 `tools/parity/current-head/` and run through the Rust golden gate until they are
 promoted into the default differential scenario set:
@@ -263,7 +263,7 @@ Use this backlog to turn each `Partial` row into implementation and parity-test
 work. Upstream references are from the pinned current-head module under
 `tools/parity/headscale-go`; rows marked `upstream-main` come from the
 2026-05-22 sweep against `headscale/headscale` main
-`4483fd0cad38717913e7509fc50f9d48c691b02b`. Local references are current repo
+`171fd7a3c54156965753a63639cdcafcd50c8d67`. Local references are current repo
 evidence, not claims about uninspected code.
 
 | Priority | Gap | Upstream evidence | Local status | Actionable next step |

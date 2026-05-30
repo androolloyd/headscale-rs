@@ -12,6 +12,8 @@ const PREAUTH_USER_FK_MIGRATION: &str =
     include_str!("../migrations/20260523000012_preauth_user_fk.sql");
 const CLEAR_TAGGED_NODE_USER_ID_MIGRATION: &str =
     include_str!("../migrations/20260524000014_clear_tagged_node_user_id.sql");
+const CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION: &str =
+    include_str!("../migrations/20260530000015_clear_zero_time_node_expiry.sql");
 const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
 const HEADSCALE_GO_V0260_EMPTY_FIXTURE: &str =
@@ -658,7 +660,7 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
 }
 
 #[tokio::test]
-async fn accepts_current_database_versions_with_tagged_node_migration_history() {
+async fn accepts_current_database_versions_with_beta2_migration_history() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(
         "
@@ -668,10 +670,11 @@ async fn accepts_current_database_versions_with_tagged_node_migration_history() 
             updated_at datetime
         );
         INSERT INTO database_versions (id, version, updated_at)
-            VALUES (1, 'v0.29.0-beta.1', '2026-05-22 00:00:00');
+            VALUES (1, 'v0.29.0-beta.2', '2026-05-22 00:00:00');
         CREATE TABLE migrations(id text, PRIMARY KEY(id));
         INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
         INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        INSERT INTO migrations VALUES('202605221435-clear-zero-time-node-expiry');
         CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
         ",
     )
@@ -686,7 +689,7 @@ async fn accepts_current_database_versions_with_tagged_node_migration_history() 
     assert_eq!(
         status,
         HeadscaleGoImportCompatibility::Versioned {
-            stored_version: "v0.29.0-beta.1".into()
+            stored_version: "v0.29.0-beta.2".into()
         }
     );
 }
@@ -723,6 +726,42 @@ async fn rejects_current_database_versions_without_tagged_node_migration_history
     assert!(
         err.to_string()
             .contains("202602201200-clear-tagged-node-user-id")
+    );
+}
+
+#[tokio::test]
+async fn rejects_current_database_versions_without_zero_time_expiry_migration_history() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.2', '2026-05-22 00:00:00');
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
+        INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current database_versions without zero-time expiry migration");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("current Go DB without beta.2 migration marker is rejected");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("202605221435-clear-zero-time-node-expiry")
     );
 }
 
@@ -966,6 +1005,50 @@ async fn clear_tagged_node_user_id_migration_preserves_untagged_nodes() {
     assert_eq!(
         rows,
         vec![(1, None), (2, Some(11)), (3, Some(12)), (4, Some(13))]
+    );
+}
+
+#[tokio::test]
+async fn clear_zero_time_node_expiry_migration_preserves_real_expiry_values() {
+    let db = Database::in_memory().await.expect("open db");
+    sqlx::raw_sql(
+        "
+        CREATE TABLE nodes(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            expiry datetime
+        );
+        INSERT INTO nodes (id, expiry)
+        VALUES
+            (1, '0001-01-01 00:00:00+00:00'),
+            (2, NULL),
+            (3, '2099-12-31 23:59:59+00:00'),
+            (4, '2020-01-01 00:00:00+00:00'),
+            (5, '1899-12-31 23:59:59+00:00');
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed nodes");
+
+    sqlx::raw_sql(CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION)
+        .execute(db.pool())
+        .await
+        .expect("run zero-time expiry migration");
+
+    let rows: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT id, expiry FROM nodes ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .expect("query nodes");
+    assert_eq!(
+        rows,
+        vec![
+            (1, None),
+            (2, None),
+            (3, Some("2099-12-31 23:59:59+00:00".into())),
+            (4, Some("2020-01-01 00:00:00+00:00".into())),
+            (5, None),
+        ]
     );
 }
 

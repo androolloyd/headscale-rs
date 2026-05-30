@@ -3347,6 +3347,48 @@ mod tests {
         )
     }
 
+    fn crossed_multiprefix_via_policy(route_a: &str, route_b: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-a": ["router@"],
+                    "tag:router-b": ["router@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["*"],
+                        "dst": ["tag:router-a", "tag:router-b"],
+                        "ip": ["*"]
+                    }},
+                    {{
+                        "src": ["alice@"],
+                        "dst": ["{route_a}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-a"]
+                    }},
+                    {{
+                        "src": ["alice@"],
+                        "dst": ["{route_b}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-b"]
+                    }},
+                    {{
+                        "src": ["bob@"],
+                        "dst": ["{route_a}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-b"]
+                    }},
+                    {{
+                        "src": ["bob@"],
+                        "dst": ["{route_b}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-a"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
     fn insert_via_steering_nodes(state: &WireState) -> (String, String, String, String) {
         insert_via_steering_nodes_for_route(state, "10.0.0.0/24", Vec::new())
     }
@@ -3547,6 +3589,10 @@ mod tests {
         })
     }
 
+    fn peer_named<'a>(mr: &'a MapResponse, name: &str) -> Option<&'a MapNode> {
+        mr.peers.iter().find(|peer| peer.name == name)
+    }
+
     fn changed_peer<'a>(mr: &'a MapResponse, name: &str) -> Option<&'a MapNode> {
         mr.peers_changed.iter().find(|peer| peer.name == name)
     }
@@ -3636,6 +3682,149 @@ mod tests {
 
             assert!(peer_route(&mr, expected, route).is_some());
             assert!(peer_route(&mr, unexpected, route).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn map_response_via_crossed_multiprefix_routes_per_viewer() {
+        let (state, _dir) = fixture();
+        let route_a = "10.77.0.0/24";
+        let route_b = "10.88.0.0/24";
+        let policy = crossed_multiprefix_via_policy(route_a, route_b);
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+
+        let router_a = "81".repeat(32);
+        let router_b = "82".repeat(32);
+        let alice = "83".repeat(32);
+        let bob = "84".repeat(32);
+        let router_routes = vec![route_a.to_string(), route_b.to_string()];
+        for (node_key, host, octet, user, tags, routes) in [
+            (
+                &router_a,
+                "router-a",
+                81,
+                "router",
+                vec!["tag:router-a".to_string()],
+                router_routes.clone(),
+            ),
+            (
+                &router_b,
+                "router-b",
+                82,
+                "router",
+                vec!["tag:router-b".to_string()],
+                router_routes.clone(),
+            ),
+            (&alice, "alice", 83, "alice", Vec::new(), Vec::new()),
+            (&bob, "bob", 84, "bob", Vec::new(), Vec::new()),
+        ] {
+            let mut rec = policy_record(node_key, host, octet, user, tags);
+            rec.available_routes = routes.clone();
+            rec.approved_routes = routes;
+            state.machines.upsert(node_key.clone(), rec);
+        }
+        let _router_a_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_a),
+        );
+        let _router_b_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_b),
+        );
+        let snapshot = state.machines.snapshot();
+        let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
+        let primary_owner_for = |route: &str| {
+            primary_routes
+                .iter()
+                .find_map(|(node_key, routes)| {
+                    routes
+                        .iter()
+                        .any(|primary| primary == route)
+                        .then_some(node_key.as_str())
+                })
+                .expect("global primary route")
+        };
+        assert!(
+            matches!(primary_owner_for(route_a), owner if owner == router_a || owner == router_b)
+        );
+        assert!(
+            matches!(primary_owner_for(route_b), owner if owner == router_a || owner == router_b)
+        );
+
+        let app = router(state);
+        for (client, expectations) in [
+            (
+                &alice,
+                [
+                    ("router-a", router_a.as_str(), route_a),
+                    ("router-b", router_b.as_str(), route_b),
+                ],
+            ),
+            (
+                &bob,
+                [
+                    ("router-b", router_b.as_str(), route_a),
+                    ("router-a", router_a.as_str(), route_b),
+                ],
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/machine/nodekey:{client}/map"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+            let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+            for name in ["router-a", "router-b"] {
+                peer_named(&mr, name).unwrap_or_else(|| panic!("{name} peer visible"));
+            }
+
+            for (expected_name, expected_key, route) in expectations {
+                let expected_peer =
+                    peer_named(&mr, expected_name).expect("expected route peer visible");
+                assert!(
+                    expected_peer
+                        .allowed_ips
+                        .iter()
+                        .any(|allowed| allowed == route),
+                    "{expected_name} should carry {route} in AllowedIPs"
+                );
+                assert_eq!(
+                    expected_peer
+                        .primary_routes
+                        .iter()
+                        .any(|primary| primary == route),
+                    primary_owner_for(route) == expected_key,
+                    "{expected_name} PrimaryRoutes placement for {route}"
+                );
+
+                let mut route_field_owners = mr
+                    .peers
+                    .iter()
+                    .filter(|peer| {
+                        peer.allowed_ips.iter().any(|allowed| allowed == route)
+                            || peer.primary_routes.iter().any(|primary| primary == route)
+                    })
+                    .map(|peer| peer.name.clone())
+                    .collect::<Vec<_>>();
+                route_field_owners.sort();
+                assert_eq!(
+                    route_field_owners,
+                    vec![expected_name.to_string()],
+                    "only the via-selected peer should expose {route}"
+                );
+            }
         }
     }
 

@@ -75,6 +75,7 @@ smoke_ids=(
   postgres-dns-disabled
   postgres-dns-edge
   postgres-magicdns-ipv6-only
+  postgres-prefix-family-ipv4-only
   postgres-web-register
   postgres-web-register-tags
   postgres-web-register-unowned-tag
@@ -225,6 +226,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -305,6 +307,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-dns-disabled-smoke.sh
   tools/real-client/postgres-dns-edge-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
+  tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
   tools/real-client/postgres-web-register-smoke.sh
   tools/real-client/postgres-web-register-tags-smoke.sh
   tools/real-client/postgres-web-register-unowned-tag-smoke.sh
@@ -420,6 +423,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-dns-disabled-headscale-go-smoke.sh
   tools/real-client/postgres-dns-edge-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
+  tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-tags-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-unowned-tag-headscale-go-smoke.sh
@@ -535,6 +539,7 @@ smoke_assertions=(
   "production Postgres MagicDNS disabled fallback names"
   "production Postgres split DNS routes, fallback resolver, and DNS edge records"
   "production Postgres MagicDNS with IPv6-only prefix-family allocation"
+  "production Postgres IPv4-only prefix-family allocation"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "production Postgres web registration with owned requested tag"
   "production Postgres web registration rejects unowned requested tag"

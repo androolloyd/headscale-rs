@@ -374,9 +374,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all twenty-seven Pg rows, including
-  `postgres-ssh-oidc-check`; broader Pg stock-client serve smokes remain,
-  especially the SSH/OIDC denial and CLI-approval production rows
+  CI now provisions Postgres for all thirty-one Pg rows, including
+  `postgres-ssh-oidc-check`, `postgres-ssh-cli-check`, and the paired
+  wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
+  stock-client serve smokes remain for the remaining registration/config
+  surfaces
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants;
   the policy-level `acceptEnv`, `check` hold-and-delegate, and host-destination
@@ -427,3 +429,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added paired `postgres-ssh-oidc-check` Rust/headscale-go rows and included
   the row in `PR_SMOKES`; the matrix now has twenty-seven Postgres
   stock-client rows.
+
+## 2026-05-31 Postgres SSH-check denial smoke slice
+
+- Added paired Postgres rows for CLI-approved SSH checks plus wrong-user,
+  expired, and cancelled OIDC SSH-check denials:
+  `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-wrong-user`,
+  `postgres-ssh-oidc-check-deny`, and `postgres-ssh-oidc-check-cancel`.
+- The real-client workflow includes these rows in `PR_SMOKES`; the matrix now
+  has thirty-one Postgres stock-client rows.

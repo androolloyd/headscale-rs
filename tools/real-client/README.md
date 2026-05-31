@@ -86,6 +86,10 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
+| Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
+| Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
+| Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
+| Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |

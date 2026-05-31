@@ -77,6 +77,10 @@ smoke_ids=(
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
   postgres-ssh-oidc-check
+  postgres-ssh-cli-check
+  postgres-ssh-oidc-check-wrong-user
+  postgres-ssh-oidc-check-deny
+  postgres-ssh-oidc-check-cancel
   postgres-web-register-restart
   postgres-restart-persistence
   postgres-tagged-preauth
@@ -195,6 +199,10 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
+  database
+  database
   registration
   registration
   registration
@@ -277,6 +285,10 @@ smoke_rust_scripts=(
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-smoke.sh
+  tools/real-client/postgres-ssh-cli-check-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/postgres-tagged-preauth-smoke.sh
@@ -377,6 +389,10 @@ smoke_go_scripts=(
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/postgres-tagged-preauth-headscale-go-smoke.sh
@@ -477,6 +493,10 @@ smoke_assertions=(
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"
   "production Postgres OIDC-backed Tailscale SSH check approval"
+  "production Postgres CLI-approved Tailscale SSH check approval"
+  "production Postgres wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
+  "production Postgres expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
+  "production Postgres cancelled OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
   "production Postgres preauth key with ACL tag owners"

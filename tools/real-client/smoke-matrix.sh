@@ -104,6 +104,7 @@ smoke_ids=(
   postgres-tag-update-invalid
   postgres-tag-reauth-clear
   postgres-acl-allow
+  postgres-route-via
   postgres-route-via-restart
   postgres-route-via-same-tag-restart
   postgres-route-via-reload-restart
@@ -191,6 +192,7 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
   database
   database
   database
@@ -350,6 +352,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-tag-update-invalid-smoke.sh
   tools/real-client/postgres-tag-reauth-clear-smoke.sh
   tools/real-client/postgres-acl-allow-smoke.sh
+  tools/real-client/postgres-route-via-smoke.sh
   tools/real-client/postgres-route-via-restart-smoke.sh
   tools/real-client/postgres-route-via-same-tag-restart-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-smoke.sh
@@ -473,6 +476,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-tag-update-invalid-headscale-go-smoke.sh
   tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh
   tools/real-client/postgres-acl-allow-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-headscale-go-smoke.sh
@@ -596,6 +600,7 @@ smoke_assertions=(
   "production Postgres invalid tag update rejection"
   "production Postgres web reauth clears forced tags"
   "production Postgres ACL allowed peers visible"
+  "production Postgres current-head grants via route steering"
   "production Postgres current-head grants via survives server restart"
   "production Postgres current-head same-tag grants via survives server restart"
   "production Postgres current-head grants via policy reload survives server restart"

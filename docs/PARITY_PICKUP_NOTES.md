@@ -375,7 +375,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`, and `postgres-acl-allow` rows. Push/PR
-  CI now provisions Postgres for all fifty Pg rows, including
+  CI now provisions Postgres for all fifty-one Pg rows, including
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -383,7 +383,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-magicdns-ipv6-only`, `postgres-prefix-family-dual-stack`,
   `postgres-prefix-family-ipv4-only`, `postgres-prefix-family-ipv6-only`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
-  `postgres-route-advertise`, `postgres-acl-allow`, `postgres-route-via-same-tag-restart`,
+  `postgres-route-advertise`, `postgres-acl-allow`, `postgres-route-via`, `postgres-route-via-same-tag-restart`,
   `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
@@ -629,3 +629,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   peer.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   fifty Postgres stock-client rows.
+
+## 2026-05-31 Postgres route-via smoke slice
+
+- Extended `tools/real-client/restart-persistence-common.sh` with an opt-in
+  no-restart route-via mode so the production Postgres harness can assert
+  current-head `grants[].via` route steering without also exercising restart
+  persistence.
+- Added paired `postgres-route-via` Rust/headscale-go rows over a temporary
+  Postgres database using the current-head headscale-go audit baseline.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  fifty-one Postgres stock-client rows.

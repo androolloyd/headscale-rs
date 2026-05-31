@@ -26,6 +26,7 @@ route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 route_via_same_tag_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_via_reload_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD:-false}"
+route_via_no_restart="${REAL_CLIENT_ROUTE_VIA_NO_RESTART:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
@@ -90,6 +91,18 @@ case "${route_via_reload_restart}" in
     ;;
   *)
     echo "REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD must be true or false, got ${route_via_reload_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_via_no_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_via_no_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_via_no_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ROUTE_VIA_NO_RESTART must be true or false, got ${route_via_no_restart}" >&2
     exit 2
     ;;
 esac
@@ -160,6 +173,10 @@ if ((web_register_restart_flag && (route_via_restart_flag || route_health_restar
 fi
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
+  exit 2
+fi
+if ((route_via_no_restart_flag && ! route_via_restart_flag)); then
+  echo "REAL_CLIENT_ROUTE_VIA_NO_RESTART requires a route-via mode" >&2
   exit 2
 fi
 if ((route_via_same_tag_restart_flag && route_via_multiprefix_restart_flag)); then
@@ -2284,10 +2301,24 @@ elif ((route_via_restart_flag)); then
   approve_router_routes "${router_b_name}"
   login_observer_with_web_registration "${observer_name}" alice
   login_observer_with_web_registration "${bob_name}" bob
-  assert_route_via_persisted_nodes "before-restart"
-  wait_for_route_via_peer_maps "before restart"
+  route_via_initial_label="before-restart"
+  route_via_initial_peer_label="before restart"
+  if ((route_via_no_restart_flag)); then
+    route_via_initial_label="initial"
+    route_via_initial_peer_label="initial"
+  fi
+  assert_route_via_persisted_nodes "${route_via_initial_label}"
+  wait_for_route_via_peer_maps "${route_via_initial_peer_label}"
   if ((route_via_reload_restart_flag)); then
     reload_route_via_policy
+    if ((route_via_no_restart_flag)); then
+      wait_for_route_via_reloaded_peer_maps "after reload"
+    fi
+  fi
+
+  if ((route_via_no_restart_flag)); then
+    echo "${target} route-via real-client smoke passed"
+    exit 0
   fi
 
   stop_server

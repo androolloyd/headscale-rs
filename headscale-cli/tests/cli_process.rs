@@ -1308,6 +1308,16 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["server", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["server", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["version", "--bad"],
         1,
         include_str!("snapshots/utility_version_unknown_flag.stderr"),
@@ -2157,7 +2167,15 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/serve_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["server", "--help"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["help", "serve"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "server"],
         include_str!("snapshots/serve_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -2691,9 +2709,49 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
         let preauth_json = json_output(&preauth_json);
         assert_eq!(preauth_json[0]["user"]["name"].as_str(), Some("alice"));
+        let preauth_id = preauth_json[0]["id"]
+            .as_u64()
+            .expect("preauth key id")
+            .to_string();
         assert!(preauth_json[0]["key"].as_str().is_some_and(|key| {
             key.starts_with("hskey-auth-") || key.starts_with("preauthkey:hskey-auth-")
         }));
+
+        let expire_preauth =
+            headscale_with_config(&config, &["preauthkeys", "expire", "--id", &preauth_id]);
+        assert!(
+            expire_preauth.status.success(),
+            "stderr: {}",
+            stderr(&expire_preauth)
+        );
+        assert_eq!(stdout(&expire_preauth), "Key expired\n");
+        assert_eq!(stderr(&expire_preauth), "");
+
+        let delete_preauth =
+            headscale_with_config(&config, &["preauthkeys", "delete", "--id", &preauth_id]);
+        assert!(
+            delete_preauth.status.success(),
+            "stderr: {}",
+            stderr(&delete_preauth)
+        );
+        assert_eq!(stdout(&delete_preauth), "Key deleted\n");
+        assert_eq!(stderr(&delete_preauth), "");
+
+        let empty_preauth_json =
+            headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
+        assert!(
+            empty_preauth_json.status.success(),
+            "stderr: {}",
+            stderr(&empty_preauth_json)
+        );
+        assert_eq!(
+            json_output(&empty_preauth_json)
+                .as_array()
+                .expect("preauth keys")
+                .len(),
+            0
+        );
+        assert_eq!(stderr(&empty_preauth_json), "");
 
         let api_key = headscale_with_config(
             &config,

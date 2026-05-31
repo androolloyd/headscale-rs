@@ -1115,7 +1115,16 @@ impl PingTracker {
     }
 
     pub fn complete(&self, ping_id: &str) -> Option<PingCompletion> {
-        let pending = self.inner.lock().pending.remove(ping_id)?;
+        let (pending, generation) = {
+            let mut inner = self.inner.lock();
+            let pending = inner.pending.remove(ping_id)?;
+            let generation = remove_queued_ping_request(&mut inner, ping_id)
+                .then(|| bump_ping_generation(&mut inner));
+            (pending, generation)
+        };
+        if let Some(generation) = generation {
+            let _ = self.gen_tx.send(generation);
+        }
         let latency = pending.start_time.elapsed();
         let _ = pending.response_tx.send(latency);
         Some(PingCompletion {
@@ -1125,7 +1134,17 @@ impl PingTracker {
     }
 
     pub fn cancel(&self, ping_id: &str) -> bool {
-        self.inner.lock().pending.remove(ping_id).is_some()
+        let (removed, generation) = {
+            let mut inner = self.inner.lock();
+            let removed_pending = inner.pending.remove(ping_id).is_some();
+            let removed_queued = remove_queued_ping_request(&mut inner, ping_id);
+            let generation = removed_queued.then(|| bump_ping_generation(&mut inner));
+            (removed_pending || removed_queued, generation)
+        };
+        if let Some(generation) = generation {
+            let _ = self.gen_tx.send(generation);
+        }
+        removed
     }
 
     pub fn pending_len(&self) -> usize {
@@ -1164,6 +1183,30 @@ impl Default for PingTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn remove_queued_ping_request(inner: &mut PingTrackerInner, ping_id: &str) -> bool {
+    let mut removed = false;
+    inner.outbound.retain(|_, queue| {
+        let before = queue.len();
+        queue.retain(|request| !ping_request_matches_id(request, ping_id));
+        removed |= queue.len() != before;
+        !queue.is_empty()
+    });
+    removed
+}
+
+fn ping_request_matches_id(request: &PingRequest, ping_id: &str) -> bool {
+    request
+        .url
+        .split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|part| part.split_once('='))
+                .any(|(key, value)| key == "id" && value == ping_id)
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -684,3 +684,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   debug ping route and matching the older auth-key ping harness.
 - The previous CI failure for `postgres-ping-lifecycle` returned the public
   listener fallback HTML instead of exercising the PingRequest callback path.
+
+## 2026-05-31 Second-wave parity cleanup slice
+
+- Added a map-stream regression for cancelled PingRequest callbacks and taught
+  the ping tracker to remove queued outbound ping frames when a ping completes
+  or is cancelled, preventing stale debug ping frames after timeout/cancel.
+- Expanded CLI parity for the hidden `server` alias so help and unknown flag
+  errors route through the same exact upstream-style snapshots as `serve`.
+- Extended the env-gated production Postgres serve topology smoke with
+  preauth-key expire/delete/list-empty coverage, and added one paired SSH
+  profile-variant denial row for reverse `other.example` profile access.
+- Focused local checks completed: `cargo fmt --all -- --check`,
+  `git diff --check`, SSH wrapper `bash -n`, and the isolated API ping
+  cancellation regression test. The broader Docker/Postgres matrix remains on
+  CI.

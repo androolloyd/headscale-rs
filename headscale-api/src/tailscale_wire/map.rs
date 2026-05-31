@@ -5370,6 +5370,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn stream_true_cancelled_ping_does_not_emit_stale_ping_frame() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert!(first_mr.ping_request.is_none());
+
+        let node_id = stable_id_from_key(&a);
+        let (ping_id, _response) = state.register_ping(node_id);
+        state.dispatch_ping_request(node_id, &ping_id, true, false);
+        assert!(state.pings.cancel(&ping_id));
+
+        assert_no_stream_frame(&mut body, Duration::from_millis(50)).await;
+    }
+
     /// Upstream always length-prefixes map stream frames, but only
     /// zstd-compresses the frame body when the request asks for it.
     #[tokio::test]

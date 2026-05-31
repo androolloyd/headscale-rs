@@ -761,7 +761,9 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
 
     match parts.as_slice() {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
-        ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
+        ["serve" | "server", "-h" | "--help"] | ["help", "serve" | "server"] => {
+            Some(UPSTREAM_SERVE_HELP)
+        }
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
@@ -1009,7 +1011,9 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
         ] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::GlobalConfig)
         }
-        ["serve", tail @ ..] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
+        ["serve" | "server", tail @ ..]
+            if !tail.is_empty() && !tail_is_help_or_global_config(tail) =>
+        {
             first_unknown_flag(tail, UtilityFlagScope::Serve)
         }
         [
@@ -2705,6 +2709,14 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["version", "-h"]),
             Some(UPSTREAM_VERSION_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["server", "--help"]),
+            Some(UPSTREAM_SERVE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "server"]),
+            Some(UPSTREAM_SERVE_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["dumpConfig", "--help"]),

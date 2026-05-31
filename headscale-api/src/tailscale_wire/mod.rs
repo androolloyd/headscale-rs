@@ -1541,13 +1541,7 @@ impl RegistrationCache {
     }
 
     pub fn approve_without_node(&self, registration_id: &str) -> bool {
-        let entry = {
-            let mut inner = self.inner.write();
-            match inner.get(registration_id) {
-                Some(entry) if entry.ssh_binding.is_some() => Some(entry.clone()),
-                _ => inner.remove(registration_id),
-            }
-        };
+        let entry = self.inner.read().get(registration_id).cloned();
         match entry {
             Some(entry) => {
                 entry.approve_without_node();
@@ -1558,13 +1552,7 @@ impl RegistrationCache {
     }
 
     pub fn reject(&self, registration_id: &str, reason: impl Into<String>) -> bool {
-        let entry = {
-            let mut inner = self.inner.write();
-            match inner.get(registration_id) {
-                Some(entry) if entry.ssh_binding.is_some() => Some(entry.clone()),
-                _ => inner.remove(registration_id),
-            }
-        };
+        let entry = self.inner.read().get(registration_id).cloned();
         match entry {
             Some(entry) => {
                 entry.reject(reason.into());
@@ -4128,6 +4116,77 @@ mod registry_tests {
             other => panic!("expected registered outcome, got {other:?}"),
         }
         assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn registration_cache_approval_keeps_entry_until_completion() {
+        let cache = Arc::new(RegistrationCache::with_tuning(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+        ));
+        let registration_id = "d".repeat(24);
+        let pending = mk_record(3);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let waiter = {
+            let cache = cache.clone();
+            let registration_id = registration_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&registration_id).await })
+        };
+        tokio::task::yield_now().await;
+
+        assert!(cache.approve_without_node(&registration_id));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be notified")
+            .expect("waiter task should not panic");
+        assert!(matches!(
+            outcome,
+            RegistrationWaitOutcome::ApprovedWithoutNode
+        ));
+
+        let cached = cache
+            .get(&registration_id)
+            .expect("approved registration remains cached");
+        assert_eq!(cached.node_key_hex, pending.node_key_hex);
+        assert_eq!(cache.len(), 1);
+
+        let registered = mk_record(4);
+        assert!(cache.complete(&registration_id, registered));
+        assert!(
+            cache.get(&registration_id).is_none(),
+            "registration completion consumes the cached auth session"
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_cache_rejection_keeps_entry_until_expiry() {
+        let cache =
+            RegistrationCache::with_tuning(Duration::from_millis(200), Duration::from_millis(400));
+        let registration_id = "r".repeat(24);
+        let pending = mk_record(5);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        assert!(cache.reject(&registration_id, "auth request rejected"));
+        match cache.wait_for_registration(&registration_id).await {
+            RegistrationWaitOutcome::Rejected(reason) => {
+                assert_eq!(reason, "auth request rejected");
+            }
+            other => panic!("expected rejected outcome, got {other:?}"),
+        }
+
+        let cached = cache
+            .get(&registration_id)
+            .expect("rejected registration remains cached");
+        assert_eq!(cached.node_key_hex, pending.node_key_hex);
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(cache.prune_expired(), 1);
+        assert!(
+            cache.get(&registration_id).is_none(),
+            "expired rejected auth session is evicted by cache expiry"
+        );
     }
 
     #[tokio::test]

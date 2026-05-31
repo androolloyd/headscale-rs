@@ -4,6 +4,7 @@
 //! longest-prefix-match lookups, enabling exit nodes and subnet routing.
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 /// A route entry in the routing table.
@@ -32,6 +33,12 @@ pub struct RoutingTable {
     ipv4_routes: Vec<Route>,
     /// IPv6 routes, sorted by prefix length (longest first).
     ipv6_routes: Vec<Route>,
+    /// Sticky primary peer per exact route prefix.
+    ///
+    /// Mirrors headscale-go primary route election: an incumbent keeps a route
+    /// while it remains approved at the best priority for that prefix. A new
+    /// peer is elected only when there is no valid incumbent.
+    primary_routes: HashMap<IpNet, String>,
 }
 
 impl RoutingTable {
@@ -44,6 +51,7 @@ impl RoutingTable {
     ///
     /// If `approved` is false, the route will be stored but not used for routing.
     pub fn add_route(&mut self, route: Route) {
+        let prefix = route.prefix;
         // Add to appropriate list and re-sort
         // Sort by: prefix_len descending (longest first), priority ascending
         // (lower first), then peer ID for deterministic conflict handling.
@@ -57,12 +65,23 @@ impl RoutingTable {
                 self.ipv6_routes.sort_by(route_order);
             }
         }
+        self.recompute_primary_for_prefix(&prefix);
     }
 
     /// Remove all routes for a peer.
     pub fn remove_peer_routes(&mut self, peer_id: &str) {
+        let affected_prefixes: Vec<IpNet> = self
+            .all_routes()
+            .filter(|r| r.peer_id == peer_id)
+            .map(|r| r.prefix)
+            .collect();
+
         self.ipv4_routes.retain(|r| r.peer_id != peer_id);
         self.ipv6_routes.retain(|r| r.peer_id != peer_id);
+
+        for prefix in affected_prefixes {
+            self.recompute_primary_for_prefix(&prefix);
+        }
     }
 
     /// Remove a specific route.
@@ -77,29 +96,26 @@ impl RoutingTable {
                     .retain(|r| !(r.prefix == *prefix && r.peer_id == peer_id));
             }
         }
+        self.recompute_primary_for_prefix(prefix);
     }
 
     /// Look up the peer that should handle a destination IP.
     ///
     /// Uses longest-prefix-match: the most specific matching route wins.
-    /// Among routes with the same prefix length, lower priority wins.
+    /// Among routes with the same prefix length, lower priority wins. Equal
+    /// prefix/priority candidates keep the current primary peer when it is
+    /// still valid, matching headscale-go's anti-flap primary-route behavior.
     pub fn lookup(&self, dst: IpAddr) -> Option<&str> {
         let routes = match dst {
             IpAddr::V4(_) => &self.ipv4_routes,
             IpAddr::V6(_) => &self.ipv6_routes,
         };
 
-        // Routes are sorted by prefix length (longest first), so first match wins
-        for route in routes {
-            if !route.approved {
-                continue;
-            }
-            if route.prefix.contains(&dst) {
-                return Some(&route.peer_id);
-            }
-        }
-
-        None
+        routes
+            .iter()
+            .filter(|route| route.approved && route.prefix.contains(&dst))
+            .max_by(|a, b| self.route_precedence(a, b))
+            .map(|route| route.peer_id.as_str())
     }
 
     /// Get all routes in the table.
@@ -117,21 +133,34 @@ impl RoutingTable {
         self.all_routes().filter(|r| r.approved)
     }
 
+    /// Return the elected primary peer for an exact prefix.
+    pub fn primary_route_for(&self, prefix: &IpNet) -> Option<&str> {
+        self.primary_routes
+            .get(prefix)
+            .map(std::string::String::as_str)
+    }
+
     /// Approve or revoke an existing advertised route.
     ///
     /// Returns `false` when the peer has not advertised the exact prefix.
     pub fn set_route_approved(&mut self, prefix: &IpNet, peer_id: &str, approved: bool) -> bool {
-        let routes = match prefix {
-            IpNet::V4(_) => &mut self.ipv4_routes,
-            IpNet::V6(_) => &mut self.ipv6_routes,
-        };
-
         let mut found = false;
-        for route in routes {
-            if route.prefix == *prefix && route.peer_id == peer_id && route.advertised {
-                route.approved = approved;
-                found = true;
+        {
+            let routes = match prefix {
+                IpNet::V4(_) => &mut self.ipv4_routes,
+                IpNet::V6(_) => &mut self.ipv6_routes,
+            };
+
+            for route in routes {
+                if route.prefix == *prefix && route.peer_id == peer_id && route.advertised {
+                    route.approved = approved;
+                    found = true;
+                }
             }
+        }
+
+        if found {
+            self.recompute_primary_for_prefix(prefix);
         }
 
         found
@@ -162,6 +191,74 @@ impl RoutingTable {
     /// Check if the table is empty.
     pub fn is_empty(&self) -> bool {
         self.ipv4_routes.is_empty() && self.ipv6_routes.is_empty()
+    }
+
+    fn route_precedence(&self, a: &Route, b: &Route) -> std::cmp::Ordering {
+        a.prefix
+            .prefix_len()
+            .cmp(&b.prefix.prefix_len())
+            .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| self.primary_precedence(a, b))
+            .then_with(|| b.peer_id.cmp(&a.peer_id))
+    }
+
+    fn primary_precedence(&self, a: &Route, b: &Route) -> std::cmp::Ordering {
+        if a.prefix != b.prefix || a.priority != b.priority {
+            return std::cmp::Ordering::Equal;
+        }
+
+        match self.primary_route_for(&a.prefix) {
+            Some(primary) if primary == a.peer_id && primary != b.peer_id => {
+                std::cmp::Ordering::Greater
+            }
+            Some(primary) if primary == b.peer_id && primary != a.peer_id => {
+                std::cmp::Ordering::Less
+            }
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    fn recompute_primary_for_prefix(&mut self, prefix: &IpNet) {
+        let routes = match prefix {
+            IpNet::V4(_) => &self.ipv4_routes,
+            IpNet::V6(_) => &self.ipv6_routes,
+        };
+
+        let best_priority = routes
+            .iter()
+            .filter(|route| route.prefix == *prefix && route.approved)
+            .map(|route| route.priority)
+            .min();
+
+        let Some(best_priority) = best_priority else {
+            self.primary_routes.remove(prefix);
+            return;
+        };
+
+        if let Some(current) = self.primary_routes.get(prefix)
+            && routes.iter().any(|route| {
+                route.prefix == *prefix
+                    && route.approved
+                    && route.priority == best_priority
+                    && route.peer_id == *current
+            })
+        {
+            return;
+        }
+
+        let selected = routes
+            .iter()
+            .filter(|route| {
+                route.prefix == *prefix && route.approved && route.priority == best_priority
+            })
+            .min_by(|a, b| a.peer_id.cmp(&b.peer_id))
+            .map(|route| route.peer_id.clone());
+
+        if let Some(peer_id) = selected {
+            self.primary_routes.insert(*prefix, peer_id);
+        } else {
+            self.primary_routes.remove(prefix);
+        }
     }
 }
 
@@ -343,15 +440,24 @@ mod tests {
     }
 
     #[test]
-    fn test_equal_priority_tie_breaks_by_peer_id() {
+    fn test_equal_priority_keeps_existing_primary() {
         let mut table = RoutingTable::new();
         table.add_route(make_route("0.0.0.0/0", "peer-b", 0));
         table.add_route(make_route("0.0.0.0/0", "peer-a", 0));
 
+        let prefix = "0.0.0.0/0".parse().unwrap();
+        assert_eq!(
+            table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            Some("peer-b")
+        );
+        assert_eq!(table.primary_route_for(&prefix), Some("peer-b"));
+
+        table.remove_route(&prefix, "peer-b");
         assert_eq!(
             table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
             Some("peer-a")
         );
+        assert_eq!(table.primary_route_for(&prefix), Some("peer-a"));
     }
 
     #[test]
@@ -415,6 +521,39 @@ mod tests {
             table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
             Some("host-peer")
         );
+    }
+
+    #[test]
+    fn test_later_approved_equal_route_does_not_steal_primary() {
+        let mut table = RoutingTable::new();
+        let prefix = "10.10.0.0/24".parse().unwrap();
+        let route_ip = IpAddr::V4(Ipv4Addr::new(10, 10, 0, 7));
+
+        table.add_route(Route {
+            prefix,
+            peer_id: "peer-b".to_string(),
+            priority: 100,
+            approved: true,
+            advertised: true,
+        });
+        table.add_route(Route {
+            prefix,
+            peer_id: "peer-a".to_string(),
+            priority: 100,
+            approved: false,
+            advertised: true,
+        });
+
+        assert_eq!(table.lookup(route_ip), Some("peer-b"));
+        assert_eq!(table.primary_route_for(&prefix), Some("peer-b"));
+
+        assert!(table.set_route_approved(&prefix, "peer-a", true));
+        assert_eq!(table.lookup(route_ip), Some("peer-b"));
+        assert_eq!(table.primary_route_for(&prefix), Some("peer-b"));
+
+        assert!(table.set_route_approved(&prefix, "peer-b", false));
+        assert_eq!(table.lookup(route_ip), Some("peer-a"));
+        assert_eq!(table.primary_route_for(&prefix), Some("peer-a"));
     }
 }
 

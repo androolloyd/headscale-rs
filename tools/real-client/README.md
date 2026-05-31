@@ -124,6 +124,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-route-via-multiprefix-restart` | `postgres-route-via-multiprefix-restart-smoke.sh` | `postgres-route-via-multiprefix-restart-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` survives server restart |
 | Database | `postgres-route-via-multiprefix-reload-restart` | `postgres-route-via-multiprefix-reload-restart-smoke.sh` | `postgres-route-via-multiprefix-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload survives server restart |
 | Database | `postgres-route-health` | `postgres-route-health-smoke.sh` | `postgres-route-health-headscale-go-smoke.sh` | Production Postgres current-head route-health failover |
+| Database | `postgres-route-health-reload` | `postgres-route-health-reload-smoke.sh` | `postgres-route-health-reload-headscale-go-smoke.sh` | Production Postgres current-head route-health policy reload failover |
 | Database | `postgres-route-health-restart` | `postgres-route-health-restart-smoke.sh` | `postgres-route-health-restart-headscale-go-smoke.sh` | Production Postgres current-head route-health survives server restart |
 | Database | `postgres-route-health-primary-restart` | `postgres-route-health-primary-restart-smoke.sh` | `postgres-route-health-primary-restart-headscale-go-smoke.sh` | Production Postgres route-health primary selection survives server restart |
 | Database | `postgres-route-health-reload-restart` | `postgres-route-health-reload-restart-smoke.sh` | `postgres-route-health-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health policy reload survives server restart |
@@ -711,6 +712,8 @@ tools/real-client/postgres-route-via-multiprefix-reload-restart-smoke.sh
 tools/real-client/postgres-route-via-multiprefix-reload-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-smoke.sh
 tools/real-client/postgres-route-health-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-reload-smoke.sh
+tools/real-client/postgres-route-health-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-restart-smoke.sh
 tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-primary-restart-smoke.sh

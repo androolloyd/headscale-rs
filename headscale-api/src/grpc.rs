@@ -1154,15 +1154,24 @@ pub mod upstream {
         ) -> Result<Response<ListNodesResponse>, Status> {
             self.authorize(&request).await?;
             let filter_user = request.into_inner().user;
+            if !filter_user.is_empty() {
+                self.users
+                    .get(&filter_user)
+                    .await
+                    .map_err(user_error_to_status)?
+                    .ok_or_else(|| Status::not_found("user not found"))?;
+            }
             let machines = self.machines.list().await;
             let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
             let mut nodes = Vec::with_capacity(machines.len());
             for node in machines {
-                if !filter_user.is_empty() && node.user != filter_user {
+                if !filter_user.is_empty() && (!node.tags.is_empty() || node.user != filter_user) {
                     continue;
                 }
                 let subnet_routes = route_sets.subnet_routes_for(&node.id);
-                nodes.push(machine_to_node_with_routes(&node, &self.users, &subnet_routes).await?);
+                nodes.push(
+                    machine_to_list_node_with_routes(&node, &self.users, &subnet_routes).await?,
+                );
             }
             nodes.sort_by_key(|node| node.id);
             Ok(Response::new(ListNodesResponse { nodes }))
@@ -1225,13 +1234,14 @@ pub mod upstream {
             request: Request<ListApiKeysRequest>,
         ) -> Result<Response<ListApiKeysResponse>, Status> {
             self.authorize(&request).await?;
-            let api_keys = self
+            let mut api_keys = self
                 .api_keys
                 .list()
                 .await
                 .iter()
                 .map(admin_key_to_proto)
-                .collect();
+                .collect::<Vec<_>>();
+            api_keys.sort_by_key(|key| key.id);
             Ok(Response::new(ListApiKeysResponse { api_keys }))
         }
 
@@ -1624,6 +1634,31 @@ pub mod upstream {
             subnet_routes: subnet_routes.to_vec(),
             tags: machine.tags.clone(),
         })
+    }
+
+    async fn machine_to_list_node_with_routes(
+        machine: &MachineAdminRecord,
+        users: &Arc<dyn UserAdmin>,
+        subnet_routes: &[String],
+    ) -> Result<Node, Status> {
+        let mut node = machine_to_node_with_routes(machine, users, subnet_routes).await?;
+        if !machine.tags.is_empty() {
+            node.user = Some(tagged_devices_user_to_proto());
+        }
+        Ok(node)
+    }
+
+    fn tagged_devices_user_to_proto() -> ProtoUser {
+        ProtoUser {
+            id: 2_147_455_555,
+            name: "tagged-devices".into(),
+            created_at: None,
+            display_name: "Tagged Devices".into(),
+            email: String::new(),
+            provider_id: String::new(),
+            provider: String::new(),
+            profile_pic_url: String::new(),
+        }
     }
 
     fn node_ip_addresses(machine: &MachineAdminRecord) -> Vec<String> {
@@ -3983,6 +4018,99 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_node_grpc_list_nodes_validates_user_filter_and_tagged_owner() {
+        let (service, machines) = admin_service_with_machines().await;
+        for name in ["alice", "bob"] {
+            service
+                .create_user(Request::new(CreateUserRequest {
+                    name: name.into(),
+                    display_name: String::new(),
+                    email: String::new(),
+                    picture_url: String::new(),
+                }))
+                .await
+                .unwrap();
+        }
+
+        let alice_key = "ad".repeat(32);
+        let bob_key = "be".repeat(32);
+        machines.upsert(
+            alice_key.clone(),
+            fixture_machine(&alice_key, "alice", "alpha"),
+        );
+        machines.upsert(bob_key.clone(), fixture_machine(&bob_key, "bob", "bravo"));
+        let alice_id = stable_id_from_key(&alice_key);
+
+        let alice_nodes = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: "alice".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            alice_nodes
+                .nodes
+                .iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![alice_id]
+        );
+        assert_eq!(alice_nodes.nodes[0].user.as_ref().unwrap().name, "alice");
+
+        let err = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: "carol".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: r#"{"tagOwners":{"tag:server":["alice@"]}}"#.into(),
+            }))
+            .await
+            .expect("tag owner policy");
+        service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id: alice_id,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap();
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let tagged = listed
+            .nodes
+            .iter()
+            .find(|node| node.id == alice_id)
+            .expect("tagged node is listed");
+        let user = tagged.user.as_ref().expect("tagged list node user");
+        assert_eq!(user.id, 2_147_455_555);
+        assert_eq!(user.name, "tagged-devices");
+        assert_eq!(user.display_name, "Tagged Devices");
+
+        let alice_nodes = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: "alice".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            alice_nodes.nodes.is_empty(),
+            "tagged nodes are no longer user-owned in upstream ListNodes"
+        );
+    }
+
+    #[tokio::test]
     async fn upstream_node_grpc_reports_missing_and_bad_tags() {
         let (service, machines) = admin_service_with_machines().await;
         let node_key = "cc".repeat(32);
@@ -4426,13 +4554,30 @@ mod upstream_tests {
             .unwrap()
             .into_inner();
         assert!(created.api_key.starts_with("hskey-api-"));
+        let second = service
+            .create_api_key(Request::new(CreateApiKeyRequest {
+                expiration: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_801,
+                    nanos: 0,
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(second.api_key.starts_with("hskey-api-"));
 
         let listed = service
             .list_api_keys(Request::new(ListApiKeysRequest {}))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(listed.api_keys.len(), 1);
+        assert_eq!(listed.api_keys.len(), 2);
+        let ids = listed.api_keys.iter().map(|key| key.id).collect::<Vec<_>>();
+        assert_eq!(ids, {
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted
+        });
         let key = &listed.api_keys[0];
         assert!(key.id > 0);
         assert!(key.prefix.starts_with("hskey-api-"));
@@ -4440,21 +4585,23 @@ mod upstream_tests {
         assert_eq!(key.expiration.as_ref().unwrap().seconds, 4_102_444_800);
         assert!(key.created_at.is_some());
 
-        service
-            .expire_api_key(Request::new(ExpireApiKeyRequest {
-                prefix: String::new(),
-                id: key.id,
-            }))
-            .await
-            .unwrap();
+        for id in ids {
+            service
+                .expire_api_key(Request::new(ExpireApiKeyRequest {
+                    prefix: String::new(),
+                    id,
+                }))
+                .await
+                .unwrap();
 
-        service
-            .delete_api_key(Request::new(DeleteApiKeyRequest {
-                prefix: String::new(),
-                id: key.id,
-            }))
-            .await
-            .unwrap();
+            service
+                .delete_api_key(Request::new(DeleteApiKeyRequest {
+                    prefix: String::new(),
+                    id,
+                }))
+                .await
+                .unwrap();
+        }
 
         let listed = service
             .list_api_keys(Request::new(ListApiKeysRequest {}))

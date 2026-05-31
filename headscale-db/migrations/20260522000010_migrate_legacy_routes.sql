@@ -45,27 +45,6 @@ SET approved_routes = COALESCE(
                       OR lower(CAST(routes.enabled AS TEXT)) = 'true'
                   )
 
-                UNION
-                SELECT '::/0' AS route
-                FROM routes
-                WHERE routes.node_id = nodes.id
-                  AND routes.deleted_at IS NULL
-                  AND routes.prefix = '0.0.0.0/0'
-                  AND (
-                      routes.enabled = 1
-                      OR lower(CAST(routes.enabled AS TEXT)) = 'true'
-                  )
-
-                UNION
-                SELECT '0.0.0.0/0' AS route
-                FROM routes
-                WHERE routes.node_id = nodes.id
-                  AND routes.deleted_at IS NULL
-                  AND routes.prefix = '::/0'
-                  AND (
-                      routes.enabled = 1
-                      OR lower(CAST(routes.enabled AS TEXT)) = 'true'
-                  )
             )
             ORDER BY route
         )

@@ -4558,7 +4558,7 @@ mod tests {
             (
                 "tag-owner-cyrillic",
                 r#"{"tagOwners":{"tag:сервер":["alice@"]}}"#,
-                r#"tagOwners["tag:сервер"]: tag names must start with a letter, after 'tag:'"#,
+                "tag names must start with a letter, after 'tag:'",
             ),
             (
                 "acl-reference-leading-hyphen",

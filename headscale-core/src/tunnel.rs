@@ -992,6 +992,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_advertised_route_primary_stays_sticky() {
+        let local_keypair = WgKeyPair::generate();
+        let first_keypair = WgKeyPair::generate();
+        let second_keypair = WgKeyPair::generate();
+        let manager = TunnelManager::new(local_keypair, DEFAULT_WG_PORT);
+
+        let route_prefix: IpNet = "10.10.0.0/24".parse().unwrap();
+        let route_ip = IpAddr::V4(Ipv4Addr::new(10, 10, 0, 7));
+
+        manager
+            .add_peer_with_ips(
+                "peer-b".to_string(),
+                first_keypair.public_key_bytes(),
+                None,
+                vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2))],
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .advertise_route("peer-b", route_prefix, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager.route_by_ip(route_ip).await,
+            Some("peer-b".to_string())
+        );
+
+        manager
+            .add_peer_with_ips(
+                "peer-a".to_string(),
+                second_keypair.public_key_bytes(),
+                None,
+                vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 3))],
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .advertise_route("peer-a", route_prefix, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager.route_by_ip(route_ip).await,
+            Some("peer-b".to_string())
+        );
+
+        manager
+            .set_route_approved("peer-b", &route_prefix, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.route_by_ip(route_ip).await,
+            Some("peer-a".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn test_pubkey_lookup() {
         let local_keypair = WgKeyPair::generate();
         let peer_keypair = WgKeyPair::generate();

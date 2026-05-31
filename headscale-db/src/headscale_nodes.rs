@@ -6,6 +6,8 @@
 //! `octra_nodes`, so Octra-specific shape does not occupy the upstream
 //! table name.
 
+use std::{cmp::Ordering, net::IpAddr};
+
 use crate::{DbError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -221,15 +223,58 @@ fn tag_owned_user_id(user_id: Option<i64>, tags: &[String]) -> Option<i64> {
     if tags.is_empty() { user_id } else { None }
 }
 
-fn expand_exit_routes(mut routes: Vec<String>) -> Vec<String> {
-    let has_ipv4_exit = routes.iter().any(|route| route == "0.0.0.0/0");
-    let has_ipv6_exit = routes.iter().any(|route| route == "::/0");
-    match (has_ipv4_exit, has_ipv6_exit) {
-        (true, false) => routes.push("::/0".to_string()),
-        (false, true) => routes.push("0.0.0.0/0".to_string()),
-        _ => {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteSortKey {
+    V4([u8; 4], u8),
+    V6([u8; 16], u8),
+}
+
+fn route_sort_key(route: &str) -> Option<RouteSortKey> {
+    let (addr, bits) = route.split_once('/')?;
+    let bits = bits.parse::<u8>().ok()?;
+    match addr.parse::<IpAddr>().ok()? {
+        IpAddr::V4(addr) if bits <= 32 => Some(RouteSortKey::V4(addr.octets(), bits)),
+        IpAddr::V6(addr) if bits <= 128 => Some(RouteSortKey::V6(addr.octets(), bits)),
+        _ => None,
     }
-    routes
+}
+
+fn compare_route_sort_key(a: RouteSortKey, b: RouteSortKey) -> Ordering {
+    match (a, b) {
+        (RouteSortKey::V4(a_addr, a_bits), RouteSortKey::V4(b_addr, b_bits)) => {
+            a_addr.cmp(&b_addr).then(a_bits.cmp(&b_bits))
+        }
+        (RouteSortKey::V4(_, _), RouteSortKey::V6(_, _)) => Ordering::Less,
+        (RouteSortKey::V6(_, _), RouteSortKey::V4(_, _)) => Ordering::Greater,
+        (RouteSortKey::V6(a_addr, a_bits), RouteSortKey::V6(b_addr, b_bits)) => {
+            a_addr.cmp(&b_addr).then(a_bits.cmp(&b_bits))
+        }
+    }
+}
+
+fn compare_routes(a: &str, b: &str) -> Ordering {
+    match (route_sort_key(a), route_sort_key(b)) {
+        (Some(a), Some(b)) => compare_route_sort_key(a, b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
+}
+
+fn normalize_approved_routes(routes: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(routes.len() + 2);
+    for route in routes {
+        if route == "0.0.0.0/0" || route == "::/0" {
+            normalized.push("0.0.0.0/0".to_string());
+            normalized.push("::/0".to_string());
+        } else {
+            normalized.push(route);
+        }
+    }
+
+    normalized.sort_by(|a, b| compare_routes(a, b));
+    normalized.dedup();
+    normalized
 }
 
 fn is_dns_label_alphanumeric(byte: u8) -> bool {
@@ -456,7 +501,7 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -551,7 +596,7 @@ pub async fn create_postgres_on_connection(
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -817,7 +862,7 @@ pub async fn update_from_auth_path(
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -896,7 +941,7 @@ pub async fn update_postgres_from_auth_path_on_connection(
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&expand_exit_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -1298,7 +1343,7 @@ pub async fn set_approved_routes(
     id: i64,
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let routes = json_array(&expand_exit_routes(routes))?;
+    let routes = json_array(&normalize_approved_routes(routes))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -1336,7 +1381,7 @@ pub async fn set_postgres_approved_routes_on_connection(
     id: i64,
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let routes = json_array(&expand_exit_routes(routes))?;
+    let routes = json_array(&normalize_approved_routes(routes))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -2144,7 +2189,7 @@ mod tests {
         assert_eq!(updated.auth_key_id, None);
         assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
         assert!(updated.tag_list().is_empty());
-        assert_eq!(updated.approved_route_list(), vec!["::/0", "0.0.0.0/0"]);
+        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
         assert_eq!(updated.created_at, original.created_at);
         assert!(updated.updated_at >= original.updated_at);
         assert_eq!(
@@ -2339,7 +2384,36 @@ mod tests {
             .await
             .unwrap()
             .approved_route_list();
-        assert_eq!(routes, vec!["::/0", "0.0.0.0/0"]);
+        assert_eq!(routes, vec!["0.0.0.0/0", "::/0"]);
+    }
+
+    #[tokio::test]
+    async fn approved_routes_sort_and_dedup_like_headscale_go() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let node = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let routes = set_approved_routes(
+            db.pool(),
+            node.id,
+            vec![
+                "192.168.0.0/16".into(),
+                "::/0".into(),
+                "10.0.0.0/24".into(),
+                "10.0.0.0/24".into(),
+            ],
+        )
+        .await
+        .unwrap()
+        .approved_route_list();
+
+        assert_eq!(
+            routes,
+            vec!["0.0.0.0/0", "10.0.0.0/24", "192.168.0.0/16", "::/0"]
+        );
     }
 
     #[tokio::test]

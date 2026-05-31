@@ -217,6 +217,19 @@ fn is_valid_urlsafe(s: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn normalize_acl_tags(mut tags: Vec<String>) -> Result<Vec<String>> {
+    tags.sort();
+    tags.dedup();
+
+    if let Some(tag) = tags.iter().find(|tag| !tag.starts_with("tag:")) {
+        return Err(DbError::General(format!(
+            "auth-key tag is invalid: '{tag}' did not begin with 'tag:'"
+        )));
+    }
+
+    Ok(tags)
+}
+
 /// Generate a fresh `hskey-auth-<12>-<64>` plaintext token.
 pub fn generate_plaintext() -> String {
     let (plaintext, _, _) = generate_plaintext_parts();
@@ -249,8 +262,9 @@ pub async fn create_with_cost(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
+    let tags = normalize_acl_tags(params.tags)?;
     let storage_user_id = resolve_storage_user_id(pool, &params.user_id).await?;
-    if storage_user_id.is_none() && params.tags.is_empty() {
+    if storage_user_id.is_none() && tags.is_empty() {
         return Err(DbError::General(
             "user_id must be non-empty unless tags are provided".into(),
         ));
@@ -258,7 +272,7 @@ pub async fn create_with_cost(
     let (plaintext, prefix, secret) = generate_plaintext_parts();
     let hash =
         bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
-    let tags_json = serde_json::to_string(&params.tags)?;
+    let tags_json = serde_json::to_string(&tags)?;
     let created_at = now_unix();
 
     let id: i64 = sqlx::query_scalar(
@@ -333,8 +347,9 @@ pub async fn create_postgres_with_cost_on_connection(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
+    let tags = normalize_acl_tags(params.tags)?;
     let storage_user_id = resolve_postgres_storage_user_id(conn, &params.user_id).await?;
-    if storage_user_id.is_none() && params.tags.is_empty() {
+    if storage_user_id.is_none() && tags.is_empty() {
         return Err(DbError::General(
             "user_id must be non-empty unless tags are provided".into(),
         ));
@@ -342,7 +357,7 @@ pub async fn create_postgres_with_cost_on_connection(
     let (plaintext, prefix, secret) = generate_plaintext_parts();
     let hash =
         bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
-    let tags_json = serde_json::to_string(&params.tags)?;
+    let tags_json = serde_json::to_string(&tags)?;
     let created_at = now_unix();
 
     let id: i64 = sqlx::query_scalar(
@@ -608,8 +623,10 @@ pub async fn get_postgres_by_token_on_connection(
 
 /// Expire a key by id — sets `expiration = now_unix()`. The row stays
 /// in place so the admin list can still surface it as "expired".
+/// Missing IDs are no-op success, matching headscale-go's unchecked
+/// `RowsAffected` behavior.
 pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
-    let n = sqlx::query(
+    sqlx::query(
         "
         UPDATE pre_auth_keys SET expiration = datetime(?, 'unixepoch') WHERE id = ?
         ",
@@ -617,11 +634,7 @@ pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
     .bind(now_unix())
     .bind(id)
     .execute(pool)
-    .await?
-    .rows_affected();
-    if n == 0 {
-        return Err(DbError::NotFound(format!("preauth_key id={id}")));
-    }
+    .await?;
     Ok(())
 }
 
@@ -633,7 +646,7 @@ pub async fn expire_postgres(pool: &PgPool, id: i64) -> Result<()> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
-    let n = sqlx::query(
+    sqlx::query(
         "
         UPDATE pre_auth_keys
         SET expiration = to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
@@ -643,11 +656,7 @@ pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> 
     .bind(now_unix())
     .bind(id)
     .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if n == 0 {
-        return Err(DbError::NotFound(format!("preauth_key id={id}")));
-    }
+    .await?;
     Ok(())
 }
 
@@ -656,6 +665,8 @@ pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> 
 /// Mirrors headscale-go: assigned nodes keep existing registration
 /// state, but their `auth_key_id` is cleared before the key row is
 /// removed so the FK does not block the admin destroy operation.
+/// Missing IDs are no-op success, matching headscale-go's unchecked
+/// `RowsAffected` behavior.
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -664,15 +675,11 @@ pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
         .execute(&mut *tx)
         .await?;
 
-    let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
+    sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(map_destroy_err)?
-        .rows_affected();
-    if n == 0 {
-        return Err(DbError::NotFound(format!("preauth_key id={id}")));
-    }
+        .map_err(map_destroy_err)?;
     tx.commit().await?;
     Ok(())
 }
@@ -697,15 +704,11 @@ pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) ->
             .await?;
     }
 
-    let n = sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
+    sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(map_destroy_err)?
-        .rows_affected();
-    if n == 0 {
-        return Err(DbError::NotFound(format!("preauth_key id={id}")));
-    }
+        .map_err(map_destroy_err)?;
     tx.commit().await?;
     Ok(())
 }
@@ -1207,10 +1210,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expire_unknown_id_returns_not_found() {
+    async fn expire_unknown_id_is_noop_success() {
         let db = fresh_db().await;
-        let e = expire(db.pool(), 99_999).await.unwrap_err();
-        assert!(matches!(e, DbError::NotFound(_)));
+        expire(db.pool(), 99_999).await.unwrap();
     }
 
     /// Go: TestDestroyPreAuthKey
@@ -1294,10 +1296,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destroy_unknown_id_returns_not_found() {
+    async fn destroy_unknown_id_is_noop_success() {
         let db = fresh_db().await;
-        let e = destroy(db.pool(), 99_999).await.unwrap_err();
-        assert!(matches!(e, DbError::NotFound(_)));
+        destroy(db.pool(), 99_999).await.unwrap();
     }
 
     /// Go: TestPreAuthKeyACLTags — tags round-trip.
@@ -1312,6 +1313,40 @@ mod tests {
             r.tag_list(),
             vec!["tag:dev".to_string(), "tag:server".into()]
         );
+    }
+
+    /// Go: CreatePreAuthKey sorts/deduplicates ACL tags and accepts
+    /// userless tagged keys.
+    #[tokio::test]
+    async fn tags_are_canonical_and_can_own_userless_keys() {
+        let db = fresh_db().await;
+        let c = create_for_test(
+            db.pool(),
+            CreateParams {
+                user_id: String::new(),
+                reusable: false,
+                ephemeral: false,
+                tags: vec!["tag:web".into(), "tag:dev".into(), "tag:web".into()],
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(c.row.user_id, "");
+        assert_eq!(c.row.tag_list(), vec!["tag:dev", "tag:web"]);
+        assert_eq!(c.row.tags, r#"["tag:dev","tag:web"]"#);
+    }
+
+    /// Go: TestPreAuthKeyACLTags rejects tags that do not start with `tag:`.
+    #[tokio::test]
+    async fn create_rejects_invalid_acl_tag() {
+        let db = fresh_db().await;
+        let mut p = alice();
+        p.tags = vec!["badtag".into()];
+        let e = create_for_test(db.pool(), p).await.unwrap_err();
+
+        assert!(matches!(e, DbError::General(msg) if msg.contains("did not begin with 'tag:'")));
     }
 
     /// Empty tag list serialises to "[]" and round-trips clean.

@@ -87,7 +87,7 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         )
         .await?
         .approved_route_list();
-        assert_eq!(routes, vec!["::/0", "0.0.0.0/0"]);
+        assert_eq!(routes, vec!["0.0.0.0/0", "::/0"]);
 
         let routed = headscale_nodes::set_postgres_host_info_routable_ips_on_connection(
             &mut schema.conn,

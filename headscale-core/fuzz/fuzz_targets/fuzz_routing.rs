@@ -124,9 +124,24 @@ fn expected_lookup(table: &RoutingTable, dst: IpAddr) -> Option<&str> {
                 .prefix_len()
                 .cmp(&b.prefix.prefix_len())
                 .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| primary_precedence(table, a, b))
                 .then_with(|| b.peer_id.cmp(&a.peer_id))
         })
         .map(|route| route.peer_id.as_str())
+}
+
+fn primary_precedence(table: &RoutingTable, a: &Route, b: &Route) -> std::cmp::Ordering {
+    if a.prefix != b.prefix || a.priority != b.priority {
+        return std::cmp::Ordering::Equal;
+    }
+
+    match table.primary_route_for(&a.prefix) {
+        Some(primary) if primary == a.peer_id && primary != b.peer_id => {
+            std::cmp::Ordering::Greater
+        }
+        Some(primary) if primary == b.peer_id && primary != a.peer_id => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 fn assert_table_invariants(table: &RoutingTable) {

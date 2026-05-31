@@ -724,6 +724,7 @@ server:
   server_url: ${control_url}
   listen: 0.0.0.0:${http_port}
   https_listen: 0.0.0.0:${https_port}
+  metrics_listen_addr: 127.0.0.1:${metrics_port}
   grpc_listen_addr: 127.0.0.1:${grpc_port}
   grpc_allow_insecure: true
   db_path: ${db_path}
@@ -873,6 +874,9 @@ start_server() {
   wait_for "${target} health" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
   if [[ "${target}" == "rust" ]]; then
     wait_for "${target} TLS certificate" "test -s '${tls_cert_path}'"
+  fi
+  if ((expect_debug_ping)); then
+    wait_for "${target} metrics debug" "curl ${health_curl_opts} '$(debug_ping_url)' >/dev/null"
   fi
   wait_for "${target} gRPC" "headscale_health_probe" || {
     dump_grpc_health_debug

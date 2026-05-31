@@ -1396,6 +1396,8 @@ async fn migrates_legacy_routes_table_enabled_rows_to_nodes_approved_routes_and_
         INSERT INTO routes (node_id, prefix, advertised, enabled, is_primary)
             VALUES (1, '10.1.0.0/24', 1, 1, 0);
         INSERT INTO routes (node_id, prefix, advertised, enabled, is_primary)
+            VALUES (1, '10.1.0.0/24', 1, 1, 0);
+        INSERT INTO routes (node_id, prefix, advertised, enabled, is_primary)
             VALUES (1, '0.0.0.0/0', 1, 1, 1);
         INSERT INTO routes (node_id, prefix, advertised, enabled, is_primary)
             VALUES (1, '10.2.0.0/24', 1, 0, 0);
@@ -1419,7 +1421,7 @@ async fn migrates_legacy_routes_table_enabled_rows_to_nodes_approved_routes_and_
         .expect("reload node");
     assert_eq!(
         migrated.approved_route_list(),
-        vec!["0.0.0.0/0", "10.0.0.0/24", "10.1.0.0/24", "::/0"]
+        vec!["0.0.0.0/0", "10.0.0.0/24", "10.1.0.0/24"]
     );
     assert_eq!(
         migrated.host_info_value()["RoutableIPs"],
@@ -1433,4 +1435,61 @@ async fn migrates_legacy_routes_table_enabled_rows_to_nodes_approved_routes_and_
     .await
     .expect("query sqlite schema");
     assert!(routes_table.is_none());
+}
+
+#[tokio::test]
+async fn migrates_legacy_routes_table_without_synthesizing_opposite_exit_route() {
+    for prefix in ["0.0.0.0/0", "::/0"] {
+        let db = Database::in_memory().await.expect("open db");
+        db.migrate().await.expect("migrate");
+
+        let user_id = user_id(&db).await;
+        let auth_key_id = preauth_key_id(&db, user_id).await;
+        let node = node_with_route(&db, user_id, auth_key_id).await;
+
+        sqlx::query("UPDATE nodes SET approved_routes = '[]' WHERE id = ?")
+            .bind(node.id)
+            .execute(db.pool())
+            .await
+            .expect("clear existing approved routes");
+
+        sqlx::raw_sql(
+            "
+            CREATE TABLE routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                deleted_at DATETIME,
+                node_id INTEGER NOT NULL,
+                prefix TEXT,
+                advertised BOOLEAN,
+                enabled BOOLEAN,
+                is_primary BOOLEAN
+            );
+            ",
+        )
+        .execute(db.pool())
+        .await
+        .expect("create legacy routes table");
+
+        sqlx::query(
+            "INSERT INTO routes (node_id, prefix, advertised, enabled, is_primary)
+             VALUES (?, ?, 1, 1, 1)",
+        )
+        .bind(node.id)
+        .bind(prefix)
+        .execute(db.pool())
+        .await
+        .expect("seed legacy exit route");
+
+        sqlx::raw_sql(LEGACY_ROUTES_MIGRATION)
+            .execute(db.pool())
+            .await
+            .expect("run legacy routes migration");
+
+        let migrated = headscale_nodes::get_by_id(db.pool(), node.id)
+            .await
+            .expect("reload node");
+        assert_eq!(migrated.approved_route_list(), vec![prefix]);
+    }
 }

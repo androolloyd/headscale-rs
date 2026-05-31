@@ -520,8 +520,12 @@ if [[ -n "${expected_approved_routes_by_client}" ]]; then
   expect_approved_by_client=true
 fi
 
-if ! [[ "${expected_primary_route_candidates}" =~ ^[0-9]+$ ]] || ((expected_primary_route_candidates < 1)); then
-  echo "REAL_CLIENT_EXPECT_PRIMARY_ROUTE_CANDIDATES must be a positive integer, got ${expected_primary_route_candidates}" >&2
+if ! [[ "${expected_primary_route_candidates}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_PRIMARY_ROUTE_CANDIDATES must be a non-negative integer, got ${expected_primary_route_candidates}" >&2
+  exit 2
+fi
+if [[ -n "${expected_primary_route}" ]] && ((expected_primary_route_candidates < 1)); then
+  echo "REAL_CLIENT_EXPECT_PRIMARY_ROUTE_CANDIDATES must be positive when REAL_CLIENT_EXPECT_PRIMARY_ROUTE is set, got ${expected_primary_route_candidates}" >&2
   exit 2
 fi
 

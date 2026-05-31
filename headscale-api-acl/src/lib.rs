@@ -621,6 +621,7 @@ fn normalize_go_policy_top_level(
         let Some(canonical) = go_policy_field_name(&key) else {
             return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
         };
+        let value = normalize_go_policy_field(canonical, value)?;
         if canonical == "groups" {
             validate_go_policy_groups(&value)?;
         }
@@ -634,6 +635,86 @@ fn normalize_go_policy_top_level(
         }
     }
 
+    Ok(serde_json::Value::Object(normalized))
+}
+
+fn normalize_go_policy_field(
+    field: &str,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, PolicyParseError> {
+    match field {
+        "acls" => normalize_go_policy_array_objects(value, "acls", go_acl_field_name, true),
+        "grants" => normalize_go_policy_array_objects(value, "grants", go_grant_field_name, false),
+        "nodeAttrs" => {
+            normalize_go_policy_array_objects(value, "nodeAttrs", go_node_attr_field_name, false)
+        }
+        "autoApprovers" => normalize_go_policy_object_fields(
+            value,
+            "autoApprovers",
+            go_auto_approvers_field_name,
+            false,
+        ),
+        "ssh" => normalize_go_policy_array_objects(value, "ssh", go_ssh_field_name, false),
+        "tests" => {
+            normalize_go_policy_array_objects(value, "tests", go_policy_test_field_name, false)
+        }
+        "sshTests" => {
+            normalize_go_policy_array_objects(value, "sshTests", go_ssh_test_field_name, false)
+        }
+        _ => Ok(value),
+    }
+}
+
+fn normalize_go_policy_array_objects(
+    value: serde_json::Value,
+    context: &str,
+    field_name: fn(&str) -> Option<&'static str>,
+    allow_hash_fields: bool,
+) -> Result<serde_json::Value, PolicyParseError> {
+    let entries = match value {
+        serde_json::Value::Array(entries) => entries,
+        other => return Ok(other),
+    };
+
+    let mut normalized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        normalized.push(normalize_go_policy_object_fields(
+            entry,
+            context,
+            field_name,
+            allow_hash_fields,
+        )?);
+    }
+    Ok(serde_json::Value::Array(normalized))
+}
+
+fn normalize_go_policy_object_fields(
+    value: serde_json::Value,
+    context: &str,
+    field_name: fn(&str) -> Option<&'static str>,
+    allow_hash_fields: bool,
+) -> Result<serde_json::Value, PolicyParseError> {
+    let object = match value {
+        serde_json::Value::Object(object) => object,
+        other => return Ok(other),
+    };
+
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in object {
+        if allow_hash_fields && key.starts_with('#') {
+            continue;
+        }
+        let Some(canonical) = field_name(&key) else {
+            return Err(PolicyParseError::Schema(format!(
+                "{context}: unknown field {key:?}"
+            )));
+        };
+        if normalized.insert(canonical.to_string(), value).is_some() {
+            return Err(PolicyParseError::Schema(format!(
+                "{context}: duplicate field {canonical:?}"
+            )));
+        }
+    }
     Ok(serde_json::Value::Object(normalized))
 }
 
@@ -719,6 +800,67 @@ fn go_acl_field_name(field: &str) -> Option<&'static str> {
     }
 }
 
+fn go_grant_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "src" => Some("src"),
+        "dst" => Some("dst"),
+        "ip" => Some("ip"),
+        "app" => Some("app"),
+        "via" => Some("via"),
+        _ => None,
+    }
+}
+
+fn go_node_attr_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "target" => Some("target"),
+        "attr" => Some("attr"),
+        "ippool" => Some("ipPool"),
+        _ => None,
+    }
+}
+
+fn go_auto_approvers_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "routes" => Some("routes"),
+        "exitnode" => Some("exitNode"),
+        _ => None,
+    }
+}
+
+fn go_ssh_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "action" => Some("action"),
+        "src" => Some("src"),
+        "dst" => Some("dst"),
+        "users" => Some("users"),
+        "checkperiod" => Some("checkPeriod"),
+        "acceptenv" => Some("acceptEnv"),
+        _ => None,
+    }
+}
+
+fn go_policy_test_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "src" => Some("src"),
+        "proto" => Some("proto"),
+        "accept" => Some("accept"),
+        "deny" => Some("deny"),
+        _ => None,
+    }
+}
+
+fn go_ssh_test_field_name(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "src" => Some("src"),
+        "dst" => Some("dst"),
+        "accept" => Some("accept"),
+        "deny" => Some("deny"),
+        "check" => Some("check"),
+        _ => None,
+    }
+}
+
 fn validate_go_acl_destinations(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), PolicyParseError> {
@@ -799,6 +941,9 @@ fn acl_rules_from_grants(grants: &[GrantRule]) -> Result<Vec<AclRule>, String> {
 fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     let mut errs = Vec::new();
 
+    for (host, prefix) in &doc.hosts {
+        validate_host_definition(host, prefix, &mut errs);
+    }
     for grant in &doc.grants {
         validate_grant_rule(doc, grant, &mut errs);
     }
@@ -821,7 +966,12 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
             validate_owner_ref(doc, owner, &mut errs);
         }
     }
-    for approvers in doc.auto_approvers.routes.values() {
+    for (prefix, approvers) in &doc.auto_approvers.routes {
+        if prefix.parse::<IpNet>().is_err() {
+            errs.push(format!(
+                "autoApprovers route contains invalid prefix {prefix:?}"
+            ));
+        }
         for approver in approvers {
             validate_approver_ref(doc, approver, &mut errs);
         }
@@ -834,6 +984,17 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
         Ok(())
     } else {
         Err(errs.join("; "))
+    }
+}
+
+fn validate_host_definition(host: &str, prefix: &str, errs: &mut Vec<String>) {
+    if host.contains('@') || host.contains(':') {
+        errs.push(format!("invalid hostname {host:?}"));
+    }
+    if parse_cidr(prefix).is_none() {
+        errs.push(format!(
+            "hostname {host:?} contains invalid IP address {prefix:?}"
+        ));
     }
 }
 
@@ -1189,6 +1350,10 @@ fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
+    if !owner.contains('@') && !owner.starts_with("group:") && !owner.starts_with("tag:") {
+        errs.push(format!("invalid owner format: {owner:?}"));
+        return;
+    }
     validate_group_ref(doc, owner, errs);
     if owner.starts_with("tag:") {
         validate_tag_ref(doc, owner, errs);
@@ -1196,6 +1361,10 @@ fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
+    if !approver.contains('@') && !approver.starts_with("group:") && !approver.starts_with("tag:") {
+        errs.push(format!("invalid auto approver format: {approver:?}"));
+        return;
+    }
     validate_group_ref(doc, approver, errs);
     validate_tag_ref(doc, approver, errs);
 }
@@ -2365,7 +2534,7 @@ fn normalize_grant_ip_spec(spec: &str) -> Result<Vec<String>, String> {
 fn validate_upstream_proto(proto: &str) -> Result<(), String> {
     match proto {
         "" | "icmp" | "igmp" | "ipv4" | "ip-in-ip" | "tcp" | "egp" | "igp" | "udp" | "gre"
-        | "esp" | "ah" | "sctp" => Ok(()),
+        | "esp" | "ah" | "ipv6-icmp" | "sctp" | "fc" => Ok(()),
         "*" => Err(
             "proto name \"*\" not known; use protocol number 0-255 or protocol name (icmp, tcp, udp, etc.)"
                 .to_string(),
@@ -4269,8 +4438,8 @@ mod tests {
     }
 
     #[test]
-    fn hujson_accepts_public_node_attrs_app_maps() {
-        let doc = parse_hujson_policy(
+    fn hujson_rejects_node_attrs_app_like_current_headscale_go() {
+        let err = parse_hujson_policy(
             r#"{
               "hosts": {"office": "10.0.0.0/8"},
               "nodeAttrs": [{
@@ -4287,16 +4456,13 @@ mod tests {
               }]
             }"#,
         )
-        .unwrap();
+        .unwrap_err()
+        .to_string();
 
-        assert_eq!(doc.node_attrs[0].attr, vec!["randomize-client-port"]);
-        assert_eq!(
-            doc.node_attrs[0].app["example.com/cap/connector"][0]["name"],
-            "prod"
+        assert!(
+            err.contains("nodeAttrs") && err.contains("unknown field \"app\""),
+            "nodeAttrs app should be rejected as an unknown field, got {err}"
         );
-        assert!(doc.node_attrs[0].ip_pool.is_empty());
-        assert_eq!(doc.rules[0].dst, vec!["office"]);
-        assert_eq!(doc.rules[0].ports, vec!["udp/53"]);
     }
 
     #[test]

@@ -354,3 +354,127 @@ fn via_routes_specific_subnet_does_not_match_exit_defaults() {
     assert!(got.exclude.is_empty());
     assert!(got.use_primary.is_empty());
 }
+
+#[test]
+fn hujson_nested_member_names_match_go_case_insensitive_json() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "TAGOWNERS": {
+            "tag:server": ["alice@"]
+          },
+          "AUTOAPPROVERS": {
+            "EXITNODE": ["tag:server"],
+            "ROUTES": {
+              "10.0.0.0/8": ["tag:server"]
+            }
+          },
+          "NODEATTRS": [{
+            "TARGET": ["tag:server"],
+            "ATTR": ["randomize-client-port"]
+          }],
+          "ACLS": [{
+            "ACTION": "accept",
+            "PROTO": "IPV6-ICMP",
+            "SRC": ["tag:server"],
+            "DST": ["*:*"]
+          }],
+          "GRANTS": [{
+            "SRC": ["tag:server"],
+            "DST": ["10.0.0.0/8"],
+            "IP": ["TCP:443"]
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(doc.auto_approvers.exit_node, vec!["tag:server"]);
+    assert_eq!(doc.node_attrs[0].target, vec!["tag:server"]);
+    assert_eq!(doc.node_attrs[0].attr, vec!["randomize-client-port"]);
+    assert_eq!(doc.rules[0].ports, vec!["ipv6-icmp/*"]);
+    assert_eq!(doc.rules[1].ports, vec!["tcp/443"]);
+}
+
+#[test]
+fn hujson_rejects_non_go_nested_policy_fields() {
+    for (name, raw, want) in [
+        (
+            "autoapprovers-snake-exit-node",
+            r#"{"autoApprovers":{"exit_node":["alice@"]}}"#,
+            "unknown field \"exit_node\"",
+        ),
+        (
+            "nodeattrs-snake-ip-pool",
+            r#"{"nodeAttrs":[{"target":["*"],"ip_pool":[]}]}"#,
+            "unknown field \"ip_pool\"",
+        ),
+        (
+            "nodeattrs-app",
+            r#"{"nodeAttrs":[{"target":["*"],"app":{"example.com/cap/use":[]}}]}"#,
+            "unknown field \"app\"",
+        ),
+        (
+            "top-level-postures",
+            r#"{"postures":{"corp":["node:os == 'linux'"]}}"#,
+            "unknown field \"postures\"",
+        ),
+    ] {
+        let err = parse_hujson_policy(raw).expect_err(name).to_string();
+        assert!(
+            err.contains(want),
+            "{name} should contain {want:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn hujson_validates_hosts_tag_owners_and_auto_approvers_eagerly() {
+    for (name, raw, want) in [
+        (
+            "invalid-host-name",
+            r#"{"hosts":{"host:server":"100.64.0.1"}}"#,
+            "invalid hostname",
+        ),
+        (
+            "invalid-host-ip",
+            r#"{"hosts":{"server":"not-an-ip"}}"#,
+            "contains invalid IP address",
+        ),
+        (
+            "invalid-tag-owner",
+            r#"{"tagOwners":{"tag:server":["100.64.0.1"]}}"#,
+            "invalid owner format",
+        ),
+        (
+            "invalid-autoapprover-route-prefix",
+            r#"{"autoApprovers":{"routes":{"not-a-prefix":["alice@"]}}}"#,
+            "invalid prefix",
+        ),
+        (
+            "invalid-autoapprover-principal",
+            r#"{"autoApprovers":{"exitNode":["100.64.0.1"]}}"#,
+            "invalid auto approver format",
+        ),
+    ] {
+        let err = parse_hujson_policy(raw).expect_err(name).to_string();
+        assert!(
+            err.contains(want),
+            "{name} should contain {want:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn hujson_accepts_current_go_protocol_names_beyond_tcp_udp_icmp() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "acls": [
+            {"action":"accept","proto":"ipv6-icmp","src":["*"],"dst":["*:*"]},
+            {"action":"accept","proto":"fc","src":["*"],"dst":["*:*"]}
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(doc.rules[0].ports, vec!["ipv6-icmp/*"]);
+    assert_eq!(doc.rules[1].ports, vec!["fc/*"]);
+}

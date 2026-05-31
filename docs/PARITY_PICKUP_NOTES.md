@@ -374,8 +374,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-two Pg rows, including
-  `postgres-web-register-tags`, `postgres-ssh-oidc-check`,
+  CI now provisions Postgres for all thirty-three Pg rows, including
+  `postgres-web-register-tags`, `postgres-route-advertise`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
@@ -445,8 +445,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added paired `postgres-web-register-tags` Rust/headscale-go rows over the
   backend-aware online/LastSeen harness. The row proves web/CLI registration
   with an owned requested tag against a temporary Postgres database.
-- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
-  thirty-two Postgres stock-client rows.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix moved
+  to thirty-two Postgres stock-client rows.
 
 ## 2026-05-31 Node DB helper parity slice
 
@@ -456,3 +456,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - SQLite unit coverage and the Postgres `postgres_nodes` integration contract
   now lock the upstream empty-filter, partial-filter, self-excluded peer, and
   ephemeral-key semantics.
+
+## 2026-05-31 Postgres route-advertise smoke slice
+
+- Added paired `postgres-route-advertise` Rust/headscale-go rows over the
+  backend-aware online/LastSeen harness. The row proves advertised-but-unapproved
+  route projection against a temporary Postgres database.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-three Postgres stock-client rows.

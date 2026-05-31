@@ -71,6 +71,7 @@ smoke_ids=(
   postgres-authkey
   postgres-web-register
   postgres-web-register-tags
+  postgres-route-advertise
   postgres-route-approve
   postgres-route-exit-node
   postgres-web-register-route-approve
@@ -205,6 +206,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -281,6 +283,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-web-register-smoke.sh
   tools/real-client/postgres-web-register-tags-smoke.sh
+  tools/real-client/postgres-route-advertise-smoke.sh
   tools/real-client/postgres-route-approve-smoke.sh
   tools/real-client/postgres-route-exit-node-smoke.sh
   tools/real-client/postgres-web-register-route-approve-smoke.sh
@@ -386,6 +389,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-tags-headscale-go-smoke.sh
+  tools/real-client/postgres-route-advertise-headscale-go-smoke.sh
   tools/real-client/postgres-route-approve-headscale-go-smoke.sh
   tools/real-client/postgres-route-exit-node-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-route-approve-headscale-go-smoke.sh
@@ -491,6 +495,7 @@ smoke_assertions=(
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "production Postgres web registration with owned requested tag"
+  "production Postgres route advertisement without approval"
   "production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen"
   "production Postgres exit-node route advertisement/approval"
   "production Postgres web registration with route advertisement/approval"

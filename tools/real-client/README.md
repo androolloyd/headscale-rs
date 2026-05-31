@@ -80,6 +80,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
+| Database | `postgres-route-advertise` | `postgres-route-advertise-smoke.sh` | `postgres-route-advertise-headscale-go-smoke.sh` | Production Postgres route advertisement without approval |
 | Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
 | Database | `postgres-route-exit-node` | `postgres-route-exit-node-smoke.sh` | `postgres-route-exit-node-headscale-go-smoke.sh` | Production Postgres exit-node route advertisement/approval |
 | Database | `postgres-web-register-route-approve` | `postgres-web-register-route-approve-smoke.sh` | `postgres-web-register-route-approve-headscale-go-smoke.sh` | Production Postgres web registration with route advertisement/approval |

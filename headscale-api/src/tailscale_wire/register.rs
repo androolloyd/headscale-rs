@@ -93,6 +93,7 @@ const REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH: &str =
 const REGISTER_LOGOUT_MACHINE_KEY_MISMATCH: &str = "node exist with different machine key";
 
 pub(crate) const CAPABILITY_ADMIN: &str = "https://tailscale.com/cap/is-admin";
+pub(crate) const CAPABILITY_DEFAULT_AUTO_UPDATE: &str = "default-auto-update";
 pub(crate) const CAPABILITY_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
 pub(crate) const CAPABILITY_SSH: &str = "https://tailscale.com/cap/ssh";
 
@@ -1035,6 +1036,10 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
 fn default_node_cap_map() -> BTreeMap<String, Vec<serde_json::Value>> {
     BTreeMap::from([
         (CAPABILITY_ADMIN.to_string(), Vec::new()),
+        (
+            CAPABILITY_DEFAULT_AUTO_UPDATE.to_string(),
+            vec![serde_json::Value::Bool(false)],
+        ),
         (CAPABILITY_FILE_SHARING.to_string(), Vec::new()),
         (CAPABILITY_SSH.to_string(), Vec::new()),
     ])

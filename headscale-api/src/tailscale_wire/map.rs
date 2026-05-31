@@ -58,7 +58,9 @@ fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
 }
 use serde::Serialize;
 
-use super::register::{CAPABILITY_FILE_SHARING, record_to_map_node};
+use super::register::{
+    CAPABILITY_DEFAULT_AUTO_UPDATE, CAPABILITY_FILE_SHARING, record_to_map_node,
+};
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
@@ -426,6 +428,7 @@ fn self_map_node_from_snapshot(
     policy: &PolicyStore,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
     let mut own_node = record_to_map_node(own, tailnet_domain);
@@ -443,7 +446,7 @@ fn self_map_node_from_snapshot(
             .unwrap_or_default(),
     );
     apply_policy_attrs_to_map_node(&mut own_node, own, policy);
-    apply_taildrop_to_map_node(&mut own_node, taildrop_enabled);
+    apply_runtime_caps_to_map_node(&mut own_node, taildrop_enabled, auto_update_enabled);
     Some(own_node)
 }
 
@@ -454,6 +457,7 @@ fn self_map_node_for_registry(
     self_node_key: &str,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
 ) -> Option<MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -470,6 +474,7 @@ fn self_map_node_for_registry(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     )
 }
 
@@ -480,6 +485,7 @@ fn visible_peer_state_for_registry(
     self_node_key: &str,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
 ) -> BTreeMap<u64, MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -508,6 +514,7 @@ fn visible_peer_state_for_registry(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     );
     peer_state_from_nodes(&peers)
 }
@@ -622,6 +629,7 @@ fn visible_peer_map_nodes(
     policy: &PolicyStore,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
 ) -> Vec<MapNode> {
     let mut peers: Vec<MapNode> = snapshot
         .iter()
@@ -642,7 +650,7 @@ fn visible_peer_map_nodes(
             );
             apply_selected_routes_to_map_node(&mut node, &selected_primary, &selected_allowed);
             apply_policy_attrs_to_map_node(&mut node, rec, policy);
-            apply_taildrop_to_map_node(&mut node, taildrop_enabled);
+            apply_runtime_caps_to_map_node(&mut node, taildrop_enabled, auto_update_enabled);
             node
         })
         .collect();
@@ -702,10 +710,18 @@ fn apply_policy_attrs_to_map_node(
     }
 }
 
-fn apply_taildrop_to_map_node(node: &mut MapNode, taildrop_enabled: bool) {
+fn apply_runtime_caps_to_map_node(
+    node: &mut MapNode,
+    taildrop_enabled: bool,
+    auto_update_enabled: bool,
+) {
     if !taildrop_enabled {
         node.cap_map.remove(CAPABILITY_FILE_SHARING);
     }
+    node.cap_map.insert(
+        CAPABILITY_DEFAULT_AUTO_UPDATE.to_string(),
+        vec![serde_json::Value::Bool(auto_update_enabled)],
+    );
 }
 
 /// How long we wait for a second peer to join before returning an
@@ -1106,6 +1122,7 @@ async fn map_inner(
         &state.policy,
         req.version,
         taildrop_enabled,
+        state.runtime_config.auto_update.enabled,
     ) else {
         return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
@@ -1125,6 +1142,7 @@ async fn map_inner(
         &state.policy,
         req.version,
         taildrop_enabled,
+        state.runtime_config.auto_update.enabled,
     );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &state.policy, &snapshot, &node_key_hex);
@@ -1155,7 +1173,7 @@ async fn map_inner(
         ),
         control_time: Some(chrono::Utc::now()),
         debug: Some(DebugConfig {
-            disable_log_tail: true,
+            disable_log_tail: !state.runtime_config.log_tail.enabled,
             ..DebugConfig::default()
         }),
         // FULL MapResponse — NOT a keepalive. Upstream
@@ -1219,6 +1237,8 @@ async fn map_inner(
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
         let taildrop_enabled = state.runtime_config.taildrop.enabled;
+        let auto_update_enabled = state.runtime_config.auto_update.enabled;
+        let disable_log_tail = !state.runtime_config.log_tail.enabled;
         let derp_map_for_stream = state.derp_map.clone();
         let derp_rx = state.derp_map.subscribe();
         let dns_for_stream = state.dns.clone();
@@ -1366,6 +1386,8 @@ async fn map_inner(
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
+                                auto_update_enabled,
+                                disable_log_tail,
                                 compression,
                                 last_self_node.as_ref(),
                                 &last_peer_state,
@@ -1396,6 +1418,7 @@ async fn map_inner(
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
+                                auto_update_enabled,
                                 compression,
                                 last_self_node.as_ref(),
                                 &last_peer_state,
@@ -1424,6 +1447,7 @@ async fn map_inner(
                             &dns,
                             cap_version,
                             taildrop_enabled,
+                            auto_update_enabled,
                             compression,
                             last_self_node.as_ref(),
                             &last_peer_state,
@@ -1451,14 +1475,16 @@ async fn map_inner(
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
+                                auto_update_enabled,
+                                disable_log_tail,
                                 compression,
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
                                 public_control_url.as_deref().unwrap_or(""),
                             ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
                         ))
                     }
                     res = derp_rx.changed() => {
@@ -1482,14 +1508,16 @@ async fn map_inner(
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
+                                auto_update_enabled,
+                                disable_log_tail,
                                 compression,
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
                                 public_control_url.as_deref().unwrap_or(""),
                             ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
+                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
                         ))
                         }
                     }
@@ -1666,6 +1694,8 @@ fn rebuild_map_batch_chunk(
     dns: &Arc<DnsStore>,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
+    disable_log_tail: bool,
     compression: MapFrameCompression,
     last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
@@ -1691,6 +1721,8 @@ fn rebuild_map_batch_chunk(
                 dns,
                 cap_version,
                 taildrop_enabled,
+                auto_update_enabled,
+                disable_log_tail,
                 compression,
                 map_batch_response_type(changes),
                 mapresponse_debug,
@@ -1704,6 +1736,7 @@ fn rebuild_map_batch_chunk(
                 self_node_key,
                 cap_version,
                 taildrop_enabled,
+                auto_update_enabled,
             ),
             self_map_node_for_registry(
                 machines,
@@ -1712,6 +1745,7 @@ fn rebuild_map_batch_chunk(
                 self_node_key,
                 cap_version,
                 taildrop_enabled,
+                auto_update_enabled,
             ),
         ));
     }
@@ -1723,6 +1757,7 @@ fn rebuild_map_batch_chunk(
         dns,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
         compression,
         last_self_node,
         last_peer_state,
@@ -1740,6 +1775,7 @@ fn rebuild_peer_delta_chunk(
     dns: &Arc<DnsStore>,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
     compression: MapFrameCompression,
     last_self_node: Option<&MapNode>,
     last_peer_state: &BTreeMap<u64, MapNode>,
@@ -1792,6 +1828,7 @@ fn rebuild_peer_delta_chunk(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     );
     let self_node_changed = match (&current_self_node, last_self_node) {
         (Some(current), Some(previous)) => {
@@ -1812,6 +1849,7 @@ fn rebuild_peer_delta_chunk(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     );
     let current_peer_state = peer_state_from_nodes(&peers_changed);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
@@ -1958,6 +1996,8 @@ fn rebuild_map_chunk(
     dns: &Arc<DnsStore>,
     cap_version: u32,
     taildrop_enabled: bool,
+    auto_update_enabled: bool,
+    disable_log_tail: bool,
     compression: MapFrameCompression,
     response_type: &str,
     mapresponse_debug: &MapResponseDebugStore,
@@ -1995,6 +2035,7 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     ) else {
         return build_keepalive_chunk(compression);
     };
@@ -2010,6 +2051,7 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
         taildrop_enabled,
+        auto_update_enabled,
     );
     let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
     let user_profiles =
@@ -2026,7 +2068,7 @@ fn rebuild_map_chunk(
         ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
         control_time: Some(chrono::Utc::now()),
         debug: Some(DebugConfig {
-            disable_log_tail: true,
+            disable_log_tail,
             ..DebugConfig::default()
         }),
         keep_alive: false,
@@ -2080,7 +2122,10 @@ mod tests {
     use crate::tailscale_wire::{
         DerpMapStore, MachineRecord, MachineRegistry, MapResponseDebugStore, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
-        register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
+        register::{
+            CAPABILITY_ADMIN, CAPABILITY_DEFAULT_AUTO_UPDATE, CAPABILITY_FILE_SHARING,
+            CAPABILITY_SSH,
+        },
         router as public_router, spawn_map_change_batcher,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::{DerpMap, DerpRegion, DerpRegionNode, DnsRecord},
@@ -2185,6 +2230,17 @@ mod tests {
         assert!(node.cap_map.contains_key(CAPABILITY_ADMIN));
         assert!(node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
         assert!(node.cap_map.contains_key(CAPABILITY_SSH));
+        assert_default_auto_update(node, false);
+    }
+
+    fn assert_default_auto_update(node: &MapNode, enabled: bool) {
+        assert_eq!(
+            node.cap_map
+                .get(CAPABILITY_DEFAULT_AUTO_UPDATE)
+                .and_then(|values| values.first())
+                .and_then(serde_json::Value::as_bool),
+            Some(enabled)
+        );
     }
 
     fn policy_record(
@@ -3555,14 +3611,23 @@ mod tests {
 
     #[tokio::test]
     async fn stream_true_derp_map_refresh_emits_full_map_response() {
-        let (state, _dir) = fixture();
+        let (mut state, _dir) = fixture();
+        let mut runtime_config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        runtime_config.auto_update.enabled = true;
+        runtime_config.log_tail.enabled = true;
+        state.runtime_config = Arc::new(runtime_config);
         let a = "d1".repeat(32);
         insert_peer(&state, &a, "peer-a", 10);
 
         let app = router(state.clone());
         let mut body = open_zstd_stream(app, &a).await;
         let first = next_zstd_map_response(&mut body).await;
-        assert!(first.derp_map.unwrap().regions.is_empty());
+        assert_eq!(
+            first.debug.as_ref().map(|debug| debug.disable_log_tail),
+            Some(false)
+        );
+        assert_default_auto_update(first.node.as_ref().expect("own node present"), true);
+        assert!(first.derp_map.as_ref().unwrap().regions.is_empty());
 
         state.derp_map.set(DerpMap {
             home_params: None,
@@ -3596,6 +3661,11 @@ mod tests {
         });
 
         let updated = next_zstd_map_response(&mut body).await;
+        assert_eq!(
+            updated.debug.as_ref().map(|debug| debug.disable_log_tail),
+            Some(false)
+        );
+        assert_default_auto_update(updated.node.as_ref().expect("own node present"), true);
         let derp_map = updated.derp_map.unwrap();
         assert_eq!(
             derp_map
@@ -7219,6 +7289,49 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let node = mr.node.as_ref().expect("own node present");
         assert_default_cap_map(node);
+    }
+
+    #[tokio::test]
+    async fn map_response_projects_auto_update_runtime_config_to_cap_map() {
+        let (mut state, _dir) = fixture();
+        let mut runtime_config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        runtime_config.auto_update.enabled = true;
+        state.runtime_config = Arc::new(runtime_config);
+
+        let node_key = "d0".repeat(32);
+        state.machines.upsert(
+            node_key.clone(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_key.clone(),
+                TEST_MACHINE_KEY_HEX.to_string(),
+                "alice".into(),
+                "server".into(),
+                Ipv4Addr::new(100, 64, 0, 12),
+                false,
+            ),
+        );
+        let peer_key = "d3".repeat(32);
+        insert_peer(&state, &peer_key, "peer", 14);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        assert_default_auto_update(mr.node.as_ref().expect("own node present"), true);
+        assert_default_auto_update(mr.peers.first().expect("peer present"), true);
     }
 
     #[tokio::test]

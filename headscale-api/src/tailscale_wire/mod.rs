@@ -2516,7 +2516,7 @@ impl MachineRegistry {
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
         let node_id = self.stable_node_id_for_key(node_key_hex);
-        let existed = self.get(node_key_hex).is_some();
+        let existed = self.inner.read().contains_key(node_key_hex);
         if existed {
             self.cancel_stream_connections(node_id);
         }

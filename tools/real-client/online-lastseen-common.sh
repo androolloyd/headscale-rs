@@ -1142,7 +1142,7 @@ wait_for_client_netmap() {
 
 debug_ping_url() {
   case "${target}" in
-    rust) printf '%s/debug/ping' "${local_control_url}" ;;
+    rust) printf 'http://127.0.0.1:%s/debug/ping' "${metrics_port}" ;;
     headscale-go) printf 'http://127.0.0.1:%s/debug/ping' "${metrics_port}" ;;
   esac
 }

@@ -676,3 +676,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   compile-only checks, and the core route-approval regression test. Local
   API/CLI compile-only checks were capped and deferred after the `headscale-api`
   build script stalled; CI should cover those surfaces with the normal gates.
+
+## 2026-05-31 Ping lifecycle CI harness fix
+
+- Fixed the production online/LastSeen harness to call Rust `/debug/ping` on
+  the metrics/debug listener, matching where `metrics_debug_router` mounts the
+  debug ping route and matching the older auth-key ping harness.
+- The previous CI failure for `postgres-ping-lifecycle` returned the public
+  listener fallback HTML instead of exercising the PingRequest callback path.

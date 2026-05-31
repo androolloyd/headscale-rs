@@ -1207,18 +1207,11 @@ async fn map_inner(
         // The stream's carried state is enough to re-build MapResponse
         // on each registry / policy / DNS wake.
         //
-        // # audit-2 C-1: lost-wake fix (commit follow-up)
-        //
-        // We subscribe to the registry's generation-counter watch
-        // channel **before** taking the first chunk. The receiver
-        // remembers its last-seen generation across `.await` boundaries
-        // — any `upsert` / `update_with` that fires while this unfold
-        // is *between* iterations bumps the sender. When the production
-        // batcher is enabled, registry generation wakes only provide
-        // cancellation/self-delete awareness; visible peer deltas are
-        // emitted from the tick-published map-batch watch channel.
-        // Embedders/tests that do not spawn the batcher keep the old
-        // missed-update-tolerant generation path as a fallback.
+        // Registry changes are delivered through the tick-published map
+        // batch watch when the batcher is running. We still subscribe to
+        // the generation counter for self-deletion/cancellation awareness
+        // and as a compatibility fallback for embedders that have not
+        // started the batch task.
         let machines = state.machines.clone();
         let gen_rx = state.machines.subscribe_gen();
         let map_batch_rx = state.machines.subscribe_map_batches();
@@ -1516,7 +1509,7 @@ async fn map_inner(
                                 last_self_node.clone(),
                             ))
                         } else {
-                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
+                            None
                         }
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
@@ -1650,6 +1643,9 @@ fn map_batch_peer_delta_options(changes: &[MapChange]) -> PeerDeltaOptions {
 }
 
 fn map_batch_response_type(changes: &[MapChange]) -> &'static str {
+    if changes.iter().any(MapChange::is_full) {
+        return "full";
+    }
     if changes.iter().any(|change| {
         change.content.include_derp_map
             || change.content.include_dns
@@ -1681,6 +1677,9 @@ fn rebuild_map_batch_chunk(
     changes: &[MapChange],
 ) -> Option<PeerDeltaChunk> {
     if changes.is_empty() {
+        return None;
+    }
+    if changes.iter().all(|change| change.content.ping_request) {
         return None;
     }
 
@@ -2146,6 +2145,22 @@ mod tests {
                 false,
             ),
         );
+    }
+
+    const TEST_MAP_BATCH_INTERVAL: Duration = Duration::from_millis(25);
+
+    async fn start_test_map_batcher(state: &WireState) -> tokio::task::JoinHandle<()> {
+        let handle = crate::tailscale_wire::spawn_map_change_batcher(
+            state.machines.clone(),
+            TEST_MAP_BATCH_INTERVAL,
+        );
+        tokio::task::yield_now().await;
+        handle
+    }
+
+    async fn publish_test_map_batch() {
+        tokio::time::advance(TEST_MAP_BATCH_INTERVAL).await;
+        tokio::task::yield_now().await;
     }
 
     fn routed_record(
@@ -5082,17 +5097,17 @@ mod tests {
         );
     }
 
-    /// Stream:true: notify_waiters on the registry produces a follow-up
-    /// MapResponse chunk on the existing stream (PR 3 acceptance).
-    /// We drive `tokio::time::pause` so the test doesn't actually wait
-    /// 30s for the keepalive interval.
+    /// Stream:true: registry changes are held until the map-change
+    /// batcher publishes its tick, then the existing stream emits the
+    /// incremental peer delta.
     #[tokio::test(start_paused = true)]
-    async fn stream_true_emits_mapresponse_chunk_on_registry_change() {
+    async fn stream_true_emits_mapresponse_chunk_after_map_batch_tick() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
         insert_peer(&state, &a, "peer-a", 10);
         // Note: only peer-a registered initially.
+        let _batcher = start_test_map_batcher(&state).await;
 
         let app = router(state.clone());
         let public_app = public_router(state.clone());
@@ -5125,24 +5140,14 @@ mod tests {
         let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(first_mr.peers.len(), 0);
 
-        // Schedule the registry change. **audit-2 C-1 fix landed**:
-        // since the stream now consumes a `watch::Receiver<u64>` (see
-        // the wake-channel doc on `MachineRegistry`), the receiver's
-        // last-seen generation lags the sender across `.await`
-        // boundaries — a bump fired BEFORE the receiver is parked on
-        // `changed()` is still captured by the next call. We keep the
-        // 50ms spawn-delay here for readability (it preserves the
-        // "first chunk → wait → second chunk" pacing that makes the
-        // test easy to read), but the previous "registered listener
-        // is mandatory before the wake" hazard is gone — see the
-        // companion `stream_true_wake_during_chunk_build_is_not_lost`
-        // test below for the load-bearing proof.
-        let state_for_spawn = state.clone();
-        let b_clone = b.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            insert_peer(&state_for_spawn, &b_clone, "peer-b", 11);
-        });
+        insert_peer(&state, &b, "peer-b", 11);
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "registry generation wakes must not bypass the batch tick"
+        );
+        publish_test_map_batch().await;
 
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
@@ -5328,6 +5333,45 @@ mod tests {
         assert!(latency <= Duration::from_secs(5));
     }
 
+    #[tokio::test]
+    async fn stream_true_batch_tick_does_not_duplicate_direct_ping_frame() {
+        let (mut state, _dir) = fixture();
+        state.public_control_url = Some("https://control.example".into());
+        let a = "aa".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert!(first_mr.ping_request.is_none());
+
+        let node_id = stable_id_from_key(&a);
+        let (ping_id, _response) = state.register_ping(node_id);
+        state.dispatch_ping_request(node_id, &ping_id, true, false);
+
+        let ping_mr = next_zstd_map_response(&mut body).await;
+        assert!(
+            ping_mr.ping_request.is_some(),
+            "ping watch should still deliver the direct PingRequest frame"
+        );
+
+        tokio::time::sleep(TEST_MAP_BATCH_INTERVAL + Duration::from_millis(10)).await;
+        if let Ok(Some(Ok(frame))) = tokio::time::timeout(
+            Duration::from_millis(20),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        {
+            let chunk = frame.into_data().unwrap();
+            let decoded = decode_framed(&chunk);
+            panic!(
+                "the pending PingNode batch should be consumed as a no-op, not emitted as a duplicate frame: {}",
+                String::from_utf8_lossy(&decoded)
+            );
+        }
+    }
+
     /// Upstream always length-prefixes map stream frames, but only
     /// zstd-compresses the frame body when the request asks for it.
     #[tokio::test]
@@ -5370,23 +5414,15 @@ mod tests {
         );
     }
 
-    /// audit-2 C-1: a registry change fired **before** the unfold
-    /// re-parks on `changed()` MUST still wake the next chunk.
-    ///
-    /// The prior `Notify::notified()` implementation lost wakes
-    /// emitted in the window between "previous chunk yielded" and
-    /// "next iteration registers the listener". The watch-channel
-    /// receiver is missed-update tolerant: the sender's value is
-    /// stored in the channel; if the receiver hasn't observed the
-    /// latest yet, `changed()` returns immediately. This test fires
-    /// the registry change with NO `sleep` first, exercising exactly
-    /// the gap the prior implementation lost.
+    /// A registry change fired before the unfold re-parks must still
+    /// be captured and delivered by the next map-batch tick.
     #[tokio::test(start_paused = true)]
-    async fn stream_true_wake_during_chunk_build_is_not_lost() {
+    async fn stream_true_wake_during_chunk_build_is_not_lost_before_batch_tick() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
         insert_peer(&state, &a, "peer-a", 10);
+        let _batcher = start_test_map_batcher(&state).await;
 
         let app = router(state.clone());
         let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
@@ -5413,19 +5449,20 @@ mod tests {
             .unwrap();
         let _ = frame.into_data().unwrap();
 
-        // CRITICAL: bump the registry IMMEDIATELY — no sleep, no yield.
-        // Under the old `Notify`-only implementation, the unfold has
-        // returned the first chunk into the framed body and is now
-        // re-entering its async block; the `Notified` listener for
-        // the second iteration has not yet been registered. The
-        // `notify_waiters()` call below would have been dropped on
-        // the floor. Under the watch-channel implementation, the
-        // sender's new value is stored; the next `changed().await`
-        // returns immediately.
+        // CRITICAL: publish no batch yet. The registry mutation happens
+        // immediately after the first chunk and must be retained as
+        // pending batch work, not emitted through the generation watch.
         insert_peer(&state, &b, "peer-b", 11);
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "registry generation wakes must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
 
-        // Now read the next chunk — must be the refreshed MapResponse
-        // (PeersChanged.len == 1), NOT a keepalive.
+        // Now read the next chunk — must be the retained peer delta,
+        // not a keepalive and not a lost wake.
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()

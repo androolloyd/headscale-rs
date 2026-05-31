@@ -1913,8 +1913,8 @@ pub struct MachineRegistry {
     /// headscale-go's mapper batcher add-to-batch semantics before stream
     /// delivery is switched over to tick-drained batches.
     pending_map_changes: RwLock<BTreeMap<u64, Vec<MapChange>>>,
-    /// Last tick-drained map-change batch. Streams will consume this
-    /// watch channel once the delivery path moves fully to batch ticks.
+    /// Last tick-drained map-change batch. Streaming map responses consume
+    /// this watch channel when the batch task is enabled.
     map_batch_tx: Arc<watch::Sender<MapChangeBatch>>,
     /// Whether the headscale-go-style batch tick task is active for
     /// this registry. Streams use this to prefer delayed batch delivery

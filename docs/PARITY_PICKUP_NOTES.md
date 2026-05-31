@@ -374,8 +374,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-three Pg rows, including
-  `postgres-web-register-tags`, `postgres-route-advertise`, `postgres-ssh-oidc-check`,
+  CI now provisions Postgres for all thirty-four Pg rows, including
+  `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
+  `postgres-route-advertise`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
@@ -464,3 +465,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   route projection against a temporary Postgres database.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-three Postgres stock-client rows.
+
+## 2026-05-31 Postgres web-registration unowned-tag smoke slice
+
+- Extended the backend-aware online/LastSeen harness with an expected
+  web-registration failure path that asserts rejected registration does not
+  create nodes.
+- Added paired `postgres-web-register-unowned-tag` Rust/headscale-go rows over
+  a temporary Postgres database. The row proves web/CLI registration rejects a
+  requested tag that is not owned by the registering user.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-four Postgres stock-client rows.

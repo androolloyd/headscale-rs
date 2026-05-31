@@ -26,6 +26,7 @@ expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
+expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
@@ -84,6 +85,24 @@ if ((expect_set_tags_failure)) && [[ -z "${set_tags_after_login}" ]]; then
   echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE requires REAL_CLIENT_SET_TAGS_AFTER_LOGIN" >&2
   exit 2
 fi
+
+case "${expected_register_failure}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_register_failure=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_register_failure=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE must be true or false, got ${expected_register_failure}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
+  echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE requires REAL_CLIENT_LOGIN_MODE=web" >&2
+  exit 2
+fi
+registration_failed_as_expected=0
 
 case "${reauth_after_login}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -701,6 +720,7 @@ login_client() {
       return 1
     fi
     registration_id="$(cat "${registration_id_path}")"
+    register_status=0
     case "${target}" in
       rust)
         auth_id="${registration_id}"
@@ -709,13 +729,38 @@ login_client() {
           *) auth_id="hskey-authreq-${auth_id}" ;;
         esac
         headscale_cmd -o json auth register "--auth-id=${auth_id}" --user alice \
-          >"${work_dir}/${client_name}.registered.json"
+          >"${work_dir}/${client_name}.registered.json" \
+          2>"${work_dir}/${client_name}.registered.stderr" ||
+          register_status="$?"
         ;;
       headscale-go)
         headscale_cmd -o json nodes register --user alice "--key=${registration_id}" \
-          >"${work_dir}/${client_name}.registered.json"
+          >"${work_dir}/${client_name}.registered.json" \
+          2>"${work_dir}/${client_name}.registered.stderr" ||
+          register_status="$?"
         ;;
     esac
+    if ((expect_register_failure)); then
+      if ((register_status == 0)); then
+        echo "expected web registration to fail for requested tags ${preauth_tags}" >&2
+        kill "${up_pid}" >/dev/null 2>&1 || true
+        wait "${up_pid}" >/dev/null 2>&1 || true
+        echo "::endgroup::"
+        return 1
+      fi
+      registration_failed_as_expected=1
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      echo "::endgroup::"
+      return 0
+    fi
+    if ((register_status != 0)); then
+      cat "${work_dir}/${client_name}.registered.stderr" >&2 || true
+      kill "${up_pid}" >/dev/null 2>&1 || true
+      wait "${up_pid}" >/dev/null 2>&1 || true
+      echo "::endgroup::"
+      return "${register_status}"
+    fi
     wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}" ||
       up_status="$?"
   else
@@ -931,6 +976,31 @@ wait_for_node_tags_if_requested() {
   }
 }
 
+assert_no_nodes_file() {
+  local path="$1"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    nodes =
+      if payload.nil?
+        []
+      elsif payload.is_a?(Array)
+        payload
+      else
+        payload.fetch("nodes")
+      end
+    abort("expected rejected web registration to create no nodes, got #{nodes.inspect}") unless nodes.empty?
+    puts JSON.pretty_generate({nodes: nodes.length})
+  ' "${path}"
+}
+
+wait_for_no_nodes_after_expected_registration_failure() {
+  local path="${work_dir}/nodes-after-rejected-registration.json"
+  wait_for "no nodes after rejected web registration" "headscale_cmd -o json nodes list >'${path}' && assert_no_nodes_file '${path}'" || {
+    dump_debug
+    return 1
+  }
+}
+
 approve_routes_if_requested() {
   [[ -n "${advertise_routes}" || -n "${approve_routes}" ]] || return 0
   wait_for_node_routes "${expected_available_routes}" "" "advertised routes"
@@ -1069,6 +1139,15 @@ start_server
 create_user_and_key
 start_client
 login_client
+if ((expect_register_failure)); then
+  if ((registration_failed_as_expected == 0)); then
+    echo "expected web registration failure path was not observed" >&2
+    exit 1
+  fi
+  wait_for_no_nodes_after_expected_registration_failure
+  echo "${target} rejected web registration real-client smoke passed"
+  exit 0
+fi
 reauth_client_if_requested
 approve_routes_if_requested
 set_tags_if_requested

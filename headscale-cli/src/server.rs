@@ -322,9 +322,18 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(status) = embedded_derp_runtime.sidecar_status() {
         tracing::info!(?status, "embedded DERP sidecar ready");
     }
-    let derp_map = derp_map_from_runtime_config(cfg.derp.as_ref(), embedded_derp_runtime.config())
-        .await
-        .context("load DERP runtime config")?;
+    let derp_shuffle_base_domain = cfg
+        .dns
+        .as_ref()
+        .map(|dns| dns.base_domain.as_str())
+        .unwrap_or("");
+    let derp_map = derp_map_from_runtime_config(
+        cfg.derp.as_ref(),
+        embedded_derp_runtime.config(),
+        derp_shuffle_base_domain,
+    )
+    .await
+    .context("load DERP runtime config")?;
     let (dns_store, dns_extra_records_path) = dns_store_from_config(
         cfg.dns.clone(),
         Some(&cfg.mesh_cidr),
@@ -458,6 +467,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         cfg.derp.clone(),
         cfg.embedded_derp.clone(),
         runtime.state.derp_map.clone(),
+        derp_shuffle_base_domain.to_string(),
     );
 
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
@@ -1624,9 +1634,10 @@ fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
 async fn derp_map_from_runtime_config(
     upstream: Option<&DerpConfig>,
     embedded: &EmbeddedDerpConfig,
+    base_domain: &str,
 ) -> Result<DerpMap> {
     let mut map = if let Some(upstream) = upstream {
-        crate::derp_config::load_derp_map(upstream).await?
+        crate::derp_config::load_derp_map(upstream, base_domain).await?
     } else {
         DerpMap::default()
     };
@@ -1645,6 +1656,7 @@ fn spawn_derp_auto_update_task(
     upstream: Option<DerpConfig>,
     embedded: EmbeddedDerpConfig,
     store: Arc<DerpMapStore>,
+    base_domain: String,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let upstream = upstream?;
     if !derp_auto_update_enabled(&upstream) {
@@ -1661,7 +1673,7 @@ fn spawn_derp_auto_update_task(
         );
         loop {
             tokio::time::sleep(interval).await;
-            match refresh_derp_map_once(&upstream, &embedded, &store).await {
+            match refresh_derp_map_once(&upstream, &embedded, &store, &base_domain).await {
                 Ok(()) => {
                     tracing::info!("DERP map auto-update completed");
                 }
@@ -1722,8 +1734,9 @@ async fn refresh_derp_map_once(
     upstream: &DerpConfig,
     embedded: &EmbeddedDerpConfig,
     store: &DerpMapStore,
+    base_domain: &str,
 ) -> Result<()> {
-    let map = derp_map_from_runtime_config(Some(upstream), embedded).await?;
+    let map = derp_map_from_runtime_config(Some(upstream), embedded, base_domain).await?;
     store.set(map);
     Ok(())
 }
@@ -3113,7 +3126,7 @@ regions:
             ..EmbeddedDerpConfig::default()
         };
 
-        let map = derp_map_from_runtime_config(Some(&derp), &embedded)
+        let map = derp_map_from_runtime_config(Some(&derp), &embedded, "")
             .await
             .unwrap();
 
@@ -3157,7 +3170,7 @@ regions:
             ..EmbeddedDerpConfig::default()
         };
 
-        let err = derp_map_from_runtime_config(Some(&derp), &embedded)
+        let err = derp_map_from_runtime_config(Some(&derp), &embedded, "")
             .await
             .unwrap_err();
 
@@ -3223,7 +3236,7 @@ regions:
         };
         let store = DerpMapStore::shared(DerpMap::default());
 
-        refresh_derp_map_once(&derp, &embedded, &store)
+        refresh_derp_map_once(&derp, &embedded, &store, "")
             .await
             .unwrap();
 

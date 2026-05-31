@@ -31,6 +31,9 @@ reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
+prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
+prefix_v6="${REAL_CLIENT_PREFIX_V6:-}"
+expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
@@ -148,6 +151,17 @@ case "${expected_no_magic_dns}" in
 esac
 if ((expect_no_magic_dns)) && [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS conflicts with REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX" >&2
+  exit 2
+fi
+case "${expected_tailscale_ip_families}" in
+  "" | ipv4 | ipv4-only | ipv6 | ipv6-only | dual | dual-stack) ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES must be empty, ipv4-only, ipv6-only, or dual-stack; got ${expected_tailscale_ip_families}" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${prefix_v4}" && -z "${prefix_v6}" ]]; then
+  echo "at least one of REAL_CLIENT_PREFIX_V4 or REAL_CLIENT_PREFIX_V6 must be non-empty" >&2
   exit 2
 fi
 
@@ -616,8 +630,14 @@ noise:
 
 prefixes:
   allocation: sequential
-  v4: 100.64.0.0/10
-
+EOF
+      if [[ -n "${prefix_v4}" ]]; then
+        printf '  v4: %s\n' "${prefix_v4}" >>"${config_path}"
+      fi
+      if [[ -n "${prefix_v6}" ]]; then
+        printf '  v6: %s\n' "${prefix_v6}" >>"${config_path}"
+      fi
+      cat >>"${config_path}" <<EOF
 dns:
   magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
@@ -644,8 +664,14 @@ noise:
 
 prefixes:
   allocation: sequential
-  v4: 100.64.0.0/10
-
+EOF
+      if [[ -n "${prefix_v4}" ]]; then
+        printf '  v4: %s\n' "${prefix_v4}" >>"${config_path}"
+      fi
+      if [[ -n "${prefix_v6}" ]]; then
+        printf '  v6: %s\n' "${prefix_v6}" >>"${config_path}"
+      fi
+      cat >>"${config_path}" <<EOF
 dns:
   magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
@@ -905,7 +931,7 @@ login_client() {
     echo "tailscale up returned ${up_status}; verifying logged-in netmap"
   fi
   wait_for "logged-in client netmap" \
-    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && ips.any? { |ip| ip.to_s.include?(\".\") }; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.status.json'"
+    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && !ips.empty?; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.status.json'"
   echo "::endgroup::"
 }
 
@@ -958,7 +984,7 @@ reauth_client_if_requested() {
     echo "tailscale reauth returned ${up_status}; verifying logged-in netmap"
   fi
   wait_for "logged-in client netmap after reauth" \
-    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.reauth-status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && ips.any? { |ip| ip.to_s.include?(\".\") }; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.reauth-status.json'"
+    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.reauth-status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && !ips.empty?; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.reauth-status.json'"
   echo "::endgroup::"
 }
 
@@ -1269,6 +1295,33 @@ assert_dns_routes_if_requested() {
   echo "::endgroup::"
 }
 
+assert_tailscale_ip_family_if_requested() {
+  [[ -n "${expected_tailscale_ip_families}" ]] || return 0
+  echo "::group::assert Tailscale IP families"
+  local status_path="${work_dir}/${client_name}.ip-family-status.json"
+  docker exec "${client_name}" tailscale status --json >"${status_path}"
+  ruby -rjson -e '
+    expected = ARGV.fetch(0)
+    path = ARGV.fetch(1)
+    status = JSON.parse(File.read(path))
+    ips = Array(status["TailscaleIPs"])
+    has_v4 = ips.any? { |ip| ip.to_s.include?(".") }
+    has_v6 = ips.any? { |ip| ip.to_s.include?(":") }
+    case expected
+    when "ipv4", "ipv4-only"
+      abort("#{path}: expected IPv4-only TailscaleIPs, got #{ips.inspect}") unless has_v4 && !has_v6
+    when "ipv6", "ipv6-only"
+      abort("#{path}: expected IPv6-only TailscaleIPs, got #{ips.inspect}") unless !has_v4 && has_v6
+    when "dual", "dual-stack"
+      abort("#{path}: expected dual-stack TailscaleIPs, got #{ips.inspect}") unless has_v4 && has_v6
+    else
+      abort("unsupported expected IP family #{expected.inspect}")
+    end
+    puts JSON.pretty_generate({path: path, tailscale_ips: ips})
+  ' "${expected_tailscale_ip_families}" "${status_path}"
+  echo "::endgroup::"
+}
+
 node_id_for_client() {
   local path="$1"
   ruby -rjson -e '
@@ -1561,6 +1614,7 @@ assert_dns_extra_records_if_requested
 assert_dns_resolvers_if_requested
 assert_dns_fallback_resolvers_if_requested
 assert_dns_routes_if_requested
+assert_tailscale_ip_family_if_requested
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled

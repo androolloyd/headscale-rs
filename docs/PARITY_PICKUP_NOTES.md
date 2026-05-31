@@ -374,8 +374,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-one Pg rows, including
-  `postgres-ssh-oidc-check`, `postgres-ssh-cli-check`, and the paired
+  CI now provisions Postgres for all thirty-two Pg rows, including
+  `postgres-web-register-tags`, `postgres-ssh-oidc-check`,
+  `postgres-ssh-cli-check`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
   surfaces
@@ -438,6 +439,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-ssh-oidc-check-deny`, and `postgres-ssh-oidc-check-cancel`.
 - The real-client workflow includes these rows in `PR_SMOKES`; the matrix now
   has thirty-one Postgres stock-client rows.
+
+## 2026-05-31 Postgres web-registration tag smoke slice
+
+- Added paired `postgres-web-register-tags` Rust/headscale-go rows over the
+  backend-aware online/LastSeen harness. The row proves web/CLI registration
+  with an owned requested tag against a temporary Postgres database.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-two Postgres stock-client rows.
 
 ## 2026-05-31 Node DB helper parity slice
 

@@ -31,8 +31,8 @@ if ((default_scenarios == 1)) && [[ -z "${CURRENT_HEAD_GOLDEN+x}" ]]; then
 fi
 
 if ((${#scenarios[@]} == 0)); then
-  echo "no current-head parity scenarios found" >&2
-  exit 2
+  echo "no current-head parity scenarios found; default differential owns all staged current-head scenarios"
+  exit 0
 fi
 
 cargo run \

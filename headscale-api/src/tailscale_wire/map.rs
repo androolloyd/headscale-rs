@@ -81,6 +81,7 @@ use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPol
 const MAP_NODE_NOT_FOUND_ERROR: &str = "node not found";
 const MAP_NODE_KEY_MISMATCH_ERROR: &str =
     "node key in request does not match the one associated with this machine key";
+const NODE_ATTR_DISABLE_IPV4: &str = "disable-ipv4";
 const NODE_ATTR_SUGGEST_EXIT_NODE: &str = "suggest-exit-node";
 
 fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
@@ -702,15 +703,45 @@ fn apply_policy_attrs_to_map_node(
     rec: &super::MachineRecord,
     policy: &PolicyStore,
 ) {
+    let attrs = node_attrs_for_record(rec, policy);
+    apply_address_shape_attrs_to_map_node(node, rec, &attrs);
+    apply_self_cap_map_attrs_to_map_node(node, &attrs);
+}
+
+fn node_attrs_for_record(rec: &super::MachineRecord, policy: &PolicyStore) -> Vec<String> {
     let addr = rec.primary_addr_string();
     let view = NodeView {
         addr: addr.as_deref(),
         user: Some(&rec.user),
         tags: &rec.forced_tags,
     };
-    for attr in policy.node_attrs_for(&view) {
-        node.cap_map.entry(attr).or_default();
+    policy.node_attrs_for(&view)
+}
+
+fn has_node_attr(attrs: &[String], attr: &str) -> bool {
+    attrs.iter().any(|candidate| candidate == attr)
+}
+
+fn apply_self_cap_map_attrs_to_map_node(node: &mut MapNode, attrs: &[String]) {
+    for attr in attrs {
+        node.cap_map.entry(attr.clone()).or_default();
     }
+}
+
+fn apply_address_shape_attrs_to_map_node(
+    node: &mut MapNode,
+    rec: &super::MachineRecord,
+    attrs: &[String],
+) {
+    if !has_node_attr(attrs, NODE_ATTR_DISABLE_IPV4) {
+        return;
+    }
+    let Some(ipv4) = rec.ipv4 else {
+        return;
+    };
+    let own_ipv4_prefix = format!("{ipv4}/32");
+    node.addresses.retain(|addr| addr != &own_ipv4_prefix);
+    node.allowed_ips.retain(|addr| addr != &own_ipv4_prefix);
 }
 
 fn apply_peer_cap_map_to_map_node(
@@ -719,22 +750,14 @@ fn apply_peer_cap_map_to_map_node(
     policy: &PolicyStore,
     is_exit_node: bool,
 ) {
+    let attrs = node_attrs_for_record(rec, policy);
+    apply_address_shape_attrs_to_map_node(node, rec, &attrs);
     node.cap_map.clear();
     if !is_exit_node {
         return;
     }
 
-    let addr = rec.primary_addr_string();
-    let view = NodeView {
-        addr: addr.as_deref(),
-        user: Some(&rec.user),
-        tags: &rec.forced_tags,
-    };
-    if policy
-        .node_attrs_for(&view)
-        .iter()
-        .any(|attr| attr == NODE_ATTR_SUGGEST_EXIT_NODE)
-    {
+    if has_node_attr(&attrs, NODE_ATTR_SUGGEST_EXIT_NODE) {
         node.cap_map
             .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
     }
@@ -7585,6 +7608,120 @@ mod tests {
         let node = mr.node.as_ref().expect("own node present");
         assert_default_cap_map(node);
         assert!(node.cap_map.contains_key("randomize-client-port"));
+    }
+
+    #[tokio::test]
+    async fn map_response_disable_ipv4_node_attr_strips_self_cgnat_address_only() {
+        let (state, _dir) = fixture();
+        let node_key = "f1".repeat(32);
+        let mut rec = routed_record(&node_key, "self", 20, vec!["10.33.0.0/16".into()]);
+        rec.ipv6 = Some("fd7a:115c:a1e0::20".parse().unwrap());
+        state.machines.upsert(node_key.clone(), rec);
+        let _route_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&node_key),
+        );
+        insert_peer(&state, &"f2".repeat(32), "peer", 21);
+
+        let raw_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["*:*"]}
+            ],
+            "nodeAttrs": [{
+                "target": ["*"],
+                "attr": ["disable-ipv4"]
+            }]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let node = mr.node.as_ref().expect("own node present");
+
+        assert_eq!(node.addresses, vec!["fd7a:115c:a1e0::20/128"]);
+        assert!(!node.allowed_ips.contains(&"100.64.0.20/32".into()));
+        assert!(node.allowed_ips.contains(&"fd7a:115c:a1e0::20/128".into()));
+        assert!(node.allowed_ips.contains(&"10.33.0.0/16".into()));
+        assert!(node.cap_map.contains_key(NODE_ATTR_DISABLE_IPV4));
+    }
+
+    #[tokio::test]
+    async fn map_response_disable_ipv4_node_attr_strips_peer_cgnat_address_only() {
+        let (state, _dir) = fixture();
+        let viewer_key = "f3".repeat(32);
+        insert_peer(&state, &viewer_key, "viewer", 22);
+
+        let peer_key = "f4".repeat(32);
+        let mut rec = routed_record(&peer_key, "peer", 23, vec!["10.44.0.0/16".into()]);
+        rec.ipv6 = Some("fd7a:115c:a1e0::23".parse().unwrap());
+        rec.forced_tags = vec!["tag:ipv6only".into()];
+        state.machines.upsert(peer_key.clone(), rec);
+        let _route_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&peer_key),
+        );
+
+        let raw_policy = r#"{
+            "tagOwners": {"tag:ipv6only": ["alice@"]},
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["*:*"]}
+            ],
+            "nodeAttrs": [{
+                "target": ["tag:ipv6only"],
+                "attr": ["disable-ipv4"]
+            }]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+
+        let peer_id = state.machines.stable_node_id_for_key(&peer_key);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{viewer_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let peer = mr
+            .peers
+            .iter()
+            .find(|peer| peer.id == peer_id)
+            .expect("tagged peer present");
+
+        assert_eq!(peer.addresses, vec!["fd7a:115c:a1e0::23/128"]);
+        assert!(!peer.allowed_ips.contains(&"100.64.0.23/32".into()));
+        assert!(peer.allowed_ips.contains(&"fd7a:115c:a1e0::23/128".into()));
+        assert!(peer.allowed_ips.contains(&"10.44.0.0/16".into()));
+        assert!(
+            peer.cap_map.is_empty(),
+            "disable-ipv4 shapes peer addresses but is not exposed in peer CapMap"
+        );
     }
 
     fn framed_chunk_fixture() -> MapResponse {

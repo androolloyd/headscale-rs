@@ -375,7 +375,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all forty-six Pg rows, including
+  CI now provisions Postgres for all forty-seven Pg rows, including
   `postgres-online-lastseen`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -384,7 +384,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-via-same-tag-restart`,
   `postgres-ssh-oidc-check`,
-  `postgres-ssh-cli-check`, and the paired
+  `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
   surfaces
@@ -590,3 +590,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   production Postgres serving path.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   forty-six Postgres stock-client rows.
+
+## 2026-05-31 Postgres SSH checkPeriod cache smoke slice
+
+- Added paired `postgres-ssh-oidc-check-period-cache` Rust/headscale-go rows
+  over a temporary Postgres database. The row reuses the OIDC-backed Tailscale
+  SSH `check` flow and asserts a second SSH attempt inside `checkPeriod` does
+  not emit a new auth URL.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  forty-seven Postgres stock-client rows.

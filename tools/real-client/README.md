@@ -100,6 +100,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
+| Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache |
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
@@ -970,6 +971,8 @@ tools/real-client/ssh-oidc-check-smoke.sh
 tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
 tools/real-client/ssh-cli-check-smoke.sh
 tools/real-client/ssh-cli-check-headscale-go-smoke.sh
+tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
+tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-deny-smoke.sh
@@ -1018,6 +1021,9 @@ Useful knobs:
   `# Headscale SSH requires an additional check.`, and an access-denied regex.
 - `REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL=cli` approves the pending SSH check with
   `headscale auth approve --auth-id ...` instead of the browser flow.
+- `REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE=true` reruns the approved SSH
+  command inside the policy `checkPeriod` window and asserts no second auth URL
+  is emitted.
 - `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=wrong-user` uses a third mock OIDC login
   as `mallory@example.com` by default, expects HTTP `403` from the auth flow,
   and then asserts the denied SSH output shape.

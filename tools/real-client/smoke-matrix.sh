@@ -91,6 +91,7 @@ smoke_ids=(
   postgres-oidc-route-approve-restart
   postgres-ssh-oidc-check
   postgres-ssh-cli-check
+  postgres-ssh-oidc-check-period-cache
   postgres-ssh-oidc-check-wrong-user
   postgres-ssh-oidc-check-deny
   postgres-ssh-oidc-check-cancel
@@ -233,6 +234,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -329,6 +331,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-smoke.sh
   tools/real-client/postgres-ssh-cli-check-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh
@@ -448,6 +451,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh
@@ -567,6 +571,7 @@ smoke_assertions=(
   "production Postgres OIDC route approval survives server restart"
   "production Postgres OIDC-backed Tailscale SSH check approval"
   "production Postgres CLI-approved Tailscale SSH check approval"
+  "production Postgres OIDC-backed Tailscale SSH checkPeriod cache"
   "production Postgres wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres cancelled OIDC-backed Tailscale SSH check denial status/stdout/stderr"

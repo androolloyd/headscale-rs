@@ -23,6 +23,7 @@ exit_routes="${REAL_CLIENT_RESTART_EXIT_ROUTES:-${REAL_CLIENT_EXIT_ROUTES:-0.0.0
 initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
+route_via_same_tag_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
 route_via_reload_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
@@ -50,6 +51,19 @@ case "${route_via_restart}" in
     ;;
   *)
     echo "REAL_CLIENT_RESTART_ROUTE_VIA must be true or false, got ${route_via_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_via_same_tag_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_via_same_tag_restart_flag=1
+    route_via_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_via_same_tag_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG must be true or false, got ${route_via_same_tag_restart}" >&2
     exit 2
     ;;
 esac
@@ -146,6 +160,14 @@ if ((web_register_restart_flag && (route_via_restart_flag || route_health_restar
 fi
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
+  exit 2
+fi
+if ((route_via_same_tag_restart_flag && route_via_multiprefix_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG cannot be combined with REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX" >&2
+  exit 2
+fi
+if ((route_via_same_tag_restart_flag && route_via_reload_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG cannot be combined with REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD" >&2
   exit 2
 fi
 if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
@@ -437,6 +459,40 @@ EOF
 
 write_policy() {
   if ((route_via_restart_flag)); then
+    if ((route_via_same_tag_restart_flag)); then
+      cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-ha": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-ha"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-ha"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-ha"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-ha"]
+    }
+  ]
+}
+EOF
+      return
+    fi
     if ((route_via_multiprefix_restart_flag)); then
       cat >"${work_dir}/policy.hujson" <<EOF
 {
@@ -954,8 +1010,13 @@ create_route_via_users_and_keys() {
   router_user_id="$(create_user_json router "${work_dir}/user-router.json")"
   alice_user_id="$(create_user_json alice "${work_dir}/user-alice.json")"
   bob_user_id="$(create_user_json bob "${work_dir}/user-bob.json")"
-  router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-a "${work_dir}/preauth-router-a.json")"
-  router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
+  if ((route_via_same_tag_restart_flag)); then
+    router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha "${work_dir}/preauth-router-a.json")"
+    router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha "${work_dir}/preauth-router-b.json")"
+  else
+    router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-a "${work_dir}/preauth-router-a.json")"
+    router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
+  fi
   echo "created router user ${router_user_id}, alice user ${alice_user_id}, and bob user ${bob_user_id}"
   echo "minted tagged router keys"
   echo "::endgroup::"
@@ -1254,8 +1315,13 @@ assert_route_via_persisted_nodes() {
     router_b = find_node(nodes, router_b_name)
     alice = find_node(nodes, alice_name)
     bob = find_node(nodes, bob_name)
-    assert_router(router_a, routes, "tag:router-a")
-    assert_router(router_b, routes, "tag:router-b")
+    if ARGV.fetch(6) == "1"
+      assert_router(router_a, routes, "tag:router-ha")
+      assert_router(router_b, routes, "tag:router-ha")
+    else
+      assert_router(router_a, routes, "tag:router-a")
+      assert_router(router_b, routes, "tag:router-b")
+    end
 
     puts JSON.pretty_generate({
       router_a: router_a,
@@ -1264,7 +1330,7 @@ assert_route_via_persisted_nodes() {
       bob: bob,
       routes: routes,
     })
-  ' "${nodes_path}" "${advertised_routes}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}"
+  ' "${nodes_path}" "${advertised_routes}" "${router_name}" "${router_b_name}" "${observer_name}" "${bob_name}" "${route_via_same_tag_restart_flag}"
 }
 
 assert_web_registered_node() {
@@ -1943,6 +2009,15 @@ wait_for_route_via_owner() {
 wait_for_route_via_peer_maps() {
   local label="$1"
   local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  if ((route_via_same_tag_restart_flag)); then
+    wait_for_route_via_owner "${label} alice route via same-tag primary" \
+      "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-same-tag.json"
+    wait_for_route_via_owner "${label} bob route via same-tag primary" \
+      "${bob_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-bob-same-tag.json"
+    cat "${work_dir}/route-via-${safe_label}-alice-same-tag.json"
+    cat "${work_dir}/route-via-${safe_label}-bob-same-tag.json"
+    return
+  fi
   if ((route_via_multiprefix_restart_flag)); then
     wait_for_route_via_owner "${label} alice route ${route} via router-a" \
       "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-a.json"

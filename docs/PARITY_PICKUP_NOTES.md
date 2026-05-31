@@ -375,9 +375,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-five Pg rows, including
+  CI now provisions Postgres for all thirty-six Pg rows, including
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
-  `postgres-route-advertise`, `postgres-ssh-oidc-check`,
+  `postgres-route-advertise`, `postgres-route-via-same-tag-restart`,
+  `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
@@ -486,3 +487,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   and production Postgres restart without requiring the all-unhealthy variant.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-five Postgres stock-client rows.
+
+## 2026-05-31 Postgres route-via same-tag restart smoke slice
+
+- Added paired `postgres-route-via-same-tag-restart` Rust/headscale-go rows over
+  the restart persistence harness. The row proves same-tag multi-router
+  `grants[].via` route ownership survives production Postgres restart.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-six Postgres stock-client rows.

@@ -904,6 +904,51 @@ mod tests {
     }
 
     #[test]
+    fn localpart_plus_root_users_compile_for_member_destinations() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["autogroup:member"],
+                "dst": ["autogroup:member", "autogroup:tagged"],
+                "users": ["localpart:*@example.com", "root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice@example.com".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("bob@example.com".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+        ];
+
+        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(pol.rules.len(), 4);
+        assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.1"]);
+        assert_eq!(pol.rules[0].ssh_users["root"], "root");
+        assert_eq!(pol.rules[1].ssh_users["alice"], "alice");
+        assert_eq!(principal_ips_for_rule(&pol.rules[2]), vec!["100.64.0.2"]);
+        assert_eq!(pol.rules[2].ssh_users["root"], "root");
+        assert_eq!(pol.rules[3].ssh_users["bob"], "bob");
+        for rule in &pol.rules {
+            assert!(
+                !rule.ssh_users.contains_key("localpart:*@example.com"),
+                "the localpart pattern must not leak into client-facing login users"
+            );
+        }
+    }
+
+    #[test]
     fn userless_nodes_do_not_match_member_or_self() {
         let doc = parse_hujson_policy(
             r#"{

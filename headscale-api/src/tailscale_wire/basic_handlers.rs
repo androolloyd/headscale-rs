@@ -4505,9 +4505,11 @@ mod tests {
     #[tokio::test]
     async fn debug_config_omits_current_headscale_go_removed_fields_and_secrets() {
         let (mut state, _dir) = fixture_state();
-        let mut snapshot = crate::tailscale_wire::RuntimeConfigSnapshot::default();
-        snapshot.ephemeral_node_inactivity_timeout = 999;
-        snapshot.randomize_client_port = true;
+        let mut snapshot = crate::tailscale_wire::RuntimeConfigSnapshot {
+            ephemeral_node_inactivity_timeout: 999,
+            randomize_client_port: true,
+            ..crate::tailscale_wire::RuntimeConfigSnapshot::default()
+        };
         snapshot.database.postgres.pass = "debug-config-postgres-secret-marker".to_string();
         snapshot.oidc.client_secret = "debug-config-oidc-secret-marker".to_string();
         snapshot.oidc.expiry = 123;

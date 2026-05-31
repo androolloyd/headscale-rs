@@ -1200,13 +1200,12 @@ fn ping_request_matches_id(request: &PingRequest, ping_id: &str) -> bool {
     request
         .url
         .split_once('?')
-        .map(|(_, query)| {
+        .is_some_and(|(_, query)| {
             query
                 .split('&')
                 .filter_map(|part| part.split_once('='))
                 .any(|(key, value)| key == "id" && value == ping_id)
         })
-        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

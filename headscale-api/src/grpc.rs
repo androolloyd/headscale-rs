@@ -752,7 +752,7 @@ pub mod upstream {
                     &body.picture_url,
                 )
                 .await
-                .map_err(create_user_error_to_status)?;
+                .map_err(|e| create_user_error_to_status(&e))?;
             self.policy.refresh();
             Ok(Response::new(CreateUserResponse {
                 user: Some(user_record_to_proto(&user)),
@@ -1951,7 +1951,7 @@ pub mod upstream {
         }
     }
 
-    fn create_user_error_to_status(e: UserRegistryError) -> Status {
+    fn create_user_error_to_status(e: &UserRegistryError) -> Status {
         Status::internal(format!("creating user: {e}"))
     }
 
@@ -3848,7 +3848,8 @@ mod upstream_tests {
         assert_eq!(listed.nodes.len(), 1);
         let listed_node = &listed.nodes[0];
         assert_eq!(listed_node.id, 1);
-        assert!(listed_node.user.is_none());
+        let listed_user = listed_node.user.as_ref().expect("tagged node user");
+        assert_eq!(listed_user.name, "tagged-devices");
         assert_eq!(listed_node.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(listed_node.machine_key, format!("mkey:{machine_key_hex}"));
         assert_eq!(listed_node.register_method, RegisterMethod::Cli as i32);
@@ -4700,7 +4701,7 @@ mod upstream_tests {
         let ids = listed.api_keys.iter().map(|key| key.id).collect::<Vec<_>>();
         assert_eq!(ids, {
             let mut sorted = ids.clone();
-            sorted.sort();
+            sorted.sort_unstable();
             sorted
         });
         let key = &listed.api_keys[0];

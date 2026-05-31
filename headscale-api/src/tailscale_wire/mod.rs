@@ -2326,6 +2326,135 @@ impl MachineRegistry {
             .collect()
     }
 
+    fn sort_machine_records_by_node_id(records: &mut [(String, MachineRecord)]) {
+        records.sort_by(|(left_key, left), (right_key, right)| {
+            left.stable_node_id_for_key(left_key)
+                .cmp(&right.stable_node_id_for_key(right_key))
+                .then_with(|| left_key.cmp(right_key))
+        });
+    }
+
+    /// Return the first node matching a machine key regardless of user.
+    ///
+    /// Headscale-go keeps a secondary `MachineKey -> UserID -> Node`
+    /// index for this lookup. The runtime registry remains scan-backed;
+    /// when more than one user has the same machine key, choosing the
+    /// lowest stable node ID gives deterministic behavior for the Go
+    /// API's otherwise unspecified map iteration order.
+    pub fn get_by_machine_key_any_user(
+        &self,
+        machine_key_hex: &str,
+    ) -> Option<(String, MachineRecord)> {
+        if machine_key_hex.is_empty() {
+            return None;
+        }
+
+        let start = Instant::now();
+        let result = {
+            let mut matches = self
+                .inner
+                .read()
+                .iter()
+                .filter(|(_, rec)| rec.machine_key_hex == machine_key_hex)
+                .map(|(node_key, rec)| (node_key.clone(), rec.clone()))
+                .collect::<Vec<_>>();
+            Self::sort_machine_records_by_node_id(&mut matches);
+            matches.into_iter().next()
+        };
+        self.record_nodestore_operation("get_by_machine_key_any_user", start.elapsed());
+        result
+    }
+
+    /// Return user-owned nodes for a user ID.
+    ///
+    /// Tagged nodes are owned by tags rather than their registering
+    /// user, so they are intentionally excluded just like
+    /// headscale-go's `nodesByUser` snapshot index.
+    pub fn list_nodes_by_user_id(&self, user_id: u64) -> Vec<(String, MachineRecord)> {
+        let start = Instant::now();
+        let mut nodes = self
+            .inner
+            .read()
+            .iter()
+            .filter(|(_, rec)| rec.user_id == Some(user_id) && !rec.is_tagged())
+            .map(|(node_key, rec)| (node_key.clone(), rec.clone()))
+            .collect::<Vec<_>>();
+        Self::sort_machine_records_by_node_id(&mut nodes);
+        self.record_nodestore_operation("list_by_user", start.elapsed());
+        nodes
+    }
+
+    /// Return policyless runtime peers for a node ID.
+    ///
+    /// The map stream applies policy-aware peer visibility in
+    /// `tailscale_wire::map`. This read helper mirrors the registry's
+    /// open-default peer set by returning every other node when the
+    /// source node exists, and an empty list when it does not.
+    pub fn list_peers_for(&self, node_id: u64) -> Vec<(String, MachineRecord)> {
+        let start = Instant::now();
+        let mut source_exists = false;
+        let mut peers = Vec::new();
+        for (node_key, rec) in self.inner.read().iter() {
+            if rec.stable_node_id_for_key(node_key) == node_id {
+                source_exists = true;
+            } else {
+                peers.push((node_key.clone(), rec.clone()));
+            }
+        }
+
+        let result = if source_exists {
+            Self::sort_machine_records_by_node_id(&mut peers);
+            peers
+        } else {
+            Vec::new()
+        };
+        self.record_nodestore_operation("list_peers", start.elapsed());
+        result
+    }
+
+    /// Return the current primary advertiser for a subnet prefix.
+    pub fn primary_route_for(&self, route: &str) -> Option<u64> {
+        let start = Instant::now();
+        let snapshot = self.snapshot();
+        let result = {
+            let mut primary_routes = self.primary_routes.write();
+            self.sync_primary_routes_for_snapshot(&mut primary_routes, &snapshot);
+            primary_routes.primary_route_for(route)
+        };
+        self.record_nodestore_operation("primary_route_for", start.elapsed());
+        result
+    }
+
+    /// Return HA route candidates: non-exit prefixes with at least two
+    /// online, non-expired nodes actively advertising and approved for
+    /// the route.
+    pub fn ha_nodes(&self) -> BTreeMap<String, Vec<u64>> {
+        let start = Instant::now();
+        let snapshot = self.snapshot();
+        let online_states = self.online_states.read().clone();
+        let now = Utc::now();
+        let mut advertisers = BTreeMap::<String, Vec<u64>>::new();
+
+        for (node_key, rec) in snapshot.iter() {
+            let node_id = rec.stable_node_id_for_key(node_key);
+            if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false) {
+                continue;
+            }
+
+            for route in active_primary_routes(&rec.available_routes, &rec.approved_routes) {
+                advertisers.entry(route).or_default().push(node_id);
+            }
+        }
+
+        advertisers.retain(|_, node_ids| {
+            node_ids.sort_unstable();
+            node_ids.dedup();
+            node_ids.len() >= 2
+        });
+        self.record_nodestore_operation("ha_nodes", start.elapsed());
+        advertisers
+    }
+
     /// Return the current primary-route debug state after syncing it
     /// against the supplied registry snapshot.
     pub fn debug_routes_for_snapshot(
@@ -4366,6 +4495,135 @@ mod registry_tests {
         }
         assert_eq!(snap.len(), 8, "old snapshot must not see new writes");
         assert_eq!(reg.snapshot().len(), 108);
+    }
+
+    #[test]
+    fn nodestore_read_helper_finds_machine_key_across_users() {
+        let reg = MachineRegistry::new();
+
+        let mut alice = mk_record(1);
+        alice.node_id = Some(20);
+        alice.node_key_hex = "node-alice".into();
+        alice.machine_key_hex = "machine-shared".into();
+        alice.user = "alice".into();
+        alice.user_id = Some(7);
+        reg.upsert(alice.node_key_hex.clone(), alice);
+
+        let mut bob = mk_record(2);
+        bob.node_id = Some(10);
+        bob.node_key_hex = "node-bob".into();
+        bob.machine_key_hex = "machine-shared".into();
+        bob.user = "bob".into();
+        bob.user_id = Some(8);
+        reg.upsert(bob.node_key_hex.clone(), bob);
+
+        let (node_key, rec) = reg
+            .get_by_machine_key_any_user("machine-shared")
+            .expect("machine key found across users");
+        assert_eq!(node_key, "node-bob");
+        assert_eq!(rec.user_id, Some(8));
+        assert!(reg.get_by_machine_key_any_user("").is_none());
+        assert!(reg.get_by_machine_key_any_user("missing").is_none());
+    }
+
+    #[test]
+    fn nodestore_read_helper_lists_user_owned_nodes_only() {
+        let reg = MachineRegistry::new();
+
+        let mut owned = mk_record(1);
+        owned.node_id = Some(1);
+        owned.node_key_hex = "node-owned".into();
+        owned.user_id = Some(7);
+        reg.upsert(owned.node_key_hex.clone(), owned);
+
+        let mut tagged = mk_record(2);
+        tagged.node_id = Some(2);
+        tagged.node_key_hex = "node-tagged".into();
+        tagged.user_id = Some(7);
+        tagged.forced_tags = vec!["tag:server".into()];
+        reg.upsert(tagged.node_key_hex.clone(), tagged);
+
+        let mut other_user = mk_record(3);
+        other_user.node_id = Some(3);
+        other_user.node_key_hex = "node-other-user".into();
+        other_user.user_id = Some(8);
+        reg.upsert(other_user.node_key_hex.clone(), other_user);
+
+        let node_keys = reg
+            .list_nodes_by_user_id(7)
+            .into_iter()
+            .map(|(node_key, _)| node_key)
+            .collect::<Vec<_>>();
+        assert_eq!(node_keys, vec!["node-owned"]);
+        assert!(reg.list_nodes_by_user_id(99).is_empty());
+    }
+
+    #[test]
+    fn nodestore_read_helper_lists_policyless_peers_for_existing_node() {
+        let reg = MachineRegistry::new();
+        for (node_id, node_key) in [(1, "node-a"), (2, "node-b"), (3, "node-c")] {
+            let mut rec = mk_record(node_id as u32);
+            rec.node_id = Some(node_id);
+            rec.node_key_hex = node_key.into();
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+
+        let node_keys = reg
+            .list_peers_for(2)
+            .into_iter()
+            .map(|(node_key, _)| node_key)
+            .collect::<Vec<_>>();
+        assert_eq!(node_keys, vec!["node-a", "node-c"]);
+        assert!(reg.list_peers_for(99).is_empty());
+    }
+
+    #[test]
+    fn nodestore_read_helpers_report_primary_route_and_ha_nodes() {
+        let reg = Arc::new(MachineRegistry::new());
+        let route = "10.0.0.0/24";
+
+        let mut first = route_record("router-a", 10, route);
+        first.node_id = Some(1);
+        reg.upsert(first.node_key_hex.clone(), first);
+
+        let mut second = route_record("router-b", 11, route);
+        second.node_id = Some(2);
+        reg.upsert(second.node_key_hex.clone(), second);
+
+        let mut offline = route_record("router-offline", 12, route);
+        offline.node_id = Some(3);
+        reg.upsert(offline.node_key_hex.clone(), offline);
+
+        let mut expired = route_record("router-expired", 13, route);
+        expired.node_id = Some(4);
+        expired.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        reg.upsert(expired.node_key_hex.clone(), expired);
+
+        let mut exit = route_record("router-exit", 14, "0.0.0.0/0");
+        exit.node_id = Some(5);
+        exit.available_routes = vec!["0.0.0.0/0".into(), "::/0".into()];
+        exit.approved_routes = exit.available_routes.clone();
+        reg.upsert(exit.node_key_hex.clone(), exit);
+
+        let first_guard =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 1, Duration::ZERO);
+        let _second_guard =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 2, Duration::ZERO);
+        let _expired_guard =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 4, Duration::ZERO);
+        let _exit_guard =
+            MachineRegistry::track_stream_connection_with_grace(reg.clone(), 5, Duration::ZERO);
+
+        assert_eq!(reg.primary_route_for(route), Some(1));
+        assert_eq!(reg.primary_route_for("0.0.0.0/0"), None);
+        assert_eq!(
+            reg.ha_nodes(),
+            BTreeMap::from([(route.to_string(), vec![1, 2])])
+        );
+
+        drop(first_guard);
+        assert_eq!(reg.primary_route_for(route), Some(2));
+        assert!(reg.ha_nodes().is_empty());
     }
 
     // ---- P1 lifecycle parity tests -------------------------------------

@@ -147,6 +147,11 @@ impl PrimaryRouteState {
             .collect()
     }
 
+    pub fn primary_route_for(&self, route: &str) -> Option<u64> {
+        let route = normalize_primary_routes([route]).ok()?.into_iter().next()?;
+        self.primaries.get(&route).copied()
+    }
+
     pub fn debug_routes(&self) -> DebugRoutes {
         DebugRoutes {
             available_routes: self
@@ -509,6 +514,21 @@ mod tests {
             vec!["10.0.0.0/24"]
         );
         assert!(!primary.contains_key("node-b"));
+    }
+
+    #[test]
+    fn primary_route_for_normalizes_subnet_and_rejects_exit_routes() {
+        let mut state = PrimaryRouteState::new();
+        state
+            .sync_routes([
+                (20, p(&["10.0.0.0/24", "0.0.0.0/0"])),
+                (10, p(&["10.0.0.0/24"])),
+            ])
+            .unwrap();
+
+        assert_eq!(state.primary_route_for(" 10.0.0.0/24 "), Some(10));
+        assert_eq!(state.primary_route_for("0.0.0.0/0"), None);
+        assert_eq!(state.primary_route_for("not-a-prefix"), None);
     }
 
     #[test]

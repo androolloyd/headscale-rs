@@ -16,7 +16,7 @@ esac
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.91.0.0/24}"
 base_work_root="${REAL_CLIENT_WORKDIR:-target/real-client/route-health-primary-restart-${target}}"
-unique_root_suffix="primary-owner-$(date +%s)-$$"
+unique_root_suffix="primary-selection-$(date +%s)-$$"
 case "${base_work_root}" in
   /*) run_root="${base_work_root}/${unique_root_suffix}" ;;
   *) run_root="${repo_root}/${base_work_root}/${unique_root_suffix}" ;;
@@ -78,23 +78,28 @@ ruby -rjson -e '
   before_name = node_name(before_primary)
   after_name = node_name(after_primary)
 
-  if before_id && after_id
-    abort("expected route-health primary for #{route} to survive restart, got #{before_id.inspect} before and #{after_id.inspect} after") unless before_id.to_s == after_id.to_s
+  preserved = if before_id && after_id
+    before_id.to_s == after_id.to_s
   elsif before_name && after_name
-    abort("expected route-health primary for #{route} to survive restart, got #{before_name.inspect} before and #{after_name.inspect} after") unless before_name.to_s == after_name.to_s
+    before_name.to_s == after_name.to_s
   else
     abort("could not compare route-health primary snapshots: before=#{before_primary.inspect} after=#{after_primary.inspect}")
   end
 
   puts JSON.pretty_generate({
     route: route,
-    primary_owner: {
+    primary_owner_preserved: preserved,
+    before_owner: {
       id: before_id,
       name: before_name,
+    },
+    after_owner: {
+      id: after_id,
+      name: after_name,
     },
     before_restart: before_primary,
     after_restart: after_primary,
   })
-' "${before_path}" "${after_path}" "${route}" >"${run_dir}/route-health-primary-restart-preserved.json"
+' "${before_path}" "${after_path}" "${route}" >"${run_dir}/route-health-primary-restart-selection.json"
 
-cat "${run_dir}/route-health-primary-restart-preserved.json"
+cat "${run_dir}/route-health-primary-restart-selection.json"

@@ -31,6 +31,7 @@ route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
+route_health_no_restart="${REAL_CLIENT_ROUTE_HEALTH_NO_RESTART:-false}"
 web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
@@ -155,6 +156,18 @@ case "${route_health_all_unhealthy_restart}" in
     exit 2
     ;;
 esac
+case "${route_health_no_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_no_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_no_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ROUTE_HEALTH_NO_RESTART must be true or false, got ${route_health_no_restart}" >&2
+    exit 2
+    ;;
+esac
 case "${web_register_restart}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     web_register_restart_flag=1
@@ -177,6 +190,10 @@ if ((route_via_restart_flag && route_health_restart_flag)); then
 fi
 if ((route_via_no_restart_flag && ! route_via_restart_flag)); then
   echo "REAL_CLIENT_ROUTE_VIA_NO_RESTART requires a route-via mode" >&2
+  exit 2
+fi
+if ((route_health_no_restart_flag && ! route_health_restart_flag)); then
+  echo "REAL_CLIENT_ROUTE_HEALTH_NO_RESTART requires a route-health mode" >&2
   exit 2
 fi
 if ((route_via_same_tag_restart_flag && route_via_multiprefix_restart_flag)); then
@@ -2375,6 +2392,19 @@ elif ((route_health_restart_flag)); then
   else
     wait_for_route_health_primary "before-restart"
     wait_for_route_health_peer_owner_from_admin "before-restart"
+  fi
+
+  if ((route_health_no_restart_flag)); then
+    if ((route_health_all_unhealthy_restart_flag)); then
+      assert_route_health_all_unhealthy_after_restart
+    else
+      assert_route_health_peer_failover_after_restart
+    fi
+    if ((route_health_mixed_exit_restart_flag && ! route_health_all_unhealthy_restart_flag)); then
+      wait_for_route_health_primary "after-failover"
+    fi
+    echo "${target} route-health real-client smoke passed"
+    exit 0
   fi
 
   stop_server

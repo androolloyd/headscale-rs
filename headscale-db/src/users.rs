@@ -207,7 +207,7 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<UserRow> 
     .bind(now)
     .fetch_one(pool)
     .await
-    .map_err(map_sqlx_err)?;
+    .map_err(map_create_sqlx_err)?;
     get_by_id(pool, id).await
 }
 
@@ -415,7 +415,7 @@ pub async fn create_postgres_on_connection(
     .bind(now)
     .fetch_one(&mut *conn)
     .await
-    .map_err(map_sqlx_err)?;
+    .map_err(map_create_sqlx_err)?;
     get_postgres_by_id_on_connection(conn, id).await
 }
 
@@ -675,6 +675,31 @@ fn map_sqlx_err(e: sqlx::Error) -> DbError {
     }
 }
 
+fn map_create_sqlx_err(e: sqlx::Error) -> DbError {
+    match &e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            if let Some(message) = headscale_go_sqlite_constraint_message(db.as_ref()) {
+                DbError::General(format!("creating user: {message}"))
+            } else {
+                DbError::General(UserError::Exists.to_string())
+            }
+        }
+        _ => DbError::from(e),
+    }
+}
+
+fn headscale_go_sqlite_constraint_message(
+    db: &(dyn sqlx::error::DatabaseError + 'static),
+) -> Option<String> {
+    let code = db.code()?;
+    let message = db.message();
+    if code.as_ref() == "2067" && message.starts_with("UNIQUE constraint failed:") {
+        Some(format!("constraint failed: {message} ({code})"))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +756,20 @@ mod tests {
         assert_eq!(created_at, user.created_at);
         assert_eq!(updated_at, user.updated_at);
         assert_eq!(deleted_at, None);
+    }
+
+    #[tokio::test]
+    async fn duplicate_create_reports_headscale_go_sqlite_constraint_text() {
+        let db = fresh_db().await;
+        create(db.pool(), alice()).await.unwrap();
+
+        let err = create(db.pool(), alice()).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            DbError::General(msg)
+                if msg == "creating user: constraint failed: UNIQUE constraint failed: users.name (2067)"
+        ));
     }
 
     #[tokio::test]

@@ -1952,7 +1952,13 @@ pub mod upstream {
     }
 
     fn create_user_error_to_status(e: &UserRegistryError) -> Status {
-        Status::internal(format!("creating user: {e}"))
+        match e {
+            UserRegistryError::Exists(_) => Status::internal(
+                "creating user: creating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
+            ),
+            UserRegistryError::Store(msg) => Status::internal(format!("creating user: {msg}")),
+            other => Status::internal(format!("creating user: {other}")),
+        }
     }
 
     fn direct_user_error_to_status(e: UserRegistryError) -> Status {
@@ -2498,7 +2504,7 @@ mod upstream_tests {
                 Call::CreateDuplicate,
                 Expected::Error {
                     code: tonic::Code::Internal,
-                    message: "creating user: user 'alice' already exists",
+                    message: "creating user: creating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
                 },
             ),
             (

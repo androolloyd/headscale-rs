@@ -628,7 +628,7 @@ pub struct DebugConfigInfo {
     pub grpc_allow_insecure: bool,
     #[serde(rename = "TrustedProxies")]
     pub trusted_proxies: Vec<String>,
-    #[serde(rename = "EphemeralNodeInactivityTimeout")]
+    #[serde(rename = "EphemeralNodeInactivityTimeout", default, skip_serializing)]
     pub ephemeral_node_inactivity_timeout: i64,
     #[serde(rename = "Node")]
     pub node: DebugNodeConfig,
@@ -668,7 +668,7 @@ pub struct DebugConfigInfo {
     pub oidc: DebugOidcConfig,
     #[serde(rename = "LogTail")]
     pub log_tail: DebugEnabledConfig,
-    #[serde(rename = "RandomizeClientPort")]
+    #[serde(rename = "RandomizeClientPort", default, skip_serializing)]
     pub randomize_client_port: bool,
     #[serde(rename = "Taildrop")]
     pub taildrop: DebugEnabledConfig,
@@ -1059,7 +1059,7 @@ pub struct DebugOidcConfig {
     pub issuer: String,
     #[serde(rename = "ClientID")]
     pub client_id: String,
-    #[serde(rename = "ClientSecret")]
+    #[serde(rename = "ClientSecret", default, skip_serializing)]
     pub client_secret: String,
     #[serde(rename = "Scope")]
     pub scope: Vec<String>,
@@ -1073,7 +1073,7 @@ pub struct DebugOidcConfig {
     pub allowed_groups: Vec<String>,
     #[serde(rename = "EmailVerifiedRequired")]
     pub email_verified_required: bool,
-    #[serde(rename = "Expiry")]
+    #[serde(rename = "Expiry", default, skip_serializing)]
     pub expiry: i64,
     #[serde(rename = "UseExpiryFromToken")]
     pub use_expiry_from_token: bool,
@@ -1099,7 +1099,7 @@ pub struct DebugEnabledConfig {
 pub struct DebugCliConfig {
     #[serde(rename = "Address")]
     pub address: String,
-    #[serde(rename = "APIKey")]
+    #[serde(rename = "APIKey", default, skip_serializing)]
     pub api_key: String,
     #[serde(rename = "Timeout")]
     pub timeout: i64,
@@ -3025,7 +3025,7 @@ mod tests {
     };
     use axum::body::to_bytes;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -4432,14 +4432,13 @@ mod tests {
         let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        for key in [
+        let expected_keys = BTreeSet::from([
             "ServerURL",
             "Addr",
             "MetricsAddr",
             "GRPCAddr",
             "GRPCAllowInsecure",
             "TrustedProxies",
-            "EphemeralNodeInactivityTimeout",
             "Node",
             "PrefixV4",
             "PrefixV6",
@@ -4451,6 +4450,8 @@ mod tests {
             "Database",
             "DERP",
             "TLS",
+            "ACMEURL",
+            "ACMEEmail",
             "DNSConfig",
             "TailcfgDNSConfig",
             "UnixSocket",
@@ -4462,13 +4463,17 @@ mod tests {
             "CLI",
             "Policy",
             "Tuning",
-        ] {
-            assert!(parsed.get(key).is_some(), "missing config field {key}");
-        }
+        ]);
+        let actual_keys = parsed
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_keys, expected_keys);
         assert_eq!(parsed["GRPCAddr"], ":50443");
         assert_eq!(parsed["GRPCAllowInsecure"], false);
         assert_eq!(parsed["TrustedProxies"], serde_json::json!([]));
-        assert_eq!(parsed["EphemeralNodeInactivityTimeout"], 120_000_000_000i64);
         assert_eq!(parsed["Node"]["Expiry"], 0);
         assert_eq!(
             parsed["Node"]["Ephemeral"]["InactivityTimeout"],
@@ -4491,6 +4496,52 @@ mod tests {
         assert_eq!(parsed["Tuning"]["NodeStoreBatchSize"], 100);
         assert_eq!(parsed["Tuning"]["RegisterCacheMaxEntries"], 0);
         assert_eq!(parsed["UnixSocketPermission"], 0o770);
+        assert!(parsed["OIDC"].get("ClientSecret").is_none());
+        assert!(parsed["OIDC"].get("Expiry").is_none());
+        assert!(parsed["CLI"].get("APIKey").is_none());
+        assert!(parsed["Database"]["Postgres"].get("Pass").is_none());
+    }
+
+    #[tokio::test]
+    async fn debug_config_omits_current_headscale_go_removed_fields_and_secrets() {
+        let (mut state, _dir) = fixture_state();
+        let mut snapshot = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        snapshot.ephemeral_node_inactivity_timeout = 999;
+        snapshot.randomize_client_port = true;
+        snapshot.database.postgres.pass = "debug-config-postgres-secret-marker".to_string();
+        snapshot.oidc.client_secret = "debug-config-oidc-secret-marker".to_string();
+        snapshot.oidc.expiry = 123;
+        snapshot.cli.api_key = "debug-config-cli-api-key-marker".to_string();
+        state.runtime_config = Arc::new(snapshot);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/config")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        for forbidden in [
+            "EphemeralNodeInactivityTimeout",
+            "RandomizeClientPort",
+            "ClientSecret",
+            "APIKey",
+            "debug-config-postgres-secret-marker",
+            "debug-config-oidc-secret-marker",
+            "debug-config-cli-api-key-marker",
+        ] {
+            assert!(!body.contains(forbidden), "leaked {forbidden:?}\n{body}");
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(parsed["OIDC"].get("Expiry").is_none());
     }
 
     #[tokio::test]

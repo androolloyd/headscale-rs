@@ -389,6 +389,23 @@ pub const UPGRADE_PROTOCOL: &str = "tailscale-control-protocol";
 /// test path.
 const EARLY_NOISE_MAGIC: [u8; 5] = [0xff, 0xff, 0xff, b'T', b'S'];
 
+fn build_early_noise_frame() -> Result<Vec<u8>, WireError> {
+    let challenge_pub = generate_x25519_public()
+        .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
+    // `nodeKeyChallenge` matches the JSON tag on upstream
+    // `tailcfg.EarlyNoise.NodeKeyChallenge`.
+    let early_json = serde_json::json!({
+        "nodeKeyChallenge": format!("chalpub:{}", hex::encode(challenge_pub))
+    })
+    .to_string();
+    let early_bytes = early_json.as_bytes();
+    let mut early = Vec::with_capacity(5 + 4 + early_bytes.len());
+    early.extend_from_slice(&EARLY_NOISE_MAGIC);
+    early.extend_from_slice(&(early_bytes.len() as u32).to_be_bytes());
+    early.extend_from_slice(early_bytes);
+    Ok(early)
+}
+
 /// `/ts2021` upgrade handler.
 ///
 /// Verifies the `Upgrade: tailscale-control-protocol` header, returns
@@ -584,23 +601,13 @@ where
     // `snow::Builder::generate_keypair` (already a workspace dep) so
     // we don't depend on x25519-dalek. The challenge is ephemeral —
     // there's no need to persist it.
-    let challenge_pub = generate_x25519_public()
-        .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
     // `NodeKeyChallenge` is a `key.ChallengePublic` — see
     // `tailscale/types/key/chal.go`. Its text marshaling is
     // `chalpub:<hex>`; JSON uses the same shape via Go's default
     // `MarshalText` plumbing (the unmarshaler in the client expects a
     // bare string, not an object — we shipped an object first and
     // the client logged a json-unmarshal error on the EarlyNoise read).
-    let early_json = serde_json::json!({
-        "NodeKeyChallenge": format!("chalpub:{}", hex::encode(challenge_pub))
-    })
-    .to_string();
-    let early_bytes = early_json.as_bytes();
-    let mut early = Vec::with_capacity(5 + 4 + early_bytes.len());
-    early.extend_from_slice(&EARLY_NOISE_MAGIC);
-    early.extend_from_slice(&(early_bytes.len() as u32).to_be_bytes());
-    early.extend_from_slice(early_bytes);
+    let early = build_early_noise_frame()?;
     use tokio::io::AsyncWriteExt;
     noise_stream
         .write_all(&early)
@@ -984,23 +991,13 @@ where
     // Step 5: send the EarlyNoise frame. Same payload as the
     // snow-backed path. With the BE transport this is what stock
     // `tailscale up` actually expects to decrypt first.
-    let challenge_pub = generate_x25519_public()
-        .map_err(|e| WireError::Noise(format!("generate early-noise challenge: {e}")))?;
     // `NodeKeyChallenge` is a `key.ChallengePublic` — see
     // `tailscale/types/key/chal.go`. Its text marshaling is
     // `chalpub:<hex>`; JSON uses the same shape via Go's default
     // `MarshalText` plumbing (the unmarshaler in the client expects a
     // bare string, not an object — we shipped an object first and
     // the client logged a json-unmarshal error on the EarlyNoise read).
-    let early_json = serde_json::json!({
-        "NodeKeyChallenge": format!("chalpub:{}", hex::encode(challenge_pub))
-    })
-    .to_string();
-    let early_bytes = early_json.as_bytes();
-    let mut early = Vec::with_capacity(5 + 4 + early_bytes.len());
-    early.extend_from_slice(&EARLY_NOISE_MAGIC);
-    early.extend_from_slice(&(early_bytes.len() as u32).to_be_bytes());
-    early.extend_from_slice(early_bytes);
+    let early = build_early_noise_frame()?;
     use tokio::io::AsyncWriteExt;
     noise_stream
         .write_all(&early)
@@ -1229,6 +1226,26 @@ mod tests {
         // sourced in the module doc.
         let p = prologue_bytes(39);
         assert_eq!(p, b"Tailscale Control Protocol v39".to_vec());
+    }
+
+    #[test]
+    fn early_noise_frame_uses_tailcfg_json_tag() {
+        let frame = build_early_noise_frame().unwrap();
+        assert!(frame.starts_with(&EARLY_NOISE_MAGIC));
+        let len = u32::from_be_bytes(frame[5..9].try_into().unwrap()) as usize;
+        assert_eq!(frame.len(), 9 + len);
+
+        let json: serde_json::Value = serde_json::from_slice(&frame[9..]).unwrap();
+        assert!(json.get("NodeKeyChallenge").is_none());
+        let challenge = json
+            .get("nodeKeyChallenge")
+            .and_then(serde_json::Value::as_str)
+            .expect("early-noise challenge");
+        let challenge_hex = challenge
+            .strip_prefix("chalpub:")
+            .expect("challenge public-key prefix");
+        assert_eq!(challenge_hex.len(), 64);
+        assert!(challenge_hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

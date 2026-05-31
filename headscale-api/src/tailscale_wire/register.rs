@@ -216,6 +216,9 @@ async fn register_inner(
         ) {
             return resp;
         }
+        if record.is_expired_at(now) {
+            return Json(node_key_expired_response(false)).into_response();
+        }
         return logout_existing_node(&state, &node_key_hex, &record, expiry);
     }
 
@@ -2637,6 +2640,53 @@ mod tests {
         assert_eq!(rr.login.login_name, "alice");
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert!(rec.is_expired_at(chrono::Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn already_expired_node_past_expiry_forces_reauth_without_reauthorizing() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-expired-logout-persistent";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "39".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let past = chrono::Utc::now() - chrono::Duration::minutes(10);
+        assert!(state.machines.set_expiry(&node_key_hex, Some(past)));
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Expiry": chrono::Utc::now() - chrono::Duration::minutes(1),
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.node_key_expired);
+        assert!(!rr.machine_authorized);
+        assert!(rr.auth_url.is_empty());
+        assert!(state.machines.get(&node_key_hex).is_some());
     }
 
     #[tokio::test]

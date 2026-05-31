@@ -4719,10 +4719,7 @@ mod tests {
             Some("text/plain")
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(
-            &body[..],
-            b"Available routes:\n\n\nCurrent primary routes:\n"
-        );
+        assert!(body.is_empty());
     }
 
     #[tokio::test]
@@ -4779,7 +4776,7 @@ mod tests {
         let available = parsed["available_routes"].as_object().unwrap();
         assert_eq!(
             available.get(&id_a.to_string()).unwrap(),
-            &serde_json::json!(["10.0.0.0/24"])
+            &serde_json::json!(["0.0.0.0/0", "10.0.0.0/24"])
         );
         assert_eq!(
             available.get(&id_b.to_string()).unwrap(),

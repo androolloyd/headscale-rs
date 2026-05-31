@@ -61,7 +61,9 @@ use serde::Serialize;
 use super::register::{
     CAPABILITY_DEFAULT_AUTO_UPDATE, CAPABILITY_FILE_SHARING, record_to_map_node,
 };
-use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
+use super::routes::{
+    active_exit_routes, auto_approved_routes_for_node, normalize_advertised_routes,
+};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
     PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX, is_auto_derived_given_name,
@@ -981,7 +983,7 @@ async fn map_inner(
         record_change_reason = MapChangeReason::EndpointDerpUpdate;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
-        let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
+        let announced_routes = match normalize_advertised_routes(&hostinfo.routable_ips) {
             Ok(routes) => routes,
             Err(e) => {
                 return (
@@ -3026,12 +3028,9 @@ mod tests {
         let rec = state.machines.get(&alice).expect("alice still registered");
         assert_eq!(
             rec.available_routes,
-            vec!["0.0.0.0/0", "10.20.1.0/24", "10.99.0.0/24", "::/0"]
+            vec!["0.0.0.0/0", "10.20.1.0/24", "10.99.0.0/24"]
         );
-        assert_eq!(
-            rec.approved_routes,
-            vec!["0.0.0.0/0", "10.20.1.0/24", "::/0"]
-        );
+        assert_eq!(rec.approved_routes, vec!["0.0.0.0/0", "10.20.1.0/24"]);
 
         let metrics_resp = public_app
             .clone()
@@ -3076,7 +3075,7 @@ mod tests {
         let node = mr.node.expect("self node");
         assert!(node.allowed_ips.iter().any(|route| route == "10.20.1.0/24"));
         assert!(node.allowed_ips.iter().any(|route| route == "0.0.0.0/0"));
-        assert!(node.allowed_ips.iter().any(|route| route == "::/0"));
+        assert!(!node.allowed_ips.iter().any(|route| route == "::/0"));
         assert!(!node.allowed_ips.iter().any(|route| route == "10.99.0.0/24"));
     }
 

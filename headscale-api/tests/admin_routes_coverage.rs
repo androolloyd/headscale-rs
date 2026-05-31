@@ -315,6 +315,36 @@ async fn api_machine_routes_invalid_prefix_returns_400() {
 }
 
 #[tokio::test]
+async fn api_machine_routes_empty_member_returns_400_like_upstream() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":[""]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("invalid route"));
+}
+
+#[tokio::test]
+async fn api_machine_routes_whitespace_member_returns_400_like_upstream() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/routes"),
+            r#"{"routes":[" 10.0.0.0/24 "]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("invalid route"));
+}
+
+#[tokio::test]
 async fn api_machine_tags_rejects_empty_list() {
     let id = "aa".repeat(32);
     let resp = app()

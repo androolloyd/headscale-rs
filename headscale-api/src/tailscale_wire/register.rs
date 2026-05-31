@@ -76,7 +76,7 @@ fn parse_register_or_go_error(raw: &[u8]) -> Result<RegisterRequest, axum::respo
 }
 
 use super::noise::{NoisePeerMachineKey, NoiseRequestCancellation};
-use super::routes::{auto_approved_routes_for_node, normalize_routes};
+use super::routes::{auto_approved_routes_for_node, normalize_advertised_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
     is_auto_derived_given_name, is_supported_capability_version, strip_key_prefix,
@@ -623,7 +623,7 @@ fn register_hostinfo_parts(
     let available_routes = body
         .hostinfo
         .as_ref()
-        .map(|h| normalize_routes(&h.routable_ips))
+        .map(|h| normalize_advertised_routes(&h.routable_ips))
         .transpose()
         .map_err(|e| {
             (

@@ -15,23 +15,16 @@ fn is_exit_route(prefix: &ipnet::IpNet) -> bool {
     }
 }
 
-/// Normalize route strings to the canonical form used by Headscale.
-///
-/// Either default route expands to both IPv4 and IPv6 defaults because
-/// Tailscale clients use the pair to mark a node as an exit node.
-pub fn normalize_routes<I, S>(routes: I) -> Result<Vec<String>, String>
+fn normalize_route_set<I, S>(routes: I, expand_exit_routes: bool) -> Result<Vec<String>, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let mut out = Vec::new();
     for route in routes {
-        let route = route.as_ref().trim();
-        if route.is_empty() {
-            continue;
-        }
+        let route = route.as_ref();
         let prefix = route.parse::<ipnet::IpNet>().map_err(|e| e.to_string())?;
-        if is_exit_route(&prefix) {
+        if expand_exit_routes && is_exit_route(&prefix) {
             out.push("0.0.0.0/0".to_string());
             out.push("::/0".to_string());
         } else {
@@ -43,6 +36,31 @@ where
     Ok(out)
 }
 
+/// Normalize operator-supplied route approvals to the canonical form
+/// used by Headscale.
+///
+/// Either default route expands to both IPv4 and IPv6 defaults because
+/// Tailscale clients use the pair to mark a node as an exit node.
+pub fn normalize_routes<I, S>(routes: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    normalize_route_set(routes, true)
+}
+
+/// Normalize client-advertised or stored route prefixes without
+/// synthesizing the other exit-route family. Headscale-go stores
+/// Hostinfo.RoutableIPs exactly as the client reports them; only
+/// admin approval expands exit defaults to the pair.
+pub fn normalize_advertised_routes<I, S>(routes: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    normalize_route_set(routes, false)
+}
+
 fn normalize_primary_routes<I, S>(routes: I) -> Result<BTreeSet<String>, String>
 where
     I: IntoIterator<Item = S>,
@@ -50,10 +68,7 @@ where
 {
     let mut out = BTreeSet::new();
     for route in routes {
-        let route = route.as_ref().trim();
-        if route.is_empty() {
-            continue;
-        }
+        let route = route.as_ref();
         let prefix = route.parse::<ipnet::IpNet>().map_err(|e| e.to_string())?;
         if !is_exit_route(&prefix) {
             out.insert(prefix.to_string());
@@ -219,20 +234,10 @@ impl PrimaryRouteState {
     }
 
     pub fn debug_string(&self) -> String {
-        let mut out = String::from("Available routes:\n");
-        for (node_id, routes) in &self.routes {
-            let _ = write!(
-                out,
-                "\nNode {node_id}: {}",
-                routes.iter().cloned().collect::<Vec<_>>().join(", ")
-            );
-        }
-
-        out.push_str("\n\nCurrent primary routes:\n");
+        let mut out = String::new();
         for (route, node_id) in &self.primaries {
-            let _ = write!(out, "\nRoute {route}: {node_id}");
+            let _ = writeln!(out, "{route}: {node_id}");
         }
-
         out
     }
 
@@ -293,11 +298,11 @@ impl PrimaryRouteState {
 /// subnet routes: they are included in `AllowedIPs`/gRPC serving-route
 /// output but never in `PrimaryRoutes`.
 pub fn active_exit_routes(available_routes: &[String], approved_routes: &[String]) -> Vec<String> {
-    let available = normalize_routes_lossy(available_routes)
+    let available = normalize_advertised_routes_lossy(available_routes)
         .into_iter()
         .filter(|route| is_exit_route_str(route))
         .collect::<BTreeSet<_>>();
-    normalize_routes_lossy(approved_routes)
+    normalize_advertised_routes_lossy(approved_routes)
         .into_iter()
         .filter(|route| is_exit_route_str(route) && available.contains(route))
         .collect()
@@ -309,10 +314,10 @@ pub fn active_approved_routes(
     available_routes: &[String],
     approved_routes: &[String],
 ) -> Vec<String> {
-    let available = normalize_routes_lossy(available_routes)
+    let available = normalize_advertised_routes_lossy(available_routes)
         .into_iter()
         .collect::<BTreeSet<_>>();
-    normalize_routes_lossy(approved_routes)
+    normalize_advertised_routes_lossy(approved_routes)
         .into_iter()
         .filter(|route| available.contains(route))
         .collect()
@@ -344,8 +349,8 @@ pub(crate) fn auto_approved_routes_for_node(
     current_approved: &[String],
     announced_routes: &[String],
 ) -> Result<Vec<String>, String> {
-    let mut approved = normalize_routes(current_approved)?;
-    let announced = normalize_routes(announced_routes)?;
+    let mut approved = normalize_advertised_routes(current_approved)?;
+    let announced = normalize_advertised_routes(announced_routes)?;
     let view = NodeView {
         addr: Some(addr),
         user,
@@ -410,8 +415,8 @@ where
         .collect()
 }
 
-fn normalize_routes_lossy(routes: &[String]) -> Vec<String> {
-    normalize_routes(routes).unwrap_or_default()
+fn normalize_advertised_routes_lossy(routes: &[String]) -> Vec<String> {
+    normalize_advertised_routes(routes).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -454,8 +459,23 @@ mod tests {
 
     #[test]
     fn normalize_routes_expands_exit_routes_and_dedupes() {
-        let routes = normalize_routes(["::/0", "0.0.0.0/0", " 10.0.0.0/24 "]).unwrap();
+        let routes = normalize_routes(["::/0", "0.0.0.0/0", "10.0.0.0/24"]).unwrap();
         assert_eq!(routes, vec!["0.0.0.0/0", "10.0.0.0/24", "::/0"]);
+    }
+
+    #[test]
+    fn normalize_routes_rejects_empty_or_whitespace_members_like_headscale_go() {
+        assert!(normalize_routes([""]).is_err());
+        assert!(normalize_routes([" 10.0.0.0/24 "]).is_err());
+    }
+
+    #[test]
+    fn normalize_advertised_routes_preserves_single_exit_family() {
+        assert_eq!(
+            normalize_advertised_routes(["0.0.0.0/0"]).unwrap(),
+            p(&["0.0.0.0/0"])
+        );
+        assert_eq!(normalize_advertised_routes(["::/0"]).unwrap(), p(&["::/0"]));
     }
 
     #[test]
@@ -488,10 +508,7 @@ mod tests {
     fn active_exit_routes_are_separate_from_primary_routes() {
         let available = p(&["0.0.0.0/0", "::/0", "10.0.0.0/24"]);
         let approved = p(&["0.0.0.0/0", "10.0.0.0/24"]);
-        assert_eq!(
-            active_exit_routes(&available, &approved),
-            p(&["0.0.0.0/0", "::/0"])
-        );
+        assert_eq!(active_exit_routes(&available, &approved), p(&["0.0.0.0/0"]));
 
         let mut state = PrimaryRouteState::new();
         let changed = state
@@ -526,7 +543,8 @@ mod tests {
             ])
             .unwrap();
 
-        assert_eq!(state.primary_route_for(" 10.0.0.0/24 "), Some(10));
+        assert_eq!(state.primary_route_for("10.0.0.0/24"), Some(10));
+        assert_eq!(state.primary_route_for(" 10.0.0.0/24 "), None);
         assert_eq!(state.primary_route_for("0.0.0.0/0"), None);
         assert_eq!(state.primary_route_for("not-a-prefix"), None);
     }
@@ -801,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_routes_matches_headscale_go_shape_and_filters_exit_routes() {
+    fn debug_routes_reflects_primary_route_state_and_filters_exit_routes() {
         let mut state = PrimaryRouteState::new();
         state
             .sync_routes([
@@ -820,9 +838,6 @@ mod tests {
                 primary_routes: primary_map(&[("10.0.0.0/24", 1), ("10.1.0.0/24", 1)]),
             }
         );
-        assert_eq!(
-            state.debug_string(),
-            "Available routes:\n\nNode 1: 10.0.0.0/24, 10.1.0.0/24\nNode 2: 10.0.0.0/24\n\nCurrent primary routes:\n\nRoute 10.0.0.0/24: 1\nRoute 10.1.0.0/24: 1"
-        );
+        assert_eq!(state.debug_string(), "10.0.0.0/24: 1\n10.1.0.0/24: 1\n");
     }
 }

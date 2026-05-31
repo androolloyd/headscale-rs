@@ -58,7 +58,8 @@ use thiserror::Error;
 use tokio::sync::{Notify, oneshot, watch};
 
 use self::routes::{
-    DebugRoutes, PrimaryRouteState, active_primary_routes, auto_approved_routes_for_node,
+    DebugRoutes, PrimaryRouteState, active_approved_routes, active_primary_routes,
+    auto_approved_routes_for_node,
 };
 use self::wire::{
     auto_given_name_base, is_auto_derived_given_name, stable_id_from_key, valid_given_name_label,
@@ -2490,7 +2491,9 @@ impl MachineRegistry {
     ) -> DebugRoutes {
         let mut primary_routes = self.primary_routes.write();
         self.sync_primary_routes_for_snapshot(&mut primary_routes, snapshot);
-        primary_routes.debug_routes()
+        let mut routes = primary_routes.debug_routes();
+        routes.available_routes = self.debug_available_routes_for_snapshot(snapshot);
+        routes
     }
 
     /// Return the text form used by headscale-go's `/debug/routes`.
@@ -2551,6 +2554,31 @@ impl MachineRegistry {
 
     pub fn is_route_candidate_healthy(&self, node_id: u64) -> bool {
         self.primary_routes.read().is_node_healthy(node_id)
+    }
+
+    fn debug_available_routes_for_snapshot(
+        &self,
+        snapshot: &HashMap<String, MachineRecord>,
+    ) -> BTreeMap<u64, Vec<String>> {
+        let now = Utc::now();
+        let online_states = self.online_states.read().clone();
+        snapshot
+            .iter()
+            .filter_map(|(node_key, rec)| {
+                let node_id = rec.stable_node_id_for_key(node_key);
+                if rec.is_expired_at(now) || !online_states.get(&node_id).copied().unwrap_or(false)
+                {
+                    return None;
+                }
+
+                let routes = active_approved_routes(&rec.available_routes, &rec.approved_routes);
+                if routes.is_empty() {
+                    None
+                } else {
+                    Some((node_id, routes))
+                }
+            })
+            .collect()
     }
 
     fn sync_primary_routes_for_snapshot(

@@ -44,8 +44,14 @@ accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
+dns_nameservers_json="${REAL_CLIENT_DNS_NAMESERVERS_JSON:-}"
+dns_split_nameservers_json="${REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON:-}"
+dns_override_local="${REAL_CLIENT_DNS_OVERRIDE_LOCAL:-false}"
 expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
 expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
+expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
+expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
+expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
@@ -98,6 +104,19 @@ case "${accept_dns}" in
     ;;
   *)
     echo "REAL_CLIENT_ACCEPT_DNS must be true or false, got ${accept_dns}" >&2
+    exit 2
+    ;;
+esac
+
+case "${dns_override_local}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    dns_override_local_yaml=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    dns_override_local_yaml=false
+    ;;
+  *)
+    echo "REAL_CLIENT_DNS_OVERRIDE_LOCAL must be true or false, got ${dns_override_local}" >&2
     exit 2
     ;;
 esac
@@ -537,6 +556,37 @@ append_dns_extra_records_config() {
   fi
 }
 
+append_dns_nameservers_config() {
+  if [[ -n "${dns_nameservers_json}" ]]; then
+    ruby -rjson -e '
+      puts "    global:"
+      JSON.parse(ARGV.fetch(0)).each do |resolver|
+        addr = resolver.is_a?(Hash) ? (resolver["Addr"] || resolver["addr"]) : resolver
+        abort("DNS resolver needs addr/Addr: #{resolver.inspect}") if addr.to_s.empty?
+        puts "      - #{addr.to_s.to_json}"
+      end
+    ' "${dns_nameservers_json}" >>"${config_path}"
+  else
+    printf '    global: []\n' >>"${config_path}"
+  fi
+
+  if [[ -n "${dns_split_nameservers_json}" ]]; then
+    ruby -rjson -e '
+      puts "    split:"
+      JSON.parse(ARGV.fetch(0)).sort.each do |suffix, resolvers|
+        puts "      #{suffix.to_s.to_json}:"
+        Array(resolvers).each do |resolver|
+          addr = resolver.is_a?(Hash) ? (resolver["Addr"] || resolver["addr"]) : resolver
+          abort("DNS split resolver needs addr/Addr: #{resolver.inspect}") if addr.to_s.empty?
+          puts "        - #{addr.to_s.to_json}"
+        end
+      end
+    ' "${dns_split_nameservers_json}" >>"${config_path}"
+  else
+    printf '    split: {}\n' >>"${config_path}"
+  fi
+}
+
 write_config() {
   case "${target}" in
     rust)
@@ -571,12 +621,11 @@ prefixes:
 dns:
   magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
-  override_local_dns: false
+  override_local_dns: ${dns_override_local_yaml}
   nameservers:
-    global: []
-    split: {}
-  search_domains: []
 EOF
+      append_dns_nameservers_config
+      printf '  search_domains: []\n' >>"${config_path}"
       append_dns_extra_records_config
       ;;
     headscale-go)
@@ -600,12 +649,11 @@ prefixes:
 dns:
   magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
-  override_local_dns: false
+  override_local_dns: ${dns_override_local_yaml}
   nameservers:
-    global: []
-    split: {}
-  search_domains: []
 EOF
+      append_dns_nameservers_config
+      printf '  search_domains: []\n' >>"${config_path}"
       append_dns_extra_records_config
       cat >>"${config_path}" <<EOF
 
@@ -1122,6 +1170,105 @@ assert_dns_extra_records_if_requested() {
   echo "::endgroup::"
 }
 
+assert_dns_resolver_list() {
+  local field="$1"
+  local expected_csv="$2"
+  local output_path="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      field = ARGV.fetch(1)
+      expected = ARGV.fetch(2).split(",").reject(&:empty?)
+      resolvers = Array(netmap.dig("DNS", field))
+      got = resolvers.map do |resolver|
+        if resolver.is_a?(Hash)
+          (resolver["Addr"] || resolver["addr"]).to_s
+        else
+          resolver.to_s
+        end
+      end
+      abort("expected DNS #{field} #{expected.inspect}, got #{got.inspect}") unless got == expected
+      puts JSON.pretty_generate({field => got})
+    ' "${netmap_path}" "${field}" "${expected_csv}" >"${output_path}"
+}
+
+assert_dns_route() {
+  local suffix="$1"
+  local expected_csv="$2"
+  local output_path="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      suffix = ARGV.fetch(1).sub(/\.\z/, "")
+      expected = ARGV.fetch(2).split(",").reject(&:empty?)
+      routes = netmap.dig("DNS", "Routes") || {}
+      route = routes[suffix] || routes["#{suffix}."]
+      abort("expected DNS route #{suffix}, got #{routes.inspect}") if route.nil?
+      got = Array(route).map do |resolver|
+        if resolver.is_a?(Hash)
+          (resolver["Addr"] || resolver["addr"]).to_s
+        else
+          resolver.to_s
+        end
+      end
+      abort("expected DNS route #{suffix}=#{expected.inspect}, got #{got.inspect}") unless got == expected
+      puts JSON.pretty_generate({suffix => got})
+    ' "${netmap_path}" "${suffix}" "${expected_csv}" >"${output_path}"
+}
+
+assert_dns_resolvers_if_requested() {
+  [[ -n "${expected_dns_resolvers}" ]] || return 0
+  echo "::group::assert DNS resolvers"
+  wait_for "DNS resolvers ${expected_dns_resolvers}" \
+    "assert_dns_resolver_list 'Resolvers' '${expected_dns_resolvers}' '${work_dir}/dns-resolvers.json'" || {
+      dump_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/dns-resolvers.json"
+  echo "::endgroup::"
+}
+
+assert_dns_fallback_resolvers_if_requested() {
+  [[ -n "${expected_dns_fallback_resolvers}" ]] || return 0
+  echo "::group::assert DNS fallback resolvers"
+  wait_for "DNS fallback resolvers ${expected_dns_fallback_resolvers}" \
+    "assert_dns_resolver_list 'FallbackResolvers' '${expected_dns_fallback_resolvers}' '${work_dir}/dns-fallback-resolvers.json'" || {
+      dump_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/dns-fallback-resolvers.json"
+  echo "::endgroup::"
+}
+
+assert_dns_routes_if_requested() {
+  [[ -n "${expected_dns_routes}" ]] || return 0
+  echo "::group::assert DNS split routes"
+  IFS=',' read -r -a dns_route_expectations <<<"${expected_dns_routes}"
+  for expectation in "${dns_route_expectations[@]}"; do
+    suffix="${expectation%%=*}"
+    expected="${expectation#*=}"
+    if [[ -z "${suffix}" || -z "${expected}" || "${suffix}" == "${expectation}" ]]; then
+      echo "REAL_CLIENT_EXPECT_DNS_ROUTES entries must be suffix=resolver|resolver, got ${expectation}" >&2
+      echo "::endgroup::"
+      return 2
+    fi
+    expected_csv="${expected//|/,}"
+    safe_suffix="${suffix//[^a-zA-Z0-9_.-]/-}"
+    wait_for "DNS route ${suffix}" \
+      "assert_dns_route '${suffix}' '${expected_csv}' '${work_dir}/dns-route-${safe_suffix}.json'" || {
+        dump_debug
+        echo "::endgroup::"
+        return 1
+      }
+    cat "${work_dir}/dns-route-${safe_suffix}.json"
+  done
+  echo "::endgroup::"
+}
+
 node_id_for_client() {
   local path="$1"
   ruby -rjson -e '
@@ -1411,6 +1558,9 @@ wait_for_client_netmap
 assert_magic_dns_if_requested
 assert_no_magic_dns_if_requested
 assert_dns_extra_records_if_requested
+assert_dns_resolvers_if_requested
+assert_dns_fallback_resolvers_if_requested
+assert_dns_routes_if_requested
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled

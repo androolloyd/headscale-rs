@@ -82,6 +82,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix and DNS extra record projection |
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
+| Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge records |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
 | Database | `postgres-web-register-unowned-tag` | `postgres-web-register-unowned-tag-smoke.sh` | `postgres-web-register-unowned-tag-headscale-go-smoke.sh` | Production Postgres web registration rejects unowned requested tag |
@@ -608,8 +609,9 @@ through production `headscale server`/headscale-go `serve` processes backed by
 a temporary Postgres database. The `postgres-magicdns-custom-domain` variant
 asserts a non-default MagicDNS suffix over that production Postgres path, the
 `postgres-extra-records` variant asserts configured DNS `extra_records` in the
-stock-client netmap, and the `postgres-dns-disabled` variant asserts disabled
-MagicDNS fallback names through the same path:
+stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
+MagicDNS fallback names, and the `postgres-dns-edge` variant asserts split DNS
+routes, fallback resolvers, and AAAA/CNAME records through the same path:
 
 ```sh
 tools/real-client/postgres-online-lastseen-smoke.sh
@@ -620,6 +622,8 @@ tools/real-client/postgres-extra-records-smoke.sh
 tools/real-client/postgres-extra-records-headscale-go-smoke.sh
 tools/real-client/postgres-dns-disabled-smoke.sh
 tools/real-client/postgres-dns-disabled-headscale-go-smoke.sh
+tools/real-client/postgres-dns-edge-smoke.sh
+tools/real-client/postgres-dns-edge-headscale-go-smoke.sh
 ```
 
 The Postgres route-approval scenario adds route advertisement and approval on

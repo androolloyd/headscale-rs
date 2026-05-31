@@ -1197,15 +1197,12 @@ fn remove_queued_ping_request(inner: &mut PingTrackerInner, ping_id: &str) -> bo
 }
 
 fn ping_request_matches_id(request: &PingRequest, ping_id: &str) -> bool {
-    request
-        .url
-        .split_once('?')
-        .is_some_and(|(_, query)| {
-            query
-                .split('&')
-                .filter_map(|part| part.split_once('='))
-                .any(|(key, value)| key == "id" && value == ping_id)
-        })
+    request.url.split_once('?').is_some_and(|(_, query)| {
+        query
+            .split('&')
+            .filter_map(|part| part.split_once('='))
+            .any(|(key, value)| key == "id" && value == ping_id)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -79,6 +79,7 @@ use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPol
 const MAP_NODE_NOT_FOUND_ERROR: &str = "node not found";
 const MAP_NODE_KEY_MISMATCH_ERROR: &str =
     "node key in request does not match the one associated with this machine key";
+const NODE_ATTR_SUGGEST_EXIT_NODE: &str = "suggest-exit-node";
 
 fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
     let mut merged = serde_json::to_value(current).unwrap_or_default();
@@ -484,8 +485,6 @@ fn visible_peer_state_for_registry(
     dns: &DnsStore,
     self_node_key: &str,
     cap_version: u32,
-    taildrop_enabled: bool,
-    auto_update_enabled: bool,
 ) -> BTreeMap<u64, MapNode> {
     let snapshot = machines.snapshot();
     let tailnet_domain = tailnet_domain(dns);
@@ -513,8 +512,6 @@ fn visible_peer_state_for_registry(
         &online_states,
         policy,
         cap_version,
-        taildrop_enabled,
-        auto_update_enabled,
     );
     peer_state_from_nodes(&peers)
 }
@@ -628,8 +625,6 @@ fn visible_peer_map_nodes(
     online_states: &BTreeMap<u64, bool>,
     policy: &PolicyStore,
     cap_version: u32,
-    taildrop_enabled: bool,
-    auto_update_enabled: bool,
 ) -> Vec<MapNode> {
     let mut peers: Vec<MapNode> = snapshot
         .iter()
@@ -649,8 +644,14 @@ fn visible_peer_map_nodes(
                 served_routes,
             );
             apply_selected_routes_to_map_node(&mut node, &selected_primary, &selected_allowed);
-            apply_policy_attrs_to_map_node(&mut node, rec, policy);
-            apply_runtime_caps_to_map_node(&mut node, taildrop_enabled, auto_update_enabled);
+            apply_peer_cap_map_to_map_node(
+                &mut node,
+                rec,
+                policy,
+                exit_routes
+                    .get(node_key)
+                    .is_some_and(|routes| !routes.is_empty()),
+            );
             node
         })
         .collect();
@@ -707,6 +708,33 @@ fn apply_policy_attrs_to_map_node(
     };
     for attr in policy.node_attrs_for(&view) {
         node.cap_map.entry(attr).or_default();
+    }
+}
+
+fn apply_peer_cap_map_to_map_node(
+    node: &mut MapNode,
+    rec: &super::MachineRecord,
+    policy: &PolicyStore,
+    is_exit_node: bool,
+) {
+    node.cap_map.clear();
+    if !is_exit_node {
+        return;
+    }
+
+    let addr = rec.primary_addr_string();
+    let view = NodeView {
+        addr: addr.as_deref(),
+        user: Some(&rec.user),
+        tags: &rec.forced_tags,
+    };
+    if policy
+        .node_attrs_for(&view)
+        .iter()
+        .any(|attr| attr == NODE_ATTR_SUGGEST_EXIT_NODE)
+    {
+        node.cap_map
+            .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
     }
 }
 
@@ -1141,8 +1169,6 @@ async fn map_inner(
         &online_states,
         &state.policy,
         req.version,
-        taildrop_enabled,
-        state.runtime_config.auto_update.enabled,
     );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &state.policy, &snapshot, &node_key_hex);
@@ -1483,7 +1509,7 @@ async fn map_inner(
                                 MapResponseDebugType::Change,
                                 public_control_url.as_deref().unwrap_or(""),
                             ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
                         ))
                     }
@@ -1516,7 +1542,7 @@ async fn map_inner(
                                 MapResponseDebugType::Change,
                                 public_control_url.as_deref().unwrap_or(""),
                             ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
+                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
                             self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
                         ))
                         }
@@ -1729,15 +1755,7 @@ fn rebuild_map_batch_chunk(
                 MapResponseDebugType::Change,
                 public_control_url,
             ),
-            visible_peer_state_for_registry(
-                machines,
-                policy,
-                dns,
-                self_node_key,
-                cap_version,
-                taildrop_enabled,
-                auto_update_enabled,
-            ),
+            visible_peer_state_for_registry(machines, policy, dns, self_node_key, cap_version),
             self_map_node_for_registry(
                 machines,
                 policy,
@@ -1848,8 +1866,6 @@ fn rebuild_peer_delta_chunk(
         &online_states,
         policy,
         cap_version,
-        taildrop_enabled,
-        auto_update_enabled,
     );
     let current_peer_state = peer_state_from_nodes(&peers_changed);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
@@ -2050,8 +2066,6 @@ fn rebuild_map_chunk(
         &online_states,
         policy,
         cap_version,
-        taildrop_enabled,
-        auto_update_enabled,
     );
     let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
     let user_profiles =
@@ -7331,7 +7345,91 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
 
         assert_default_auto_update(mr.node.as_ref().expect("own node present"), true);
-        assert_default_auto_update(mr.peers.first().expect("peer present"), true);
+        assert!(
+            mr.peers.first().expect("peer present").cap_map.is_empty(),
+            "peer CapMap should use upstream PeerCapMap filtering"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_filters_peer_cap_map_like_upstream_peer_cap_map() {
+        let (mut state, _dir) = fixture();
+        let mut runtime_config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
+        runtime_config.auto_update.enabled = true;
+        state.runtime_config = Arc::new(runtime_config);
+
+        let viewer_key = "e0".repeat(32);
+        insert_peer(&state, &viewer_key, "viewer", 10);
+
+        let exit_key = "e1".repeat(32);
+        let exit_routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+        state.machines.upsert(
+            exit_key.clone(),
+            routed_record(&exit_key, "exit", 11, exit_routes),
+        );
+
+        let plain_key = "e2".repeat(32);
+        insert_peer(&state, &plain_key, "plain", 12);
+
+        let raw_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["*"],"dst":["*:*"]}
+            ],
+            "nodeAttrs": [{
+                "target": ["*"],
+                "attr": ["suggest-exit-node", "randomize-client-port"]
+            }]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+
+        let exit_id = state.machines.stable_node_id_for_key(&exit_key);
+        let plain_id = state.machines.stable_node_id_for_key(&plain_key);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{viewer_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        let self_node = mr.node.as_ref().expect("own node present");
+        assert!(self_node.cap_map.contains_key(CAPABILITY_ADMIN));
+        assert!(self_node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
+        assert!(self_node.cap_map.contains_key(CAPABILITY_SSH));
+        assert_default_auto_update(self_node, true);
+        assert!(self_node.cap_map.contains_key(NODE_ATTR_SUGGEST_EXIT_NODE));
+        assert!(self_node.cap_map.contains_key("randomize-client-port"));
+
+        let exit_peer = mr
+            .peers
+            .iter()
+            .find(|peer| peer.id == exit_id)
+            .expect("exit peer present");
+        assert_eq!(
+            exit_peer.cap_map.keys().cloned().collect::<Vec<_>>(),
+            vec![NODE_ATTR_SUGGEST_EXIT_NODE.to_string()]
+        );
+
+        let plain_peer = mr
+            .peers
+            .iter()
+            .find(|peer| peer.id == plain_id)
+            .expect("plain peer present");
+        assert!(
+            plain_peer.cap_map.is_empty(),
+            "non-exit peer should not inherit baseline, runtime, or arbitrary policy caps"
+        );
     }
 
     #[tokio::test]
@@ -7420,7 +7518,7 @@ mod tests {
 
             [[node_attrs]]
             target = ["tag:server"]
-            attr = ["funnel", "ssh"]
+            attr = ["custom-node-attr", "ssh"]
         "#;
         let doc = crate::policy::PolicyDoc::from_toml(raw_policy).unwrap();
         state.policy.set(doc, raw_policy.to_string());
@@ -7442,7 +7540,7 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         let node = mr.node.as_ref().expect("own node present");
         assert_default_cap_map(node);
-        assert!(node.cap_map.contains_key("funnel"));
+        assert!(node.cap_map.contains_key("custom-node-attr"));
         assert!(node.cap_map.contains_key("ssh"));
     }
 

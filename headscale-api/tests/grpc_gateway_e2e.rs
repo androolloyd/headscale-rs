@@ -773,7 +773,26 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
 }
 
 #[tokio::test]
-async fn grpc_gateway_body_unknown_and_duplicate_fields_are_status_json() {
+async fn grpc_gateway_body_unknown_fields_are_discarded_like_grpc_gateway() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"unknown-ok","unknown":1}"#),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["user"]["name"], "unknown-ok");
+}
+
+#[tokio::test]
+async fn grpc_gateway_body_duplicate_fields_are_status_json() {
     struct Case {
         name: &'static str,
         method: Method,
@@ -785,20 +804,6 @@ async fn grpc_gateway_body_unknown_and_duplicate_fields_are_status_json() {
     let (app, token) = fixture().await;
 
     for case in [
-        Case {
-            name: "create user unknown field",
-            method: Method::POST,
-            uri: "/api/v1/user",
-            body: r#"{"name":"alice","unknown":1}"#,
-            message_fragment: r#"unknown field "unknown""#,
-        },
-        Case {
-            name: "auth approve unknown field",
-            method: Method::POST,
-            uri: "/api/v1/auth/approve",
-            body: r#"{"authId":"abc","unknown":1}"#,
-            message_fragment: r#"unknown field "unknown""#,
-        },
         Case {
             name: "create user duplicate protojson field",
             method: Method::POST,

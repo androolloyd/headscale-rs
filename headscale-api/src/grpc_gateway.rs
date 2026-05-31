@@ -946,7 +946,7 @@ async fn read_json_value(request: Request, allowed_fields: &[&[&str]]) -> Result
         )));
     }
     ensure_unique_top_level_fields(&body)?;
-    ensure_known_fields(&value, allowed_fields)?;
+    ensure_no_duplicate_field_aliases(&value, allowed_fields)?;
     Ok(value)
 }
 
@@ -984,19 +984,13 @@ impl<'de> Visitor<'de> for UniqueObjectVisitor {
     }
 }
 
-fn ensure_known_fields(value: &Value, allowed_fields: &[&[&str]]) -> Result<(), Status> {
+fn ensure_no_duplicate_field_aliases(
+    value: &Value,
+    allowed_fields: &[&[&str]],
+) -> Result<(), Status> {
     let Some(object) = value.as_object() else {
         return Ok(());
     };
-
-    for key in object.keys() {
-        if !allowed_fields
-            .iter()
-            .any(|aliases| aliases.contains(&key.as_str()))
-        {
-            return Err(Status::invalid_argument(format!("unknown field {key:?}")));
-        }
-    }
 
     for aliases in allowed_fields {
         let mut present = aliases.iter().filter(|alias| object.contains_key(**alias));

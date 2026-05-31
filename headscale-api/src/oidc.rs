@@ -30,6 +30,7 @@ const AUTH_ID_PREFIX: &str = "hskey-authreq-";
 const REGISTRATION_ID_LENGTH: usize = 24;
 const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const OIDC_CSRF_TOKEN_LEN: usize = 64;
+const OIDC_COOKIE_NAME_PREFIX_LEN: usize = 6;
 const OIDC_COOKIE_MAX_AGE_SECS: u64 = 60 * 60;
 const DEFAULT_OIDC_AUTH_CACHE_EXPIRY: StdDuration = StdDuration::from_secs(15 * 60);
 const DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -502,6 +503,8 @@ pub enum OidcRuntimeError {
     InvalidAuthId,
     #[error("missing code or state parameter")]
     MissingCodeOrState,
+    #[error("invalid state parameter")]
+    InvalidStateParameter,
     #[error("state not found")]
     StateCookieMissing,
     #[error("state did not match")]
@@ -977,17 +980,12 @@ pub fn merge_userinfo_claims(claims: &mut OidcClaims, userinfo: Option<&OidcUser
 pub fn determine_node_expiry(
     cfg: &OidcPolicyConfig,
     id_token_expiry: DateTime<Utc>,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     if cfg.use_expiry_from_token {
         Some(id_token_expiry)
-    } else if oidc_expiry_disabled(cfg.expiry) {
-        None
     } else {
-        Some(
-            now.checked_add_signed(cfg.expiry)
-                .unwrap_or(DateTime::<Utc>::MAX_UTC),
-        )
+        None
     }
 }
 
@@ -1643,6 +1641,10 @@ fn cookie_name(base_name: &str, value: &str) -> String {
 }
 
 fn validate_state_cookie(headers: &HeaderMap, state: &str) -> Result<(), OidcRuntimeError> {
+    if state.len() < OIDC_COOKIE_NAME_PREFIX_LEN {
+        return Err(OidcRuntimeError::InvalidStateParameter);
+    }
+
     let expected_name = cookie_name("state", state);
     let Some(actual) = cookie_value(headers, &expected_name) else {
         return Err(OidcRuntimeError::StateCookieMissing);
@@ -1697,6 +1699,7 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
         OidcRuntimeError::InvalidRegistrationId
         | OidcRuntimeError::InvalidAuthId
         | OidcRuntimeError::MissingCodeOrState
+        | OidcRuntimeError::InvalidStateParameter
         | OidcRuntimeError::InvalidForm
         | OidcRuntimeError::MissingCsrfToken
         | OidcRuntimeError::StateCookieMissing
@@ -1987,10 +1990,6 @@ fn looks_like_simple_email_address(email: &str) -> bool {
         return false;
     };
     !local.is_empty() && !domain.is_empty() && !email.chars().any(char::is_whitespace)
-}
-
-fn oidc_expiry_disabled(expiry: Duration) -> bool {
-    expiry <= Duration::seconds(0) || expiry.num_nanoseconds() == Some(i64::MAX)
 }
 
 fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -2722,6 +2721,17 @@ mod tests {
             Query(OidcCallbackQuery {
                 code: String::new(),
                 state: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = handle_callback(
+            runtime.clone(),
+            HeaderMap::new(),
+            Query(OidcCallbackQuery {
+                code: "code".into(),
+                state: "abc".into(),
             }),
         )
         .await;
@@ -3628,17 +3638,14 @@ mod tests {
     }
 
     #[test]
-    fn oidc_expiry_uses_token_or_config_like_upstream() {
+    fn oidc_expiry_uses_only_token_when_configured_like_upstream() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let token_expiry = Utc.timestamp_opt(1_700_003_600, 0).unwrap();
         let cfg = OidcPolicyConfig {
             expiry: Duration::days(180),
             ..OidcPolicyConfig::default()
         };
-        assert_eq!(
-            determine_node_expiry(&cfg, token_expiry, now),
-            Some(now + cfg.expiry)
-        );
+        assert_eq!(determine_node_expiry(&cfg, token_expiry, now), None);
 
         let cfg = OidcPolicyConfig {
             use_expiry_from_token: true,
@@ -3648,13 +3655,6 @@ mod tests {
             determine_node_expiry(&cfg, token_expiry, now),
             Some(token_expiry)
         );
-
-        let cfg = OidcPolicyConfig {
-            expiry: Duration::nanoseconds(i64::MAX),
-            use_expiry_from_token: false,
-            ..cfg
-        };
-        assert_eq!(determine_node_expiry(&cfg, token_expiry, now), None);
     }
 
     #[test]

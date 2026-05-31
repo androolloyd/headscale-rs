@@ -185,7 +185,7 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     assert_eq!(registered.user, "userinfo@example.com");
     assert_eq!(registered.hostname, "oidc-client");
     assert_eq!(registered.register_method, 3);
-    assert!(registered.expiry.is_some());
+    assert!(registered.expiry.is_none());
     assert!(state.registration_cache.is_empty());
 
     let captured_form = provider.captured_form.read();

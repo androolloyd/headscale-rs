@@ -2436,6 +2436,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_duplicate_live_node_key() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut duplicate = node_params(user_id, auth_key_id);
+        duplicate.machine_key = "mkey:duplicate-node-key".into();
+        duplicate.disco_key = "discokey:duplicate-node-key".into();
+        duplicate.hostname = "duplicate-node-key".into();
+        duplicate.given_name = "duplicate-node-key".into();
+        duplicate.ipv4 = Some("100.64.0.44".into());
+        duplicate.ipv6 = Some("fd7a:115c:a1e0::44".into());
+        let err = create(db.pool(), duplicate).await.unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+
+        let mut empty_key = node_params(user_id, auth_key_id);
+        empty_key.machine_key = "mkey:empty-node-key".into();
+        empty_key.node_key.clear();
+        empty_key.disco_key = "discokey:empty-node-key".into();
+        empty_key.hostname = "empty-node-key".into();
+        empty_key.given_name = "empty-node-key".into();
+        empty_key.ipv4 = Some("100.64.0.45".into());
+        empty_key.ipv6 = Some("fd7a:115c:a1e0::45".into());
+        create(db.pool(), empty_key).await.unwrap();
+
+        let mut second_empty_key = node_params(user_id, auth_key_id);
+        second_empty_key.machine_key = "mkey:second-empty-node-key".into();
+        second_empty_key.node_key.clear();
+        second_empty_key.disco_key = "discokey:second-empty-node-key".into();
+        second_empty_key.hostname = "second-empty-node-key".into();
+        second_empty_key.given_name = "second-empty-node-key".into();
+        second_empty_key.ipv4 = Some("100.64.0.46".into());
+        second_empty_key.ipv6 = Some("fd7a:115c:a1e0::46".into());
+        create(db.pool(), second_empty_key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_from_auth_path_rejects_duplicate_live_node_key() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let first = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut second_params = node_params(user_id, auth_key_id);
+        second_params.machine_key = "mkey:def".into();
+        second_params.node_key = "nodekey:def".into();
+        second_params.disco_key = "discokey:def".into();
+        second_params.hostname = "bob-laptop".into();
+        second_params.given_name = "bob-laptop".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let second = create(db.pool(), second_params).await.unwrap();
+
+        let mut duplicate = node_params(user_id, auth_key_id);
+        duplicate.machine_key = "mkey:def".into();
+        duplicate.node_key = first.node_key;
+        duplicate.disco_key = "discokey:duplicate-node-key-update".into();
+        duplicate.hostname = "duplicate-node-key-update".into();
+        duplicate.given_name = "duplicate-node-key-update".into();
+        duplicate.ipv4 = Some("100.64.0.47".into());
+        duplicate.ipv6 = Some("fd7a:115c:a1e0::47".into());
+        let err = update_from_auth_path(db.pool(), second.id, duplicate)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::General(_)));
+
+        assert_eq!(
+            get_by_id(db.pool(), second.id).await.unwrap().node_key,
+            "nodekey:def"
+        );
+    }
+
+    #[tokio::test]
     async fn set_ip_addresses_rejects_duplicate_manual_addresses() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;

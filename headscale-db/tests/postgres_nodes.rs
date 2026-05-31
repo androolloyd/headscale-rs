@@ -234,6 +234,49 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
             DbError::General(_)
         ));
 
+        let mut duplicate_node_key = node_params(alice.id, auth_key_id);
+        duplicate_node_key.machine_key = "mkey:node-key".into();
+        duplicate_node_key.disco_key = "discokey:node-key".into();
+        duplicate_node_key.hostname = "node-key".into();
+        duplicate_node_key.given_name = "node-key".into();
+        duplicate_node_key.ipv4 = Some("100.64.0.12".into());
+        duplicate_node_key.ipv6 = Some("fd7a:115c:a1e0::12".into());
+        assert!(matches!(
+            headscale_nodes::create_postgres_on_connection(&mut schema.conn, duplicate_node_key)
+                .await
+                .unwrap_err(),
+            DbError::General(_)
+        ));
+
+        let mut second_params = node_params(alice.id, auth_key_id);
+        second_params.machine_key = "mkey:second".into();
+        second_params.node_key = "nodekey:second".into();
+        second_params.disco_key = "discokey:second".into();
+        second_params.hostname = "second".into();
+        second_params.given_name = "second".into();
+        second_params.ipv4 = Some("100.64.0.13".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::13".into());
+        let second =
+            headscale_nodes::create_postgres_on_connection(&mut schema.conn, second_params).await?;
+
+        let mut duplicate_update = node_params(alice.id, auth_key_id);
+        duplicate_update.machine_key = "mkey:second".into();
+        duplicate_update.disco_key = "discokey:duplicate-update".into();
+        duplicate_update.hostname = "duplicate-update".into();
+        duplicate_update.given_name = "duplicate-update".into();
+        duplicate_update.ipv4 = Some("100.64.0.14".into());
+        duplicate_update.ipv6 = Some("fd7a:115c:a1e0::14".into());
+        assert!(matches!(
+            headscale_nodes::update_postgres_from_auth_path_on_connection(
+                &mut schema.conn,
+                second.id,
+                duplicate_update,
+            )
+            .await
+            .unwrap_err(),
+            DbError::General(_)
+        ));
+
         Ok::<(), DbError>(())
     }
     .await;

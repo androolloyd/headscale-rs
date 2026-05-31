@@ -534,6 +534,12 @@ fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
     serde_json::to_value(node).ok()
 }
 
+fn map_nodes_equal_ignoring_last_seen(previous: &MapNode, current: &MapNode) -> bool {
+    let mut current_normalized = current.clone();
+    current_normalized.last_seen = previous.last_seen;
+    map_node_json_value(previous) == map_node_json_value(&current_normalized)
+}
+
 fn map_node_has_subnet_route(node: &MapNode) -> bool {
     node.allowed_ips
         .iter()
@@ -547,16 +553,8 @@ fn peer_patch_if_only_patchable_fields_changed(
     let endpoints_changed = previous.endpoints != current.endpoints;
     let derp_changed = previous.home_derp != current.home_derp;
     let online_changed = previous.online != current.online;
-    let last_seen_changed = previous.last_seen != current.last_seen;
     let key_expiry_changed = previous.key_expiry != current.key_expiry;
-    let last_seen_patch =
-        last_seen_changed && !online_changed && !endpoints_changed && !derp_changed;
-    if !endpoints_changed
-        && !derp_changed
-        && !online_changed
-        && !last_seen_patch
-        && !key_expiry_changed
-    {
+    if !endpoints_changed && !derp_changed && !online_changed && !key_expiry_changed {
         return None;
     }
     // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
@@ -599,11 +597,7 @@ fn peer_patch_if_only_patchable_fields_changed(
         },
         derp_region: if derp_changed { current.home_derp } else { 0 },
         online: if online_changed { current.online } else { None },
-        last_seen: if last_seen_patch {
-            current.last_seen
-        } else {
-            None
-        },
+        last_seen: None,
         key_expiry: if key_expiry_changed {
             current.key_expiry
         } else {
@@ -1659,7 +1653,7 @@ fn rebuild_peer_delta_chunk(
     for peer in peers_changed {
         match last_peer_state.get(&peer.id) {
             None => full_peers_changed.push(peer),
-            Some(previous) if map_node_json_value(previous) == map_node_json_value(&peer) => {}
+            Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
             Some(previous) => match peer_patch_if_only_patchable_fields_changed(previous, &peer) {
                 Some(patch) => peer_patches.push(patch),
                 None => full_peers_changed.push(peer),
@@ -5220,6 +5214,61 @@ mod tests {
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         assert_eq!(&decoded[..], br#"{"KeepAlive":true}"#);
+    }
+
+    #[tokio::test]
+    async fn stream_true_quiet_last_seen_touch_is_absorbed_on_next_wake() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app.clone(), &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+        assert!(first_mr.peers[0].last_seen.is_some());
+
+        let before = state.machines.get(&a).unwrap().last_seen;
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let req_body = serde_json::json!({ "OmitPeers": true, "Version": 113 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.get(&a).unwrap().last_seen > before);
+
+        assert_no_stream_frame(&mut body, Duration::from_millis(50)).await;
+
+        insert_peer(&state, &c, "peer-c", 12);
+        let mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&c));
+        assert!(
+            mr.peers_changed
+                .iter()
+                .all(|peer| peer.id != stable_id_from_key(&a)),
+            "timestamp-only peer-a churn must not become a delayed full peer delta"
+        );
+        assert!(
+            mr.peers_changed_patch
+                .iter()
+                .all(|patch| patch.node_id != stable_id_from_key(&a)),
+            "timestamp-only peer-a churn must not become a delayed peer patch"
+        );
     }
 
     #[tokio::test(start_paused = true)]

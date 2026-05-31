@@ -260,8 +260,10 @@ fn derp_random_seed(base_domain: &str) -> i64 {
     let seed = if base_domain.is_empty() {
         fallback = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos().to_string())
-            .unwrap_or_else(|err| format!("{err:?}"));
+            .map_or_else(
+                |err| format!("{err:?}"),
+                |duration| duration.as_nanos().to_string(),
+            );
         fallback.as_str()
     } else {
         base_domain
@@ -296,7 +298,7 @@ impl GoMathRand {
             seed += i64::from(I32_MAX);
         }
         if seed == 0 {
-            seed = 89482311;
+            seed = 89_482_311;
         }
 
         let cooked = rng_cooked();

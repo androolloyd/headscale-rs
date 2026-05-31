@@ -322,11 +322,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(status) = embedded_derp_runtime.sidecar_status() {
         tracing::info!(?status, "embedded DERP sidecar ready");
     }
-    let derp_shuffle_base_domain = cfg
-        .dns
-        .as_ref()
-        .map(|dns| dns.base_domain.as_str())
-        .unwrap_or("");
+    let derp_shuffle_base_domain = cfg.dns.as_ref().map_or("", |dns| dns.base_domain.as_str());
     let derp_map = derp_map_from_runtime_config(
         cfg.derp.as_ref(),
         embedded_derp_runtime.config(),
@@ -3931,7 +3927,7 @@ database:
         assert!(
             map.peers
                 .iter()
-                .any(|peer| peer.name == "peer-b.tail.example.org")
+                .any(|peer| peer.name == "peer-b.tail.example.org.")
         );
         assert!(dns.proxied);
         assert_eq!(

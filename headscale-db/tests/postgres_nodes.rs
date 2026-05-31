@@ -243,6 +243,130 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
     Ok(())
 }
 
+#[tokio::test]
+async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
+    let Some(mut schema) = TempSchema::open("nodes_list_helpers").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let alice = seed_user(&mut schema.conn, "alice").await?;
+        let auth_key_id = seed_auth_key(&mut schema.conn, alice.id).await?;
+        let first = headscale_nodes::create_postgres_on_connection(
+            &mut schema.conn,
+            node_params(alice.id, auth_key_id),
+        )
+        .await?;
+
+        let mut second_params = node_params(alice.id, auth_key_id);
+        second_params.machine_key = "mkey:second".into();
+        second_params.node_key = "nodekey:second".into();
+        second_params.disco_key = "discokey:second".into();
+        second_params.hostname = "alice-phone".into();
+        second_params.given_name = "alice-phone".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let second =
+            headscale_nodes::create_postgres_on_connection(&mut schema.conn, second_params).await?;
+
+        let ephemeral_key_id =
+            seed_auth_key_with_ephemeral(&mut schema.conn, alice.id, true).await?;
+        let mut ephemeral_params = node_params(alice.id, ephemeral_key_id);
+        ephemeral_params.machine_key = "mkey:ephemeral".into();
+        ephemeral_params.node_key = "nodekey:ephemeral".into();
+        ephemeral_params.disco_key = "discokey:ephemeral".into();
+        ephemeral_params.hostname = "ephemeral".into();
+        ephemeral_params.given_name = "ephemeral".into();
+        ephemeral_params.ipv4 = Some("100.64.0.3".into());
+        ephemeral_params.ipv6 = Some("fd7a:115c:a1e0::3".into());
+        let ephemeral =
+            headscale_nodes::create_postgres_on_connection(&mut schema.conn, ephemeral_params)
+                .await?;
+
+        let all =
+            headscale_nodes::list_postgres_by_ids_on_connection(&mut schema.conn, &[]).await?;
+        assert_eq!(
+            all.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![first.id, second.id, ephemeral.id]
+        );
+
+        assert!(
+            headscale_nodes::list_postgres_by_ids_on_connection(&mut schema.conn, &[999])
+                .await?
+                .is_empty()
+        );
+        let partial = headscale_nodes::list_postgres_by_ids_on_connection(
+            &mut schema.conn,
+            &[second.id, 999],
+        )
+        .await?;
+        assert_eq!(
+            partial.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![second.id]
+        );
+
+        let peers =
+            headscale_nodes::list_postgres_peers_on_connection(&mut schema.conn, first.id, &[])
+                .await?;
+        assert_eq!(
+            peers.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![second.id, ephemeral.id]
+        );
+        let filtered_peers = headscale_nodes::list_postgres_peers_on_connection(
+            &mut schema.conn,
+            first.id,
+            &[first.id, second.id, 999],
+        )
+        .await?;
+        assert_eq!(
+            filtered_peers
+                .iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![second.id]
+        );
+
+        assert_eq!(
+            headscale_nodes::get_postgres_by_user_hostname_on_connection(
+                &mut schema.conn,
+                alice.id,
+                "alice-phone",
+            )
+            .await?
+            .id,
+            second.id
+        );
+        assert!(matches!(
+            headscale_nodes::get_postgres_by_user_hostname_on_connection(
+                &mut schema.conn,
+                alice.id,
+                "missing",
+            )
+            .await,
+            Err(DbError::NotFound(_))
+        ));
+
+        let ephemeral_nodes =
+            headscale_nodes::list_postgres_ephemeral_on_connection(&mut schema.conn).await?;
+        assert_eq!(
+            ephemeral_nodes
+                .iter()
+                .map(|node| (node.id, node.auth_key_id))
+                .collect::<Vec<_>>(),
+            vec![(ephemeral.id, Some(ephemeral_key_id))]
+        );
+
+        Ok::<(), DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
 fn node_params(user_id: i64, auth_key_id: i64) -> headscale_nodes::CreateParams {
     headscale_nodes::CreateParams {
         machine_key: "mkey:abc".into(),
@@ -283,12 +407,20 @@ async fn seed_user(conn: &mut PgConnection, name: &str) -> Result<users::UserRow
 }
 
 async fn seed_auth_key(conn: &mut PgConnection, user_id: i64) -> Result<i64, DbError> {
+    seed_auth_key_with_ephemeral(conn, user_id, false).await
+}
+
+async fn seed_auth_key_with_ephemeral(
+    conn: &mut PgConnection,
+    user_id: i64,
+    ephemeral: bool,
+) -> Result<i64, DbError> {
     Ok(preauth_keys::create_postgres_for_test_on_connection(
         conn,
         preauth_keys::CreateParams {
             user_id: user_id.to_string(),
             reusable: false,
-            ephemeral: false,
+            ephemeral,
             tags: Vec::new(),
             expiration: None,
         },

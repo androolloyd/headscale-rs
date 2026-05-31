@@ -438,3 +438,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-ssh-oidc-check-deny`, and `postgres-ssh-oidc-check-cancel`.
 - The real-client workflow includes these rows in `PR_SMOKES`; the matrix now
   has thirty-one Postgres stock-client rows.
+
+## 2026-05-31 Node DB helper parity slice
+
+- Added Go-shaped node read helpers for ID-filtered `ListNodes`, peer listing,
+  assigned-preauth-key ephemeral listing, and user+raw-hostname lookup across
+  SQLite and feature-gated Postgres.
+- SQLite unit coverage and the Postgres `postgres_nodes` integration contract
+  now lock the upstream empty-filter, partial-filter, self-excluded peer, and
+  ephemeral-key semantics.

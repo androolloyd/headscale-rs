@@ -65,6 +65,10 @@ fn node_select(suffix: &str) -> String {
     format!("SELECT {NODE_COLUMNS} FROM nodes {suffix}")
 }
 
+fn sqlite_placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
 #[cfg(feature = "postgres-sqlx")]
 const POSTGRES_NODE_COLUMNS: &str = r"
         id,
@@ -672,6 +676,22 @@ pub async fn get_by_machine_key_and_user(
         .map_err(map_not_found)
 }
 
+pub async fn get_by_user_hostname(
+    pool: &SqlitePool,
+    user_id: i64,
+    hostname: &str,
+) -> Result<HeadscaleNodeRow> {
+    let query = node_select(
+        "WHERE user_id = ? AND hostname = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+    );
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(user_id)
+        .bind(hostname)
+        .fetch_one(pool)
+        .await
+        .map_err(map_not_found)
+}
+
 #[cfg(feature = "postgres-sqlx")]
 pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<HeadscaleNodeRow> {
     let mut conn = pool.acquire().await?;
@@ -755,6 +775,33 @@ pub async fn get_postgres_by_machine_key_and_user_on_connection(
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(machine_key)
         .bind(user_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_user_hostname(
+    pool: &PgPool,
+    user_id: i64,
+    hostname: &str,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    get_postgres_by_user_hostname_on_connection(&mut conn, user_id, hostname).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_user_hostname_on_connection(
+    conn: &mut PgConnection,
+    user_id: i64,
+    hostname: &str,
+) -> Result<HeadscaleNodeRow> {
+    let query = postgres_node_select(
+        "WHERE user_id = $1 AND hostname = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1",
+    );
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(user_id)
+        .bind(hostname)
         .fetch_one(&mut *conn)
         .await
         .map_err(map_not_found)
@@ -919,6 +966,54 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
         .map_err(DbError::from)
 }
 
+pub async fn list_by_ids(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<HeadscaleNodeRow>> {
+    if ids.is_empty() {
+        return list(pool).await;
+    }
+
+    let query = node_select(&format!(
+        "WHERE deleted_at IS NULL AND id IN ({}) ORDER BY id",
+        sqlite_placeholders(ids.len())
+    ));
+    let mut query = sqlx::query_as::<_, HeadscaleNodeRow>(&query);
+    for id in ids {
+        query = query.bind(*id);
+    }
+    query.fetch_all(pool).await.map_err(DbError::from)
+}
+
+pub async fn list_peers(
+    pool: &SqlitePool,
+    node_id: i64,
+    peer_ids: &[i64],
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = if peer_ids.is_empty() {
+        node_select("WHERE id != ? AND deleted_at IS NULL ORDER BY id")
+    } else {
+        node_select(&format!(
+            "WHERE id != ? AND deleted_at IS NULL AND id IN ({}) ORDER BY id",
+            sqlite_placeholders(peer_ids.len())
+        ))
+    };
+    let mut query = sqlx::query_as::<_, HeadscaleNodeRow>(&query).bind(node_id);
+    for id in peer_ids {
+        query = query.bind(*id);
+    }
+    query.fetch_all(pool).await.map_err(DbError::from)
+}
+
+pub async fn list_ephemeral(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = node_select(
+        "WHERE deleted_at IS NULL
+         AND auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = 1)
+         ORDER BY id",
+    );
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::from)
+}
+
 pub async fn list_by_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<HeadscaleNodeRow>> {
     let query = node_select("WHERE user_id = ? AND deleted_at IS NULL ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -937,6 +1032,80 @@ pub async fn list_postgres(pool: &PgPool) -> Result<Vec<HeadscaleNodeRow>> {
 #[cfg(feature = "postgres-sqlx")]
 pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<HeadscaleNodeRow>> {
     let query = postgres_node_select("WHERE deleted_at IS NULL ORDER BY id");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Vec<HeadscaleNodeRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_by_ids_on_connection(&mut conn, ids).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_ids_on_connection(
+    conn: &mut PgConnection,
+    ids: &[i64],
+) -> Result<Vec<HeadscaleNodeRow>> {
+    if ids.is_empty() {
+        return list_postgres_on_connection(conn).await;
+    }
+
+    let query = postgres_node_select("WHERE deleted_at IS NULL AND id = ANY($1) ORDER BY id");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(ids.to_vec())
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_peers(
+    pool: &PgPool,
+    node_id: i64,
+    peer_ids: &[i64],
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_peers_on_connection(&mut conn, node_id, peer_ids).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_peers_on_connection(
+    conn: &mut PgConnection,
+    node_id: i64,
+    peer_ids: &[i64],
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = if peer_ids.is_empty() {
+        postgres_node_select("WHERE id != $1 AND deleted_at IS NULL ORDER BY id")
+    } else {
+        postgres_node_select("WHERE id != $1 AND deleted_at IS NULL AND id = ANY($2) ORDER BY id")
+    };
+    let query = sqlx::query_as::<_, HeadscaleNodeRow>(&query).bind(node_id);
+    let query = if peer_ids.is_empty() {
+        query
+    } else {
+        query.bind(peer_ids.to_vec())
+    };
+    query.fetch_all(&mut *conn).await.map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_ephemeral(pool: &PgPool) -> Result<Vec<HeadscaleNodeRow>> {
+    let mut conn = pool.acquire().await?;
+    list_postgres_ephemeral_on_connection(&mut conn).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_ephemeral_on_connection(
+    conn: &mut PgConnection,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let query = postgres_node_select(
+        "WHERE deleted_at IS NULL
+         AND auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = TRUE)
+         ORDER BY id",
+    );
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .fetch_all(&mut *conn)
         .await
@@ -1653,12 +1822,16 @@ mod tests {
     }
 
     async fn auth_key_id(db: &Database, user_id: i64) -> i64 {
+        auth_key_id_with_ephemeral(db, user_id, false).await
+    }
+
+    async fn auth_key_id_with_ephemeral(db: &Database, user_id: i64, ephemeral: bool) -> i64 {
         preauth_keys::create_for_test(
             db.pool(),
             PreauthCreateParams {
                 user_id: user_id.to_string(),
                 reusable: false,
-                ephemeral: false,
+                ephemeral,
                 tags: Vec::new(),
                 expiration: None,
             },
@@ -1823,6 +1996,97 @@ mod tests {
         duplicate_params.given_name.clear();
         let duplicate = create(db.pool(), duplicate_params).await.unwrap();
         assert_eq!(duplicate.given_name, format!("{expected_base}-1"));
+    }
+
+    #[tokio::test]
+    async fn list_helpers_match_headscale_go_id_and_peer_filters() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let first = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut second_params = node_params(user_id, auth_key_id);
+        second_params.machine_key = "mkey:second".into();
+        second_params.node_key = "nodekey:second".into();
+        second_params.disco_key = "discokey:second".into();
+        second_params.hostname = "alice-phone".into();
+        second_params.given_name = "alice-phone".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let second = create(db.pool(), second_params).await.unwrap();
+
+        let all = list_by_ids(db.pool(), &[]).await.unwrap();
+        assert_eq!(
+            all.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+
+        assert!(list_by_ids(db.pool(), &[999]).await.unwrap().is_empty());
+        let partial = list_by_ids(db.pool(), &[second.id, 999]).await.unwrap();
+        assert_eq!(
+            partial.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![second.id]
+        );
+
+        let peers = list_peers(db.pool(), first.id, &[]).await.unwrap();
+        assert_eq!(
+            peers.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![second.id]
+        );
+        let filtered_peers = list_peers(db.pool(), first.id, &[first.id, second.id, 999])
+            .await
+            .unwrap();
+        assert_eq!(
+            filtered_peers
+                .iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
+            vec![second.id]
+        );
+
+        assert_eq!(
+            get_by_user_hostname(db.pool(), user_id, "alice-phone")
+                .await
+                .unwrap()
+                .id,
+            second.id
+        );
+        assert!(matches!(
+            get_by_user_hostname(db.pool(), user_id, "missing").await,
+            Err(DbError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_ephemeral_uses_assigned_preauth_key_flag() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let ephemeral_key_id = auth_key_id_with_ephemeral(&db, user_id, true).await;
+        let mut ephemeral_params = node_params(user_id, ephemeral_key_id);
+        ephemeral_params.machine_key = "mkey:ephemeral".into();
+        ephemeral_params.node_key = "nodekey:ephemeral".into();
+        ephemeral_params.disco_key = "discokey:ephemeral".into();
+        ephemeral_params.hostname = "ephemeral".into();
+        ephemeral_params.given_name = "ephemeral".into();
+        ephemeral_params.ipv4 = Some("100.64.0.2".into());
+        ephemeral_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let ephemeral = create(db.pool(), ephemeral_params).await.unwrap();
+
+        let ephemeral_nodes = list_ephemeral(db.pool()).await.unwrap();
+        assert_eq!(
+            ephemeral_nodes
+                .iter()
+                .map(|node| (node.id, node.auth_key_id))
+                .collect::<Vec<_>>(),
+            vec![(ephemeral.id, Some(ephemeral_key_id))]
+        );
     }
 
     #[tokio::test]

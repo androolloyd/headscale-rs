@@ -1,0 +1,28 @@
+{
+  "tagOwners": {
+    "tag:server": ["alice@example.com"]
+  },
+  "nodeAttrs": [
+    {
+      "target": ["tag:server"],
+      "attr": ["ssh"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "check",
+      "checkPeriod": "1.5h",
+      "src": [" alice@example.com "],
+      "dst": [" tag:server "],
+      "users": [" root ", "\tubuntu\n"],
+      "acceptEnv": ["LANG", "LC_*"]
+    }
+  ],
+  "sshTests": [
+    {
+      "src": " alice@example.com ",
+      "dst": [" tag:server "],
+      "check": [" root "]
+    }
+  ]
+}

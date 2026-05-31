@@ -192,8 +192,16 @@ fn source_node_addrs_for_rule(nodes: &[&SshPolicyNode], rule: &SshUserRule) -> V
         if !rule.source_node_ids.contains(&node.id) {
             continue;
         }
-        for addr in &node.addrs {
-            push_unique_string(&mut out, addr.clone());
+        if node.tags.is_empty() {
+            for addr in &node.addrs {
+                push_unique_string(&mut out, addr.clone());
+            }
+        } else {
+            for _ in 0..node.tags.len() {
+                for addr in &node.addrs {
+                    out.push(addr.clone());
+                }
+            }
         }
     }
     out.sort();
@@ -446,7 +454,7 @@ pub(crate) fn ssh_check_hold_url_with_auth(base_url: &str, auth_id: &str) -> Str
 }
 
 fn check_period_from_rule(check_period: Option<&str>) -> Duration {
-    match check_period.map(str::trim) {
+    match check_period {
         None => SSH_CHECK_PERIOD_DEFAULT,
         Some("always" | "0") => Duration::ZERO,
         Some(period) => parse_duration_nanos(period)
@@ -456,47 +464,85 @@ fn check_period_from_rule(check_period: Option<&str>) -> Duration {
 }
 
 fn parse_duration_nanos(input: &str) -> Option<i64> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    if input.is_empty() {
         return None;
     }
-    if trimmed == "always" {
-        return Some(0);
-    }
-    if trimmed == "0" {
+    if input == "always" {
         return Some(0);
     }
 
-    let bytes = trimmed.as_bytes();
+    let bytes = input.as_bytes();
     let mut pos = 0usize;
-    let mut total: i128 = 0;
-    while pos < bytes.len() {
-        if !bytes[pos].is_ascii_digit() {
+    let mut negative = false;
+    if bytes[pos] == b'+' || bytes[pos] == b'-' {
+        negative = bytes[pos] == b'-';
+        pos += 1;
+        if pos == bytes.len() {
             return None;
         }
+    }
+    if &input[pos..] == "0" {
+        return Some(0);
+    }
+
+    let mut total: i128 = 0;
+    while pos < bytes.len() {
         let start = pos;
         while pos < bytes.len() && bytes[pos].is_ascii_digit() {
             pos += 1;
         }
-        let value: i128 = trimmed[start..pos].parse().ok()?;
+        let has_integer = pos > start;
+        let whole: i128 = if has_integer {
+            input[start..pos].parse().ok()?
+        } else {
+            0
+        };
+
+        let mut fraction = 0i128;
+        let mut scale = 1i128;
+        let mut has_fraction = false;
+        if pos < bytes.len() && bytes[pos] == b'.' {
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                has_fraction = true;
+                if scale < 1_000_000_000_000_000_000 {
+                    fraction = fraction
+                        .checked_mul(10)?
+                        .checked_add(i128::from(bytes[pos] - b'0'))?;
+                    scale = scale.checked_mul(10)?;
+                }
+                pos += 1;
+            }
+        }
+        if !has_integer && !has_fraction {
+            return None;
+        }
+
         let unit_start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_digit() {
+        while pos < bytes.len() && !bytes[pos].is_ascii_digit() && bytes[pos] != b'.' {
             pos += 1;
         }
-        let unit = &trimmed[unit_start..pos];
+        if unit_start == pos {
+            return None;
+        }
+        let unit = &input[unit_start..pos];
         let multiplier: i128 = match unit {
             "ns" => 1,
-            "us" | "µs" => 1_000,
+            "us" | "µs" | "μs" => 1_000,
             "ms" => 1_000_000,
             "s" => 1_000_000_000,
             "m" => 60 * 1_000_000_000,
             "h" => 60 * 60 * 1_000_000_000,
-            "d" => 24 * 60 * 60 * 1_000_000_000,
-            "w" => 7 * 24 * 60 * 60 * 1_000_000_000,
-            "y" => 365 * 24 * 60 * 60 * 1_000_000_000,
             _ => return None,
         };
-        total = total.checked_add(value.checked_mul(multiplier)?)?;
+        let whole_nanos = whole.checked_mul(multiplier)?;
+        let fraction_nanos = fraction.checked_mul(multiplier)?.checked_div(scale)?;
+        total = total
+            .checked_add(whole_nanos)?
+            .checked_add(fraction_nanos)?;
+    }
+    if negative {
+        total = total.checked_neg()?;
     }
     i64::try_from(total).ok()
 }
@@ -707,6 +753,43 @@ mod tests {
     }
 
     #[test]
+    fn fractional_check_period_uses_go_duration_grammar() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "groups": {"group:admins": ["bob@"]},
+              "tagOwners": {"tag:db": ["alice@"]},
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "1.5h",
+                "src": ["group:admins"],
+                "dst": ["tag:db"],
+                "users": ["admin"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("bob".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:db".into()],
+            },
+        ];
+
+        assert_eq!(
+            ssh_check_period_for(&doc, &nodes, 1, 2),
+            Some(Duration::from_secs(90 * 60))
+        );
+    }
+
+    #[test]
     fn accept_env_compiles_to_tailcfg_rule_like_headscale_go() {
         let doc = parse_hujson_policy(
             r#"{
@@ -739,6 +822,42 @@ mod tests {
 
         assert_eq!(pol.rules[0].accept_env, vec!["LANG", "LC_*"]);
         assert_eq!(pol.rules[0].ssh_users["root"], "root");
+    }
+
+    #[test]
+    fn tagged_sources_preserve_per_tag_principal_duplicates_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:client": ["alice@"], "tag:server": ["alice@"]},
+              "ssh": [{
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["tag:server"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: vec!["tag:client".into(), "tag:admin".into()],
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:server".into()],
+            },
+        ];
+        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(
+            principal_ips_for_rule(&pol.rules[0]),
+            vec!["100.64.0.1", "100.64.0.1"]
+        );
     }
 
     #[test]

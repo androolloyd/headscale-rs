@@ -192,6 +192,25 @@ pub struct NodeAttrGrant {
 /// and `nodeAttrs[].app` policy entries.
 pub type CapabilityMap = BTreeMap<String, Vec<serde_json::Value>>;
 
+fn deserialize_trimmed_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|value| value.trim().to_string())
+}
+
+fn deserialize_trimmed_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(|values| {
+        values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .collect()
+    })
+}
+
 /// One public `grants` rule. Grants have an implied accept action and
 /// can carry network-layer `ip` allowances, application-layer `app`
 /// capabilities, and optional route-filtering `via` tags.
@@ -229,9 +248,11 @@ pub struct AutoApprovers {
 #[serde(deny_unknown_fields)]
 pub struct SshRule {
     pub action: String,
+    #[serde(deserialize_with = "deserialize_trimmed_strings")]
     pub src: Vec<String>,
+    #[serde(deserialize_with = "deserialize_trimmed_strings")]
     pub dst: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub users: Vec<String>,
     #[serde(default, rename = "check_period", alias = "checkPeriod")]
     pub check_period: Option<String>,
@@ -259,14 +280,15 @@ pub struct PolicyTest {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshPolicyTest {
+    #[serde(deserialize_with = "deserialize_trimmed_string")]
     pub src: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub dst: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub accept: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub deny: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub check: Vec<String>,
 }
 
@@ -995,6 +1017,10 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
     if let Some(period) = rule.check_period.as_deref() {
         if rule.action == "check" {
             match parse_duration_nanos(period) {
+                Some(nanos) if nanos < 0 => errs.push(format!(
+                    "checkPeriod {} must be a positive duration",
+                    format_duration_nanos(nanos)
+                )),
                 Some(nanos) if nanos <= SSH_CHECK_PERIOD_MAX_NANOS => {}
                 Some(nanos) => errs.push(format!(
                     "checkPeriod {} is above the max (168h)",
@@ -1402,47 +1428,85 @@ fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut
 const SSH_CHECK_PERIOD_MAX_NANOS: i64 = 168 * 60 * 60 * 1_000_000_000;
 
 fn parse_duration_nanos(input: &str) -> Option<i64> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    if input.is_empty() {
         return None;
     }
-    if trimmed == "always" {
-        return Some(0);
-    }
-    if trimmed == "0" {
+    if input == "always" {
         return Some(0);
     }
 
-    let bytes = trimmed.as_bytes();
+    let bytes = input.as_bytes();
     let mut pos = 0usize;
-    let mut total: i128 = 0;
-    while pos < bytes.len() {
-        if !bytes[pos].is_ascii_digit() {
+    let mut negative = false;
+    if bytes[pos] == b'+' || bytes[pos] == b'-' {
+        negative = bytes[pos] == b'-';
+        pos += 1;
+        if pos == bytes.len() {
             return None;
         }
+    }
+    if &input[pos..] == "0" {
+        return Some(0);
+    }
+
+    let mut total: i128 = 0;
+    while pos < bytes.len() {
         let start = pos;
         while pos < bytes.len() && bytes[pos].is_ascii_digit() {
             pos += 1;
         }
-        let value: i128 = trimmed[start..pos].parse().ok()?;
+        let has_integer = pos > start;
+        let whole: i128 = if has_integer {
+            input[start..pos].parse().ok()?
+        } else {
+            0
+        };
+
+        let mut fraction = 0i128;
+        let mut scale = 1i128;
+        let mut has_fraction = false;
+        if pos < bytes.len() && bytes[pos] == b'.' {
+            pos += 1;
+            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                has_fraction = true;
+                if scale < 1_000_000_000_000_000_000 {
+                    fraction = fraction
+                        .checked_mul(10)?
+                        .checked_add(i128::from(bytes[pos] - b'0'))?;
+                    scale = scale.checked_mul(10)?;
+                }
+                pos += 1;
+            }
+        }
+        if !has_integer && !has_fraction {
+            return None;
+        }
+
         let unit_start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_digit() {
+        while pos < bytes.len() && !bytes[pos].is_ascii_digit() && bytes[pos] != b'.' {
             pos += 1;
         }
-        let unit = &trimmed[unit_start..pos];
+        if unit_start == pos {
+            return None;
+        }
+        let unit = &input[unit_start..pos];
         let multiplier: i128 = match unit {
             "ns" => 1,
-            "us" | "µs" => 1_000,
+            "us" | "µs" | "μs" => 1_000,
             "ms" => 1_000_000,
             "s" => 1_000_000_000,
             "m" => 60 * 1_000_000_000,
             "h" => 60 * 60 * 1_000_000_000,
-            "d" => 24 * 60 * 60 * 1_000_000_000,
-            "w" => 7 * 24 * 60 * 60 * 1_000_000_000,
-            "y" => 365 * 24 * 60 * 60 * 1_000_000_000,
             _ => return None,
         };
-        total = total.checked_add(value.checked_mul(multiplier)?)?;
+        let whole_nanos = whole.checked_mul(multiplier)?;
+        let fraction_nanos = fraction.checked_mul(multiplier)?.checked_div(scale)?;
+        total = total
+            .checked_add(whole_nanos)?
+            .checked_add(fraction_nanos)?;
+    }
+    if negative {
+        total = total.checked_neg()?;
     }
     i64::try_from(total).ok()
 }
@@ -3637,6 +3701,49 @@ mod tests {
     }
 
     #[test]
+    fn accepts_fractional_ssh_check_period_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "1.5h",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(doc.ssh[0].check_period.as_deref(), Some("1.5h"));
+    }
+
+    #[test]
+    fn rejects_non_go_ssh_check_period_units_like_headscale_go() {
+        for (period, expected) in [
+            ("1d", "not a valid duration string"),
+            (" 1h", "not a valid duration string"),
+            ("-1h", "must be a positive duration"),
+        ] {
+            let raw = format!(
+                r#"{{
+                  "ssh": [{{
+                    "action": "check",
+                    "checkPeriod": "{period}",
+                    "src": ["alice@"],
+                    "dst": ["autogroup:self"],
+                    "users": ["root"]
+                  }}]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).unwrap_err().to_string();
+            assert!(
+                err.contains(expected),
+                "{period:?} should contain {expected:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_ssh_check_period_above_max_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{
@@ -3735,6 +3842,36 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(wildcard.contains(r#"user "*" is not a valid SSH user"#));
+    }
+
+    #[test]
+    fn normalizes_ssh_aliases_and_users_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:server": ["alice@"]},
+              "ssh": [{
+                "action": "accept",
+                "src": [" alice@ "],
+                "dst": [" tag:server "],
+                "users": [" root ", "\tubuntu\n"]
+              }],
+              "sshTests": [{
+                "src": " alice@ ",
+                "dst": [" tag:server "],
+                "accept": [" root "],
+                "deny": ["\tubuntu\n"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(doc.ssh[0].src, vec!["alice@"]);
+        assert_eq!(doc.ssh[0].dst, vec!["tag:server"]);
+        assert_eq!(doc.ssh[0].users, vec!["root", "ubuntu"]);
+        assert_eq!(doc.ssh_tests[0].src, "alice@");
+        assert_eq!(doc.ssh_tests[0].dst, vec!["tag:server"]);
+        assert_eq!(doc.ssh_tests[0].accept, vec!["root"]);
+        assert_eq!(doc.ssh_tests[0].deny, vec!["ubuntu"]);
     }
 
     #[test]

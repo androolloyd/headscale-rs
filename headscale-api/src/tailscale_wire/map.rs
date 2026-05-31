@@ -2910,6 +2910,8 @@ mod tests {
             false,
         );
         record.register_method = 1;
+        record.last_seen = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let initial_last_seen = record.last_seen.timestamp();
         machines
             .create_or_update_auth_key_path(
                 record.clone(),
@@ -2978,6 +2980,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row.auth_key_id, Some(preauth.row.id));
+        assert!(
+            row.last_seen.is_some_and(|seen| seen > initial_last_seen),
+            "map-time last_seen touch should persist to nodes.last_seen"
+        );
         assert_eq!(row.disco_key, disco_key);
         assert_eq!(row.endpoint_list(), endpoints);
         let host_info = row.host_info_value();

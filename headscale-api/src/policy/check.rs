@@ -215,7 +215,7 @@ fn test_allows(
     let protos = test_protocols(&test.proto);
 
     for src in srcs {
-        let dsts = resolve_alias(doc, nodes, alias, Some(src));
+        let dsts = resolve_alias(doc, nodes, alias, None);
         if dsts.is_empty() {
             return Err(format!("alias {alias:?} resolved to no addresses"));
         }
@@ -675,6 +675,30 @@ mod tests {
     }
 
     #[test]
+    fn acl_tests_do_not_resolve_autogroup_self_per_source() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "acls": [
+                    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:22"]}
+                ],
+                "tests": [
+                    {"src": "alice@", "accept": ["autogroup:self:22"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice-a", "alice", "100.64.0.1", &[]),
+            node(2, "alice-b", "alice", "100.64.0.2", &[]),
+            node(3, "bob", "bob", "100.64.0.3", &[]),
+        ];
+
+        let err = check_policy_semantics(&doc, &nodes).unwrap_err();
+        assert!(err.contains("autogroup:self"));
+        assert!(err.contains("resolved to no addresses"));
+    }
+
+    #[test]
     fn ssh_tests_accept_deny_and_check_pass_against_live_nodes() {
         let doc = parse_hujson_policy(
             r#"{
@@ -694,6 +718,28 @@ mod tests {
             node(1, "alice", "alice", "100.64.0.1", &[]),
             node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
             node(3, "db", "bob", "100.64.0.3", &["tag:db"]),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_resolve_autogroup_self_for_user_source() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "ssh": [
+                    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["autogroup:self"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice-a", "alice", "100.64.0.1", &[]),
+            node(2, "alice-b", "alice", "100.64.0.2", &[]),
+            node(3, "bob", "bob", "100.64.0.3", &[]),
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();

@@ -615,6 +615,14 @@ pub struct DebugStringInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DebugRoutesInfo {
+    pub available_routes: BTreeMap<u64, Vec<String>>,
+    pub primary_routes: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unhealthy_nodes: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugConfigInfo {
     #[serde(rename = "ServerURL")]
     pub server_url: String,
@@ -1174,7 +1182,7 @@ pub async fn handle_debug_config(State(state): State<WireState>) -> Response {
 pub async fn handle_debug_routes(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let snapshot = state.machines.snapshot();
     if wants_json(&headers) {
-        let routes = state.machines.debug_routes_for_snapshot(&snapshot);
+        let routes = debug_routes_info(&state, &snapshot);
         match serde_json::to_string_pretty(&routes) {
             Ok(body) => (
                 StatusCode::OK,
@@ -1191,6 +1199,25 @@ pub async fn handle_debug_routes(State(state): State<WireState>, headers: Header
             state.machines.debug_routes_string_for_snapshot(&snapshot),
         )
             .into_response()
+    }
+}
+
+fn debug_routes_info(
+    state: &WireState,
+    snapshot: &HashMap<String, MachineRecord>,
+) -> DebugRoutesInfo {
+    let routes = state.machines.debug_routes_for_snapshot(snapshot);
+    let unhealthy_nodes = routes
+        .available_routes
+        .keys()
+        .copied()
+        .filter(|node_id| !state.machines.is_route_candidate_healthy(*node_id))
+        .collect();
+
+    DebugRoutesInfo {
+        available_routes: routes.available_routes,
+        primary_routes: routes.primary_routes,
+        unhealthy_nodes,
     }
 }
 
@@ -4742,6 +4769,13 @@ mod tests {
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let keys = parsed
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["available_routes", "primary_routes"]);
         let available = parsed["available_routes"].as_object().unwrap();
         assert_eq!(
             available.get(&id_a.to_string()).unwrap(),
@@ -4756,6 +4790,62 @@ mod tests {
             parsed["primary_routes"].get("0.0.0.0/0").is_none(),
             "exit routes are excluded from primary route debug state"
         );
+    }
+
+    #[tokio::test]
+    async fn debug_routes_json_includes_unhealthy_nodes_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let node_a = "debug-route-unhealthy-a";
+        let node_b = "debug-route-unhealthy-b";
+        state.machines.upsert(
+            node_a.to_string(),
+            record(node_a, 1, &["10.0.0.0/24"], &["10.0.0.0/24"]),
+        );
+        state.machines.upsert(
+            node_b.to_string(),
+            record(node_b, 2, &["10.0.0.0/24"], &["10.0.0.0/24"]),
+        );
+
+        let id_a = stable_id_from_key(node_a);
+        let id_b = stable_id_from_key(node_b);
+        let _guard_a = MachineRegistry::track_stream_connection(state.machines.clone(), id_a);
+        let _guard_b = MachineRegistry::track_stream_connection(state.machines.clone(), id_b);
+        let _ = state.machines.set_route_candidate_health(id_a, false);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/routes")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let keys = parsed
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec!["available_routes", "primary_routes", "unhealthy_nodes"]
+        );
+        assert_eq!(parsed["unhealthy_nodes"], serde_json::json!([id_a]));
+        assert_eq!(
+            parsed["available_routes"][id_a.to_string()],
+            serde_json::json!(["10.0.0.0/24"])
+        );
+        assert_eq!(
+            parsed["available_routes"][id_b.to_string()],
+            serde_json::json!(["10.0.0.0/24"])
+        );
+        assert_eq!(parsed["primary_routes"]["10.0.0.0/24"], id_b);
     }
 
     #[tokio::test]

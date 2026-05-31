@@ -1,4 +1,4 @@
-//! Tiny duration parser for `--expires-in` flags.
+//! Tiny duration parser for upstream `--expiration` flags.
 //!
 //! The upstream `headscale` CLI accepts a string like `90d` / `12h` /
 //! `30m` / `45s` (no fractions, single unit). We mirror that exactly —

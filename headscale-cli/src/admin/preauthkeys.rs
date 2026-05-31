@@ -70,15 +70,8 @@ pub async fn create_grpc(
     Ok(())
 }
 
-pub async fn list(
-    client: &AdminClient,
-    user_filter: Option<&str>,
-    fmt: OutputFormat,
-) -> Result<(), AdminError> {
-    let mut keys: Vec<PreauthAdminKey> = client.get_json("/preauthkeys").await?;
-    if let Some(u) = user_filter {
-        keys.retain(|k| k.user == u);
-    }
+pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+    let keys: Vec<PreauthAdminKey> = client.get_json("/preauthkeys").await?;
     if fmt.is_structured() {
         print_structured(fmt, &keys)?;
     } else {
@@ -87,20 +80,13 @@ pub async fn list(
     Ok(())
 }
 
-pub async fn list_grpc(
-    client: &mut GrpcAdminClient,
-    user_filter: Option<&str>,
-    fmt: OutputFormat,
-) -> Result<(), AdminError> {
-    let mut keys: Vec<PreauthOutput> = client
+pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
+    let keys: Vec<PreauthOutput> = client
         .list_pre_auth_keys()
         .await?
         .into_iter()
         .map(PreauthOutput::from)
         .collect();
-    if let Some(u) = user_filter {
-        keys.retain(|k| k.user.as_ref().is_some_and(|user| user.name == u));
-    }
     if fmt.is_structured() {
         print_structured(fmt, &keys)?;
     } else {

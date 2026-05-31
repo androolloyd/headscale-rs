@@ -300,8 +300,8 @@ pub enum NodesCmd {
         #[arg(short = 'k', long)]
         key: String,
     },
-    /// Mark a node expired. Without `--at`, expires immediately
-    /// (forces re-register on the node's next /map). With `--at`,
+    /// Mark a node expired. Without `--expiry`, expires immediately
+    /// (forces re-register on the node's next /map). With `--expiry`,
     /// schedules expiry for the supplied ISO-8601 timestamp. With
     /// `--disable`, clears key expiry so the node never expires.
     #[command(alias = "logout", alias = "exp", alias = "e")]
@@ -313,7 +313,7 @@ pub enum NodesCmd {
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
         identifier: Option<String>,
         /// ISO-8601 timestamp to schedule expiry at. Defaults to "now".
-        #[arg(short = 'e', long = "expiry", alias = "at", value_name = "RFC3339")]
+        #[arg(short = 'e', long = "expiry", value_name = "RFC3339")]
         expiry: Option<String>,
         /// Disable key expiry for this node.
         #[arg(short = 'd', long = "disable")]
@@ -352,7 +352,7 @@ pub enum NodesCmd {
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
         id: String,
         /// Comma-separated route list. Empty list removes approvals.
-        #[arg(short = 'r', long = "routes", alias = "route", value_delimiter = ',')]
+        #[arg(short = 'r', long = "routes", value_delimiter = ',')]
         routes: Vec<String>,
     },
     /// Delete a node.
@@ -392,21 +392,12 @@ pub enum PreauthKeysCmd {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         /// Human-readable expiration of the key (e.g. 30m, 24h).
-        #[arg(
-            short = 'e',
-            long = "expiration",
-            alias = "expires-in",
-            default_value = "1h"
-        )]
+        #[arg(short = 'e', long = "expiration", default_value = "1h")]
         expires_in: String,
     },
     /// List all preauthkeys.
     #[command(alias = "ls", alias = "show")]
-    List {
-        /// Restrict to a single user.
-        #[arg(long)]
-        user: Option<String>,
-    },
+    List,
     /// Expire a preauthkey.
     #[command(alias = "revoke", alias = "exp", alias = "e")]
     Expire {
@@ -740,7 +731,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
                 )
                 .await
             }
-            PreauthKeysCmd::List { user } => preauthkeys::list(&client, user.as_deref(), fmt).await,
+            PreauthKeysCmd::List => preauthkeys::list(&client, fmt).await,
             PreauthKeysCmd::Expire { id } => {
                 let id = id.unwrap_or_default();
                 if id == 0 {
@@ -789,9 +780,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             )
             .await
         }
-        PreauthKeysCmd::List { user } => {
-            preauthkeys::list_grpc(&mut client, user.as_deref(), fmt).await
-        }
+        PreauthKeysCmd::List => preauthkeys::list_grpc(&mut client, fmt).await,
         PreauthKeysCmd::Expire { id } => preauthkeys::expire_grpc(&mut client, *id, fmt).await,
         PreauthKeysCmd::Delete { id } => preauthkeys::delete_grpc(&mut client, *id, fmt).await,
     }
@@ -1237,7 +1226,7 @@ mod tests {
                 "approve-routes",
                 "--identifier",
                 "42",
-                "--route",
+                "--routes",
                 "10.0.0.0/24,192.168.0.0/24",
             ])
             .unwrap()
@@ -1257,6 +1246,30 @@ mod tests {
                 ..
             }
         ));
+        assert!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "expire",
+                "--identifier",
+                "42",
+                "--at",
+                "2025-08-27T10:00:00Z",
+            ])
+            .is_err(),
+            "current upstream only accepts --expiry"
+        );
+        assert!(
+            NodesHarness::try_parse_from([
+                "headscale",
+                "approve-routes",
+                "--identifier",
+                "42",
+                "--route",
+                "10.0.0.0/24",
+            ])
+            .is_err(),
+            "current upstream only accepts --routes"
+        );
     }
 
     #[test]
@@ -1432,20 +1445,22 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        match PreauthKeysHarness::try_parse_from([
-            "headscale",
-            "create",
-            "--user",
-            "42",
-            "--expires-in",
-            "24h",
-        ])
-        .unwrap()
-        .action
-        {
-            PreauthKeysCmd::Create { expires_in, .. } => assert_eq!(expires_in, "24h"),
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(
+            PreauthKeysHarness::try_parse_from([
+                "headscale",
+                "create",
+                "--user",
+                "42",
+                "--expires-in",
+                "24h",
+            ])
+            .is_err(),
+            "current upstream only accepts --expiration"
+        );
+        assert!(
+            PreauthKeysHarness::try_parse_from(["headscale", "list", "--user", "alice"]).is_err(),
+            "current upstream preauthkeys list has no --user filter"
+        );
     }
 
     #[test]

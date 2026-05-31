@@ -175,7 +175,7 @@ impl<'de> Deserialize<'de> for AclRule {
 ///
 /// `target` lists principal tokens the attrs apply to. `attr` is the
 /// list of capability flags the matching nodes receive — strings like
-/// `"funnel"`, `"exit-node"`, `"ssh"`.
+/// `"randomize-client-port"`, `"exit-node"`, `"ssh"`.
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeAttrGrant {
@@ -875,6 +875,15 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
             errs.push(err);
         }
     }
+    for attr in &grant.attr {
+        if attr == "funnel" {
+            errs.push(
+                "nodeAttrs uses a feature headscale does not yet support: \
+                 \"funnel\" tracked in https://github.com/juanfont/headscale/issues/2527"
+                    .to_string(),
+            );
+        }
+    }
     for target in &grant.target {
         if let Some(ag) = target.strip_prefix("autogroup:")
             && !matches!(ag, "member" | "tagged")
@@ -885,6 +894,13 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
         }
         validate_acl_ref(doc, target, errs);
     }
+    if !grant.ip_pool.is_empty() {
+        errs.push(
+            "nodeAttrs ipPool requires the IP allocator \
+             (https://github.com/juanfont/headscale/issues/2912)"
+                .to_string(),
+        );
+    }
     for pool in &grant.ip_pool {
         let Some(net) = parse_cidr(pool) else {
             errs.push(format!("nodeAttrs ipPool contains invalid prefix {pool:?}"));
@@ -894,6 +910,16 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
             errs.push(format!(
                 "nodeAttrs ipPool must be within 100.64.0.0/10: {pool:?}"
             ));
+            continue;
+        }
+        for reserved in reserved_tailscale_ranges() {
+            if nets_overlap(&net, &reserved) {
+                errs.push(format!(
+                    "nodeAttrs ipPool must not overlap reserved Tailscale ranges: \
+                     {pool:?} overlaps {:?}",
+                    reserved.to_string()
+                ));
+            }
         }
     }
 }
@@ -2178,6 +2204,17 @@ fn cgnat_range() -> IpNet {
     "100.64.0.0/10".parse().expect("static CGNAT range")
 }
 
+fn reserved_tailscale_ranges() -> [IpNet; 2] {
+    [
+        "100.100.100.0/24"
+            .parse()
+            .expect("static MagicDNS/TSMP reserved range"),
+        "100.115.92.0/23"
+            .parse()
+            .expect("static Quad100/IPN reserved range"),
+    ]
+}
+
 fn covers(outer: &IpNet, inner: &IpNet) -> bool {
     match (outer, inner) {
         (IpNet::V4(o), IpNet::V4(i)) => {
@@ -3405,7 +3442,7 @@ mod tests {
 
             [[node_attrs]]
             target = ["*"]
-            attr = ["funnel"]
+            attr = ["custom-node-attr"]
 
             [[node_attrs]]
             target = ["tag:exit"]
@@ -3414,7 +3451,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(doc.node_attrs.len(), 2);
-        assert_eq!(doc.node_attrs[0].attr, vec!["funnel"]);
+        assert_eq!(doc.node_attrs[0].attr, vec!["custom-node-attr"]);
         assert_eq!(doc.node_attrs[1].target, vec!["tag:exit"]);
     }
 
@@ -4104,8 +4141,7 @@ mod tests {
                 "attr": ["randomize-client-port"],
                 "app": {
                   "example.com/cap/connector": [{"name": "prod"}]
-                },
-                "ipPool": ["100.81.0.0/16"]
+                }
               }],
               "grants": [{
                 "src": ["*"],
@@ -4121,9 +4157,47 @@ mod tests {
             doc.node_attrs[0].app["example.com/cap/connector"][0]["name"],
             "prod"
         );
-        assert_eq!(doc.node_attrs[0].ip_pool, vec!["100.81.0.0/16"]);
+        assert!(doc.node_attrs[0].ip_pool.is_empty());
         assert_eq!(doc.rules[0].dst, vec!["office"]);
         assert_eq!(doc.rules[0].ports, vec!["udp/53"]);
+    }
+
+    #[test]
+    fn hujson_rejects_unsupported_node_attrs_like_current_headscale_go() {
+        for (name, raw, want) in [
+            (
+                "funnel",
+                r#"{"nodeAttrs":[{"target":["*"],"attr":["funnel"]}]}"#,
+                &[
+                    "nodeAttrs uses a feature headscale does not yet support",
+                    r#""funnel" tracked in https://github.com/juanfont/headscale/issues/2527"#,
+                ][..],
+            ),
+            (
+                "ip-pool",
+                r#"{"nodeAttrs":[{"target":["autogroup:member"],"ipPool":["100.81.0.0/16"]}]}"#,
+                &[
+                    "nodeAttrs ipPool requires the IP allocator (https://github.com/juanfont/headscale/issues/2912)",
+                ][..],
+            ),
+            (
+                "reserved-ip-pool",
+                r#"{"nodeAttrs":[{"target":["autogroup:member"],"ipPool":["100.100.100.0/24"]}]}"#,
+                &[
+                    "nodeAttrs ipPool requires the IP allocator (https://github.com/juanfont/headscale/issues/2912)",
+                    "nodeAttrs ipPool must not overlap reserved Tailscale ranges",
+                    r#""100.100.100.0/24" overlaps "100.100.100.0/24""#,
+                ][..],
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).unwrap_err().to_string();
+            for expected in want {
+                assert!(
+                    err.contains(expected),
+                    "{name}: expected {expected:?} in {err:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4222,7 +4296,7 @@ mod tests {
             version = 1
             [[nodeAttrs]]
             target = ["*"]
-            attr = ["funnel"]
+            attr = ["custom-node-attr"]
             "#,
         )
         .unwrap();

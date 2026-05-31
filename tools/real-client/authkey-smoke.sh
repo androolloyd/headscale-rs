@@ -29,6 +29,7 @@ expected_primary_withdraw_route="${REAL_CLIENT_EXPECT_PRIMARY_WITHDRAW_ROUTE:-}"
 expected_withdraw_approval_preserved="${REAL_CLIENT_EXPECT_WITHDRAW_APPROVAL_PRESERVED:-false}"
 expected_peer_route_owners="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS:-}"
 expected_peer_route_owners_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS_AFTER_POLICY_RELOAD:-}"
+expected_peer_route_owners_after_route_health="${REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS_AFTER_ROUTE_HEALTH:-}"
 expected_route_health_failover_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE:-}"
 expected_route_health_all_unhealthy_route="${REAL_CLIENT_EXPECT_ROUTE_HEALTH_ALL_UNHEALTHY_ROUTE:-}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-}"
@@ -464,6 +465,10 @@ fi
 if { [[ -n "${expected_route_health_failover_route}" ]] || [[ -n "${expected_route_health_all_unhealthy_route}" ]]; } &&
   [[ -z "${route_health_probe_interval_secs}" || -z "${route_health_probe_timeout_secs}" ]]; then
   echo "route-health assertions require REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS and REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS" >&2
+  exit 2
+fi
+if [[ -n "${expected_peer_route_owners_after_route_health}" && -z "${expected_route_health_failover_route}" ]]; then
+  echo "REAL_CLIENT_EXPECT_PEER_ROUTE_OWNERS_AFTER_ROUTE_HEALTH requires REAL_CLIENT_EXPECT_ROUTE_HEALTH_FAILOVER_ROUTE" >&2
   exit 2
 fi
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
@@ -2369,6 +2374,10 @@ if [[ -n "${expected_route_health_failover_route}" ]]; then
     abort("route-health recovery stole #{route}: #{recovered_owner.inspect}, expected sticky #{failed_over_owner.inspect}") unless recovered_owner == failed_over_owner
     puts JSON.pretty_generate({route: route, sticky_owner: recovered_owner})
   ' "${work_dir}/debug-routes-after-route-health.json" "${work_dir}/debug-routes-after-route-health-recovery.json" "${expected_route_health_failover_route}"
+  if [[ -n "${expected_peer_route_owners_after_route_health}" ]]; then
+    assert_peer_route_owners "${expected_peer_route_owners_after_route_health}" \
+      "assert route-via peer route owners after route-health failover"
+  fi
   echo "::endgroup::"
 fi
 

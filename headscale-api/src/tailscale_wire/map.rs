@@ -3544,6 +3544,30 @@ mod tests {
         )
     }
 
+    fn via_steering_policy_with_regular_overlap_multi_router_via(route: &str) -> String {
+        format!(
+            r#"{{
+                "tagOwners": {{
+                    "tag:router-ha": ["router@"],
+                    "tag:group-a": ["client@"]
+                }},
+                "grants": [
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"]
+                    }},
+                    {{
+                        "src": ["tag:group-a"],
+                        "dst": ["{route}"],
+                        "ip": ["*"],
+                        "via": ["tag:router-ha"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
     fn via_steering_policy_with_exit_node_via() -> &'static str {
         r#"{
             "tagOwners": {
@@ -4111,6 +4135,89 @@ mod tests {
         assert!(
             peer_route(&mr, unexpected, route).is_none(),
             "non-primary via router should be excluded for the same prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_via_regular_overlap_follows_route_health_primary() {
+        let (state, _dir) = fixture();
+        let route = "10.80.0.0/24";
+        let policy = via_steering_policy_with_regular_overlap_multi_router_via(route);
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(&policy).unwrap(), policy);
+        let (router_a, router_b, client_a, _client_b) =
+            insert_via_steering_nodes_for_route(&state, route, Vec::new());
+        for router in [&router_a, &router_b] {
+            let mut rec = state.machines.get(router).expect("router record");
+            rec.forced_tags = vec!["tag:router-ha".to_string()];
+            state.machines.upsert(router.clone(), rec);
+        }
+        let _router_a_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_a),
+        );
+        let _router_b_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_b),
+        );
+
+        let snapshot = state.machines.snapshot();
+        let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
+        let initial_primary = owner_for_route(&primary_routes, route).expect("global primary");
+        let (initial_primary_name, failover_name, failover_key) = if initial_primary == router_a {
+            ("router-a", "router-b", router_b.as_str())
+        } else {
+            ("router-b", "router-a", router_a.as_str())
+        };
+
+        let app = router(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(peer_route(&mr, initial_primary_name, route).is_some());
+        assert!(peer_route(&mr, failover_name, route).is_none());
+
+        assert!(
+            state
+                .machines
+                .set_route_candidate_health(stable_id_from_key(&initial_primary), false)
+        );
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{client_a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(peer_route(&mr, failover_name, route).is_some());
+        assert!(peer_route(&mr, initial_primary_name, route).is_none());
+        let failed_over = state
+            .machines
+            .primary_routes_for_snapshot(&state.machines.snapshot());
+        assert_eq!(
+            failed_over.get(failover_key).cloned().unwrap_or_default(),
+            vec![route.to_string()]
         );
     }
 

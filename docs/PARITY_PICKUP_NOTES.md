@@ -234,9 +234,11 @@ Current multi-agent split:
   without waking long-poll streams; direct SSH action rejection pins now cover
   missing Noise identity, unknown destination, malformed/unknown auth IDs,
   binding mismatches, cancellation, and denied auth verdicts without seeding
-  check-period auto-approval. Remaining high-priority follow-ups are combined
-  route-via plus route-health failover smokes, canonical map-batcher
-  reason/state deltas, and broader churn/restart map-stream tests. Runtime
+  check-period auto-approval. A paired regular-overlap same-tag route-via plus
+  route-health failover smoke now asserts stock-client route ownership follows
+  HA primary failover and sticky recovery. Remaining high-priority follow-ups
+  are canonical map-batcher reason/state deltas and broader churn/restart
+  map-stream tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response

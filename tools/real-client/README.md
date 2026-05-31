@@ -142,6 +142,7 @@ predates the executable PingRequest lifecycle.
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
 | Routes | `route-via-same-tag` | `route-via-same-tag-smoke.sh` | `route-via-same-tag-headscale-go-smoke.sh` | Current-head same-tag multi-router `grants[].via` election |
+| Routes | `route-via-health` | `route-via-health-smoke.sh` | `route-via-health-headscale-go-smoke.sh` | Current-head regular-overlap same-tag `grants[].via` route owner follows route-health failover |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
@@ -718,6 +719,17 @@ router as the stock-client route owner for that shared `via` tag:
 ```sh
 tools/real-client/route-via-same-tag-smoke.sh
 tools/real-client/route-via-same-tag-headscale-go-smoke.sh
+```
+
+The route-via plus route-health variant uses the same two-router `via` tag with
+a regular overlapping route grant, enables HA route-health probes, pauses the
+current primary router, and asserts Alice and Bob's stock-client netmaps move
+the route owner to the surviving router. After the old primary recovers, it also
+asserts sticky route-health ownership does not steal the route back:
+
+```sh
+tools/real-client/route-via-health-smoke.sh
+tools/real-client/route-via-health-headscale-go-smoke.sh
 ```
 
 The route-via reload variant starts from the same two-router state, reloads the

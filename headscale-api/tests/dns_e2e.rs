@@ -254,6 +254,73 @@ async fn extra_records_file_watcher_picks_up_changes_and_wakes_waiters() {
     handle.abort();
 }
 
+#[tokio::test]
+async fn extra_records_file_watcher_keeps_last_records_while_file_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extra.json");
+    write_records(&path, &[("first.example", "A", "10.0.0.1")]);
+
+    let store = DnsStore::from_spec(magic_spec());
+    let handle =
+        spawn_extra_records_watcher(store.clone(), path.clone(), Some(Duration::from_millis(50)));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        if store
+            .extra_records()
+            .iter()
+            .any(|r| r.name == "first.example")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        store
+            .extra_records()
+            .iter()
+            .any(|r| r.name == "first.example"),
+        "initial extra-records file should land before removal"
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        store.extra_records().as_slice(),
+        &[DnsRecord {
+            name: "first.example".into(),
+            record_type: "A".into(),
+            value: "10.0.0.1".into(),
+        }],
+        "headscale-go keeps serving the last good extra-records set while the watched file is missing"
+    );
+
+    write_records(&path, &[("second.example", "A", "10.0.0.2")]);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        if store
+            .extra_records()
+            .iter()
+            .any(|r| r.name == "second.example")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        store.extra_records().as_slice(),
+        &[DnsRecord {
+            name: "second.example".into(),
+            record_type: "A".into(),
+            value: "10.0.0.2".into(),
+        }],
+        "recreated extra-records file should replace the retained set"
+    );
+
+    handle.abort();
+}
+
 #[test]
 fn parse_extra_records_validates_required_fields() {
     // Missing `value` is rejected.

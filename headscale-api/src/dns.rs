@@ -1298,11 +1298,15 @@ pub fn spawn_extra_records_watcher(
                     Err(e) => tracing::warn!(?path, ?e, "extra-records mtime read failed"),
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // File disappeared — clear the record set, log,
-                    // and keep polling for it to reappear.
-                    if last_mtime.is_some() || !store.extra_records().is_empty() {
-                        store.set_extra_records(Vec::new());
-                        last_mtime = None;
+                    // Match headscale-go's ExtraRecordsMan: remove/
+                    // rename events do not clear the live record set.
+                    // The manager keeps serving the last good records
+                    // while it waits for the file to reappear.
+                    if last_mtime.take().is_some() {
+                        tracing::warn!(
+                            ?path,
+                            "extra-records file disappeared; keeping previous set"
+                        );
                     }
                 }
                 Err(e) => tracing::warn!(?path, ?e, "extra-records stat failed"),

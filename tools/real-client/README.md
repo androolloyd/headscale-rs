@@ -112,6 +112,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-tag-update` | `postgres-tag-update-smoke.sh` | `postgres-tag-update-headscale-go-smoke.sh` | Production Postgres post-login forced tag replacement |
 | Database | `postgres-tag-update-invalid` | `postgres-tag-update-invalid-smoke.sh` | `postgres-tag-update-invalid-headscale-go-smoke.sh` | Production Postgres invalid forced tag rejection |
 | Database | `postgres-tag-reauth-clear` | `postgres-tag-reauth-clear-smoke.sh` | `postgres-tag-reauth-clear-headscale-go-smoke.sh` | Production Postgres web reauth clears forced tags |
+| Database | `postgres-acl-allow` | `postgres-acl-allow-smoke.sh` | `postgres-acl-allow-headscale-go-smoke.sh` | Production Postgres ACL allowed peers visible |
 | Database | `postgres-route-via-restart` | `postgres-route-via-restart-smoke.sh` | `postgres-route-via-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` survives server restart |
 | Database | `postgres-route-via-same-tag-restart` | `postgres-route-via-same-tag-restart-smoke.sh` | `postgres-route-via-same-tag-restart-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` survives server restart |
 | Database | `postgres-route-via-reload-restart` | `postgres-route-via-reload-restart-smoke.sh` | `postgres-route-via-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload survives server restart |

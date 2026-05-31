@@ -1069,19 +1069,15 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
                 i += 1;
                 continue;
             }
-            (UtilityFlagScope::Serve, "-c" | "--config") if i + 1 < tail.len() => {
+            (UtilityFlagScope::Serve | UtilityFlagScope::GlobalConfig, "-c" | "--config")
+                if i + 1 < tail.len() =>
+            {
                 i += 2;
                 continue;
             }
-            (UtilityFlagScope::Serve, value) if value.starts_with("--config=") => {
-                i += 1;
-                continue;
-            }
-            (UtilityFlagScope::GlobalConfig, "-c" | "--config") if i + 1 < tail.len() => {
-                i += 2;
-                continue;
-            }
-            (UtilityFlagScope::GlobalConfig, value) if value.starts_with("--config=") => {
+            (UtilityFlagScope::Serve | UtilityFlagScope::GlobalConfig, value)
+                if value.starts_with("--config=") =>
+            {
                 i += 1;
                 continue;
             }

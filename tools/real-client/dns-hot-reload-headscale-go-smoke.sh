@@ -11,6 +11,18 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/dns-hot-reload-headscale-go
 run_id="hs-dns-hot-reload-go-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN:-tail.test}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
+
+# shellcheck source=tools/real-client/postgres-test-db-common.sh
+source tools/real-client/postgres-test-db-common.sh
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -35,6 +47,9 @@ cleanup() {
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${database_backend}" == "postgres" ]]; then
+    real_client_drop_postgres_database || true
   fi
   rm -f "${socket_path}"
 }
@@ -82,6 +97,20 @@ write_records() {
     "${record_name}" "${record_type}" "${record_value}" >"${extra_records_path}"
 }
 
+write_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      cat <<EOF
+database:
+  type: sqlite
+  sqlite:
+    path: ${work_dir}/db.sqlite
+EOF
+      ;;
+    postgres) real_client_write_postgres_database_config ;;
+  esac
+}
+
 write_config() {
   cat >"${work_dir}/derp.yaml" <<EOF
 regions:
@@ -116,10 +145,9 @@ prefixes:
   allocation: sequential
   v4: 100.64.0.0/10
 
-database:
-  type: sqlite
-  sqlite:
-    path: ${work_dir}/db.sqlite
+EOF
+  write_database_config >>"${config_path}"
+  cat >>"${config_path}" <<EOF
 
 dns:
   magic_dns: true
@@ -256,10 +284,15 @@ assert_dns_netmap() {
     ' "${netmap_path}" "${expected_name}" "${expected_type}" "${expected_value}" >"${output_path}"
 }
 
+need ruby
+if [[ "${database_backend}" == "postgres" ]]; then
+  real_client_prepare_postgres_database \
+    "Postgres headscale-go DNS hot-reload real-client smoke" \
+    "headscale_rs_pg_dns_hot_reload_go"
+fi
 need curl
 need docker
-need go
-need ruby
+[[ -n "${HEADSCALE_GO_BIN:-}" ]] || need go
 
 http_port="$(free_port)"
 grpc_port="$(free_port)"
@@ -296,4 +329,4 @@ wait_for "hot-reloaded DNS extra record" \
 cat "${work_dir}/dns-after.json"
 echo "::endgroup::"
 
-echo "headscale-go production DNS hot-reload real-client smoke passed"
+echo "headscale-go production ${database_backend} DNS hot-reload real-client smoke passed"

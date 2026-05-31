@@ -75,6 +75,7 @@ smoke_ids=(
   postgres-extra-records
   postgres-dns-disabled
   postgres-dns-edge
+  postgres-dns-hot-reload
   postgres-magicdns-ipv6-only
   postgres-prefix-family-dual-stack
   postgres-prefix-family-ipv4-only
@@ -235,6 +236,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -315,6 +317,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-extra-records-smoke.sh
   tools/real-client/postgres-dns-disabled-smoke.sh
   tools/real-client/postgres-dns-edge-smoke.sh
+  tools/real-client/postgres-dns-hot-reload-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
@@ -435,6 +438,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-extra-records-headscale-go-smoke.sh
   tools/real-client/postgres-dns-disabled-headscale-go-smoke.sh
   tools/real-client/postgres-dns-edge-headscale-go-smoke.sh
+  tools/real-client/postgres-dns-hot-reload-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
@@ -555,6 +559,7 @@ smoke_assertions=(
   "production Postgres MagicDNS suffix and DNS extra record projection"
   "production Postgres MagicDNS disabled fallback names"
   "production Postgres split DNS routes, fallback resolver, and DNS edge records"
+  "production Postgres DNS extra_records hot reload"
   "production Postgres MagicDNS with IPv6-only prefix-family allocation"
   "production Postgres dual-stack prefix-family allocation"
   "production Postgres IPv4-only prefix-family allocation"

@@ -375,10 +375,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all forty-seven Pg rows, including
+  CI now provisions Postgres for all forty-eight Pg rows, including
   `postgres-online-lastseen`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
+  `postgres-dns-hot-reload`,
   `postgres-magicdns-ipv6-only`, `postgres-prefix-family-dual-stack`,
   `postgres-prefix-family-ipv4-only`, `postgres-prefix-family-ipv6-only`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
@@ -599,3 +600,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   not emit a new auth URL.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   forty-seven Postgres stock-client rows.
+
+## 2026-05-31 Postgres DNS hot-reload smoke slice
+
+- Added paired `postgres-dns-hot-reload` Rust/headscale-go rows over a
+  temporary Postgres database. The row proves production `extra_records_path`
+  file reloads by observing an initial A record and a later AAAA record in the
+  stock-client netmap.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  forty-eight Postgres stock-client rows.

@@ -84,6 +84,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix and DNS extra record projection |
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
 | Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge records |
+| Database | `postgres-dns-hot-reload` | `postgres-dns-hot-reload-smoke.sh` | `postgres-dns-hot-reload-headscale-go-smoke.sh` | Production Postgres DNS `extra_records` hot reload |
 | Database | `postgres-magicdns-ipv6-only` | `postgres-magicdns-ipv6-only-smoke.sh` | `postgres-magicdns-ipv6-only-headscale-go-smoke.sh` | Production Postgres MagicDNS with IPv6-only prefix-family allocation |
 | Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
@@ -618,7 +619,9 @@ default MagicDNS suffix over that production Postgres path, the
 `postgres-extra-records` variant asserts configured DNS `extra_records` in the
 stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
 MagicDNS fallback names, the `postgres-dns-edge` variant asserts split DNS
-routes, fallback resolvers, and AAAA/CNAME records, and the
+routes, fallback resolvers, and AAAA/CNAME records, the
+`postgres-dns-hot-reload` variant asserts production `extra_records_path`
+file reloads, and the
 `postgres-magicdns-ipv6-only` variant asserts IPv6-only MagicDNS allocation.
 The `postgres-prefix-family-dual-stack`, `postgres-prefix-family-ipv4-only`,
 and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family
@@ -637,6 +640,8 @@ tools/real-client/postgres-dns-disabled-smoke.sh
 tools/real-client/postgres-dns-disabled-headscale-go-smoke.sh
 tools/real-client/postgres-dns-edge-smoke.sh
 tools/real-client/postgres-dns-edge-headscale-go-smoke.sh
+tools/real-client/postgres-dns-hot-reload-smoke.sh
+tools/real-client/postgres-dns-hot-reload-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
 tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-smoke.sh

@@ -10,6 +10,18 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/dns-hot-reload-smoke}"
 run_id="hs-dns-hot-reload-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN:-tail.test}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
+
+# shellcheck source=tools/real-client/postgres-test-db-common.sh
+source tools/real-client/postgres-test-db-common.sh
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -36,6 +48,9 @@ cleanup() {
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${database_backend}" == "postgres" ]]; then
+    real_client_drop_postgres_database || true
   fi
   rm -f "${socket_path}"
 }
@@ -84,6 +99,13 @@ write_records() {
     "${record_name}" "${record_type}" "${record_value}" >"${extra_records_path}"
 }
 
+write_database_config() {
+  case "${database_backend}" in
+    sqlite) return 0 ;;
+    postgres) real_client_write_postgres_database_config ;;
+  esac
+}
+
 write_config() {
   cat >"${config_path}" <<EOF
 server:
@@ -113,6 +135,7 @@ dns:
     split: {}
   extra_records_path: ${extra_records_path}
 EOF
+  write_database_config >>"${config_path}"
 }
 
 start_server() {
@@ -120,7 +143,11 @@ start_server() {
   rm -f "${socket_path}"
   mkdir -p "${work_dir}/state"
   echo "::group::build headscale-rs CLI"
-  cargo build --quiet -p headscale-cli --bin headscale
+  if [[ "${database_backend}" == "postgres" ]]; then
+    cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+  else
+    cargo build --quiet -p headscale-cli --bin headscale
+  fi
   echo "::endgroup::"
 
   echo "::group::start headscale-rs server"
@@ -216,10 +243,15 @@ assert_dns_netmap() {
     ' "${netmap_path}" "${expected_name}" "${expected_type}" "${expected_value}" >"${output_path}"
 }
 
+need ruby
+if [[ "${database_backend}" == "postgres" ]]; then
+  real_client_prepare_postgres_database \
+    "Postgres DNS hot-reload real-client smoke" \
+    "headscale_rs_pg_dns_hot_reload_rust"
+fi
 need cargo
 need curl
 need docker
-need ruby
 
 http_port="$(free_port)"
 https_port="$(free_port)"
@@ -255,4 +287,4 @@ wait_for "hot-reloaded DNS extra record" \
 cat "${work_dir}/dns-after.json"
 echo "::endgroup::"
 
-echo "headscale-rs production DNS hot-reload real-client smoke passed"
+echo "headscale-rs production ${database_backend} DNS hot-reload real-client smoke passed"

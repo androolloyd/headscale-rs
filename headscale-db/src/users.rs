@@ -147,46 +147,53 @@ fn normalize_oidc_provider_identifier(value: String) -> std::result::Result<Stri
     normalize_provider_identifier(Some(value)).ok_or(UserError::MissingOidcProviderIdentifier)
 }
 
-pub fn validate_hostname(name: &str) -> std::result::Result<(), UserError> {
+pub fn validate_username(name: &str) -> std::result::Result<(), UserError> {
     if name.len() < 2 {
         return Err(UserError::InvalidName(format!(
-            "hostname {name:?} is too short, must be at least 2 characters"
+            "username {name:?} must be at least 2 characters long"
         )));
     }
-    if name.len() > 63 {
+
+    let Some(first) = name.chars().next() else {
         return Err(UserError::InvalidName(format!(
-            "hostname {name:?} is too long, must not exceed 63 characters"
+            "username {name:?} must be at least 2 characters long"
+        )));
+    };
+    if !first.is_alphabetic() {
+        return Err(UserError::InvalidName(format!(
+            "username {name:?} must start with a letter"
         )));
     }
-    if name.to_lowercase() != name {
-        return Err(UserError::InvalidName(format!(
-            "hostname {name:?} must be lowercase (try {:?})",
-            name.to_lowercase()
-        )));
-    }
-    if name.starts_with('-') || name.ends_with('-') {
-        return Err(UserError::InvalidName(format!(
-            "hostname {name:?} cannot start or end with a hyphen"
-        )));
-    }
-    if name.starts_with('.') || name.ends_with('.') {
-        return Err(UserError::InvalidName(format!(
-            "hostname {name:?} cannot start or end with a dot"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
-    {
-        return Err(UserError::InvalidName(format!(
-            "hostname {name:?} contains invalid characters, only lowercase letters, numbers, hyphens and dots are allowed"
-        )));
+
+    let mut at_count = 0usize;
+    for ch in name.chars() {
+        match ch {
+            '-' | '.' | '_' => {}
+            '@' => {
+                at_count += 1;
+                if at_count > 1 {
+                    return Err(UserError::InvalidName(format!(
+                        "username {name:?} cannot contain more than one '@'"
+                    )));
+                }
+            }
+            _ if ch.is_alphanumeric() => {}
+            _ => {
+                return Err(UserError::InvalidName(format!(
+                    "username {name:?} contains invalid character {ch:?}"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
+pub fn validate_hostname(name: &str) -> std::result::Result<(), UserError> {
+    validate_username(name)
+}
+
 pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<UserRow> {
-    validate_hostname(&params.name).map_err(|e| DbError::General(e.to_string()))?;
+    validate_username(&params.name).map_err(|e| DbError::General(e.to_string()))?;
     let provider_identifier = normalize_provider_identifier(params.provider_identifier);
     let now = now_unix();
     let id: i64 = sqlx::query_scalar(
@@ -291,7 +298,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<UserRow>> {
 }
 
 pub async fn rename(pool: &SqlitePool, id: i64, new_name: &str) -> Result<UserRow> {
-    validate_hostname(new_name).map_err(|e| DbError::General(e.to_string()))?;
+    validate_username(new_name).map_err(|e| DbError::General(e.to_string()))?;
     let existing = get_by_id(pool, id).await?;
     if existing.provider == REGISTER_METHOD_OIDC {
         return Err(DbError::General(
@@ -395,7 +402,7 @@ pub async fn create_postgres_on_connection(
     conn: &mut PgConnection,
     params: CreateParams,
 ) -> Result<UserRow> {
-    validate_hostname(&params.name).map_err(|e| DbError::General(e.to_string()))?;
+    validate_username(&params.name).map_err(|e| DbError::General(e.to_string()))?;
     let provider_identifier = normalize_provider_identifier(params.provider_identifier);
     let now = now_unix();
     let id: i64 = sqlx::query_scalar(
@@ -553,7 +560,7 @@ pub async fn rename_postgres_on_connection(
     id: i64,
     new_name: &str,
 ) -> Result<UserRow> {
-    validate_hostname(new_name).map_err(|e| DbError::General(e.to_string()))?;
+    validate_username(new_name).map_err(|e| DbError::General(e.to_string()))?;
     let existing = get_postgres_by_id_on_connection(conn, id).await?;
     if existing.provider == REGISTER_METHOD_OIDC {
         return Err(DbError::General(
@@ -773,17 +780,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_hostnames_like_headscale_go() {
-        assert!(validate_hostname("valid-hostname").is_ok());
-        assert!(validate_hostname("valid.name").is_ok());
-        assert!(validate_hostname("a").is_err());
-        assert!(validate_hostname("Alice").is_err());
-        assert!(validate_hostname("-alice").is_err());
-        assert!(validate_hostname("alice-").is_err());
-        assert!(validate_hostname(".alice").is_err());
-        assert!(validate_hostname("alice.").is_err());
-        assert!(validate_hostname("alice_smith").is_err());
-        assert!(validate_hostname(&"a".repeat(64)).is_err());
+    async fn validates_usernames_like_headscale_go() {
+        assert!(validate_username("valid-hostname").is_ok());
+        assert!(validate_username("valid.name").is_ok());
+        assert!(validate_username("Alice").is_ok());
+        assert!(validate_username("alice_smith").is_ok());
+        assert!(validate_username("alice@example.com").is_ok());
+        assert!(validate_username("alice-").is_ok());
+        assert!(validate_username("alice.").is_ok());
+        assert!(validate_username(&"a".repeat(64)).is_ok());
+
+        assert!(validate_username("").is_err());
+        assert!(validate_username("a").is_err());
+        assert!(validate_username("1alice").is_err());
+        assert!(validate_username("-alice").is_err());
+        assert!(validate_username(".alice").is_err());
+        assert!(validate_username("_alice").is_err());
+        assert!(validate_username("alice@@example.com").is_err());
+        assert!(validate_username("alice smith").is_err());
+        assert!(validate_username("alice/slash").is_err());
+    }
+
+    #[tokio::test]
+    async fn create_and_rename_accept_headscale_go_username_charset() {
+        let db = fresh_db().await;
+        let user = create(
+            db.pool(),
+            CreateParams {
+                name: "Alice_Example@example.com".into(),
+                display_name: "Alice Example".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: None,
+                provider: "cli".into(),
+                profile_pic_url: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            get_by_name(db.pool(), "Alice_Example@example.com")
+                .await
+                .unwrap()
+                .id,
+            user.id
+        );
+
+        let renamed = rename(db.pool(), user.id, "Alice-Renamed@example.com")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Alice-Renamed@example.com");
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 //! admin/gRPC deployments.
 //!
 //! The in-memory registry tracks two things:
-//!   1. A canonical user name (must match `^[a-z0-9_-]{1,32}$`).
+//!   1. A canonical user name matching headscale-go's `ValidateUsername`.
 //!   2. A creation timestamp + best-effort "last activity" stamp the
 //!      admin handlers bump whenever a related entity (preauth key /
 //!      machine) is created or registered for that user.
@@ -23,22 +23,8 @@ use sqlx::SqlitePool;
 
 use super::auth::now_unix;
 
-/// Maximum user-name length. Matches headscale-go's DNS label limit.
-pub const MAX_USER_NAME_LEN: usize = 63;
-pub const MIN_USER_NAME_LEN: usize = 2;
-
-/// Headscale-go validates users with `util.ValidateHostname`: lower-case
-/// DNS labels, dots allowed, no leading/trailing dot or hyphen.
 fn is_valid_user_name(s: &str) -> bool {
-    s.len() >= MIN_USER_NAME_LEN
-        && s.len() <= MAX_USER_NAME_LEN
-        && s.to_lowercase() == s
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-        && !s.starts_with('.')
-        && !s.ends_with('.')
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    headscale_db::users::validate_username(s).is_ok()
 }
 
 /// One row in the registry. Cheap to clone; the admin handlers return
@@ -72,7 +58,7 @@ pub struct UserRegistry {
 /// Reasons a write to the registry can fail.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UserRegistryError {
-    #[error("user name '{0}' is invalid (lowercase DNS hostname, 2..=63 chars)")]
+    #[error("user name '{0}' is invalid")]
     InvalidName(String),
     #[error("user '{0}' already exists")]
     Exists(String),
@@ -334,7 +320,9 @@ impl PersistentUserAdmin {
                 UserRegistryError::CannotChangeOidcUser
             }
             headscale_db::DbError::General(msg)
-                if msg.contains("user name invalid") || msg.contains("hostname") =>
+                if msg.contains("user name invalid")
+                    || msg.contains("hostname")
+                    || msg.contains("username") =>
             {
                 UserRegistryError::InvalidName(subject.to_string())
             }
@@ -722,21 +710,25 @@ mod tests {
     }
 
     #[test]
-    fn invalid_names_rejected() {
+    fn user_names_follow_headscale_go_validation() {
         let r = UserRegistry::new();
         assert!(r.create("").is_err());
         assert!(r.create("a").is_err());
-        assert!(r.create("Alice").is_err()); // uppercase
-        assert!(r.create("_alice").is_err()); // underscore
+        assert!(r.create("1alice").is_err());
+        assert!(r.create("_alice").is_err());
         assert!(r.create("-alice").is_err());
-        assert!(r.create("alice-").is_err());
         assert!(r.create(".alice").is_err());
-        assert!(r.create("alice.").is_err());
-        assert!(r.create(&"a".repeat(64)).is_err());
-        assert!(r.create("alice@host").is_err());
+        assert!(r.create("alice@@host").is_err());
+        assert!(r.create("alice host").is_err());
+        assert!(r.create("alice/host").is_err());
+
+        assert!(r.create("Alice").is_ok());
+        assert!(r.create("alice_smith").is_ok());
+        assert!(r.create("alice@example.com").is_ok());
+        assert!(r.create("alice-").is_ok());
+        assert!(r.create("alice.").is_ok());
         assert!(r.create("alice.smith").is_ok());
-        // Boundary: 63 chars OK.
-        assert!(r.create(&"a".repeat(63)).is_ok());
+        assert!(r.create(&"a".repeat(64)).is_ok());
     }
 
     #[test]
@@ -826,6 +818,42 @@ mod tests {
 
         users.delete_by_id(created.id).await.unwrap();
         assert!(users.all().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_user_admin_accepts_headscale_go_username_charset() {
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = PersistentUserAdmin::new(db.pool().clone());
+
+        let created = users
+            .create_detailed(
+                "Alice_Example@example.com",
+                "Alice Example",
+                "alice@example.com",
+                "",
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.name, "Alice_Example@example.com");
+
+        let stored = headscale_db::users::get_by_name(db.pool(), "Alice_Example@example.com")
+            .await
+            .unwrap();
+        assert_eq!(stored.id, created.id as i64);
+
+        let renamed = users
+            .rename_by_id(created.id, "Alice-Renamed@example.com")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Alice-Renamed@example.com");
+        assert!(
+            users
+                .get("Alice_Example@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,13 @@ advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
+preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
+set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
+expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
+reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
+reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
+expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
+policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
@@ -61,6 +68,82 @@ case "${advertise_exit_node}" in
     ;;
 esac
 
+case "${expected_set_tags_failure}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_set_tags_failure=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_set_tags_failure=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE must be true or false, got ${expected_set_tags_failure}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_set_tags_failure)) && [[ -z "${set_tags_after_login}" ]]; then
+  echo "REAL_CLIENT_EXPECT_SET_TAGS_FAILURE requires REAL_CLIENT_SET_TAGS_AFTER_LOGIN" >&2
+  exit 2
+fi
+
+case "${reauth_after_login}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    do_reauth_after_login=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    do_reauth_after_login=0
+    ;;
+  *)
+    echo "REAL_CLIENT_REAUTH_AFTER_LOGIN must be true or false, got ${reauth_after_login}" >&2
+    exit 2
+    ;;
+esac
+
+expected_tags_default="${preauth_tags}"
+if ((do_reauth_after_login)); then
+  expected_tags_default="${reauth_tags}"
+fi
+if [[ -n "${set_tags_after_login}" ]] && ((expect_set_tags_failure == 0)); then
+  expected_tags_default="${set_tags_after_login}"
+fi
+expected_tags="${REAL_CLIENT_EXPECT_TAGS:-${expected_tags_default}}"
+if [[ -z "${expected_tags_exact}" ]]; then
+  if ((do_reauth_after_login)); then
+    expected_tags_exact=true
+  else
+    expected_tags_exact=false
+  fi
+fi
+case "${expected_tags_exact}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_tags_exact=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_tags_exact=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_TAGS_EXACT must be true or false, got ${expected_tags_exact}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${policy_json}" ]]; then
+  policy_json="$(
+    ruby -rjson -e '
+      tags = []
+      tags.concat(ARGV.fetch(0).split(","))
+      tags.concat(ARGV.fetch(1).split(","))
+      tags.concat(ARGV.fetch(2).split(",")) unless ARGV.fetch(3) == "true"
+      tags = tags.reject(&:empty?).sort.uniq
+      exit if tags.empty?
+      owners = tags.to_h { |tag| [tag, ["alice@"]] }
+      puts JSON.generate({
+        tagOwners: owners,
+        acls: [{action: "accept", src: ["*"], dst: ["*:*"]}],
+      })
+    ' "${preauth_tags}" "${reauth_tags}" "${set_tags_after_login}" "$([[ "${expect_set_tags_failure}" -eq 1 ]] && printf true || printf false)"
+  )"
+fi
+
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
   *) work_dir="${repo_root}/${work_root}/${run_id}" ;;
@@ -73,6 +156,7 @@ metrics_port=""
 grpc_port=""
 server_pid=""
 config_path="${work_dir}/config.yaml"
+policy_path="${work_dir}/policy.hujson"
 db_path="${work_dir}/db.sqlite"
 socket_path="/tmp/${run_id}.sock"
 control_url=""
@@ -347,6 +431,11 @@ regions:
 EOF
 }
 
+write_policy_file() {
+  [[ -n "${policy_json}" ]] || return 0
+  printf '%s\n' "${policy_json}" >"${policy_path}"
+}
+
 write_config() {
   case "${target}" in
     rust)
@@ -502,6 +591,14 @@ start_server() {
   echo "::endgroup::"
 }
 
+load_policy_if_requested() {
+  [[ -n "${policy_json}" ]] || return 0
+  echo "::group::load policy"
+  headscale_cmd --force -o json policy set --file "${policy_path}" \
+    >"${work_dir}/policy-set.json"
+  echo "::endgroup::"
+}
+
 create_user_and_key() {
   echo "::group::create user"
   case "${target}" in
@@ -517,16 +614,32 @@ create_user_and_key() {
   echo "created user alice ${user_id}"
   echo "::endgroup::"
 
+  load_policy_if_requested
+
   if [[ "${login_mode}" == "authkey" ]]; then
     echo "::group::mint preauth key"
     case "${target}" in
       rust)
-        headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
+        preauth_args=(
+          -o json preauthkeys create
+          --user "${user_id}"
+          --reusable
+          --expires-in 1h
+        )
         ;;
       headscale-go)
-        headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expiration 1h >"${work_dir}/preauth.json"
+        preauth_args=(
+          -o json preauthkeys create
+          --user "${user_id}"
+          --reusable
+          --expiration 1h
+        )
         ;;
     esac
+    if [[ -n "${preauth_tags}" ]]; then
+      preauth_args+=(--tags "${preauth_tags}")
+    fi
+    headscale_cmd "${preauth_args[@]}" >"${work_dir}/preauth.json"
     authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
     echo "minted ${authkey%%-*}-..."
     echo "::endgroup::"
@@ -572,6 +685,9 @@ login_client() {
   if ((advertise_exit_node_flag)); then
     up_args+=(--advertise-exit-node)
   fi
+  if [[ "${login_mode}" == "web" && -n "${preauth_tags}" ]]; then
+    up_args+=("--advertise-tags=${preauth_tags}")
+  fi
 
   up_status=0
   if [[ "${login_mode}" == "web" ]]; then
@@ -611,6 +727,59 @@ login_client() {
   fi
   wait_for "logged-in client netmap" \
     "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && ips.any? { |ip| ip.to_s.include?(\".\") }; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.status.json'"
+  echo "::endgroup::"
+}
+
+reauth_client_if_requested() {
+  ((do_reauth_after_login)) || return 0
+  echo "::group::force web reauth"
+  reauth_args=(
+    tailscale up
+    "--login-server=${control_url}"
+    "--hostname=${client_name}"
+    --timeout=60s
+    --accept-routes=false
+    --accept-dns=false
+    --force-reauth
+    --reset
+  )
+  if [[ -n "${reauth_tags}" ]]; then
+    reauth_args+=("--advertise-tags=${reauth_tags}")
+  fi
+
+  up_status=0
+  docker exec "${client_name}" "${reauth_args[@]}" \
+    >"${work_dir}/${client_name}.reauth-up.stdout" \
+    2>"${work_dir}/${client_name}.reauth-up.stderr" &
+  up_pid="$!"
+  registration_id_path="${work_dir}/${client_name}.reauth-registration-id"
+  if ! wait_for "reauth web registration URL" "write_registration_id '${registration_id_path}'"; then
+    dump_debug
+    return 1
+  fi
+  registration_id="$(cat "${registration_id_path}")"
+  case "${target}" in
+    rust)
+      auth_id="${registration_id}"
+      case "${auth_id}" in
+        hskey-authreq-*) ;;
+        *) auth_id="hskey-authreq-${auth_id}" ;;
+      esac
+      headscale_cmd -o json auth register "--auth-id=${auth_id}" --user alice \
+        >"${work_dir}/${client_name}.reauth-registered.json"
+      ;;
+    headscale-go)
+      headscale_cmd -o json nodes register --user alice "--key=${registration_id}" \
+        >"${work_dir}/${client_name}.reauth-registered.json"
+      ;;
+  esac
+  wait_pid_with_timeout "tailscale reauth ${client_name}" "${up_pid}" ||
+    up_status="$?"
+  if ((up_status != 0)); then
+    echo "tailscale reauth returned ${up_status}; verifying logged-in netmap"
+  fi
+  wait_for "logged-in client netmap after reauth" \
+    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.reauth-status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && ips.any? { |ip| ip.to_s.include?(\".\") }; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.reauth-status.json'"
   echo "::endgroup::"
 }
 
@@ -720,6 +889,48 @@ wait_for_node_routes() {
   }
 }
 
+assert_node_tags_file() {
+  local path="$1"
+  local expected="$2"
+  local exact="$3"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    expected = ARGV.fetch(2).split(",").reject(&:empty?).sort
+    exact = ARGV.fetch(3) == "true"
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).any? { |name| name == client_name || name.include?(client_name) }
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    tags = Array(node["tags"] || node["Tags"] || node["forced_tags"] || node["forcedTags"]).map(&:to_s).sort
+    unless (!exact && expected.empty?) || tags == expected
+      abort("expected tags #{expected.inspect}, got #{tags.inspect} in #{node.inspect}")
+    end
+    puts JSON.pretty_generate({name: client_name, tags: tags, node: node})
+  ' "${path}" "${client_name}" "${expected}" "${exact}"
+}
+
+wait_for_node_tags_if_requested() {
+  if [[ -z "${expected_tags}" && "${expect_tags_exact}" -eq 0 ]]; then
+    return 0
+  fi
+  local path="${work_dir}/nodes-final-tags.json"
+  local exact=false
+  if [[ "${expect_tags_exact}" -eq 1 ]]; then
+    exact=true
+  fi
+  wait_for "node tags" "headscale_cmd -o json nodes list >'${path}' && assert_node_tags_file '${path}' '${expected_tags}' '${exact}'" || {
+    dump_debug
+    return 1
+  }
+}
+
 approve_routes_if_requested() {
   [[ -n "${advertise_routes}" || -n "${approve_routes}" ]] || return 0
   wait_for_node_routes "${expected_available_routes}" "" "advertised routes"
@@ -735,6 +946,33 @@ approve_routes_if_requested() {
   echo "::endgroup::"
 
   wait_for_node_routes "${expected_available_routes}" "${expected_approved_routes}" "approved routes"
+}
+
+set_tags_if_requested() {
+  [[ -n "${set_tags_after_login}" ]] || return 0
+  echo "::group::set forced tags"
+  local nodes_path="${work_dir}/nodes-before-tags.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  local node_id tag_status
+  node_id="$(node_id_for_client "${nodes_path}")"
+  tag_status=0
+  headscale_cmd -o json nodes tag --identifier "${node_id}" --tags "${set_tags_after_login}" \
+    >"${work_dir}/set-tags-${node_id}.json" \
+    2>"${work_dir}/set-tags-${node_id}.err" ||
+    tag_status="$?"
+  if ((expect_set_tags_failure)); then
+    if ((tag_status == 0)); then
+      echo "expected tag update to fail for node ${node_id}" >&2
+      exit 1
+    fi
+    echo "::endgroup::"
+    return 0
+  fi
+  if ((tag_status != 0)); then
+    cat "${work_dir}/set-tags-${node_id}.err" >&2 || true
+    exit "${tag_status}"
+  fi
+  echo "::endgroup::"
 }
 
 assert_node_lifecycle_file() {
@@ -822,6 +1060,7 @@ case "${target}" in
 esac
 
 write_derp_map
+write_policy_file
 install_or_build_headscale
 if [[ "${target}" == "headscale-go" ]]; then
   generate_headscale_go_tls
@@ -830,7 +1069,10 @@ start_server
 create_user_and_key
 start_client
 login_client
+reauth_client_if_requested
 approve_routes_if_requested
+set_tags_if_requested
+wait_for_node_tags_if_requested
 wait_for_client_netmap
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"

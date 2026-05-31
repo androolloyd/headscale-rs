@@ -87,6 +87,10 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
+| Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |
+| Database | `postgres-tag-update` | `postgres-tag-update-smoke.sh` | `postgres-tag-update-headscale-go-smoke.sh` | Production Postgres post-login forced tag replacement |
+| Database | `postgres-tag-update-invalid` | `postgres-tag-update-invalid-smoke.sh` | `postgres-tag-update-invalid-headscale-go-smoke.sh` | Production Postgres invalid forced tag rejection |
+| Database | `postgres-tag-reauth-clear` | `postgres-tag-reauth-clear-smoke.sh` | `postgres-tag-reauth-clear-headscale-go-smoke.sh` | Production Postgres web reauth clears forced tags |
 | Database | `postgres-route-via-restart` | `postgres-route-via-restart-smoke.sh` | `postgres-route-via-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` survives server restart |
 | Database | `postgres-route-via-reload-restart` | `postgres-route-via-reload-restart-smoke.sh` | `postgres-route-via-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload survives server restart |
 | Database | `postgres-route-via-multiprefix-restart` | `postgres-route-via-multiprefix-restart-smoke.sh` | `postgres-route-via-multiprefix-restart-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` survives server restart |

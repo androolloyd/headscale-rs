@@ -369,9 +369,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, and route-health
   mixed-exit all-unhealthy restart, plus route-health mixed-exit all-unhealthy
-  reload+restart stock-client smokes are checked into the real-client matrix and
-  push/PR CI now provisions Postgres for them; broader Pg stock-client serve
-  smokes remain
+  reload+restart stock-client smokes are checked into the real-client matrix.
+  The production Pg stock-client harness also covers tagged preauth, post-login
+  tag replacement, invalid tag-update rejection, and web reauth clearing forced
+  tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
+  `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
+  CI now provisions Postgres for all twenty-six Pg rows; broader Pg stock-client
+  serve smokes remain, especially SSH/OIDC-check production rows
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants;
   the policy-level `acceptEnv`, `check` hold-and-delegate, and host-destination
@@ -398,3 +402,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Verified locally with `headscale-db --lib` and `headscale-api --features
   admin --lib`; clippy/format gates should be rerun before the final commit if
   more edits land.
+
+## 2026-05-31 Postgres tag-mutation smoke slice
+
+- `tools/real-client/online-lastseen-common.sh` can now load a generated or
+  caller-provided ACL policy through the production CLI, mint tagged preauth
+  keys, force web reauth, set node tags, assert tag state, and run the same
+  lifecycle checks against SQLite or Postgres.
+- Added paired Rust/headscale-go Postgres rows for tagged preauth, tag update,
+  invalid tag update, and web reauth tag clearing:
+  `postgres-tagged-preauth`, `postgres-tag-update`,
+  `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear`.
+- The real-client workflow includes those rows in `PR_SMOKES`; the matrix now
+  has twenty-six Postgres stock-client rows. Next small Pg gap from the
+  subagent audit is `postgres-ssh-oidc-check`.

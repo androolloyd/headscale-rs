@@ -78,6 +78,10 @@ smoke_ids=(
   postgres-oidc-route-approve-restart
   postgres-web-register-restart
   postgres-restart-persistence
+  postgres-tagged-preauth
+  postgres-tag-update
+  postgres-tag-update-invalid
+  postgres-tag-reauth-clear
   postgres-route-via-restart
   postgres-route-via-reload-restart
   postgres-route-via-multiprefix-restart
@@ -185,6 +189,10 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
+  database
+  database
   registration
   registration
   registration
@@ -268,6 +276,10 @@ smoke_rust_scripts=(
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
+  tools/real-client/postgres-tagged-preauth-smoke.sh
+  tools/real-client/postgres-tag-update-smoke.sh
+  tools/real-client/postgres-tag-update-invalid-smoke.sh
+  tools/real-client/postgres-tag-reauth-clear-smoke.sh
   tools/real-client/postgres-route-via-restart-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-restart-smoke.sh
@@ -363,6 +375,10 @@ smoke_go_scripts=(
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
+  tools/real-client/postgres-tagged-preauth-headscale-go-smoke.sh
+  tools/real-client/postgres-tag-update-headscale-go-smoke.sh
+  tools/real-client/postgres-tag-update-invalid-headscale-go-smoke.sh
+  tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-restart-headscale-go-smoke.sh
@@ -458,6 +474,10 @@ smoke_assertions=(
   "production Postgres OIDC route approval survives server restart"
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
+  "production Postgres preauth key with ACL tag owners"
+  "production Postgres post-login tag replacement"
+  "production Postgres invalid tag update rejection"
+  "production Postgres web reauth clears forced tags"
   "production Postgres current-head grants via survives server restart"
   "production Postgres current-head grants via policy reload survives server restart"
   "production Postgres current-head multi-prefix grants via survives server restart"

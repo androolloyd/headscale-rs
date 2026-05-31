@@ -84,7 +84,9 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
 | Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge records |
 | Database | `postgres-magicdns-ipv6-only` | `postgres-magicdns-ipv6-only-smoke.sh` | `postgres-magicdns-ipv6-only-headscale-go-smoke.sh` | Production Postgres MagicDNS with IPv6-only prefix-family allocation |
+| Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
+| Database | `postgres-prefix-family-ipv6-only` | `postgres-prefix-family-ipv6-only-smoke.sh` | `postgres-prefix-family-ipv6-only-headscale-go-smoke.sh` | Production Postgres IPv6-only prefix-family allocation |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
 | Database | `postgres-web-register-unowned-tag` | `postgres-web-register-unowned-tag-smoke.sh` | `postgres-web-register-unowned-tag-headscale-go-smoke.sh` | Production Postgres web registration rejects unowned requested tag |
@@ -615,8 +617,9 @@ stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
 MagicDNS fallback names, the `postgres-dns-edge` variant asserts split DNS
 routes, fallback resolvers, and AAAA/CNAME records, and the
 `postgres-magicdns-ipv6-only` variant asserts IPv6-only MagicDNS allocation.
-The `postgres-prefix-family-ipv4-only` variant asserts explicit IPv4-only
-prefix-family allocation through the same path:
+The `postgres-prefix-family-dual-stack`, `postgres-prefix-family-ipv4-only`,
+and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family
+allocation through the same path:
 
 ```sh
 tools/real-client/postgres-online-lastseen-smoke.sh
@@ -631,8 +634,12 @@ tools/real-client/postgres-dns-edge-smoke.sh
 tools/real-client/postgres-dns-edge-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
 tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
 tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-ipv6-only-smoke.sh
+tools/real-client/postgres-prefix-family-ipv6-only-headscale-go-smoke.sh
 ```
 
 The Postgres route-approval scenario adds route advertisement and approval on

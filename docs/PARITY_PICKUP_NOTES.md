@@ -283,10 +283,14 @@ CARGO_TARGET_DIR=target/codex-verify-db-pg-node CARGO_BUILD_JOBS=1 CARGO_INCREME
 
 CLI structured-error snapshot parity was completed after `4d04612`:
 
-- Add `serve_missing_noise_private_key_json.stderr` near `serve_rejects_supported_server_init_validation_before_state_startup`
-- Add `serve_unsupported_postgres_json_line.stderr` beside `serve_rejects_unsupported_postgres_before_sqlite_startup`
-- Add `grpc_live_health_failure_json_line.stderr` inside `live_local_grpc_health_failure_matches_process_stderr`
-- Add `grpc_remote_auth_failure_json.stderr` beside `live_remote_grpc_config_success_and_auth_errors_match_process_output`
+- Added `serve_missing_noise_private_key_json.stderr` near `serve_rejects_supported_server_init_validation_before_state_startup`
+- Added `serve_unsupported_postgres_json.stderr` and
+  `serve_unsupported_postgres_json_line.stderr` beside
+  `serve_rejects_unsupported_postgres_before_sqlite_startup`
+- Added `grpc_live_health_failure_json.stderr` and
+  `grpc_live_health_failure_json_line.stderr` inside
+  `live_local_grpc_health_failure_matches_process_stderr`
+- Added `grpc_remote_auth_failure_json.stderr` beside `live_remote_grpc_config_success_and_auth_errors_match_process_output`
 - Unknown `-o/--output` selectors now match upstream by falling back to human
   output/error formatting instead of failing local validation.
 
@@ -313,7 +317,9 @@ including users, preauth keys, API keys, policy, debug node creation,
 registration, node mutation, backfill, and deletion; direct policy DB bypass now
 round-trips against configured Pg without a running server. The next critical
 slice is broader production Pg stock-client/mutation coverage beyond the
-auth-key, web-registration, route-approval, OIDC map, and OIDC restart flows.
+already-paired auth-key, web-registration, route-approval, exit-node,
+web-registration route-approval, OIDC, OIDC restart, route-via, route-health,
+and restart-persistence rows listed below.
 The other narrow lanes remain current-upstream CLI output drift snapshots,
 map/session churn parity, and remaining route/SSH stock-client edge rows.
 

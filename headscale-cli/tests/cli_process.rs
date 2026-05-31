@@ -1884,6 +1884,15 @@ database:
         "serve unsupported postgres",
     );
 
+    let output = headscale_in(&["-o", "json", "serve"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/serve_unsupported_postgres_json.stderr"),
+        "serve unsupported postgres json",
+    );
+
     let output = headscale_in(&["-ojson-line", "serve"], cwd.path(), home.path());
 
     assert_process_stderr_snapshot(
@@ -4463,6 +4472,13 @@ async fn live_local_grpc_health_failure_matches_process_stderr() {
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-o", "json", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_live_health_failure_json.stderr")
     );
 
     let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 6).await;

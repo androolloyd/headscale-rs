@@ -1521,6 +1521,10 @@ pub struct MachineRegistry {
     /// Monotonic per-node stream generation used to suppress stale
     /// delayed-offline tasks after a rapid reconnect.
     connection_generations: RwLock<BTreeMap<u64, u64>>,
+    /// Per-active-stream cancellation flags. Headscale-go reports
+    /// server-side batcher shutdown separately from client context
+    /// completion in `mapresponse_ended_total`.
+    stream_cancel_flags: RwLock<BTreeMap<u64, Vec<Arc<AtomicBool>>>>,
     /// Timestamp captured when the final stream for a node disconnects.
     /// Long-offline zero-count entries are cleaned on the upstream batcher
     /// cadence to prevent unbounded debug/runtime state growth.
@@ -1612,6 +1616,7 @@ impl Default for MachineRegistry {
             active_connections: RwLock::new(BTreeMap::new()),
             online_states: RwLock::new(BTreeMap::new()),
             connection_generations: RwLock::new(BTreeMap::new()),
+            stream_cancel_flags: RwLock::new(BTreeMap::new()),
             disconnected_at: RwLock::new(BTreeMap::new()),
             route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             ephemeral_gc: RwLock::new(None),
@@ -1922,10 +1927,18 @@ impl MachineRegistry {
             machines.wake_waiters();
         }
         machines.primary_routes.write().clear_unhealthy(node_id);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        machines
+            .stream_cancel_flags
+            .write()
+            .entry(node_id)
+            .or_default()
+            .push(cancelled.clone());
         StreamConnectionGuard {
             machines,
             node_id,
             offline_grace,
+            cancelled,
         }
     }
 
@@ -1984,6 +1997,15 @@ impl MachineRegistry {
             .wrapping_add(1);
         generations.insert(node_id, generation);
         Some(generation)
+    }
+
+    fn cancel_stream_connections(&self, node_id: u64) {
+        let flags = self.stream_cancel_flags.read();
+        if let Some(flags) = flags.get(&node_id) {
+            for flag in flags {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Remove long-offline zero-count batcher entries without deleting nodes.
@@ -2494,6 +2516,10 @@ impl MachineRegistry {
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
         let node_id = self.stable_node_id_for_key(node_key_hex);
+        let existed = self.get(node_key_hex).is_some();
+        if existed {
+            self.cancel_stream_connections(node_id);
+        }
         let removed =
             self.update_with_operation("delete", |map| map.remove(node_key_hex).is_some());
         if removed {
@@ -2653,6 +2679,16 @@ impl MachineRegistry {
         self.disconnected_at.write().remove(&node_id);
         self.route_health_stable_sessions.write().remove(&node_id);
     }
+
+    fn forget_stream_cancel_flag(&self, node_id: u64, cancelled: &Arc<AtomicBool>) {
+        let mut flags = self.stream_cancel_flags.write();
+        if let Some(node_flags) = flags.get_mut(&node_id) {
+            node_flags.retain(|flag| !Arc::ptr_eq(flag, cancelled));
+            if node_flags.is_empty() {
+                flags.remove(&node_id);
+            }
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -2660,6 +2696,7 @@ pub struct StreamConnectionGuard {
     machines: Arc<MachineRegistry>,
     node_id: u64,
     offline_grace: Duration,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -2831,6 +2868,11 @@ impl EphemeralNodeGc {
 
 impl Drop for StreamConnectionGuard {
     fn drop(&mut self) {
+        let end_reason = if self.cancelled.load(Ordering::SeqCst) {
+            "cancelled"
+        } else {
+            "done"
+        };
         if let Some(generation) = self.machines.release_stream_connection(self.node_id) {
             if let Some(node_key) = self.machines.ephemeral_node_key_by_id(self.node_id)
                 && let Some(gc) = self.machines.ephemeral_gc()
@@ -2844,7 +2886,9 @@ impl Drop for StreamConnectionGuard {
                 self.offline_grace,
             );
         }
-        self.machines.record_mapresponse_ended("done");
+        self.machines
+            .forget_stream_cancel_flag(self.node_id, &self.cancelled);
+        self.machines.record_mapresponse_ended(end_reason);
     }
 }
 
@@ -3832,6 +3876,29 @@ mod registry_tests {
         assert_eq!(reg.online_states().get(&node_id), Some(&false));
 
         assert!(reg.delete("nk-a"));
+        assert!(!reg.active_connections().contains_key(&node_id));
+        assert!(!reg.online_states().contains_key(&node_id));
+    }
+
+    #[test]
+    fn stream_connection_guard_records_cancelled_reason_when_node_is_deleted() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+
+        let guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+
+        assert!(reg.delete("nk-a"));
+        drop(guard);
+
+        let ended = reg.mapresponse_ended_metrics();
+        assert_eq!(ended.get("cancelled"), Some(&1));
+        assert_eq!(ended.get("done"), None);
         assert!(!reg.active_connections().contains_key(&node_id));
         assert!(!reg.online_states().contains_key(&node_id));
     }

@@ -964,7 +964,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         if domain.is_empty() {
             label
         } else {
-            format!("{label}.{domain}")
+            format!("{label}.{domain}.")
         }
     }
 
@@ -1200,6 +1200,7 @@ mod tests {
 
         let node = record_to_map_node(&record, "octra.test");
 
+        assert_eq!(node.name, "router-a.octra.test.");
         assert_eq!(node.allowed_ips, vec!["100.64.0.8/32", "10.0.0.0/24"]);
         assert_eq!(node.primary_routes, vec!["10.0.0.0/24"]);
         assert_eq!(
@@ -1208,6 +1209,23 @@ mod tests {
         );
         assert_eq!(node.hostinfo.os, "linux");
         assert_eq!(node.hostinfo.os_version, "6.8");
+    }
+
+    #[test]
+    fn record_to_map_node_keeps_unqualified_name_without_dns_domain() {
+        let record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "alice".into(),
+            "router-a".into(),
+            Ipv4Addr::new(100, 64, 0, 8),
+            false,
+        );
+
+        let node = record_to_map_node(&record, "");
+
+        assert_eq!(node.name, "router-a");
     }
 
     #[test]

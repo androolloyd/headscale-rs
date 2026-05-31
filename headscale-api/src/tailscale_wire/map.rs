@@ -3542,7 +3542,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(mr.peers[0].name, "peer-b.headscale.test");
+        assert_eq!(mr.peers[0].name, "peer-b.headscale.test.");
         assert_eq!(mr.domain, "headscale.test");
     }
 

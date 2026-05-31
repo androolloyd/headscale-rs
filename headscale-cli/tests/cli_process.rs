@@ -2547,13 +2547,27 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         );
         assert_eq!(stderr(&list_users), "");
 
+        let list_users_json =
+            headscale_with_config(&config, &["-o", "json", "users", "list", "--name", "alice"]);
+        assert!(
+            list_users_json.status.success(),
+            "stderr: {}",
+            stderr(&list_users_json)
+        );
+        let list_users_json = json_output(&list_users_json);
+        assert_eq!(list_users_json.as_array().expect("users").len(), 1);
+        let user_id = list_users_json[0]["id"]
+            .as_u64()
+            .expect("user id")
+            .to_string();
+
         let preauth = headscale_with_config(
             &config,
             &[
                 "preauthkeys",
                 "create",
                 "--user",
-                "alice",
+                &user_id,
                 "--reusable",
                 "--expiration",
                 "1h",

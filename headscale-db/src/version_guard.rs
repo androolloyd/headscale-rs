@@ -1,8 +1,9 @@
 //! Compatibility guard for importing headscale-go SQLite databases.
 //!
-//! The Rust database shape tracks the pinned headscale-go v0.28 schema.
-//! It can read databases already migrated to that shape, but it should
-//! not attempt arbitrary headscale-go upgrades or downgrades.
+//! The Rust database shape tracks the pinned headscale-go v0.29 schema
+//! while accepting the supported v0.28 import baseline. It can read
+//! databases already migrated to that shape, but it should not attempt
+//! arbitrary headscale-go upgrades or downgrades.
 
 use crate::{DbError, Result};
 #[cfg(feature = "postgres-sqlx")]
@@ -98,7 +99,9 @@ pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Re
         "
         INSERT INTO database_versions (id, version, updated_at)
         VALUES (1, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO NOTHING
+        ON CONFLICT(id) DO UPDATE SET
+            version = excluded.version,
+            updated_at = excluded.updated_at
         ",
     )
     .bind(HEADSCALE_GO_CURRENT_VERSION)
@@ -154,7 +157,9 @@ async fn stamp_postgres_database_version(conn: &mut PgConnection) -> Result<()> 
         "
         INSERT INTO database_versions (id, version, updated_at)
         VALUES (1, $1, CURRENT_TIMESTAMP)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id) DO UPDATE SET
+            version = EXCLUDED.version,
+            updated_at = EXCLUDED.updated_at
         ",
     )
     .bind(HEADSCALE_GO_CURRENT_VERSION)

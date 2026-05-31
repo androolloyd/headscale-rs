@@ -214,7 +214,7 @@ async fn postgres_foundation_accepts_supported_go_version_history() -> TestResul
             sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
                 .fetch_one(&mut schema.conn)
                 .await?;
-        assert_eq!(version, "v0.28.0");
+        assert_eq!(version, HEADSCALE_GO_CURRENT_VERSION);
 
         Ok::<(), headscale_db::DbError>(())
     }

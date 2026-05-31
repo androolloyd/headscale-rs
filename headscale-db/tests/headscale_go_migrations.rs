@@ -649,8 +649,8 @@ async fn accepts_database_versions_for_v028_compatible_schema() {
         sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
             .fetch_one(db.pool())
             .await
-            .expect("query preserved database_versions row");
-    assert_eq!(stored_version, "v0.28.1-beta.1");
+            .expect("query stamped database_versions row");
+    assert_eq!(stored_version, HEADSCALE_GO_CURRENT_VERSION);
 
     let after = db
         .check_headscale_go_import_compatibility()

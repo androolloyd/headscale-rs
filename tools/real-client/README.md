@@ -79,6 +79,7 @@ predates the executable PingRequest lifecycle.
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
+| Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix and DNS extra record projection |
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
@@ -610,8 +611,9 @@ Additional knobs:
 
 The Postgres online/LastSeen scenario runs the single-node lifecycle flow
 through production `headscale server`/headscale-go `serve` processes backed by
-a temporary Postgres database. The `postgres-magicdns-custom-domain` variant
-asserts a non-default MagicDNS suffix over that production Postgres path, the
+a temporary Postgres database. The `postgres-magicdns` variant asserts the
+default MagicDNS suffix over that production Postgres path, the
+`postgres-magicdns-custom-domain` variant asserts a non-default suffix, the
 `postgres-extra-records` variant asserts configured DNS `extra_records` in the
 stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
 MagicDNS fallback names, the `postgres-dns-edge` variant asserts split DNS
@@ -624,6 +626,8 @@ allocation through the same path:
 ```sh
 tools/real-client/postgres-online-lastseen-smoke.sh
 tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
+tools/real-client/postgres-magicdns-smoke.sh
+tools/real-client/postgres-magicdns-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-custom-domain-smoke.sh
 tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
 tools/real-client/postgres-extra-records-smoke.sh

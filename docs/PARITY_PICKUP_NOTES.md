@@ -174,6 +174,10 @@ Recent accepted slices:
   multi-prefix `grants[].via`, route-health primary-owner preservation,
   degraded all-unhealthy route-health retention, and mixed exit-node/subnet
   router separation across Rust/headscale-go production restart.
+- This slice adds paired `postgres-route-exit-node` production Postgres
+  stock-client rows. They exercise exit-node advertisement through stock
+  `tailscaled`, Pg-backed CLI approval, netmap projection, and online/LastSeen
+  assertions against Rust and headscale-go.
 
 Current multi-agent split:
 
@@ -188,8 +192,8 @@ Current multi-agent split:
   health/user/preauth/API-key/policy/node admin operations. A live-Pg OIDC runtime smoke now
   covers OIDC registration, same-machine rekey, live-registry projection, full
   map output, and restart hydration. Paired env-gated production Pg
-  stock-client auth-key, web-registration, route-approval, web-registration
-  route-approval, OIDC, OIDC restart, OIDC route-approval restart,
+  stock-client auth-key, web-registration, route-approval, exit-node
+  route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval restart,
   web-registration restart, restart-persistence, route-via restart,
   route-via multiprefix restart, route-health restart, route-health
   primary-owner restart, route-health reload+restart, route-health
@@ -322,8 +326,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production Pg `serve` process smoke covers public
   health plus local gRPC health/user/preauth/API-key/policy/node CLI paths, and
-  paired env-gated Pg auth-key, web-registration, route-approval,
-  web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
+  paired env-gated Pg auth-key, web-registration, route-approval, exit-node
+  route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
   route-via multiprefix restart, route-health restart, route-health
   primary-owner restart, reload+restart, route-health all-unhealthy restart,

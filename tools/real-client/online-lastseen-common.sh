@@ -19,6 +19,7 @@ timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
+advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
@@ -43,6 +44,19 @@ case "${login_mode}" in
   authkey | web) ;;
   *)
     echo "REAL_CLIENT_LOGIN_MODE must be authkey or web, got ${login_mode}" >&2
+    exit 2
+    ;;
+esac
+
+case "${advertise_exit_node}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    advertise_exit_node_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    advertise_exit_node_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ADVERTISE_EXIT_NODE must be true or false, got ${advertise_exit_node}" >&2
     exit 2
     ;;
 esac
@@ -554,6 +568,9 @@ login_client() {
   fi
   if [[ -n "${advertise_routes}" ]]; then
     up_args+=("--advertise-routes=${advertise_routes}")
+  fi
+  if ((advertise_exit_node_flag)); then
+    up_args+=(--advertise-exit-node)
   fi
 
   up_status=0

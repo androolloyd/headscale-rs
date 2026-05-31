@@ -35,15 +35,15 @@ fn nodeattrs_doc() -> PolicyDoc {
 
             [tag_owners]
             "tag:exit" = ["alice@example.com"]
-            "tag:funnel" = ["alice@example.com"]
+            "tag:custom" = ["alice@example.com"]
 
             [[node_attrs]]
             target = ["*"]
             attr = ["mullvad-exit-node"]
 
             [[node_attrs]]
-            target = ["tag:funnel"]
-            attr = ["funnel"]
+            target = ["tag:custom"]
+            attr = ["custom-node-attr"]
 
             [[node_attrs]]
             target = ["tag:exit"]
@@ -102,9 +102,9 @@ fn parses_internal_nodeattrs_toml() {
     assert_eq!(doc.node_attrs.len(), 3);
 
     let exit_tags = vec!["exit".to_string()];
-    let funnel_tags = vec!["funnel".to_string()];
+    let custom_tags = vec!["custom".to_string()];
     let exit_node = NodeView::new("100.64.0.1").with_tags(&exit_tags);
-    let funnel_node = NodeView::new("100.64.0.2").with_tags(&funnel_tags);
+    let custom_node = NodeView::new("100.64.0.2").with_tags(&custom_tags);
     let plain_node = NodeView::new("100.64.0.3");
 
     // `*` target grants mullvad-exit-node to every node.
@@ -126,10 +126,10 @@ fn parses_internal_nodeattrs_toml() {
         !doc.node_attrs_for(&plain_node)
             .contains(&"exit-node".to_string())
     );
-    // tag:funnel grants funnel.
+    // tag:custom grants custom-node-attr.
     assert!(
-        doc.node_attrs_for(&funnel_node)
-            .contains(&"funnel".to_string())
+        doc.node_attrs_for(&custom_node)
+            .contains(&"custom-node-attr".to_string())
     );
 }
 

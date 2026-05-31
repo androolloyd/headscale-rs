@@ -42,6 +42,7 @@ base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 magic_dns="${REAL_CLIENT_MAGIC_DNS:-false}"
 accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
 expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
+expected_no_magic_dns="${REAL_CLIENT_EXPECT_NO_MAGIC_DNS:-false}"
 dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
 expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
 expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
@@ -113,6 +114,23 @@ case "${expected_dns_extra_records_exact}" in
     exit 2
     ;;
 esac
+
+case "${expected_no_magic_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_no_magic_dns=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_no_magic_dns=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS must be true or false, got ${expected_no_magic_dns}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_no_magic_dns)) && [[ -n "${expected_magic_dns_suffix}" ]]; then
+  echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS conflicts with REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX" >&2
+  exit 2
+fi
 
 case "${expected_set_tags_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -968,6 +986,37 @@ assert_magic_dns_if_requested() {
   echo "::endgroup::"
 }
 
+assert_no_magic_dns_status() {
+  local output_path="${work_dir}/${client_name}.no-magicdns-status.json"
+  docker exec "${client_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      self_node = status.fetch("Self")
+      self_host = self_node.fetch("HostName").to_s
+      suffix = status["MagicDNSSuffix"].to_s.sub(/\.\z/, "")
+      abort("expected MagicDNSSuffix to fall back to self hostname #{self_host.inspect}, got #{suffix.inspect}") unless suffix == self_host
+      self_dns = self_node["DNSName"].to_s.sub(/\.\z/, "")
+      abort("expected bare self DNSName #{self_host.inspect}, got #{self_dns.inspect}") unless self_dns == self_host
+      puts JSON.pretty_generate({
+        magic_dns: false,
+        self_host: self_host,
+        self_dns: self_dns,
+      })
+    ' "${output_path}" >"${work_dir}/${client_name}.no-magicdns-summary.json"
+  cat "${work_dir}/${client_name}.no-magicdns-summary.json"
+}
+
+assert_no_magic_dns_if_requested() {
+  ((expect_no_magic_dns)) || return 0
+  echo "::group::assert MagicDNS disabled client status"
+  wait_for "MagicDNS disabled fallback names" "assert_no_magic_dns_status" || {
+    dump_debug
+    echo "::endgroup::"
+    return 1
+  }
+  echo "::endgroup::"
+}
+
 assert_dns_extra_record() {
   local host="$1"
   local expected="$2"
@@ -1360,6 +1409,7 @@ set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_magic_dns_if_requested
+assert_no_magic_dns_if_requested
 assert_dns_extra_records_if_requested
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"

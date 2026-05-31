@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-30 12:22 ADT
+Updated: 2026-05-31 16:23 ADT
 
 ## Current State
 
@@ -375,9 +375,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-nine Pg rows, including
+  CI now provisions Postgres for all forty Pg rows, including
   `postgres-online-lastseen`, `postgres-magicdns-custom-domain`,
-  `postgres-extra-records`,
+  `postgres-extra-records`, `postgres-dns-disabled`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-via-same-tag-restart`,
   `postgres-ssh-oidc-check`,
@@ -527,3 +527,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   MagicDNS status through the production Postgres serving path.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-nine Postgres stock-client rows.
+
+## 2026-05-31 Postgres DNS disabled smoke slice
+
+- Extended the backend-aware online/LastSeen harness with
+  `REAL_CLIENT_EXPECT_NO_MAGIC_DNS`, matching the existing two-client
+  DNS-disabled assertions for the single-client production Postgres lifecycle
+  path.
+- Added paired `postgres-dns-disabled` Rust/headscale-go rows over a temporary
+  Postgres database. The row proves disabled MagicDNS fallback names project
+  through the production Postgres serving path.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  forty Postgres stock-client rows.

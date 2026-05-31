@@ -114,6 +114,9 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-tag-reauth-clear` | `postgres-tag-reauth-clear-smoke.sh` | `postgres-tag-reauth-clear-headscale-go-smoke.sh` | Production Postgres web reauth clears forced tags |
 | Database | `postgres-acl-allow` | `postgres-acl-allow-smoke.sh` | `postgres-acl-allow-headscale-go-smoke.sh` | Production Postgres ACL allowed peers visible |
 | Database | `postgres-route-via` | `postgres-route-via-smoke.sh` | `postgres-route-via-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` route steering |
+| Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
+| Database | `postgres-route-via-multiprefix` | `postgres-route-via-multiprefix-smoke.sh` | `postgres-route-via-multiprefix-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` route steering |
+| Database | `postgres-route-via-multiprefix-reload` | `postgres-route-via-multiprefix-reload-smoke.sh` | `postgres-route-via-multiprefix-reload-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload steering |
 | Database | `postgres-route-via-restart` | `postgres-route-via-restart-smoke.sh` | `postgres-route-via-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` survives server restart |
 | Database | `postgres-route-via-same-tag-restart` | `postgres-route-via-same-tag-restart-smoke.sh` | `postgres-route-via-same-tag-restart-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` survives server restart |
 | Database | `postgres-route-via-reload-restart` | `postgres-route-via-reload-restart-smoke.sh` | `postgres-route-via-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload survives server restart |
@@ -679,11 +682,19 @@ It uses the same mock OIDC provider and stock Tailscale client as `oidc`, skips
 cleanly when `HEADSCALE_DB_POSTGRES_TEST_URL` is not set, and asserts the OIDC
 node row, user profile/provider fields, CLI node projection, and client netmap.
 
-The Postgres route-edge restart rows reuse the restart harness with a temporary
-Postgres database to prove persisted route-via and route-health state across a
-production server restart:
+The Postgres route-edge rows reuse the restart harness with a temporary
+Postgres database to prove current-head route-via steering, policy reloads, and
+persisted route-via/route-health state across production server boundaries:
 
 ```sh
+tools/real-client/postgres-route-via-smoke.sh
+tools/real-client/postgres-route-via-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-reload-smoke.sh
+tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-reload-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-restart-smoke.sh
 tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-same-tag-restart-smoke.sh

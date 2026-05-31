@@ -752,7 +752,7 @@ pub mod upstream {
                     &body.picture_url,
                 )
                 .await
-                .map_err(user_error_to_status)?;
+                .map_err(create_user_error_to_status)?;
             self.policy.refresh();
             Ok(Response::new(CreateUserResponse {
                 user: Some(user_record_to_proto(&user)),
@@ -765,11 +765,20 @@ pub mod upstream {
         ) -> Result<Response<RenameUserResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
+            if self
+                .users
+                .get_by_id(body.old_id)
+                .await
+                .map_err(direct_user_error_to_status)?
+                .is_none()
+            {
+                return Err(upstream_user_not_found_status());
+            }
             let user = self
                 .users
                 .rename_by_id(body.old_id, &body.new_name)
                 .await
-                .map_err(user_error_to_status)?;
+                .map_err(direct_user_error_to_status)?;
             self.policy.refresh();
             Ok(Response::new(RenameUserResponse {
                 user: Some(user_record_to_proto(&user)),
@@ -781,10 +790,20 @@ pub mod upstream {
             request: Request<DeleteUserRequest>,
         ) -> Result<Response<DeleteUserResponse>, Status> {
             self.authorize(&request).await?;
-            self.users
-                .delete_by_id(request.into_inner().id)
+            let id = request.into_inner().id;
+            if self
+                .users
+                .get_by_id(id)
                 .await
-                .map_err(user_error_to_status)?;
+                .map_err(direct_user_error_to_status)?
+                .is_none()
+            {
+                return Err(upstream_user_not_found_status());
+            }
+            self.users
+                .delete_by_id(id)
+                .await
+                .map_err(direct_user_error_to_status)?;
             self.policy.refresh();
             Ok(Response::new(DeleteUserResponse {}))
         }
@@ -800,14 +819,14 @@ pub mod upstream {
                     .users
                     .get(&body.name)
                     .await
-                    .map_err(user_error_to_status)?
+                    .map_err(direct_user_error_to_status)?
                     .into_iter()
                     .collect::<Vec<_>>(),
                 (true, false, _) => self
                     .users
                     .all()
                     .await
-                    .map_err(user_error_to_status)?
+                    .map_err(direct_user_error_to_status)?
                     .into_iter()
                     .filter(|u| u.email == body.email)
                     .collect(),
@@ -815,10 +834,14 @@ pub mod upstream {
                     .users
                     .get_by_id(id)
                     .await
-                    .map_err(user_error_to_status)?
+                    .map_err(direct_user_error_to_status)?
                     .into_iter()
                     .collect::<Vec<_>>(),
-                _ => self.users.all().await.map_err(user_error_to_status)?,
+                _ => self
+                    .users
+                    .all()
+                    .await
+                    .map_err(direct_user_error_to_status)?,
             };
             users.sort_by_key(|u| u.id);
             Ok(Response::new(ListUsersResponse {
@@ -1927,6 +1950,21 @@ pub mod upstream {
             UserRegistryError::Store(msg) => Status::internal(msg),
         }
     }
+
+    fn create_user_error_to_status(e: UserRegistryError) -> Status {
+        Status::internal(format!("creating user: {e}"))
+    }
+
+    fn direct_user_error_to_status(e: UserRegistryError) -> Status {
+        match e {
+            UserRegistryError::Missing(_) => upstream_user_not_found_status(),
+            other => Status::unknown(other.to_string()),
+        }
+    }
+
+    fn upstream_user_not_found_status() -> Status {
+        Status::unknown("user not found")
+    }
 }
 
 #[cfg(all(test, feature = "admin"))]
@@ -2436,45 +2474,134 @@ mod upstream_tests {
     }
 
     #[tokio::test]
-    async fn upstream_user_grpc_reports_invalid_duplicate_and_missing() {
-        let service = admin_service().await;
+    async fn upstream_user_grpc_reports_exact_error_text() {
+        enum Call {
+            CreateDuplicate,
+            RenameMissing,
+            DeleteMissing,
+            ListMissingId,
+            ListMissingName,
+            ListMissingEmail,
+        }
 
-        let err = service
-            .create_user(Request::new(CreateUserRequest {
-                name: "Alice".into(),
-                display_name: String::new(),
-                email: String::new(),
-                picture_url: String::new(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        enum Expected {
+            Error {
+                code: tonic::Code,
+                message: &'static str,
+            },
+            EmptyList,
+        }
 
-        service
-            .create_user(Request::new(CreateUserRequest {
-                name: "alice".into(),
-                display_name: String::new(),
-                email: String::new(),
-                picture_url: String::new(),
-            }))
-            .await
-            .unwrap();
-        let err = service
-            .create_user(Request::new(CreateUserRequest {
-                name: "alice".into(),
-                display_name: String::new(),
-                email: String::new(),
-                picture_url: String::new(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::AlreadyExists);
+        let cases = [
+            (
+                "create duplicate",
+                Call::CreateDuplicate,
+                Expected::Error {
+                    code: tonic::Code::Internal,
+                    message: "creating user: user 'alice' already exists",
+                },
+            ),
+            (
+                "rename missing id",
+                Call::RenameMissing,
+                Expected::Error {
+                    code: tonic::Code::Unknown,
+                    message: "user not found",
+                },
+            ),
+            (
+                "delete missing id",
+                Call::DeleteMissing,
+                Expected::Error {
+                    code: tonic::Code::Unknown,
+                    message: "user not found",
+                },
+            ),
+            ("list missing id", Call::ListMissingId, Expected::EmptyList),
+            (
+                "list missing name",
+                Call::ListMissingName,
+                Expected::EmptyList,
+            ),
+            (
+                "list missing email",
+                Call::ListMissingEmail,
+                Expected::EmptyList,
+            ),
+        ];
 
-        let err = service
-            .delete_user(Request::new(DeleteUserRequest { id: 99 }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        for (name, call, expected) in cases {
+            let service = admin_service().await;
+            let result = match call {
+                Call::CreateDuplicate => {
+                    service
+                        .create_user(Request::new(CreateUserRequest {
+                            name: "alice".into(),
+                            display_name: String::new(),
+                            email: String::new(),
+                            picture_url: String::new(),
+                        }))
+                        .await
+                        .unwrap();
+                    service
+                        .create_user(Request::new(CreateUserRequest {
+                            name: "alice".into(),
+                            display_name: String::new(),
+                            email: String::new(),
+                            picture_url: String::new(),
+                        }))
+                        .await
+                        .map(|_| Vec::new())
+                }
+                Call::RenameMissing => service
+                    .rename_user(Request::new(RenameUserRequest {
+                        old_id: 99,
+                        new_name: "alice".into(),
+                    }))
+                    .await
+                    .map(|_| Vec::new()),
+                Call::DeleteMissing => service
+                    .delete_user(Request::new(DeleteUserRequest { id: 99 }))
+                    .await
+                    .map(|_| Vec::new()),
+                Call::ListMissingId => service
+                    .list_users(Request::new(ListUsersRequest {
+                        id: 99,
+                        name: String::new(),
+                        email: String::new(),
+                    }))
+                    .await
+                    .map(|response| response.into_inner().users),
+                Call::ListMissingName => service
+                    .list_users(Request::new(ListUsersRequest {
+                        id: 0,
+                        name: "missing".into(),
+                        email: String::new(),
+                    }))
+                    .await
+                    .map(|response| response.into_inner().users),
+                Call::ListMissingEmail => service
+                    .list_users(Request::new(ListUsersRequest {
+                        id: 0,
+                        name: String::new(),
+                        email: "missing@example.com".into(),
+                    }))
+                    .await
+                    .map(|response| response.into_inner().users),
+            };
+
+            match expected {
+                Expected::Error { code, message } => {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.code(), code, "{name}");
+                    assert_eq!(err.message(), message, "{name}");
+                }
+                Expected::EmptyList => {
+                    let users = result.unwrap_or_else(|err| panic!("{name}: {err}"));
+                    assert!(users.is_empty(), "{name}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

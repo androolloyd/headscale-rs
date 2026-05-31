@@ -1496,8 +1496,8 @@ async fn map_inner(
                     res = ping_rx.changed() => {
                         if res.is_err() {
                             Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                        } else if let Some(request) = pings.pop_next_for_node(self_node_id) {
-                            Some((
+                        } else {
+                            pings.pop_next_for_node(self_node_id).map(|request| (
                                 build_ping_request_chunk(
                                     &machines,
                                     request,
@@ -1508,8 +1508,6 @@ async fn map_inner(
                                 last_peer_state.clone(),
                                 last_self_node.clone(),
                             ))
-                        } else {
-                            None
                         }
                     }
                     () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {

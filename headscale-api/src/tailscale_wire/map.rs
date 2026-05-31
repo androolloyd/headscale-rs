@@ -66,7 +66,9 @@ use super::wire::{
     is_supported_capability_version, stable_id_from_key, strip_key_prefix,
     unsupported_client_error,
 };
-use super::{MachineRecord, MapResponseDebugStore, MapResponseDebugType, WireState};
+use super::{
+    MachineRecord, MapChangeReason, MapResponseDebugStore, MapResponseDebugType, WireState,
+};
 
 use crate::dns::{DnsRequester, DnsStore, MachineDnsRecord};
 use crate::policy::{NodeView, PacketFilterNode, PeerMapNode, PolicyStore, SshPolicyNode};
@@ -918,17 +920,20 @@ async fn map_inner(
     // peer's streaming `/map` so they pick up the new disco/endpoint
     // values on the next chunk.
     let mut record_changed = false;
+    let mut record_change_reason = MapChangeReason::NodeUpdated;
     if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty())
         && own.disco_key.as_deref() != Some(dk.as_str())
     {
         own.disco_key = Some(dk.clone());
         record_changed = true;
+        record_change_reason = MapChangeReason::EndpointDerpUpdate;
     }
     if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty())
         && &own.endpoints != eps
     {
         own.endpoints = eps.clone();
         record_changed = true;
+        record_change_reason = MapChangeReason::EndpointDerpUpdate;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
         let announced_routes = match normalize_routes(&hostinfo.routable_ips) {
@@ -969,14 +974,20 @@ async fn map_inner(
         if own.host_info_for_node() != hostinfo {
             own.replace_host_info(hostinfo);
             record_changed = true;
+            record_change_reason = MapChangeReason::FullSelfUpdate;
         }
         if own.approved_routes != approved_routes {
             own.approved_routes = approved_routes;
             record_changed = true;
+            record_change_reason = MapChangeReason::RouteUpdate;
         }
     }
     if record_changed {
-        state.machines.upsert(node_key_hex.clone(), own.clone());
+        state.machines.upsert_with_reason(
+            node_key_hex.clone(),
+            own.clone(),
+            Some(record_change_reason),
+        );
     }
     if let Some(store) = &state.registration_store {
         let current = if record_changed {
@@ -1366,6 +1377,11 @@ async fn map_inner(
                         // rather than a full map whose empty Peers list
                         // would serialize away and leave clients with
                         // stale peers/routes.
+                        machines.record_observed_map_change(
+                            MapChangeReason::PolicyChange,
+                            Some(self_node_id),
+                            None,
+                        );
                         rebuild_peer_delta_chunk(
                             &machines,
                             &policy,
@@ -1386,6 +1402,11 @@ async fn map_inner(
                         // Extra-records file edited (or DnsStore.set_spec
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
+                        machines.record_observed_map_change(
+                            MapChangeReason::DnsConfigUpdate,
+                            Some(self_node_id),
+                            None,
+                        );
                         Some((
                             rebuild_map_chunk(
                                 &machines,
@@ -1412,6 +1433,11 @@ async fn map_inner(
                         if res.is_err() {
                             Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         } else {
+                            machines.record_observed_map_change(
+                                MapChangeReason::DerpMapUpdate,
+                                Some(self_node_id),
+                                None,
+                            );
                             Some((
                             rebuild_map_chunk(
                                 &machines,
@@ -4843,6 +4869,36 @@ mod tests {
         let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
         let metrics = String::from_utf8(metrics.to_vec()).unwrap();
         assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"done\"} 1\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_true_records_cancelled_end_reason_when_self_node_deleted() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+
+        let app = router(state.clone());
+        let public_app = public_router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert!(first_mr.node.is_some());
+
+        assert!(state.machines.delete(&a));
+        drop(body);
+        tokio::task::yield_now().await;
+
+        let metrics_resp = public_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let metrics = to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+        let metrics = String::from_utf8(metrics.to_vec()).unwrap();
+        assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"cancelled\"} 1\n"));
     }
 
     #[tokio::test]

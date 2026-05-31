@@ -236,9 +236,13 @@ Current multi-agent split:
   binding mismatches, cancellation, and denied auth verdicts without seeding
   check-period auto-approval. A paired regular-overlap same-tag route-via plus
   route-health failover smoke now asserts stock-client route ownership follows
-  HA primary failover and sticky recovery. Remaining high-priority follow-ups
-  are canonical map-batcher reason/state deltas and broader churn/restart
-  map-stream tests. Runtime
+  HA primary failover and sticky recovery. A bounded canonical map-change
+  reason history now owns upstream-shaped reasons for node add/update/delete,
+  online/offline transitions, endpoint/DERP updates, key expiry, policy/DNS/DERP
+  config changes, pings, route updates, and route-health changes without adding
+  free-form Prometheus labels. Remaining high-priority follow-ups are actual
+  NodeStore worker batching semantics and broader churn/restart map-stream
+  tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response
@@ -361,5 +365,6 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   rejection scenarios are now promoted into the default Go-vs-Rust differential
   gate
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,
-  including canonical map-batcher reason/state deltas
+  especially NodeStore worker batching semantics and remaining reason/state edge
+  deltas
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed

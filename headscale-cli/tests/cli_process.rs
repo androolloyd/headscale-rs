@@ -1148,6 +1148,29 @@ fn generate_private_key_outputs_tailscale_machine_private_key() {
 }
 
 #[test]
+fn generate_private_key_ignores_extra_positionals_like_upstream_cobra() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    for args in [
+        &["generate", "private-key", "extra"][..],
+        &["gen", "private-key", "extra", "--force"][..],
+    ] {
+        let output = headscale_in(args, cwd.path(), home.path());
+
+        assert!(
+            output.status.success(),
+            "args: {args:?}; stderr: {}",
+            stderr(&output)
+        );
+        let out = stdout(&output);
+        let key = out.trim();
+        assert!(key.starts_with("privkey:"), "args: {args:?}; stdout: {out}");
+        assert_eq!(key.len(), "privkey:".len() + 64);
+    }
+}
+
+#[test]
 fn version_human_uses_upstream_headscale_label() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -1322,6 +1345,11 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["gen", "private-key", "--bad"],
+        1,
+        include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["generate", "private-key", "-x"],
         1,
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
@@ -1356,8 +1384,6 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         &["dumpConfig", "bad"][..],
         &["mockoidc", "bad"][..],
         &["completion", "bash", "bad"][..],
-        &["generate", "private-key", "bad"][..],
-        &["gen", "private-key", "bad"][..],
         &["help", "version", "bad"][..],
     ] {
         let output = headscale_clean(args);
@@ -2128,6 +2154,10 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_snapshot(
         &["generate", "private-key", "--help"],
+        include_str!("snapshots/generate_private_key_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["gen", "private-key", "--help"],
         include_str!("snapshots/generate_private_key_help.stdout"),
     );
     assert_stdout_snapshot(

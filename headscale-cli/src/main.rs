@@ -227,7 +227,10 @@ enum IdentityAction {
 #[derive(Subcommand)]
 enum GenerateCmd {
     /// Generate a private key for the headscale server.
-    PrivateKey,
+    PrivateKey {
+        #[arg(hide = true)]
+        _ignored_args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -553,8 +556,10 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             .await
             .map_err(Into::into),
         Commands::Generate { action } => match action {
-            GenerateCmd::PrivateKey => print_private_key(connect.fmt().map_err(MainError::Admin)?)
-                .map_err(MainError::Other),
+            GenerateCmd::PrivateKey { .. } => {
+                print_private_key(connect.fmt().map_err(MainError::Admin)?)
+                    .map_err(MainError::Other)
+            }
         },
         Commands::Mockoidc => mockoidc::run()
             .await
@@ -785,9 +790,8 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         {
             Some(UPSTREAM_GENERATE_HELP)
         }
-        ["generate", "private-key", "-h" | "--help"] | ["help", "generate", "private-key"] => {
-            Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
-        }
+        ["generate" | "gen", "private-key", "-h" | "--help"]
+        | ["help", "generate" | "gen", "private-key"] => Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP),
         ["debug", "-h" | "--help"] | ["help", "debug"] => Some(UPSTREAM_DEBUG_HELP),
         ["debug", "create-node", "-h" | "--help"] | ["help", "debug", "create-node"] => {
             Some(UPSTREAM_DEBUG_CREATE_NODE_HELP)
@@ -984,11 +988,6 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             "bash" | "fish" | "powershell" | "zsh",
             tail @ ..,
         ] if !tail.is_empty() && !completion_tail_is_supported(tail) => true,
-        ["generate" | "gen", "private-key", tail @ ..]
-            if !tail.is_empty() && !tail_is_help_or_force(tail) =>
-        {
-            true
-        }
         ["help", _, _, ..] => true,
         _ => false,
     };
@@ -2624,7 +2623,7 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Generate {
-                action: GenerateCmd::PrivateKey
+                action: GenerateCmd::PrivateKey { .. }
             }
         ));
 
@@ -2632,7 +2631,7 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Generate {
-                action: GenerateCmd::PrivateKey
+                action: GenerateCmd::PrivateKey { .. }
             }
         ));
     }
@@ -2716,6 +2715,10 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["mockoidc", "--help"]),
             Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["gen", "private-key", "--help"]),
+            Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["completion", "bash", "--help"]),

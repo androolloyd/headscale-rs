@@ -114,6 +114,7 @@ pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum MapChangeReason {
+    FullUpdate,
     NodeAdded,
     NodeUpdated,
     PeersRemoved,
@@ -134,6 +135,7 @@ impl MapChangeReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::FullUpdate => "full update",
             Self::NodeAdded => "node added",
             Self::NodeUpdated => "node updated",
             Self::PeersRemoved => "peers removed",
@@ -168,9 +170,24 @@ pub struct MapChangeContent {
 }
 
 impl MapChangeContent {
+    fn full() -> Self {
+        Self {
+            include_self: true,
+            include_derp_map: true,
+            include_dns: true,
+            include_domain: true,
+            include_policy: true,
+            send_all_peers: true,
+            ..Self::default()
+        }
+    }
+
     fn for_reason(reason: MapChangeReason, node_id: Option<u64>) -> Self {
         let mut content = Self::default();
         match reason {
+            MapChangeReason::FullUpdate | MapChangeReason::FullSelfUpdate => {
+                content = Self::full();
+            }
             MapChangeReason::NodeAdded
             | MapChangeReason::NodeUpdated
             | MapChangeReason::RouteUpdate
@@ -211,14 +228,6 @@ impl MapChangeContent {
             MapChangeReason::PingNode => {
                 content.ping_request = true;
             }
-            MapChangeReason::FullSelfUpdate => {
-                content.include_self = true;
-                content.include_derp_map = true;
-                content.include_dns = true;
-                content.include_domain = true;
-                content.include_policy = true;
-                content.send_all_peers = true;
-            }
         }
         content
     }
@@ -248,6 +257,16 @@ pub struct MapChange {
 }
 
 impl MapChange {
+    #[must_use]
+    pub fn full_update(generation: u64) -> Self {
+        PendingMapChange::global(MapChangeReason::FullUpdate).into_change(generation)
+    }
+
+    #[must_use]
+    pub fn full_self(generation: u64, node_id: u64) -> Self {
+        PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(generation)
+    }
+
     #[must_use]
     pub fn reason_label(&self) -> &'static str {
         self.reasons
@@ -1886,6 +1905,10 @@ pub struct MachineRegistry {
     /// runtime an owned counterpart to headscale-go's change reason
     /// layer without exposing free-form labels through Prometheus.
     map_changes: RwLock<VecDeque<MapChange>>,
+    /// Per-node pending map changes awaiting a batch tick. This mirrors
+    /// headscale-go's mapper batcher add-to-batch semantics before stream
+    /// delivery is switched over to tick-drained batches.
+    pending_map_changes: RwLock<BTreeMap<u64, Vec<MapChange>>>,
     /// Upstream-shaped ephemeral-node lifecycle manager. When
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
@@ -1973,6 +1996,7 @@ impl Default for MachineRegistry {
             disconnected_at: RwLock::new(BTreeMap::new()),
             route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             map_changes: RwLock::new(VecDeque::new()),
+            pending_map_changes: RwLock::new(BTreeMap::new()),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
         }
@@ -2046,11 +2070,57 @@ impl MachineRegistry {
         self.map_changes.read().iter().cloned().collect()
     }
 
+    #[must_use]
+    pub fn pending_map_changes(&self) -> BTreeMap<u64, Vec<MapChange>> {
+        self.pending_map_changes.read().clone()
+    }
+
+    #[must_use]
+    pub fn drain_pending_map_changes(&self) -> BTreeMap<u64, Vec<MapChange>> {
+        std::mem::take(&mut *self.pending_map_changes.write())
+    }
+
     fn push_map_change(&self, change: MapChange) {
         let mut changes = self.map_changes.write();
         changes.push_back(change);
         while changes.len() > MAP_CHANGE_HISTORY_LIMIT {
             changes.pop_front();
+        }
+    }
+
+    fn batcher_node_ids(&self) -> Vec<u64> {
+        self.active_connections.read().keys().copied().collect()
+    }
+
+    fn enqueue_map_change(&self, change: MapChange) {
+        let removed = change.content.peers_removed.clone();
+        let mut pending = self.pending_map_changes.write();
+        for node_id in &removed {
+            pending.remove(node_id);
+        }
+
+        if change.is_full() && change.target_node_id.is_none() {
+            for node_id in self.batcher_node_ids() {
+                pending.insert(node_id, vec![change.clone()]);
+            }
+            return;
+        }
+
+        if let Some(target_node_id) = change.target_node_id {
+            if removed.contains(&target_node_id) {
+                return;
+            }
+            pending.entry(target_node_id).or_default().push(change);
+            return;
+        }
+
+        for node_id in self.batcher_node_ids() {
+            if removed.contains(&node_id) {
+                continue;
+            }
+            if change.should_send_to_node(node_id) {
+                pending.entry(node_id).or_default().push(change.clone());
+            }
         }
     }
 
@@ -2061,9 +2131,10 @@ impl MachineRegistry {
         origin_node_id: Option<u64>,
     ) {
         let generation = *self.gen_tx.borrow();
-        self.push_map_change(
-            PendingMapChange::new(reason, target_node_id, origin_node_id).into_change(generation),
-        );
+        let change =
+            PendingMapChange::new(reason, target_node_id, origin_node_id).into_change(generation);
+        self.push_map_change(change.clone());
+        self.enqueue_map_change(change);
     }
 
     fn wake_waiters_with(&self, change: PendingMapChange) {
@@ -2076,7 +2147,9 @@ impl MachineRegistry {
             *g = g.wrapping_add(1);
             generation = *g;
         });
-        self.push_map_change(change.into_change(generation));
+        let change = change.into_change(generation);
+        self.push_map_change(change.clone());
+        self.enqueue_map_change(change);
         self.notify.notify_waiters();
     }
 
@@ -4503,6 +4576,119 @@ mod registry_tests {
         assert_eq!(merged.change_type(), "peers");
         assert_eq!(merged.content.peers_changed, vec![node_id]);
         assert_eq!(merged.content.peer_patches, vec![node_id]);
+    }
+
+    #[test]
+    fn map_change_batcher_full_update_supersedes_pending() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = 1001;
+        let node_b = 1002;
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+
+        reg.enqueue_map_change(
+            PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_a).into_change(1),
+        );
+        reg.enqueue_map_change(
+            PendingMapChange::global(MapChangeReason::DnsConfigUpdate).into_change(2),
+        );
+        reg.enqueue_map_change(MapChange::full_update(3));
+
+        let pending = reg.pending_map_changes();
+        assert_eq!(pending.len(), 2);
+        for node_id in [node_a, node_b] {
+            let changes = pending.get(&node_id).expect("node has pending change");
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].reason_labels(), vec!["full update"]);
+            assert_eq!(changes[0].change_type(), "full");
+        }
+    }
+
+    #[test]
+    fn map_change_batcher_splits_targeted_and_broadcast() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = 2001;
+        let node_b = 2002;
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+        let _ = reg.drain_pending_map_changes();
+
+        reg.enqueue_map_change(
+            PendingMapChange::target(MapChangeReason::PingNode, node_a).into_change(1),
+        );
+        reg.enqueue_map_change(
+            PendingMapChange::global(MapChangeReason::PolicyChange).into_change(2),
+        );
+
+        let pending = reg.pending_map_changes();
+        let node_a_labels = pending
+            .get(&node_a)
+            .expect("target node has pending changes")
+            .iter()
+            .flat_map(MapChange::reason_labels)
+            .collect::<Vec<_>>();
+        assert_eq!(node_a_labels, vec!["ping node", "policy change"]);
+
+        let node_b_labels = pending
+            .get(&node_b)
+            .expect("broadcast node has pending changes")
+            .iter()
+            .flat_map(MapChange::reason_labels)
+            .collect::<Vec<_>>();
+        assert_eq!(node_b_labels, vec!["policy change"]);
+    }
+
+    #[test]
+    fn map_change_batcher_deletion_removes_deleted_node_pending_state() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = stable_id_from_key("nk-a");
+        let node_b = stable_id_from_key("nk-b");
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+        reg.upsert("nk-b".to_string(), mk_record(2));
+        let _ = reg.drain_pending_map_changes();
+
+        reg.enqueue_map_change(
+            PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_b).into_change(10),
+        );
+        assert!(reg.pending_map_changes().contains_key(&node_b));
+
+        assert!(reg.delete("nk-b"));
+
+        let pending = reg.pending_map_changes();
+        assert!(!pending.contains_key(&node_b));
+        assert!(!reg.active_connections().contains_key(&node_b));
+        assert_eq!(
+            pending
+                .get(&node_a)
+                .and_then(|changes| changes.last())
+                .map(|change| change.content.peers_removed.as_slice()),
+            Some([node_b].as_slice())
+        );
     }
 
     #[test]

@@ -242,8 +242,12 @@ Current multi-agent split:
   merge semantics for node add/update/delete, online/offline transitions,
   endpoint/DERP updates, key expiry, policy/DNS/DERP config changes, pings,
   route updates, and route-health changes without adding free-form Prometheus
-  labels. Remaining high-priority follow-ups are actual NodeStore worker
-  batching semantics and broader churn/restart map-stream tests. Runtime
+  labels. A pending per-node map-change batcher foundation now matches
+  upstream add-to-batch behavior for full-update supersession,
+  targeted/broadcast splits, and deleted-node pending cleanup. Remaining
+  high-priority follow-ups are tick-driven stream delivery from those batches,
+  actual NodeStore worker batching semantics, and broader churn/restart
+  map-stream tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response

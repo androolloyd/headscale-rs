@@ -112,7 +112,7 @@ pub use wire::{
 pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
 pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum MapChangeReason {
     NodeAdded,
     NodeUpdated,
@@ -152,30 +152,231 @@ impl MapChangeReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MapChangeContent {
+    pub include_self: bool,
+    pub include_derp_map: bool,
+    pub include_dns: bool,
+    pub include_domain: bool,
+    pub include_policy: bool,
+    pub peers_changed: Vec<u64>,
+    pub peers_removed: Vec<u64>,
+    pub peer_patches: Vec<u64>,
+    pub send_all_peers: bool,
+    pub requires_runtime_peer_computation: bool,
+    pub ping_request: bool,
+}
+
+impl MapChangeContent {
+    fn for_reason(reason: MapChangeReason, node_id: Option<u64>) -> Self {
+        let mut content = Self::default();
+        match reason {
+            MapChangeReason::NodeAdded
+            | MapChangeReason::NodeUpdated
+            | MapChangeReason::RouteUpdate
+            | MapChangeReason::RouteHealthUpdate => {
+                if let Some(node_id) = node_id {
+                    content.peers_changed.push(node_id);
+                } else {
+                    content.send_all_peers = true;
+                }
+            }
+            MapChangeReason::PeersRemoved => {
+                if let Some(node_id) = node_id {
+                    content.peers_removed.push(node_id);
+                } else {
+                    content.send_all_peers = true;
+                }
+            }
+            MapChangeReason::NodeOnline
+            | MapChangeReason::NodeOffline
+            | MapChangeReason::EndpointDerpUpdate
+            | MapChangeReason::KeyExpiry => {
+                if let Some(node_id) = node_id {
+                    content.peer_patches.push(node_id);
+                } else {
+                    content.send_all_peers = true;
+                }
+            }
+            MapChangeReason::PolicyChange => {
+                content.include_dns = true;
+                content.include_policy = true;
+                content.requires_runtime_peer_computation = true;
+            }
+            MapChangeReason::DnsConfigUpdate => {
+                content.include_dns = true;
+            }
+            MapChangeReason::DerpMapUpdate => {
+                content.include_derp_map = true;
+            }
+            MapChangeReason::PingNode => {
+                content.ping_request = true;
+            }
+            MapChangeReason::FullSelfUpdate => {
+                content.include_self = true;
+            }
+        }
+        content
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.include_self |= other.include_self;
+        self.include_derp_map |= other.include_derp_map;
+        self.include_dns |= other.include_dns;
+        self.include_domain |= other.include_domain;
+        self.include_policy |= other.include_policy;
+        self.send_all_peers |= other.send_all_peers;
+        self.requires_runtime_peer_computation |= other.requires_runtime_peer_computation;
+        self.ping_request |= other.ping_request;
+        append_unique(&mut self.peers_changed, other.peers_changed);
+        append_unique(&mut self.peers_removed, other.peers_removed);
+        append_unique(&mut self.peer_patches, other.peer_patches);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapChange {
     pub generation: u64,
-    pub reason: MapChangeReason,
+    pub reasons: Vec<MapChangeReason>,
     pub target_node_id: Option<u64>,
     pub origin_node_id: Option<u64>,
+    pub content: MapChangeContent,
 }
 
 impl MapChange {
     #[must_use]
-    pub const fn reason_label(self) -> &'static str {
-        self.reason.as_str()
+    pub fn reason_label(&self) -> &'static str {
+        self.reasons
+            .first()
+            .map_or("unknown", |reason| reason.as_str())
+    }
+
+    #[must_use]
+    pub fn reason_labels(&self) -> Vec<&'static str> {
+        self.reasons.iter().map(|reason| reason.as_str()).collect()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let content = &self.content;
+        !content.include_self
+            && !content.include_derp_map
+            && !content.include_dns
+            && !content.include_domain
+            && !content.include_policy
+            && !content.send_all_peers
+            && !content.requires_runtime_peer_computation
+            && !content.ping_request
+            && content.peers_changed.is_empty()
+            && content.peers_removed.is_empty()
+            && content.peer_patches.is_empty()
+    }
+
+    #[must_use]
+    pub fn is_self_only(&self) -> bool {
+        self.target_node_id.is_some()
+            && self.content.include_self
+            && !self.content.send_all_peers
+            && self.content.peers_changed.is_empty()
+            && self.content.peers_removed.is_empty()
+            && self.content.peer_patches.is_empty()
+    }
+
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.content.send_all_peers
+            && self.content.include_self
+            && self.content.include_derp_map
+            && self.content.include_dns
+            && self.content.include_domain
+            && self.content.include_policy
+    }
+
+    #[must_use]
+    pub fn change_type(&self) -> &'static str {
+        if self.is_full() {
+            return "full";
+        }
+        if self.is_self_only() {
+            return "self";
+        }
+        if self.content.requires_runtime_peer_computation {
+            return "policy";
+        }
+        if !self.content.peer_patches.is_empty()
+            && self.content.peers_changed.is_empty()
+            && self.content.peers_removed.is_empty()
+            && !self.content.send_all_peers
+        {
+            return "patch";
+        }
+        if !self.content.peers_changed.is_empty()
+            || !self.content.peers_removed.is_empty()
+            || self.content.send_all_peers
+        {
+            return "peers";
+        }
+        if self.content.include_derp_map
+            || self.content.include_dns
+            || self.content.include_domain
+            || self.content.include_policy
+        {
+            return "config";
+        }
+        if self.content.ping_request {
+            return "ping";
+        }
+        "unknown"
+    }
+
+    #[must_use]
+    pub fn should_send_to_node(&self, node_id: u64) -> bool {
+        self.target_node_id
+            .is_none_or(|target_node_id| target_node_id == node_id)
+    }
+
+    #[must_use]
+    pub fn merge(mut self, other: Self) -> Self {
+        if let (Some(left), Some(right)) = (self.target_node_id, other.target_node_id) {
+            assert_eq!(
+                left, right,
+                "cannot merge map changes with different target nodes"
+            );
+        }
+        self.generation = self.generation.max(other.generation);
+        if self.target_node_id.is_none() {
+            self.target_node_id = other.target_node_id;
+        }
+        if self.origin_node_id.is_none() {
+            self.origin_node_id = other.origin_node_id;
+        }
+        append_unique(&mut self.reasons, other.reasons);
+        self.content.merge(other.content);
+        self
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+fn append_unique<T>(target: &mut Vec<T>, values: Vec<T>)
+where
+    T: PartialEq,
+{
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingMapChange {
     reason: MapChangeReason,
     target_node_id: Option<u64>,
     origin_node_id: Option<u64>,
+    content: MapChangeContent,
 }
 
 impl PendingMapChange {
-    const fn new(
+    fn new(
         reason: MapChangeReason,
         target_node_id: Option<u64>,
         origin_node_id: Option<u64>,
@@ -184,23 +385,25 @@ impl PendingMapChange {
             reason,
             target_node_id,
             origin_node_id,
+            content: MapChangeContent::for_reason(reason, target_node_id.or(origin_node_id)),
         }
     }
 
-    const fn global(reason: MapChangeReason) -> Self {
+    fn global(reason: MapChangeReason) -> Self {
         Self::new(reason, None, None)
     }
 
-    const fn target(reason: MapChangeReason, target_node_id: u64) -> Self {
+    fn target(reason: MapChangeReason, target_node_id: u64) -> Self {
         Self::new(reason, Some(target_node_id), None)
     }
 
-    const fn into_change(self, generation: u64) -> MapChange {
+    fn into_change(self, generation: u64) -> MapChange {
         MapChange {
             generation,
-            reason: self.reason,
+            reasons: vec![self.reason],
             target_node_id: self.target_node_id,
             origin_node_id: self.origin_node_id,
+            content: self.content,
         }
     }
 }
@@ -1790,7 +1993,7 @@ impl MachineRegistry {
 
     #[must_use]
     pub fn map_change_history(&self) -> Vec<MapChange> {
-        self.map_changes.read().iter().copied().collect()
+        self.map_changes.read().iter().cloned().collect()
     }
 
     fn push_map_change(&self, change: MapChange) {
@@ -4160,6 +4363,14 @@ mod registry_tests {
                 "peers removed",
             ]
         );
+        let types = changes
+            .iter()
+            .map(MapChange::change_type)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            vec!["peers", "peers", "patch", "patch", "patch", "peers"]
+        );
         assert!(
             changes
                 .windows(2)
@@ -4172,6 +4383,68 @@ mod registry_tests {
                 .all(|change| change.target_node_id == Some(node_id))
         );
         assert!(changes.iter().all(|change| change.origin_node_id.is_none()));
+    }
+
+    #[test]
+    fn map_change_type_matches_upstream_bounded_categories() {
+        let node_id = 42;
+        let self_change =
+            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(1);
+        assert_eq!(self_change.change_type(), "self");
+        assert!(self_change.should_send_to_node(node_id));
+        assert!(!self_change.should_send_to_node(node_id + 1));
+
+        let patch_change =
+            PendingMapChange::target(MapChangeReason::NodeOnline, node_id).into_change(2);
+        assert_eq!(patch_change.change_type(), "patch");
+
+        let peers_change =
+            PendingMapChange::target(MapChangeReason::RouteUpdate, node_id).into_change(3);
+        assert_eq!(peers_change.change_type(), "peers");
+
+        let config_change =
+            PendingMapChange::global(MapChangeReason::DnsConfigUpdate).into_change(4);
+        assert_eq!(config_change.change_type(), "config");
+
+        let policy_change = PendingMapChange::global(MapChangeReason::PolicyChange).into_change(5);
+        assert_eq!(policy_change.change_type(), "policy");
+
+        let ping_change =
+            PendingMapChange::target(MapChangeReason::PingNode, node_id).into_change(6);
+        assert_eq!(ping_change.change_type(), "ping");
+
+        let mut full_change =
+            PendingMapChange::global(MapChangeReason::FullSelfUpdate).into_change(7);
+        full_change.content.include_self = true;
+        full_change.content.include_derp_map = true;
+        full_change.content.include_dns = true;
+        full_change.content.include_domain = true;
+        full_change.content.include_policy = true;
+        full_change.content.send_all_peers = true;
+        assert_eq!(full_change.change_type(), "full");
+    }
+
+    #[test]
+    fn map_change_merge_combines_reasons_and_state() {
+        let node_id = 42;
+        let peers = PendingMapChange::target(MapChangeReason::RouteUpdate, node_id).into_change(1);
+        let patch = PendingMapChange::target(MapChangeReason::NodeOnline, node_id).into_change(2);
+        let merged = peers.merge(patch);
+
+        assert_eq!(merged.generation, 2);
+        assert_eq!(merged.target_node_id, Some(node_id));
+        assert_eq!(merged.reason_labels(), vec!["route update", "node online"]);
+        assert_eq!(merged.change_type(), "peers");
+        assert_eq!(merged.content.peers_changed, vec![node_id]);
+        assert_eq!(merged.content.peer_patches, vec![node_id]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot merge map changes with different target nodes")]
+    fn map_change_merge_rejects_different_targets() {
+        let left = PendingMapChange::target(MapChangeReason::PingNode, 1).into_change(1);
+        let right = PendingMapChange::target(MapChangeReason::PingNode, 2).into_change(2);
+        let _ = left.merge(right);
     }
 
     #[test]

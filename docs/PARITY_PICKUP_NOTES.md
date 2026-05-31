@@ -237,12 +237,13 @@ Current multi-agent split:
   check-period auto-approval. A paired regular-overlap same-tag route-via plus
   route-health failover smoke now asserts stock-client route ownership follows
   HA primary failover and sticky recovery. A bounded canonical map-change
-  reason history now owns upstream-shaped reasons for node add/update/delete,
-  online/offline transitions, endpoint/DERP updates, key expiry, policy/DNS/DERP
-  config changes, pings, route updates, and route-health changes without adding
-  free-form Prometheus labels. Remaining high-priority follow-ups are actual
-  NodeStore worker batching semantics and broader churn/restart map-stream
-  tests. Runtime
+  reason/content history now owns upstream-shaped reasons, target/origin nodes,
+  content flags, peer changed/removed/patch state, bounded response types, and
+  merge semantics for node add/update/delete, online/offline transitions,
+  endpoint/DERP updates, key expiry, policy/DNS/DERP config changes, pings,
+  route updates, and route-health changes without adding free-form Prometheus
+  labels. Remaining high-priority follow-ups are actual NodeStore worker
+  batching semantics and broader churn/restart map-stream tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response

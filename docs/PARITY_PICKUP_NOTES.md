@@ -257,6 +257,9 @@ Current multi-agent split:
   Persistent auth-key node hydration now derives the live ephemeral flag from
   the assigned preauth key, matching headscale-go's `Node.IsEphemeral` restart
   behavior.
+  Operator `SetTags` calls now reject empty tag lists at the SQLite/Postgres
+  node-store and in-memory registry boundaries, preserving existing tags like
+  headscale-go's `ErrCannotRemoveAllTags` path.
 - Explorer lane: Postgres machine admin next-slice inventory. Outcome:
   `headscale_db::headscale_nodes` already exposes the needed Postgres node
   primitives; the feature-gated `PersistentPostgresMachineAdmin` is the safe

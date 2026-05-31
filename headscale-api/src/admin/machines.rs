@@ -69,6 +69,8 @@ use super::users::{UserAdmin, UserRecord};
 
 const REGISTER_METHOD_AUTH_KEY: i32 = 1;
 const REGISTER_METHOD_OIDC: i32 = 3;
+const EMPTY_TAGS_ERROR: &str =
+    "cannot remove all tags from a node - tagged nodes must have at least one tag";
 
 #[derive(Clone, Debug, Default)]
 struct UserIdentity {
@@ -2004,6 +2006,9 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        if tags.is_empty() {
+            return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
+        }
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_tags(&self.pool, row.id, tags)
             .await
@@ -2285,6 +2290,9 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        if tags.is_empty() {
+            return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
+        }
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_postgres_tags(&self.pool, row.id, tags)
             .await
@@ -2607,6 +2615,9 @@ impl MachineAdmin for WireMachineAdmin {
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        if tags.is_empty() {
+            return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
+        }
         if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
@@ -3214,12 +3225,19 @@ mod tests {
     /// `set_tags` writes through; admin DTO carries the forced tags.
     #[test]
     fn set_tags_round_trips_through_dto() {
-        let (a, _reg) = fixture();
+        let (a, reg) = fixture();
         let id = "aa".repeat(32);
         rt().block_on(a.set_tags(&id, vec!["tag:prod".into(), "tag:db".into()]))
             .unwrap();
         let view = rt().block_on(a.get(&id)).unwrap();
         assert_eq!(view.tags, vec!["tag:prod", "tag:db"]);
+
+        let err = rt().block_on(a.set_tags(&id, Vec::new())).unwrap_err();
+        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        assert_eq!(
+            reg.get(&id).unwrap().forced_tags,
+            vec!["tag:prod", "tag:db"]
+        );
     }
 
     /// `create` inserts a synthetic node through the same admin

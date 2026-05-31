@@ -3142,10 +3142,13 @@ impl MachineRegistry {
         })
     }
 
-    /// Replace a machine's `forced_tags` list. Empty list ⇒ clear the
-    /// override. Mirrors upstream's `db.SetTags` (the writer of
-    /// `Node.ForcedTags`).
+    /// Replace a machine's `forced_tags` list. Empty-list admin
+    /// updates are rejected, matching upstream's `db.SetTags` /
+    /// `State.SetNodeTags` boundary.
     pub fn set_forced_tags(&self, node_key_hex: &str, tags: Vec<String>) -> bool {
+        if tags.is_empty() {
+            return false;
+        }
         let node_id = self.stable_node_id_for_key(node_key_hex);
         self.update_with_operation_and_change(
             "update",
@@ -5002,9 +5005,9 @@ mod registry_tests {
         // Replace, not merge.
         assert!(reg.set_forced_tags("nk-a", vec!["tag:prod".into()]));
         assert_eq!(reg.get("nk-a").unwrap().forced_tags, vec!["tag:prod"]);
-        // Empty list clears.
-        assert!(reg.set_forced_tags("nk-a", Vec::new()));
-        assert!(reg.get("nk-a").unwrap().forced_tags.is_empty());
+        // Empty list is rejected like upstream `SetNodeTags`.
+        assert!(!reg.set_forced_tags("nk-a", Vec::new()));
+        assert_eq!(reg.get("nk-a").unwrap().forced_tags, vec!["tag:prod"]);
     }
 
     #[test]

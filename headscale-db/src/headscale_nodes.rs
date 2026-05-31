@@ -789,7 +789,12 @@ pub async fn list_postgres_by_user_on_connection(
 
 pub async fn set_tags(pool: &SqlitePool, id: i64, tags: Vec<String>) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(tags);
-    let clear_user_id = !tags.is_empty();
+    if tags.is_empty() {
+        return Err(DbError::Constraint(
+            "cannot remove all tags from a node - tagged nodes must have at least one tag".into(),
+        ));
+    }
+    let clear_user_id = true;
     let tags = json_array(&tags)?;
     let now = now_unix();
     let affected = sqlx::query(
@@ -833,7 +838,12 @@ pub async fn set_postgres_tags_on_connection(
     tags: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(tags);
-    let clear_user_id = !tags.is_empty();
+    if tags.is_empty() {
+        return Err(DbError::Constraint(
+            "cannot remove all tags from a node - tagged nodes must have at least one tag".into(),
+        ));
+    }
+    let clear_user_id = true;
     let tags = json_array(&tags)?;
     let now = now_unix();
     let affected = sqlx::query(
@@ -1725,6 +1735,14 @@ mod tests {
         assert_eq!(tagged.tag_list(), vec!["tag:dev", "tag:prod"]);
         assert_eq!(tagged.user_id, None);
         assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+
+        let empty_tags = set_tags(db.pool(), node.id, Vec::new())
+            .await
+            .expect_err("upstream rejects removing every forced tag");
+        assert!(matches!(empty_tags, DbError::Constraint(_)));
+        let still_tagged = get_by_id(db.pool(), node.id).await.unwrap();
+        assert_eq!(still_tagged.tag_list(), vec!["tag:dev", "tag:prod"]);
+        assert_eq!(still_tagged.user_id, None);
 
         let expired = set_expiry(db.pool(), node.id, Some(1_700_000_001))
             .await

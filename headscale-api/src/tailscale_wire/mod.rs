@@ -199,7 +199,6 @@ impl MapChangeContent {
                 }
             }
             MapChangeReason::PolicyChange => {
-                content.include_dns = true;
                 content.include_policy = true;
                 content.requires_runtime_peer_computation = true;
             }
@@ -214,6 +213,11 @@ impl MapChangeContent {
             }
             MapChangeReason::FullSelfUpdate => {
                 content.include_self = true;
+                content.include_derp_map = true;
+                content.include_dns = true;
+                content.include_domain = true;
+                content.include_policy = true;
+                content.send_all_peers = true;
             }
         }
         content
@@ -376,17 +380,31 @@ struct PendingMapChange {
 }
 
 impl PendingMapChange {
-    fn new(
+    fn with_content_node(
         reason: MapChangeReason,
         target_node_id: Option<u64>,
         origin_node_id: Option<u64>,
+        content_node_id: Option<u64>,
     ) -> Self {
         Self {
             reason,
             target_node_id,
             origin_node_id,
-            content: MapChangeContent::for_reason(reason, target_node_id.or(origin_node_id)),
+            content: MapChangeContent::for_reason(reason, content_node_id),
         }
+    }
+
+    fn new(
+        reason: MapChangeReason,
+        target_node_id: Option<u64>,
+        origin_node_id: Option<u64>,
+    ) -> Self {
+        Self::with_content_node(
+            reason,
+            target_node_id,
+            origin_node_id,
+            target_node_id.or(origin_node_id),
+        )
     }
 
     fn global(reason: MapChangeReason) -> Self {
@@ -395,6 +413,38 @@ impl PendingMapChange {
 
     fn target(reason: MapChangeReason, target_node_id: u64) -> Self {
         Self::new(reason, Some(target_node_id), None)
+    }
+
+    fn origin(reason: MapChangeReason, origin_node_id: u64) -> Self {
+        Self::new(reason, None, Some(origin_node_id))
+    }
+
+    fn broadcast_peer(reason: MapChangeReason, node_id: u64) -> Self {
+        Self::with_content_node(reason, None, None, Some(node_id))
+    }
+
+    fn peer_patches(reason: MapChangeReason, node_ids: Vec<u64>) -> Self {
+        Self {
+            reason,
+            target_node_id: None,
+            origin_node_id: None,
+            content: MapChangeContent {
+                peer_patches: node_ids,
+                ..MapChangeContent::default()
+            },
+        }
+    }
+
+    fn peers_removed(node_ids: Vec<u64>) -> Self {
+        Self {
+            reason: MapChangeReason::PeersRemoved,
+            target_node_id: None,
+            origin_node_id: None,
+            content: MapChangeContent {
+                peers_removed: node_ids,
+                ..MapChangeContent::default()
+            },
+        }
     }
 
     fn into_change(self, generation: u64) -> MapChange {
@@ -2067,12 +2117,15 @@ impl MachineRegistry {
         let elapsed = start.elapsed();
         self.record_nodestore_operation("expire", elapsed);
         self.record_nodestore_batch(expired.len(), elapsed);
-        let target_node_id = (expired.len() == 1).then(|| self.stable_node_id_for_key(&expired[0]));
-        self.wake_waiters_with(PendingMapChange::new(
-            MapChangeReason::KeyExpiry,
-            target_node_id,
-            None,
-        ));
+        let expired_node_ids = expired
+            .iter()
+            .map(|node_key| self.stable_node_id_for_key(node_key))
+            .collect::<Vec<_>>();
+        let change = match expired_node_ids.as_slice() {
+            [node_id] => PendingMapChange::origin(MapChangeReason::KeyExpiry, *node_id),
+            _ => PendingMapChange::peer_patches(MapChangeReason::KeyExpiry, expired_node_ids),
+        };
+        self.wake_waiters_with(change);
         expired
     }
 
@@ -2110,7 +2163,7 @@ impl MachineRegistry {
         } else {
             MapChangeReason::NodeAdded
         });
-        self.wake_waiters_with(PendingMapChange::target(reason, node_id));
+        self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
     }
 
     /// Snapshot all known machines as a single `Arc<HashMap>`. The
@@ -2183,7 +2236,7 @@ impl MachineRegistry {
 
         let changed = primary_routes.set_node_health(node_id, healthy);
         if changed {
-            self.wake_waiters_with(PendingMapChange::target(
+            self.wake_waiters_with(PendingMapChange::broadcast_peer(
                 MapChangeReason::RouteHealthUpdate,
                 node_id,
             ));
@@ -2280,7 +2333,7 @@ impl MachineRegistry {
             !was_online
         };
         if online_changed {
-            machines.wake_waiters_with(PendingMapChange::target(
+            machines.wake_waiters_with(PendingMapChange::broadcast_peer(
                 MapChangeReason::NodeOnline,
                 node_id,
             ));
@@ -2471,7 +2524,7 @@ impl MachineRegistry {
         let now = Utc::now();
         self.update_with_operation_and_change(
             "update",
-            PendingMapChange::target(MapChangeReason::NodeOffline, node_id),
+            PendingMapChange::broadcast_peer(MapChangeReason::NodeOffline, node_id),
             |map| {
                 if let Some((_node_key, rec)) = map
                     .iter_mut()
@@ -2860,7 +2913,7 @@ impl MachineRegistry {
         let node_id = self.stable_node_id_for_key(node_key_hex);
         self.update_with_operation_and_change(
             "update",
-            PendingMapChange::target(MapChangeReason::KeyExpiry, node_id),
+            PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
             |map| match map.get_mut(node_key_hex) {
                 Some(rec) => {
                     rec.expiry = expiry;
@@ -2905,7 +2958,7 @@ impl MachineRegistry {
         let node_id = self.stable_node_id_for_key(node_key_hex);
         self.update_with_operation_and_change(
             "update",
-            PendingMapChange::target(MapChangeReason::KeyExpiry, node_id),
+            PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
             |map| match map.get_mut(node_key_hex) {
                 Some(rec) => {
                     rec.expiry = Some(now);
@@ -2926,7 +2979,7 @@ impl MachineRegistry {
         }
         let removed = self.update_with_operation_and_change(
             "delete",
-            PendingMapChange::target(MapChangeReason::PeersRemoved, node_id),
+            PendingMapChange::peers_removed(vec![node_id]),
             |map| map.remove(node_key_hex).is_some(),
         );
         if removed {
@@ -2990,7 +3043,7 @@ impl MachineRegistry {
         let mut clear_unhealthy = false;
         let changed = self.update_with_operation_and_change(
             "update",
-            PendingMapChange::target(MapChangeReason::RouteUpdate, node_id),
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
             |map| match map.get_mut(node_key_hex) {
                 Some(rec) => {
                     rec.approved_routes = routes;
@@ -3014,7 +3067,7 @@ impl MachineRegistry {
         let node_id = self.stable_node_id_for_key(node_key_hex);
         self.update_with_operation_and_change(
             "update",
-            PendingMapChange::target(MapChangeReason::RouteUpdate, node_id),
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
             |map| match map.get_mut(node_key_hex) {
                 Some(rec) => {
                     rec.available_routes = routes;
@@ -3074,11 +3127,11 @@ impl MachineRegistry {
         let elapsed = start.elapsed();
         self.record_nodestore_operation("update", elapsed);
         self.record_nodestore_batch(1, elapsed);
-        let target_node_id = (removed.len() == 1).then_some(removed[0].1);
-        self.wake_waiters_with(PendingMapChange::new(
-            MapChangeReason::PeersRemoved,
-            target_node_id,
-            None,
+        self.wake_waiters_with(PendingMapChange::peers_removed(
+            removed
+                .iter()
+                .map(|(_node_key_hex, node_id)| *node_id)
+                .collect(),
         ));
 
         let mut active = self.active_connections.write();
@@ -4377,29 +4430,48 @@ mod registry_tests {
                 .all(|pair| pair[0].generation < pair[1].generation),
             "{changes:?}"
         );
-        assert!(
-            changes
-                .iter()
-                .all(|change| change.target_node_id == Some(node_id))
-        );
-        assert!(changes.iter().all(|change| change.origin_node_id.is_none()));
+        assert_eq!(changes[0].origin_node_id, Some(node_id));
+        assert_eq!(changes[0].target_node_id, None);
+        assert_eq!(changes[0].content.peers_changed, vec![node_id]);
+        assert_eq!(changes[1].target_node_id, None);
+        assert_eq!(changes[1].origin_node_id, None);
+        assert_eq!(changes[1].content.peers_changed, vec![node_id]);
+        assert_eq!(changes[2].origin_node_id, Some(node_id));
+        assert_eq!(changes[2].target_node_id, None);
+        assert_eq!(changes[2].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[3].target_node_id, None);
+        assert_eq!(changes[3].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[4].target_node_id, None);
+        assert_eq!(changes[4].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[5].target_node_id, None);
+        assert_eq!(changes[5].content.peers_removed, vec![node_id]);
     }
 
     #[test]
     fn map_change_type_matches_upstream_bounded_categories() {
         let node_id = 42;
-        let self_change =
+        let full_self_change =
             PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(1);
+        assert_eq!(full_self_change.change_type(), "full");
+        assert!(full_self_change.should_send_to_node(node_id));
+        assert!(!full_self_change.should_send_to_node(node_id + 1));
+
+        let mut self_change =
+            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(1);
+        self_change.content = MapChangeContent {
+            include_self: true,
+            ..MapChangeContent::default()
+        };
         assert_eq!(self_change.change_type(), "self");
         assert!(self_change.should_send_to_node(node_id));
         assert!(!self_change.should_send_to_node(node_id + 1));
 
         let patch_change =
-            PendingMapChange::target(MapChangeReason::NodeOnline, node_id).into_change(2);
+            PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_id).into_change(2);
         assert_eq!(patch_change.change_type(), "patch");
 
         let peers_change =
-            PendingMapChange::target(MapChangeReason::RouteUpdate, node_id).into_change(3);
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id).into_change(3);
         assert_eq!(peers_change.change_type(), "peers");
 
         let config_change =
@@ -4408,31 +4480,25 @@ mod registry_tests {
 
         let policy_change = PendingMapChange::global(MapChangeReason::PolicyChange).into_change(5);
         assert_eq!(policy_change.change_type(), "policy");
+        assert!(!policy_change.content.include_dns);
+        assert!(policy_change.content.include_policy);
 
         let ping_change =
             PendingMapChange::target(MapChangeReason::PingNode, node_id).into_change(6);
         assert_eq!(ping_change.change_type(), "ping");
-
-        let mut full_change =
-            PendingMapChange::global(MapChangeReason::FullSelfUpdate).into_change(7);
-        full_change.content.include_self = true;
-        full_change.content.include_derp_map = true;
-        full_change.content.include_dns = true;
-        full_change.content.include_domain = true;
-        full_change.content.include_policy = true;
-        full_change.content.send_all_peers = true;
-        assert_eq!(full_change.change_type(), "full");
     }
 
     #[test]
     fn map_change_merge_combines_reasons_and_state() {
         let node_id = 42;
-        let peers = PendingMapChange::target(MapChangeReason::RouteUpdate, node_id).into_change(1);
-        let patch = PendingMapChange::target(MapChangeReason::NodeOnline, node_id).into_change(2);
+        let peers =
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id).into_change(1);
+        let patch =
+            PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_id).into_change(2);
         let merged = peers.merge(patch);
 
         assert_eq!(merged.generation, 2);
-        assert_eq!(merged.target_node_id, Some(node_id));
+        assert_eq!(merged.target_node_id, None);
         assert_eq!(merged.reason_labels(), vec!["route update", "node online"]);
         assert_eq!(merged.change_type(), "peers");
         assert_eq!(merged.content.peers_changed, vec![node_id]);

@@ -86,6 +86,12 @@ fn fixed_psk() -> [u8; 32] {
     psk
 }
 
+fn stable_knock_config(psk: [u8; 32]) -> KnockConfig {
+    let mut cfg = KnockConfig::enabled(psk);
+    cfg.window_secs = u64::MAX;
+    cfg
+}
+
 #[tokio::test]
 async fn ts2021_knock_disabled_passes_through() {
     // KnockConfig disabled (default) — `/key?v=39` should serve as before.
@@ -106,7 +112,7 @@ async fn ts2021_knock_disabled_passes_through() {
 #[tokio::test]
 async fn ts2021_knock_enabled_rejects_no_knock() {
     let psk = fixed_psk();
-    let (state, _dir) = fixture(KnockConfig::enabled(psk));
+    let (state, _dir) = fixture(stable_knock_config(psk));
     let app = tailscale_wire::router(state);
     let resp = app
         .oneshot(
@@ -125,7 +131,7 @@ async fn ts2021_knock_enabled_rejects_no_knock() {
 #[tokio::test]
 async fn ts2021_knock_enabled_accepts_valid_header() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let computed = cfg.current_knock();
 
     let (state, _dir) = fixture(cfg);
@@ -146,7 +152,7 @@ async fn ts2021_knock_enabled_accepts_valid_header() {
 #[tokio::test]
 async fn ts2021_knock_enabled_accepts_path_prefix() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let knock = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
@@ -165,7 +171,7 @@ async fn ts2021_knock_enabled_accepts_path_prefix() {
 #[tokio::test]
 async fn ts2021_knock_bad_header_returns_canonical_404() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
     let resp = app
@@ -189,7 +195,7 @@ async fn ts2021_knock_probe_resistance_100_randomized_attempts() {
     // surface; every response body must be byte-identical (so a state
     // probe can't fingerprint the wire layer by response shape).
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
 
@@ -263,7 +269,7 @@ async fn ts2021_knock_probe_resistance_100_randomized_attempts() {
 #[tokio::test]
 async fn empty_knock_header_rejected() {
     let psk = fixed_psk();
-    let (state, _dir) = fixture(KnockConfig::enabled(psk));
+    let (state, _dir) = fixture(stable_knock_config(psk));
     let app = tailscale_wire::router(state);
     let resp = app
         .oneshot(
@@ -283,7 +289,7 @@ async fn empty_knock_header_rejected() {
 #[tokio::test]
 async fn knock_header_with_leading_whitespace_rejected() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let valid = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
@@ -308,7 +314,7 @@ async fn knock_header_with_leading_whitespace_rejected() {
 #[tokio::test]
 async fn knock_header_with_trailing_newline_rejected() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let valid = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
@@ -334,7 +340,7 @@ async fn knock_header_with_trailing_newline_rejected() {
 #[tokio::test]
 async fn ts2021_knock_path_prefix_100_random_invalid() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
 
@@ -370,7 +376,7 @@ async fn ts2021_knock_path_prefix_100_random_invalid() {
 #[tokio::test]
 async fn ts2021_knock_header_100_random_invalid() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
 
@@ -406,7 +412,7 @@ async fn ts2021_knock_header_100_random_invalid() {
 #[tokio::test]
 async fn knock_no_inner_path_returns_404() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let knock = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
@@ -427,7 +433,7 @@ async fn knock_no_inner_path_returns_404() {
 #[tokio::test]
 async fn knock_50_concurrent_valid_requests_all_pass() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let knock = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
@@ -463,7 +469,7 @@ async fn knock_50_concurrent_valid_requests_all_pass() {
 #[tokio::test]
 async fn knock_path_prefix_routes_to_inner_handler() {
     let psk = fixed_psk();
-    let cfg = KnockConfig::enabled(psk);
+    let cfg = stable_knock_config(psk);
     let knock = cfg.current_knock();
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);

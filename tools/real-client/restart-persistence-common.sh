@@ -720,6 +720,41 @@ headscale_cmd() {
   esac
 }
 
+register_web_node() {
+  local registration_id="$1"
+  local user="$2"
+  local output_path="$3"
+  local error_path="$4"
+  local auth_id="${registration_id}"
+  case "${auth_id}" in
+    hskey-authreq-*) ;;
+    *) auth_id="hskey-authreq-${auth_id}" ;;
+  esac
+
+  case "${target}" in
+    rust)
+      headscale_cmd -o json auth register "--auth-id=${auth_id}" "--user=${user}" \
+        >"${output_path}"
+      ;;
+    headscale-go)
+      local register_status=0
+      headscale_cmd -o json auth register "--auth-id=${auth_id}" "--user=${user}" \
+        >"${output_path}" \
+        2>"${error_path}" ||
+        register_status="$?"
+      if ((register_status == 0)); then
+        return 0
+      fi
+      if ! grep -Eq 'unknown command|unknown flag|unknown shorthand' "${error_path}"; then
+        cat "${error_path}" >&2 || true
+        return "${register_status}"
+      fi
+      headscale_cmd -o json nodes register "--user=${user}" "--key=${registration_id}" \
+        >"${output_path}"
+      ;;
+  esac
+}
+
 start_server() {
   write_config
   rm -f "${socket_path}"
@@ -956,21 +991,11 @@ login_observer_with_web_registration() {
   fi
   local registration_id
   registration_id="$(cat "${registration_id_path}")"
-  case "${target}" in
-    rust)
-      local auth_id="${registration_id}"
-      case "${auth_id}" in
-        hskey-authreq-*) ;;
-        *) auth_id="hskey-authreq-${auth_id}" ;;
-      esac
-      headscale_cmd -o json auth register "--auth-id=${auth_id}" "--user=${user}" \
-        >"${work_dir}/${client_name}.registered.json"
-      ;;
-    headscale-go)
-      headscale_cmd -o json nodes register "--user=${user}" "--key=${registration_id}" \
-        >"${work_dir}/${client_name}.registered.json"
-      ;;
-  esac
+  register_web_node \
+    "${registration_id}" \
+    "${user}" \
+    "${work_dir}/${client_name}.registered.json" \
+    "${work_dir}/${client_name}.registered.err"
 
   if ! wait_pid_with_timeout "tailscale up ${client_name}" "${up_pid}"; then
     echo "tailscale up ${client_name} returned non-zero; verifying logged-in netmap"

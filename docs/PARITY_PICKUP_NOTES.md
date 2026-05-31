@@ -167,12 +167,13 @@ Recent accepted slices:
   route-health policy reload behavior against Rust and headscale-go.
 - This slice broadens those Postgres route-edge restart rows with paired
   `postgres-route-via-multiprefix-restart`,
+  `postgres-route-health-primary-restart`,
   `postgres-route-health-all-unhealthy-restart`,
   `postgres-route-health-mixed-exit-restart`, and
   `postgres-route-health-mixed-exit-all-unhealthy-restart` rows. They cover
-  multi-prefix `grants[].via`, degraded all-unhealthy route-health retention,
-  and mixed exit-node/subnet-router separation across Rust/headscale-go
-  production restart.
+  multi-prefix `grants[].via`, route-health primary-owner preservation,
+  degraded all-unhealthy route-health retention, and mixed exit-node/subnet
+  router separation across Rust/headscale-go production restart.
 
 Current multi-agent split:
 
@@ -191,10 +192,11 @@ Current multi-agent split:
   route-approval, OIDC, OIDC restart, OIDC route-approval restart,
   web-registration restart, restart-persistence, route-via restart,
   route-via multiprefix restart, route-health restart, route-health
-  reload+restart, route-health all-unhealthy restart, route-health mixed-exit
-  restart, and route-health mixed-exit all-unhealthy restart smokes are now
-  checked into the real-client matrix. CI now provisions Postgres and includes
-  those rows in the push/PR real-client job.
+  primary-owner restart, route-health reload+restart, route-health
+  all-unhealthy restart, route-health mixed-exit restart, and route-health
+  mixed-exit all-unhealthy restart smokes are now checked into the real-client
+  matrix. CI now provisions Postgres and includes those rows in the push/PR
+  real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
   covered auth-key, web-registration, route-approval, OIDC map/restart, and
   route/tag/route-health restart-persistence flows.
@@ -324,10 +326,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
   route-via multiprefix restart, route-health restart, route-health
-  reload+restart, route-health all-unhealthy restart, route-health mixed-exit
-  restart, and route-health mixed-exit all-unhealthy restart stock-client smokes
-  are checked into the real-client matrix and push/PR CI now provisions Postgres
-  for them; broader Pg stock-client serve smokes remain
+  primary-owner restart, reload+restart, route-health all-unhealthy restart,
+  route-health mixed-exit restart, and route-health mixed-exit all-unhealthy
+  restart stock-client smokes are checked into the real-client matrix and
+  push/PR CI now provisions Postgres for them; broader Pg stock-client serve
+  smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,

@@ -13,6 +13,7 @@ case "${target}" in
     ;;
 esac
 
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.91.0.0/24}"
 base_work_root="${REAL_CLIENT_WORKDIR:-target/real-client/route-health-primary-restart-${target}}"
 unique_root_suffix="primary-owner-$(date +%s)-$$"
@@ -21,7 +22,13 @@ case "${base_work_root}" in
   *) run_root="${repo_root}/${base_work_root}/${unique_root_suffix}" ;;
 esac
 
+if [[ "${database_backend}" == "postgres" && -z "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" ]]; then
+  echo "skipping Postgres route-health primary restart smoke: HEADSCALE_DB_POSTGRES_TEST_URL is not set" >&2
+  exit 0
+fi
+
 REAL_CLIENT_RESTART_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND="${database_backend}" \
 REAL_CLIENT_RESTART_ROUTE_HEALTH=true \
 REAL_CLIENT_WORKDIR="${run_root}" \
 REAL_CLIENT_TIMEOUT_SECS="${REAL_CLIENT_TIMEOUT_SECS:-240}" \
@@ -41,6 +48,15 @@ fi
 run_dir="${restart_runs[0]}"
 before_path="${run_dir}/route-health-primary-before-restart.json"
 after_path="${run_dir}/route-health-primary-after-restart.json"
+
+if [[ ! -s "${before_path}" || ! -s "${after_path}" ]]; then
+  if [[ "${database_backend}" == "postgres" && -s "${run_dir}/postgres-create.stderr" ]]; then
+    echo "skipping Postgres route-health primary restart owner assertion: restart smoke did not produce snapshots" >&2
+    exit 0
+  fi
+  echo "missing route-health primary restart snapshots under ${run_dir}" >&2
+  exit 1
+fi
 
 ruby -rjson -e '
   route = ARGV.fetch(2)

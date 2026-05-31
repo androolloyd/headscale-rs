@@ -186,7 +186,8 @@ pub mod upstream {
         validate_requested_tags_for_node,
     };
     use crate::tailscale_wire::routes::{
-        PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_routes,
+        PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_advertised_routes,
+        normalize_routes,
     };
     use crate::tailscale_wire::wire::stable_id_from_key;
     use crate::tailscale_wire::{IpAllocator, MachineRecord, MachineRegistry};
@@ -953,7 +954,7 @@ pub mod upstream {
                 .await
                 .map_err(user_error_to_status)?
                 .ok_or_else(|| Status::not_found("user not found"))?;
-            let routes = normalize_routes(body.routes)
+            let routes = normalize_advertised_routes(body.routes)
                 .map_err(|e| Status::invalid_argument(format!("parsing route: {e}")))?;
             let record = self
                 .debug_machine_record(&user.name, &body.name, routes)
@@ -3252,6 +3253,53 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_debug_create_preserves_single_exit_route_advertisement() {
+        let (service, _machines) = admin_service_with_machines().await;
+        const REGISTRATION_ID: &str = "debugexitrouteonly123456";
+        const AUTH_ID: &str = "hskey-authreq-debugexitrouteonly123456";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let debug_node = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: AUTH_ID.into(),
+                name: "debug-exit-router".into(),
+                routes: vec!["0.0.0.0/0".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("debug node");
+        assert_eq!(debug_node.available_routes, vec!["0.0.0.0/0"]);
+        assert!(debug_node.approved_routes.is_empty());
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: AUTH_ID.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert_eq!(registered.node_key, debug_node.node_key);
+        assert_eq!(registered.available_routes, vec!["0.0.0.0/0"]);
+        assert!(registered.approved_routes.is_empty());
     }
 
     #[tokio::test]

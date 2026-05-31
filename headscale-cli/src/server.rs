@@ -47,7 +47,8 @@ use headscale_api::tailscale_wire::{
     MachineRegistry, MapResponseDebugStore, PingTracker, PreauthRedeemer,
     REGISTRATION_CACHE_CLEANUP, REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_MAX_ENTRIES,
     RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey, WireState, serve,
-    spawn_node_expiry_waker, spawn_offline_connection_cleanup, spawn_route_health_probe,
+    spawn_map_change_batcher, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
+    spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::EmbeddedDerpRuntime;
@@ -361,6 +362,10 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     );
     let node_expiry_waker =
         spawn_node_expiry_waker(runtime.state.machines.clone(), NODE_EXPIRY_UPDATE_INTERVAL);
+    let map_change_batcher = spawn_map_change_batcher(
+        runtime.state.machines.clone(),
+        Duration::from_nanos(cfg.tuning.batch_change_delay),
+    );
     let route_health_probe = spawn_route_health_probe(
         runtime.state.clone(),
         cfg.node_routes_ha_probe_interval,
@@ -486,6 +491,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             if let Some(handle) = &route_health_probe {
                 handle.abort();
             }
+            map_change_batcher.abort();
             offline_connection_cleanup.abort();
             if let Some(handle) = &derp_auto_update {
                 handle.abort();
@@ -526,6 +532,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     if let Some(handle) = route_health_probe {
         handle.abort();
     }
+    map_change_batcher.abort();
     offline_connection_cleanup.abort();
     ephemeral_gc.abort();
     if let Some(handle) = dns_extra_records_watcher {

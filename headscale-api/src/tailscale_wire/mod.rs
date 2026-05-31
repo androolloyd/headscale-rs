@@ -256,6 +256,8 @@ pub struct MapChange {
     pub content: MapChangeContent,
 }
 
+pub type MapChangeBatch = Arc<BTreeMap<u64, Vec<MapChange>>>;
+
 impl MapChange {
     #[must_use]
     pub fn full_update(generation: u64) -> Self {
@@ -1909,6 +1911,9 @@ pub struct MachineRegistry {
     /// headscale-go's mapper batcher add-to-batch semantics before stream
     /// delivery is switched over to tick-drained batches.
     pending_map_changes: RwLock<BTreeMap<u64, Vec<MapChange>>>,
+    /// Last tick-drained map-change batch. Streams will consume this
+    /// watch channel once the delivery path moves fully to batch ticks.
+    map_batch_tx: Arc<watch::Sender<MapChangeBatch>>,
     /// Upstream-shaped ephemeral-node lifecycle manager. When
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
@@ -1984,6 +1989,8 @@ impl HistogramMetric {
 impl Default for MachineRegistry {
     fn default() -> Self {
         let (gen_tx, _gen_rx) = watch::channel(0u64);
+        let (map_batch_tx, _map_batch_rx) =
+            watch::channel(Arc::new(BTreeMap::<u64, Vec<MapChange>>::new()));
         Self {
             inner: RwLock::default(),
             notify: Arc::new(Notify::new()),
@@ -1997,6 +2004,7 @@ impl Default for MachineRegistry {
             route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             map_changes: RwLock::new(VecDeque::new()),
             pending_map_changes: RwLock::new(BTreeMap::new()),
+            map_batch_tx: Arc::new(map_batch_tx),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
         }
@@ -2066,6 +2074,11 @@ impl MachineRegistry {
     }
 
     #[must_use]
+    pub fn subscribe_map_batches(&self) -> watch::Receiver<MapChangeBatch> {
+        self.map_batch_tx.subscribe()
+    }
+
+    #[must_use]
     pub fn map_change_history(&self) -> Vec<MapChange> {
         self.map_changes.read().iter().cloned().collect()
     }
@@ -2078,6 +2091,16 @@ impl MachineRegistry {
     #[must_use]
     pub fn drain_pending_map_changes(&self) -> BTreeMap<u64, Vec<MapChange>> {
         std::mem::take(&mut *self.pending_map_changes.write())
+    }
+
+    pub fn publish_pending_map_changes(&self) -> Option<MapChangeBatch> {
+        let pending = self.drain_pending_map_changes();
+        if pending.is_empty() {
+            return None;
+        }
+        let batch = Arc::new(pending);
+        self.map_batch_tx.send_replace(batch.clone());
+        Some(batch)
     }
 
     fn push_map_change(&self, change: MapChange) {
@@ -2094,27 +2117,28 @@ impl MachineRegistry {
 
     fn enqueue_map_change(&self, change: MapChange) {
         let removed = change.content.peers_removed.clone();
+        let batcher_node_ids = self.batcher_node_ids();
         let mut pending = self.pending_map_changes.write();
         for node_id in &removed {
             pending.remove(node_id);
         }
 
         if change.is_full() && change.target_node_id.is_none() {
-            for node_id in self.batcher_node_ids() {
+            for node_id in batcher_node_ids {
                 pending.insert(node_id, vec![change.clone()]);
             }
             return;
         }
 
         if let Some(target_node_id) = change.target_node_id {
-            if removed.contains(&target_node_id) {
+            if removed.contains(&target_node_id) || !batcher_node_ids.contains(&target_node_id) {
                 return;
             }
             pending.entry(target_node_id).or_default().push(change);
             return;
         }
 
-        for node_id in self.batcher_node_ids() {
+        for node_id in batcher_node_ids {
             if removed.contains(&node_id) {
                 continue;
             }
@@ -2537,6 +2561,7 @@ impl MachineRegistry {
             online.remove(&node_id);
             generations.remove(&node_id);
             route_health_sessions.remove(&node_id);
+            self.pending_map_changes.write().remove(&node_id);
             cleaned.push(node_id);
         }
 
@@ -3231,6 +3256,7 @@ impl MachineRegistry {
         self.connection_generations.write().remove(&node_id);
         self.disconnected_at.write().remove(&node_id);
         self.route_health_stable_sessions.write().remove(&node_id);
+        self.pending_map_changes.write().remove(&node_id);
     }
 
     fn forget_stream_cancel_flag(&self, node_id: u64, cancelled: &Arc<AtomicBool>) {
@@ -3504,6 +3530,34 @@ pub fn spawn_offline_connection_cleanup(
                     "cleaned long-offline batcher connection state"
                 );
             }
+        }
+    })
+}
+
+/// Spawn headscale-go's map-change batcher tick.
+///
+/// Mutators enqueue per-node changes immediately, but this task publishes the
+/// drained batch on the configured `BatchChangeDelay` cadence so stream
+/// delivery can consume one ordered work item per node.
+pub fn spawn_map_change_batcher(
+    machines: Arc<MachineRegistry>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = std::cmp::max(interval, Duration::from_millis(1));
+        let mut tick = tokio::time::interval(interval);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(batch) = machines.publish_pending_map_changes() else {
+                continue;
+            };
+            tracing::trace!(
+                target = "tailscale_wire::batcher",
+                nodes = batch.len(),
+                changes = batch.values().map(Vec::len).sum::<usize>(),
+                "published map-change batch"
+            );
         }
     })
 }
@@ -4689,6 +4743,82 @@ mod registry_tests {
                 .map(|change| change.content.peers_removed.as_slice()),
             Some([node_b].as_slice())
         );
+    }
+
+    #[test]
+    fn map_change_batcher_publish_drains_pending_and_updates_watch() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = 3001;
+        let node_b = 3002;
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+
+        let mut batch_rx = reg.subscribe_map_batches();
+        let _ = reg.drain_pending_map_changes();
+        reg.enqueue_map_change(
+            PendingMapChange::global(MapChangeReason::PolicyChange).into_change(1),
+        );
+
+        let batch = reg
+            .publish_pending_map_changes()
+            .expect("pending changes publish");
+        assert!(reg.pending_map_changes().is_empty());
+        assert_eq!(batch.len(), 2);
+        assert_eq!(
+            batch
+                .get(&node_a)
+                .expect("node A batch")
+                .iter()
+                .flat_map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec!["policy change"]
+        );
+        assert!(batch_rx.has_changed().unwrap());
+        assert_eq!(batch_rx.borrow_and_update().len(), 2);
+        assert!(!batch_rx.has_changed().unwrap());
+        assert!(reg.publish_pending_map_changes().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn map_change_batcher_tick_publishes_pending_batch() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_id = 4001;
+        let _guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        let mut batch_rx = reg.subscribe_map_batches();
+        let _handle = spawn_map_change_batcher(reg.clone(), Duration::from_millis(10));
+        tokio::task::yield_now().await;
+        let _ = reg.drain_pending_map_changes();
+
+        reg.enqueue_map_change(
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id).into_change(1),
+        );
+        assert!(!batch_rx.has_changed().unwrap());
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        batch_rx.changed().await.unwrap();
+        let batch = batch_rx.borrow_and_update().clone();
+        assert_eq!(
+            batch
+                .get(&node_id)
+                .expect("node batch")
+                .iter()
+                .flat_map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec!["route update"]
+        );
+        assert!(reg.pending_map_changes().is_empty());
     }
 
     #[test]

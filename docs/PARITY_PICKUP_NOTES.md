@@ -244,10 +244,11 @@ Current multi-agent split:
   route updates, and route-health changes without adding free-form Prometheus
   labels. A pending per-node map-change batcher foundation now matches
   upstream add-to-batch behavior for full-update supersession,
-  targeted/broadcast splits, and deleted-node pending cleanup. Remaining
-  high-priority follow-ups are tick-driven stream delivery from those batches,
-  actual NodeStore worker batching semantics, and broader churn/restart
-  map-stream tests. Runtime
+  targeted/broadcast splits, deleted-node pending cleanup, and
+  `BatchChangeDelay` tick-drained publishing. Remaining high-priority
+  follow-ups are stream consumption of those published batches, actual
+  NodeStore worker batching semantics, and broader churn/restart map-stream
+  tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response

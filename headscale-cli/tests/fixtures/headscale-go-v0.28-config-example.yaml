@@ -79,7 +79,5 @@ unix_socket_permission: "0770"
 logtail:
   enabled: false
 
-randomize_client_port: false
-
 taildrop:
   enabled: true

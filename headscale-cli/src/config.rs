@@ -111,11 +111,6 @@ pub(crate) struct CliConfig {
     /// Upstream-compatible Taildrop/file-sharing switch.
     #[serde(default, skip_serializing_if = "taildrop_config_is_default")]
     pub(crate) taildrop: TaildropConfig,
-    /// Pinned v0.28 top-level default client-port randomization switch.
-    /// Current upstream also supports policy-scoped `randomizeClientPort`;
-    /// this field keeps v0.28 config files parse-compatible.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) randomize_client_port: bool,
     /// Upstream-compatible Logtail switch. Parsed and projected only.
     #[serde(default, skip_serializing_if = "enabled_config_is_default")]
     pub(crate) logtail: EnabledConfig,
@@ -1522,6 +1517,14 @@ const REMOVED_CONFIG_KEYS: &[RemovedConfigKey] = &[
         replacement: Some("node.expiry"),
         hint: None,
     },
+    RemovedConfigKey {
+        path: &["randomize_client_port"],
+        display: "randomize_client_port",
+        replacement: None,
+        hint: Some(
+            r#"Set "randomizeClientPort": true at the top level of your policy file (see policy.path / policy.mode), or grant the cap per-node via a "nodeAttrs" entry. See CHANGELOG.md (BREAKING / Configuration)."#,
+        ),
+    },
 ];
 
 const REMOVED_OIDC_ENV_KEYS: &[(&str, &str)] = &[(
@@ -1579,15 +1582,21 @@ fn reject_removed_oidc_env_keys(vars: &[(String, String)]) -> Result<()> {
 fn removed_config_key_message(key: RemovedConfigKey) -> String {
     match (key.replacement, key.hint) {
         (Some(replacement), Some(hint)) => format!(
-            "config key {} was removed; use {} instead. {}",
+            "The \"{}\" configuration key has been removed. Please use \"{}\" instead. {}",
             key.display, replacement, hint
         ),
         (Some(replacement), None) => format!(
-            "config key {} was removed; use {} instead",
+            "The \"{}\" configuration key has been removed. Please use \"{}\" instead.",
             key.display, replacement
         ),
-        (None, Some(hint)) => format!("config key {} was removed. {}", key.display, hint),
-        (None, None) => format!("config key {} was removed", key.display),
+        (None, Some(hint)) => format!(
+            "The \"{}\" configuration key has been removed. {}",
+            key.display, hint
+        ),
+        (None, None) => format!(
+            "The \"{}\" configuration key has been removed. Please see the changelog for more details.",
+            key.display
+        ),
     }
 }
 
@@ -2624,7 +2633,6 @@ server_url: "https://derp.no"
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
         config.validate_for_configtest().unwrap();
-        assert!(!config.randomize_client_port);
         assert_eq!(
             config.acme_url.as_deref(),
             Some("https://acme-v02.api.letsencrypt.org/directory")
@@ -3700,11 +3708,14 @@ oidc:
     }
 
     #[test]
-    fn accepts_pinned_randomize_client_port_config_key() {
-        let config =
-            CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap();
+    fn rejects_removed_randomize_client_port_config_key() {
+        let err =
+            CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap_err();
+        let err = format!("{err:#}");
 
-        assert!(config.randomize_client_port);
+        assert!(err.contains("randomize_client_port"));
+        assert!(err.contains("randomizeClientPort"));
+        assert!(err.contains("nodeAttrs"));
     }
 
     #[test]

@@ -1745,6 +1745,14 @@ database:
 fn configtest_rejects_supported_server_init_validation_errors() {
     assert_configtest_default_config_snapshot(
         r#"
+randomize_client_port: true
+"#,
+        include_str!("snapshots/configtest_removed_randomize_client_port.stderr"),
+        "configtest removed randomize_client_port",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
 server_url: "https://headscale.example"
 dns:
   magic_dns: false

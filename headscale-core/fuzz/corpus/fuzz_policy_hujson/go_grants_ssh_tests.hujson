@@ -1,0 +1,73 @@
+{
+  // Exercise upstream-style key casing, comments, trailing commas, grants,
+  // policy tests, and SSH check-period parsing in one compact seed.
+  "GROUPS": {
+    "group:admins": ["alice@example.com"]
+  },
+  "HOSTS": {
+    "bastion": "100.64.0.50/32",
+    "db": "fd7a:115c:a1e0::50/128"
+  },
+  "TAGOWNERS": {
+    "tag:server": ["group:admins"]
+  },
+  "AUTOAPPROVERS": {
+    "ROUTES": {
+      "10.0.0.0/8": ["group:admins"],
+      "fd7a:115c:a1e0::/48": ["tag:server"]
+    },
+    "EXITNODE": ["tag:server"]
+  },
+  "NODEATTRS": [
+    {
+      "TARGET": ["autogroup:member", "tag:server"],
+      "ATTR": ["ssh", "randomize-client-port"]
+    }
+  ],
+  "GRANTS": [
+    {
+      "SRC": ["group:admins"],
+      "DST": ["tag:server", "bastion"],
+      "IP": ["tcp:22", "udp:41641"]
+    },
+    {
+      "SRC": ["tag:server"],
+      "DST": ["autogroup:internet"],
+      "IP": ["*"],
+      "VIA": ["tag:server"]
+    },
+  ],
+  "ACLS": [
+    {
+      "ACTION": "accept",
+      "SRC": ["autogroup:member"],
+      "DST": ["host:bastion:443"]
+    }
+  ],
+  "SSH": [
+    {
+      "ACTION": "check",
+      "CHECKPERIOD": "always",
+      "SRC": ["group:admins"],
+      "DST": ["tag:server"],
+      "USERS": ["autogroup:nonroot", "root"],
+      "ACCEPTENV": ["LANG", "LC_*"]
+    }
+  ],
+  "TESTS": [
+    {
+      "SRC": "alice@example.com",
+      "PROTO": "tcp",
+      "ACCEPT": ["host:bastion:443"],
+      "DENY": ["host:db:22"]
+    }
+  ],
+  "SSHTESTS": [
+    {
+      "SRC": "alice@example.com",
+      "DST": ["tag:server"],
+      "CHECK": ["root"],
+      "ACCEPT": ["alice"]
+    }
+  ],
+}

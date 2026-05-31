@@ -1,0 +1,20 @@
+{
+  "User": {
+    "ID": 42,
+    "DisplayName": "alice@example.com",
+    "ProfilePicURL": "https://example.test/alice.png",
+    "Created": "2026-05-31T12:00:00Z"
+  },
+  "Login": {
+    "ID": 42,
+    "Provider": "preauth",
+    "LoginName": "alice@example.com",
+    "DisplayName": "alice@example.com",
+    "ProfilePicURL": "https://example.test/alice.png"
+  },
+  "NodeKeyExpired": false,
+  "AuthURL": "",
+  "MachineAuthorized": true,
+  "Error": "",
+  "NodeKeySignature": null
+}

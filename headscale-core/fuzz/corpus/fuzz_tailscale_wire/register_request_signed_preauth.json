@@ -1,0 +1,27 @@
+{
+  "Version": 39,
+  "NodeKey": "nodekey:0123456789abcdef",
+  "OldNodeKey": "nodekey:0000000000000000",
+  "NLKey": "nlpub:1111111111111111",
+  "Auth": {
+    "AuthKey": "hskey-auth-aaaaaaaa-bbbbbbbbbbbbbbbb"
+  },
+  "Hostinfo": {
+    "Hostname": "signed-node",
+    "OS": "linux",
+    "RequestTags": ["tag:ci"],
+    "NetInfo": {
+      "PreferredDERP": 901,
+      "WorkingUDP": true
+    }
+  },
+  "Followup": "auth",
+  "Tailnet": "tailnet.test",
+  "Ephemeral": true,
+  "Expiry": "2026-06-30T00:00:00Z",
+  "NodeKeySignature": null,
+  "SignatureType": "signature-v1",
+  "Timestamp": "2026-05-31T12:00:00Z",
+  "DeviceCert": null,
+  "Signature": "c2lnbmF0dXJl"
+}

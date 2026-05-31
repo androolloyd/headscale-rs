@@ -1,0 +1,35 @@
+{
+  "HomeParams": {
+    "RegionScore": {
+      "1": 0.5,
+      "901": 0.1
+    }
+  },
+  "Regions": {
+    "1": {
+      "RegionID": 1,
+      "RegionCode": "test",
+      "RegionName": "Test Region",
+      "Nodes": [
+        {
+          "Name": "derp-1a",
+          "RegionID": 1,
+          "HostName": "derp-1a.example.test",
+          "IPv4": "203.0.113.10",
+          "DERPPort": 443,
+          "STUNPort": 3478,
+          "InsecureForTests": true
+        },
+        {
+          "Name": "derp-1b",
+          "RegionID": 1,
+          "HostName": "derp-1b.example.test",
+          "IPv6": "2001:db8::10",
+          "STUNOnly": true,
+          "STUNTestIP": "203.0.113.11"
+        }
+      ]
+    }
+  },
+  "OmitDefaultRegions": true
+}

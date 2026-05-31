@@ -1,0 +1,57 @@
+{
+  "IPNVersion": "1.78.0",
+  "FrontendLogID": "front-log",
+  "BackendLogID": "back-log",
+  "Hostname": "alice-laptop",
+  "OS": "linux",
+  "OSVersion": "6.8",
+  "Container": false,
+  "Userspace": true,
+  "UserspaceRouter": false,
+  "GoArch": "amd64",
+  "GoVersion": "go1.23.0",
+  "RoutableIPs": ["10.10.0.0/24", "fd7a:115c:a1e0::/48"],
+  "RequestTags": ["tag:server", "tag:ssh"],
+  "WoLMACs": ["00:11:22:33:44:55"],
+  "Services": [
+    {
+      "Proto": "tcp",
+      "Port": 22,
+      "Description": "ssh"
+    }
+  ],
+  "sshHostKeys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest"],
+  "NetInfo": {
+    "MappingVariesByDestIP": true,
+    "WorkingIPv6": false,
+    "OSHasIPv6": true,
+    "WorkingUDP": true,
+    "WorkingICMPv4": true,
+    "PreferredDERP": 901,
+    "HavePortMap": true,
+    "UPnP": false,
+    "PMP": true,
+    "PCP": false,
+    "LinkType": "wired",
+    "DERPLatency": {
+      "901-v4": 0.034
+    },
+    "FirewallMode": "ipt-default"
+  },
+  "Location": {
+    "Country": "Testland",
+    "CountryCode": "TS",
+    "City": "Fixture",
+    "Latitude": 45.0,
+    "Longitude": -63.0,
+    "Priority": 1
+  },
+  "TPM": {
+    "Manufacturer": "fixture",
+    "Vendor": "test",
+    "Model": 2,
+    "FirmwareVersion": 1234,
+    "SpecRevision": 116,
+    "FamilyIndicator": "2.0"
+  }
+}

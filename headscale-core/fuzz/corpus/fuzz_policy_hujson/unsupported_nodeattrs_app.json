@@ -1,0 +1,17 @@
+{
+  "nodeAttrs": [
+    {
+      "target": ["*"],
+      "app": {
+        "example.com/cap/use": []
+      }
+    }
+  ],
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "Version": 39,
+  "Stream": true,
+  "Compress": "",
+  "KeepAlive": true,
+  "NodeKey": "nodekey:0123456789abcdef",
+  "DiscoKey": "discokey:feedface",
+  "Endpoints": ["198.51.100.25:41641", "[2001:db8::25]:41641"],
+  "EndpointTypes": [0, 1],
+  "MapSessionHandle": "session-123",
+  "MapSessionSeq": 7,
+  "ReadOnly": true,
+  "TKAHead": "tka-head-fixture",
+  "DebugFlags": ["derp", "map-session"],
+  "ConnectionHandleForTest": "conn-fixture",
+  "Hostinfo": {
+    "Hostname": "resume-node",
+    "OS": "linux",
+    "RoutableIPs": ["10.20.0.0/24"],
+    "RequestTags": ["tag:router"],
+    "NetInfo": {
+      "PreferredDERP": 901,
+      "WorkingUDP": true
+    }
+  }
+}

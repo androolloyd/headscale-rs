@@ -1,0 +1,211 @@
+{
+  "MapSessionHandle": "session-123",
+  "Seq": 8,
+  "KeepAlive": false,
+  "Node": {
+    "ID": 1001,
+    "StableID": "n1001",
+    "Name": "alice.tailnet.test.",
+    "User": 42,
+    "Key": "nodekey:aaaaaaaaaaaaaaaa",
+    "Machine": "mkey:bbbbbbbbbbbbbbbb",
+    "Addresses": ["100.64.0.1/32", "fd7a:115c:a1e0::1/128"],
+    "AllowedIPs": ["100.64.0.1/32"],
+    "Hostinfo": {
+      "Hostname": "alice",
+      "OS": "linux",
+      "NetInfo": {
+        "PreferredDERP": 901
+      }
+    },
+    "Cap": 39,
+    "Tags": ["tag:server"],
+    "Online": true,
+    "MachineAuthorized": true,
+    "Capabilities": ["https://tailscale.com/cap/file-sharing"],
+    "CapMap": {
+      "https://tailscale.com/cap/ssh": [{}]
+    },
+    "HomeDERP": 901,
+    "DiscoKey": "discokey:alice",
+    "Endpoints": ["198.51.100.10:41641"]
+  },
+  "Peers": [
+    {
+      "ID": 1002,
+      "StableID": "n1002",
+      "Name": "bob.tailnet.test.",
+      "User": 43,
+      "Key": "nodekey:cccccccccccccccc",
+      "Addresses": ["100.64.0.2/32"],
+      "AllowedIPs": ["100.64.0.2/32", "10.30.0.0/24"],
+      "PrimaryRoutes": ["10.30.0.0/24"],
+      "Hostinfo": {
+        "Hostname": "bob",
+        "OS": "linux",
+        "RoutableIPs": ["10.30.0.0/24"]
+      },
+      "Online": false,
+      "MachineAuthorized": true,
+      "HomeDERP": 901,
+      "DiscoKey": "discokey:bob",
+      "Endpoints": []
+    }
+  ],
+  "PeersChangedPatch": [
+    {
+      "NodeID": 1002,
+      "DERPRegion": 901,
+      "Cap": 39,
+      "CapMap": {
+        "https://tailscale.com/cap/ssh": [{}]
+      },
+      "Endpoints": ["203.0.113.20:41641"],
+      "DiscoKey": "discokey:bob",
+      "Online": true
+    }
+  ],
+  "PeerSeenChange": {
+    "1002": true
+  },
+  "OnlineChange": {
+    "1002": true
+  },
+  "UserProfiles": [
+    {
+      "ID": 42,
+      "LoginName": "alice@example.com",
+      "DisplayName": "Alice",
+      "ProfilePicURL": "https://example.test/alice.png"
+    },
+    {
+      "ID": 43,
+      "LoginName": "bob@example.com",
+      "DisplayName": "Bob"
+    }
+  ],
+  "DNSConfig": {
+    "Proxied": true,
+    "Domains": ["tailnet.test"],
+    "Resolvers": [
+      {
+        "Addr": "100.100.100.100",
+        "BootstrapResolution": ["100.100.100.100"],
+        "UseWithExitNode": true
+      }
+    ],
+    "ExtraRecords": [
+      {
+        "Name": "alice.tailnet.test.",
+        "Type": "A",
+        "Value": "100.64.0.1"
+      }
+    ],
+    "TempCorpIssue13969": "fixture"
+  },
+  "DERPMap": {
+    "Regions": {
+      "901": {
+        "RegionID": 901,
+        "RegionCode": "local",
+        "RegionName": "Local DERP",
+        "Nodes": [
+          {
+            "Name": "local-a",
+            "RegionID": 901,
+            "HostName": "derp.local.test",
+            "DERPPort": 443,
+            "STUNPort": 3478,
+            "InsecureForTests": true
+          }
+        ]
+      }
+    },
+    "omitDefaultRegions": true
+  },
+  "Domain": "tailnet.test",
+  "CollectServices": true,
+  "PacketFilter": [
+    {
+      "SrcIPs": ["*"],
+      "DstPorts": [
+        {
+          "IP": "*",
+          "Ports": {
+            "First": 0,
+            "Last": 65535
+          }
+        }
+      ],
+      "IPProto": [6, 17]
+    }
+  ],
+  "PacketFilters": {
+    "ssh": [
+      {
+        "SrcIPs": ["100.64.0.0/10"],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.1/32",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ]
+      }
+    ],
+    "*": null
+  },
+  "Health": [],
+  "SSHPolicy": {
+    "rules": [
+      {
+        "principals": [
+          {
+            "nodeIP": "100.64.0.2"
+          }
+        ],
+        "sshUsers": {
+          "root": "",
+          "*": "="
+        },
+        "action": {
+          "accept": true,
+          "sessionDuration": 3600000000000
+        },
+        "acceptEnv": ["LANG", "LC_*"]
+      }
+    ]
+  },
+  "ControlTime": "2026-05-31T12:00:00Z",
+  "TKAInfo": {
+    "Head": "tka-head-fixture",
+    "Disabled": false
+  },
+  "DomainDataPlaneAuditLogID": "audit-fixture",
+  "Debug": {
+    "SleepSeconds": 0.001,
+    "DisableLogTail": true
+  },
+  "ControlDialPlan": {
+    "Candidates": [
+      {
+        "IP": "203.0.113.5",
+        "ACEHost": "control.example.test",
+        "DialStartDelaySec": 0.1,
+        "DialTimeoutSec": 1.5,
+        "Priority": 1
+      }
+    ]
+  },
+  "ClientVersion": {
+    "RunningLatest": false,
+    "LatestVersion": "1.78.1",
+    "UrgentSecurityUpdate": true,
+    "Notify": true,
+    "NotifyURL": "https://example.test/update",
+    "NotifyText": "update"
+  },
+  "DefaultAutoUpdate": true
+}

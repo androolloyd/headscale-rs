@@ -67,7 +67,8 @@ use super::wire::{
     unsupported_client_error,
 };
 use super::{
-    MachineRecord, MapChangeReason, MapResponseDebugStore, MapResponseDebugType, WireState,
+    MachineRecord, MapChange, MapChangeReason, MapResponseDebugStore, MapResponseDebugType,
+    WireState,
 };
 
 use crate::dns::{DnsRequester, DnsStore, MachineDnsRecord};
@@ -1202,16 +1203,15 @@ async fn map_inner(
         // channel **before** taking the first chunk. The receiver
         // remembers its last-seen generation across `.await` boundaries
         // — any `upsert` / `update_with` that fires while this unfold
-        // is *between* iterations bumps the sender, and the next
-        // `changed().await` on the receiver returns immediately. This
-        // closes the `notify_waiters` lost-wake gap the prior
-        // implementation had (the `Notified` was re-registered AFTER
-        // the chunk was returned, so wakes fired in the gap were
-        // dropped). The companion `tokio::sync::Notify` stays on the
-        // registry for any caller that wants raw fan-out wake, but the
-        // long-poll path now consumes the watch channel exclusively.
+        // is *between* iterations bumps the sender. When the production
+        // batcher is enabled, registry generation wakes only provide
+        // cancellation/self-delete awareness; visible peer deltas are
+        // emitted from the tick-published map-batch watch channel.
+        // Embedders/tests that do not spawn the batcher keep the old
+        // missed-update-tolerant generation path as a fallback.
         let machines = state.machines.clone();
         let gen_rx = state.machines.subscribe_gen();
+        let map_batch_rx = state.machines.subscribe_map_batches();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
@@ -1229,6 +1229,7 @@ async fn map_inner(
                 Some(first),
                 machines,
                 gen_rx,
+                map_batch_rx,
                 policy,
                 self_node_key,
                 derp_map_for_stream,
@@ -1250,6 +1251,7 @@ async fn map_inner(
                 first_opt,
                 machines,
                 mut gen_rx,
+                mut map_batch_rx,
                 policy,
                 self_node_key,
                 machines_derp_map,
@@ -1274,6 +1276,7 @@ async fn map_inner(
                             None,
                             machines,
                             gen_rx,
+                            map_batch_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
@@ -1307,6 +1310,7 @@ async fn map_inner(
                             None,
                             machines,
                             gen_rx,
+                            map_batch_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
@@ -1345,6 +1349,30 @@ async fn map_inner(
                     tokio::pin!(dns_changed);
                     let maybe_chunk = tokio::select! {
                     biased;
+                    res = map_batch_rx.changed() => {
+                        if res.is_err() {
+                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
+                        } else {
+                            let batch = map_batch_rx.borrow_and_update().clone();
+                            let changes = batch.get(&self_node_id).cloned().unwrap_or_default();
+                            rebuild_map_batch_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &machines_derp_map,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                compression,
+                                last_self_node.as_ref(),
+                                &last_peer_state,
+                                &initial_peer_ids,
+                                &mapresponse_debug,
+                                public_control_url.as_deref().unwrap_or(""),
+                                &changes,
+                            )
+                        }
+                    }
                     res = gen_rx.changed() => {
                         // `Err` only happens if every sender has been
                         // dropped — would mean the entire registry's
@@ -1353,6 +1381,10 @@ async fn map_inner(
                         // (or stream end) handle teardown.
                         if res.is_err() {
                             Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
+                        } else if machines.get(&self_node_key).is_none() {
+                            return None;
+                        } else if machines.map_batcher_enabled() {
+                            None
                         } else {
                             rebuild_peer_delta_chunk(
                                 &machines,
@@ -1377,7 +1409,7 @@ async fn map_inner(
                         // rather than a full map whose empty Peers list
                         // would serialize away and leave clients with
                         // stale peers/routes.
-                        machines.record_observed_map_change(
+                        machines.record_unbatched_map_change(
                             MapChangeReason::PolicyChange,
                             Some(self_node_id),
                             None,
@@ -1402,7 +1434,7 @@ async fn map_inner(
                         // Extra-records file edited (or DnsStore.set_spec
                         // called) — wake every parked poller so the
                         // next chunk carries the refreshed `DNSConfig`.
-                        machines.record_observed_map_change(
+                        machines.record_unbatched_map_change(
                             MapChangeReason::DnsConfigUpdate,
                             Some(self_node_id),
                             None,
@@ -1433,7 +1465,7 @@ async fn map_inner(
                         if res.is_err() {
                             Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
                         } else {
-                            machines.record_observed_map_change(
+                            machines.record_unbatched_map_change(
                                 MapChangeReason::DerpMapUpdate,
                                 Some(self_node_id),
                                 None,
@@ -1496,6 +1528,7 @@ async fn map_inner(
                         None,
                         machines,
                         gen_rx,
+                        map_batch_rx,
                         policy,
                         self_node_key,
                         machines_derp_map,
@@ -1586,6 +1619,112 @@ fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
 /// add/remove/update events instead of replacing the full peer list on
 /// every wake.
 type PeerDeltaChunk = (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>);
+
+fn map_batch_requires_full_response(changes: &[MapChange]) -> bool {
+    changes.iter().any(|change| {
+        change.is_full()
+            || change.content.include_derp_map
+            || change.content.include_domain
+            || (change.content.include_dns && !change.content.requires_runtime_peer_computation)
+    })
+}
+
+fn map_batch_peer_delta_options(changes: &[MapChange]) -> PeerDeltaOptions {
+    if changes.iter().any(|change| {
+        change.content.include_policy || change.content.requires_runtime_peer_computation
+    }) {
+        PeerDeltaOptions::policy_change()
+    } else {
+        PeerDeltaOptions::registry_change()
+    }
+}
+
+fn map_batch_response_type(changes: &[MapChange]) -> &'static str {
+    if changes.iter().any(|change| {
+        change.content.include_derp_map
+            || change.content.include_dns
+            || change.content.include_domain
+    }) {
+        return "config";
+    }
+    if changes.iter().any(|change| change.target_node_id.is_some()) {
+        return "self";
+    }
+    "full"
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild_map_batch_chunk(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    policy: &Arc<crate::policy::PolicyStore>,
+    self_node_key: &str,
+    derp_map: &Arc<crate::tailscale_wire::DerpMapStore>,
+    dns: &Arc<DnsStore>,
+    cap_version: u32,
+    taildrop_enabled: bool,
+    compression: MapFrameCompression,
+    last_self_node: Option<&MapNode>,
+    last_peer_state: &BTreeMap<u64, MapNode>,
+    initial_peer_ids: &BTreeSet<u64>,
+    mapresponse_debug: &MapResponseDebugStore,
+    public_control_url: &str,
+    changes: &[MapChange],
+) -> Option<PeerDeltaChunk> {
+    if changes.is_empty() {
+        return None;
+    }
+
+    if map_batch_requires_full_response(changes) {
+        return Some((
+            rebuild_map_chunk(
+                machines,
+                policy,
+                self_node_key,
+                derp_map,
+                dns,
+                cap_version,
+                taildrop_enabled,
+                compression,
+                map_batch_response_type(changes),
+                mapresponse_debug,
+                MapResponseDebugType::Change,
+                public_control_url,
+            ),
+            visible_peer_state_for_registry(
+                machines,
+                policy,
+                dns,
+                self_node_key,
+                cap_version,
+                taildrop_enabled,
+            ),
+            self_map_node_for_registry(
+                machines,
+                policy,
+                dns,
+                self_node_key,
+                cap_version,
+                taildrop_enabled,
+            ),
+        ));
+    }
+
+    rebuild_peer_delta_chunk(
+        machines,
+        policy,
+        self_node_key,
+        dns,
+        cap_version,
+        taildrop_enabled,
+        compression,
+        last_self_node,
+        last_peer_state,
+        initial_peer_ids,
+        mapresponse_debug,
+        public_control_url,
+        map_batch_peer_delta_options(changes),
+    )
+}
 
 fn rebuild_peer_delta_chunk(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
@@ -1935,7 +2074,7 @@ mod tests {
         DerpMapStore, MachineRecord, MachineRegistry, MapResponseDebugStore, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         register::{CAPABILITY_ADMIN, CAPABILITY_FILE_SHARING, CAPABILITY_SSH},
-        router as public_router,
+        router as public_router, spawn_map_change_batcher,
         test_support::{MockIpAllocator, MockRedeemer},
         wire::{DerpMap, DerpRegion, DerpRegionNode, DnsRecord},
     };
@@ -5120,6 +5259,32 @@ mod tests {
              got keepalive instead, indicating the lost-wake race regressed"
         );
         assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_with_batcher_waits_for_map_batch_tick() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        let _batcher = spawn_map_change_batcher(state.machines.clone(), Duration::from_millis(50));
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 0);
+
+        insert_peer(&state, &b, "peer-b", 11);
+        assert_no_stream_frame(&mut body, Duration::from_millis(49)).await;
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(
+            mr.peers.is_empty(),
+            "batch-delivered follow-up chunks still use incremental peer deltas"
+        );
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&b));
+        assert_eq!(mr.peers_changed[0].name, "peer-b");
     }
 
     #[tokio::test(start_paused = true)]

@@ -1914,6 +1914,11 @@ pub struct MachineRegistry {
     /// Last tick-drained map-change batch. Streams will consume this
     /// watch channel once the delivery path moves fully to batch ticks.
     map_batch_tx: Arc<watch::Sender<MapChangeBatch>>,
+    /// Whether the headscale-go-style batch tick task is active for
+    /// this registry. Streams use this to prefer delayed batch delivery
+    /// while preserving immediate generation wakes for embedders/tests
+    /// that have not spawned the task.
+    map_batcher_enabled: AtomicBool,
     /// Upstream-shaped ephemeral-node lifecycle manager. When
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
@@ -2005,6 +2010,7 @@ impl Default for MachineRegistry {
             map_changes: RwLock::new(VecDeque::new()),
             pending_map_changes: RwLock::new(BTreeMap::new()),
             map_batch_tx: Arc::new(map_batch_tx),
+            map_batcher_enabled: AtomicBool::new(false),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
         }
@@ -2076,6 +2082,15 @@ impl MachineRegistry {
     #[must_use]
     pub fn subscribe_map_batches(&self) -> watch::Receiver<MapChangeBatch> {
         self.map_batch_tx.subscribe()
+    }
+
+    #[must_use]
+    pub fn map_batcher_enabled(&self) -> bool {
+        self.map_batcher_enabled.load(Ordering::SeqCst)
+    }
+
+    fn enable_map_batcher(&self) {
+        self.map_batcher_enabled.store(true, Ordering::SeqCst);
     }
 
     #[must_use]
@@ -2159,6 +2174,18 @@ impl MachineRegistry {
             PendingMapChange::new(reason, target_node_id, origin_node_id).into_change(generation);
         self.push_map_change(change.clone());
         self.enqueue_map_change(change);
+    }
+
+    pub(crate) fn record_unbatched_map_change(
+        &self,
+        reason: MapChangeReason,
+        target_node_id: Option<u64>,
+        origin_node_id: Option<u64>,
+    ) {
+        let generation = *self.gen_tx.borrow();
+        let change =
+            PendingMapChange::new(reason, target_node_id, origin_node_id).into_change(generation);
+        self.push_map_change(change);
     }
 
     fn wake_waiters_with(&self, change: PendingMapChange) {
@@ -3543,6 +3570,7 @@ pub fn spawn_map_change_batcher(
     machines: Arc<MachineRegistry>,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    machines.enable_map_batcher();
     tokio::spawn(async move {
         let interval = std::cmp::max(interval, Duration::from_millis(1));
         let mut tick = tokio::time::interval(interval);

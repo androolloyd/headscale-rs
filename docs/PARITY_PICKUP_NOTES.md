@@ -245,10 +245,11 @@ Current multi-agent split:
   labels. A pending per-node map-change batcher foundation now matches
   upstream add-to-batch behavior for full-update supersession,
   targeted/broadcast splits, deleted-node pending cleanup, and
-  `BatchChangeDelay` tick-drained publishing. Remaining high-priority
-  follow-ups are stream consumption of those published batches, actual
-  NodeStore worker batching semantics, and broader churn/restart map-stream
-  tests. Runtime
+  `BatchChangeDelay` tick-drained publishing; production `Stream:true`
+  delivery now consumes those published batches while preserving the
+  generation-watch fallback for non-batcher embedders/tests. Remaining
+  high-priority follow-ups are actual NodeStore worker batching semantics
+  and broader churn/restart map-stream tests. Runtime
   MapSessionHandle/Seq
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response

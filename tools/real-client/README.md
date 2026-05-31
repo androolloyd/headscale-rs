@@ -97,6 +97,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-route-health-all-unhealthy-restart` | `postgres-route-health-all-unhealthy-restart-smoke.sh` | `postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention survives server restart |
 | Database | `postgres-route-health-mixed-exit-restart` | `postgres-route-health-mixed-exit-restart-smoke.sh` | `postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node separation survives server restart |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy-restart` | `postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention survives server restart |
+| Database | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy policy reload survives server restart |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
@@ -632,6 +633,8 @@ tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
 ```
 
 The primary-route scenario starts two stock clients, advertises and approves

@@ -178,6 +178,12 @@ Recent accepted slices:
   multi-prefix `grants[].via`, route-health primary selection after restart,
   degraded all-unhealthy route-health retention, and mixed exit-node/subnet
   router separation across Rust/headscale-go production restart.
+- This slice removes the restart harness restriction that kept route-health
+  policy reload separate from mixed-exit/all-unhealthy restart modes and adds
+  paired `postgres-route-health-mixed-exit-all-unhealthy-reload-restart` rows.
+  They prove tagged exit-route auto-approval, route-health policy reload,
+  Postgres restart hydration, mixed exit-node separation, failover, and
+  all-unhealthy last-known subnet owner retention against Rust and headscale-go.
 - This slice adds paired `postgres-route-exit-node` production Postgres
   stock-client rows. They exercise exit-node advertisement through stock
   `tailscaled`, Pg-backed CLI approval, netmap projection, and online/LastSeen
@@ -202,7 +208,8 @@ Current multi-agent split:
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health restart, route-health
   primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, and route-health
-  mixed-exit all-unhealthy restart smokes are now checked into the real-client
+  mixed-exit all-unhealthy restart, plus route-health mixed-exit all-unhealthy
+  reload+restart smokes are now checked into the real-client
   matrix. CI now provisions Postgres and includes those rows in the push/PR
   real-client job.
   Remaining critical work is broader production Pg serve coverage beyond the
@@ -342,8 +349,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health restart, route-health
   primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, and route-health
-  mixed-exit all-unhealthy restart stock-client smokes are checked into the
-  real-client matrix and
+  mixed-exit all-unhealthy restart, plus route-health mixed-exit all-unhealthy
+  reload+restart stock-client smokes are checked into the real-client matrix and
   push/PR CI now provisions Postgres for them; broader Pg stock-client serve
   smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics

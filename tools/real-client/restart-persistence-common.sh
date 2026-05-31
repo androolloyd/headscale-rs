@@ -156,10 +156,6 @@ if ((route_health_all_unhealthy_restart_flag && ! route_health_restart_flag)); t
   echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
   exit 2
 fi
-if ((route_health_reload_restart_flag && (route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag))); then
-  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD cannot be combined with mixed-exit or all-unhealthy restart modes" >&2
-  exit 2
-fi
 if ((route_health_restart_flag)); then
   if ! [[ "${route_health_probe_interval_secs}" =~ ^[0-9]+$ ]] || ((route_health_probe_interval_secs < 2)); then
     echo "REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS must be an integer >= 2, got ${route_health_probe_interval_secs}" >&2
@@ -217,6 +213,7 @@ headscale_bin=""
 authkey=""
 router_a_authkey=""
 router_b_authkey=""
+exit_authkey=""
 postgres_admin_url=""
 postgres_database_name=""
 postgres_host=""
@@ -562,16 +559,24 @@ write_route_health_reload_policy() {
   local auto_tags=("$@")
   ruby -rjson -e '
     route = ARGV.fetch(0)
-    auto_tags = ARGV.drop(1)
+    exit_routes = ARGV.fetch(1).split(",")
+    mixed_exit = ARGV.fetch(2) == "1"
+    auto_tags = ARGV.drop(3)
+    tag_owners = {
+      "tag:router-a" => ["router@"],
+      "tag:router-b" => ["router@"],
+    }
+    auto_routes = {
+      route => auto_tags,
+    }
+    if mixed_exit
+      tag_owners["tag:exit"] = ["router@"]
+      exit_routes.each { |exit_route| auto_routes[exit_route] = ["tag:exit"] }
+    end
     puts JSON.pretty_generate({
-      tagOwners: {
-        "tag:router-a" => ["router@"],
-        "tag:router-b" => ["router@"],
-      },
+      tagOwners: tag_owners,
       autoApprovers: {
-        routes: {
-          route => auto_tags,
-        },
+        routes: auto_routes,
       },
       grants: [
         {
@@ -586,7 +591,7 @@ write_route_health_reload_policy() {
         },
       ],
     })
-  ' "${route}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
+  ' "${route}" "${exit_routes}" "${route_health_mixed_exit_restart_flag}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
 }
 
 write_route_via_reload_policy() {
@@ -961,6 +966,9 @@ create_route_health_reload_users_and_keys() {
   alice_user_id="$(create_user_json alice "${work_dir}/user-alice.json")"
   router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-a "${work_dir}/preauth-router-a.json")"
   router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-b "${work_dir}/preauth-router-b.json")"
+  if ((route_health_mixed_exit_restart_flag)); then
+    exit_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:exit "${work_dir}/preauth-exit.json")"
+  fi
   echo "created router user ${router_user_id} and alice user ${alice_user_id}"
   echo "minted route-health tagged router keys"
   echo "::endgroup::"
@@ -2239,8 +2247,12 @@ elif ((route_health_restart_flag)); then
     approve_router_routes "${router_b_name}"
   fi
   if ((route_health_mixed_exit_restart_flag)); then
-    login_exit_with_authkey "${exit_name}" "${authkey}"
-    approve_exit_routes "${exit_name}"
+    if ((route_health_reload_restart_flag)); then
+      login_exit_with_authkey "${exit_name}" "${exit_authkey}"
+    else
+      login_exit_with_authkey "${exit_name}" "${authkey}"
+      approve_exit_routes "${exit_name}"
+    fi
   fi
   login_observer_with_web_registration "${observer_name}" alice
   if ((route_health_reload_restart_flag)); then
@@ -2249,6 +2261,9 @@ elif ((route_health_restart_flag)); then
       "${observer_name}" "${router_name}" "${route}" "${work_dir}/route-health-before-policy-reload-owner.json"
     reload_route_health_policy
     wait_for_route_health_peer_owner_from_admin "after-policy-reload"
+    if ((route_health_mixed_exit_restart_flag)); then
+      wait_for_route_health_primary "after-policy-reload"
+    fi
   else
     wait_for_route_health_primary "before-restart"
     wait_for_route_health_peer_owner_from_admin "before-restart"
@@ -2264,6 +2279,9 @@ elif ((route_health_restart_flag)); then
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
   if ((route_health_reload_restart_flag)); then
     wait_for_route_health_approved_candidates "after-restart" "${router_name},${router_b_name}"
+    if ((route_health_mixed_exit_restart_flag)); then
+      wait_for_route_health_primary "after-restart"
+    fi
   else
     wait_for_route_health_primary "after-restart"
   fi

@@ -41,6 +41,7 @@ client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backen
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 magic_dns="${REAL_CLIENT_MAGIC_DNS:-false}"
 accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
+expected_magic_dns_suffix="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-}"
 dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
 expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
 expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
@@ -934,6 +935,39 @@ wait_for_client_netmap() {
   }
 }
 
+assert_magic_dns_status() {
+  local output_path="${work_dir}/${client_name}.magicdns-status.json"
+  docker exec "${client_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      expected_suffix = ARGV.fetch(1).sub(/\.\z/, "")
+      self_node = status.fetch("Self")
+      self_host = self_node.fetch("HostName").to_s
+      suffix = status.fetch("MagicDNSSuffix").to_s.sub(/\.\z/, "")
+      abort("expected MagicDNSSuffix #{expected_suffix.inspect}, got #{suffix.inspect}") unless suffix == expected_suffix
+      self_dns = self_node.fetch("DNSName").to_s.sub(/\.\z/, "")
+      expected_self_dns = "#{self_host}.#{expected_suffix}"
+      abort("expected self DNSName #{expected_self_dns.inspect}, got #{self_dns.inspect}") unless self_dns == expected_self_dns
+      puts JSON.pretty_generate({
+        magic_dns_suffix: suffix,
+        self_host: self_host,
+        self_dns: self_dns,
+      })
+    ' "${output_path}" "${expected_magic_dns_suffix}" >"${work_dir}/${client_name}.magicdns-summary.json"
+  cat "${work_dir}/${client_name}.magicdns-summary.json"
+}
+
+assert_magic_dns_if_requested() {
+  [[ -n "${expected_magic_dns_suffix}" ]] || return 0
+  echo "::group::assert MagicDNS client status"
+  wait_for "MagicDNS suffix ${expected_magic_dns_suffix}" "assert_magic_dns_status" || {
+    dump_debug
+    echo "::endgroup::"
+    return 1
+  }
+  echo "::endgroup::"
+}
+
 assert_dns_extra_record() {
   local host="$1"
   local expected="$2"
@@ -1325,6 +1359,7 @@ approve_routes_if_requested
 set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
+assert_magic_dns_if_requested
 assert_dns_extra_records_if_requested
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"

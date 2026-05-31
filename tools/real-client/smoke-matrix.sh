@@ -514,7 +514,7 @@ smoke_assertions=(
   "auth-key login and one alice node"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres online transition and LastSeen after disconnect"
-  "production Postgres DNS extra record projection"
+  "production Postgres MagicDNS suffix and DNS extra record projection"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "production Postgres web registration with owned requested tag"
   "production Postgres web registration rejects unowned requested tag"

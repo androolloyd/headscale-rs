@@ -509,10 +509,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 ## 2026-05-31 Postgres DNS extra-record smoke slice
 
 - Extended the backend-aware online/LastSeen harness with production DNS knobs:
-  MagicDNS, `tailscale up --accept-dns`, config-backed `dns.extra_records`, and
-  stock-client netmap assertions for `DNS.ExtraRecords`.
+  MagicDNS, `tailscale up --accept-dns`, config-backed `dns.extra_records`,
+  stock-client status assertions for the MagicDNS suffix, and netmap assertions
+  for `DNS.ExtraRecords`.
 - Added paired `postgres-extra-records` Rust/headscale-go rows over a temporary
-  Postgres database. The row proves configured DNS extra records project
-  through the production Postgres serving path.
+  Postgres database. The row proves the MagicDNS suffix and configured DNS
+  extra records project through the production Postgres serving path.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-eight Postgres stock-client rows.

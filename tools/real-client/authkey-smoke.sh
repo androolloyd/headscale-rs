@@ -545,10 +545,7 @@ cleanup() {
   for client_name in "${client_names[@]}"; do
     docker rm -f "${client_name}" >/dev/null 2>&1 || true
   done
-  if [[ -n "${harness_pid}" ]]; then
-    kill "${harness_pid}" >/dev/null 2>&1 || true
-    wait "${harness_pid}" >/dev/null 2>&1 || true
-  fi
+  stop_harness
 }
 trap cleanup EXIT
 
@@ -560,13 +557,21 @@ need() {
 }
 
 free_port() {
-  ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
+  local host="${1:-127.0.0.1}"
+  ruby -rsocket -e 'host=ARGV.fetch(0); s=TCPServer.new(host,0); puts s.addr[1]; s.close' "${host}"
 }
 
 wait_for() {
   local label="$1"
   local cmd="$2"
-  local deadline=$((SECONDS + timeout_secs))
+  wait_for_with_timeout "${label}" "${timeout_secs}" "${cmd}"
+}
+
+wait_for_with_timeout() {
+  local label="$1"
+  local wait_secs="$2"
+  local cmd="$3"
+  local deadline=$((SECONDS + wait_secs))
   until eval "${cmd}"; do
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for ${label}" >&2
@@ -574,6 +579,27 @@ wait_for() {
     fi
     sleep 1
   done
+}
+
+dump_harness_logs() {
+  local label="${1:-harness}"
+  local stream
+  for stream in stdout stderr; do
+    local path="${work_dir}/harness.${stream}"
+    if [[ -s "${path}" ]]; then
+      echo "::group::${label} ${stream}"
+      tail -200 "${path}" >&2 || true
+      echo "::endgroup::"
+    fi
+  done
+}
+
+stop_harness() {
+  if [[ -n "${harness_pid}" ]]; then
+    kill "${harness_pid}" >/dev/null 2>&1 || true
+    wait "${harness_pid}" >/dev/null 2>&1 || true
+    harness_pid=""
+  fi
 }
 
 run_with_timeout() {
@@ -1049,31 +1075,12 @@ need curl
 need docker
 need ruby
 
-http_port="$(free_port)"
-https_port="$(free_port)"
-metrics_port="$(free_port)"
+harness_start_timeout_secs="${REAL_CLIENT_HARNESS_START_TIMEOUT_SECS:-60}"
 
 echo "::group::build headscale-rs real-client harness"
 cargo build --quiet --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml
 echo "::endgroup::"
 
-echo "::group::start headscale-rs harness"
-harness_args=(
-  tools/real-client/headscale-rs-harness/target/debug/headscale-rs-real-client-harness
-  --http "127.0.0.1:${http_port}"
-  --https "0.0.0.0:${https_port}"
-  --metrics "127.0.0.1:${metrics_port}"
-  --hostname host.docker.internal
-  --public-url "https://host.docker.internal:${https_port}"
-  --state-dir "${work_dir}/state"
-  --ip-families "${harness_ip_families}"
-)
-if [[ -n "${harness_derp_map}" ]]; then
-  harness_args+=(--derp-map "${harness_derp_map}")
-fi
-if [[ -n "${base_domain}" ]]; then
-  harness_args+=(--base-domain "${base_domain}")
-fi
 if [[ -n "${dns_extra_records_json}" ]]; then
   export HSRS_HARNESS_DNS_EXTRA_RECORDS_JSON="${dns_extra_records_json}"
 fi
@@ -1095,20 +1102,63 @@ fi
 if [[ -n "${route_health_probe_timeout_secs}" ]]; then
   export HSRS_HARNESS_ROUTE_HEALTH_PROBE_TIMEOUT_SECS="${route_health_probe_timeout_secs}"
 fi
-"${harness_args[@]}" \
-  >"${work_dir}/harness.stdout" \
-  2>"${work_dir}/harness.stderr" &
-harness_pid="$!"
 
-wait_for "harness health" \
-  "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >/dev/null"
-wait_for "harness metrics" \
-  "curl -fsS 'http://127.0.0.1:${metrics_port}/metrics' >/dev/null"
-wait_for "harness TLS certificate" "test -s '${work_dir}/state/tls.crt'"
-echo "harness http=http://127.0.0.1:${http_port}"
-echo "harness login=https://host.docker.internal:${https_port}"
-echo "harness metrics=http://127.0.0.1:${metrics_port}"
-echo "::endgroup::"
+harness_started=0
+for harness_attempt in 1 2 3; do
+  http_port="$(free_port 127.0.0.1)"
+  https_port="$(free_port 0.0.0.0)"
+  metrics_port="$(free_port 127.0.0.1)"
+
+  echo "::group::start headscale-rs harness attempt ${harness_attempt}"
+  harness_args=(
+    tools/real-client/headscale-rs-harness/target/debug/headscale-rs-real-client-harness
+    --http "127.0.0.1:${http_port}"
+    --https "0.0.0.0:${https_port}"
+    --metrics "127.0.0.1:${metrics_port}"
+    --hostname host.docker.internal
+    --public-url "https://host.docker.internal:${https_port}"
+    --state-dir "${work_dir}/state"
+    --ip-families "${harness_ip_families}"
+  )
+  if [[ -n "${harness_derp_map}" ]]; then
+    harness_args+=(--derp-map "${harness_derp_map}")
+  fi
+  if [[ -n "${base_domain}" ]]; then
+    harness_args+=(--base-domain "${base_domain}")
+  fi
+  "${harness_args[@]}" \
+    >"${work_dir}/harness.stdout" \
+    2>"${work_dir}/harness.stderr" &
+  harness_pid="$!"
+
+  if wait_for_with_timeout "harness health" "${harness_start_timeout_secs}" \
+    "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >/dev/null" &&
+    wait_for_with_timeout "harness metrics" "${harness_start_timeout_secs}" \
+      "curl -fsS 'http://127.0.0.1:${metrics_port}/metrics' >/dev/null" &&
+    wait_for_with_timeout "harness TLS certificate" "${harness_start_timeout_secs}" \
+      "test -s '${work_dir}/state/tls.crt'"; then
+    echo "harness http=http://127.0.0.1:${http_port}"
+    echo "harness login=https://host.docker.internal:${https_port}"
+    echo "harness metrics=http://127.0.0.1:${metrics_port}"
+    echo "::endgroup::"
+    harness_started=1
+    break
+  fi
+
+  echo "harness startup attempt ${harness_attempt} failed" >&2
+  if ! kill -0 "${harness_pid}" >/dev/null 2>&1; then
+    wait "${harness_pid}" >/dev/null 2>&1 || true
+    harness_pid=""
+  fi
+  dump_harness_logs "failed harness startup attempt ${harness_attempt}"
+  stop_harness
+  echo "::endgroup::"
+done
+
+if ((harness_started == 0)); then
+  echo "failed to start headscale-rs harness after 3 attempts" >&2
+  exit 1
+fi
 
 if ((assert_derp_stun_flag)); then
   echo "::group::assert embedded DERP STUN"

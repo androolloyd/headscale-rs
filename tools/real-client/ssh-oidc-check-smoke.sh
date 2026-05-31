@@ -29,13 +29,14 @@ check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
 check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
 check_approval="${REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL:-oidc}"
 register_cache_expiration="${REAL_CLIENT_REGISTER_CACHE_EXPIRATION:-}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 ssh_deny_status="${REAL_CLIENT_OIDC_SSH_DENY_STATUS:-255}"
 ssh_deny_stderr_first_line="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_FIRST_LINE:-}"
 ssh_deny_stderr_regex="${REAL_CLIENT_OIDC_SSH_DENY_STDERR_REGEX:-tailscale: access denied|Permission denied \(tailscale\)}"
 wrong_user_auth_status="${REAL_CLIENT_OIDC_SSH_WRONG_USER_AUTH_STATUS:-403}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/ssh-oidc-check-smoke}"
-run_id="hs-ssh-oidc-${target}-$(date +%s)-$$"
+run_id="hs-ssh-oidc-${target}-${database_backend}-$(date +%s)-$$"
 client_one="${REAL_CLIENT_CLIENT_ONE:-${run_id}-one}"
 client_two="${REAL_CLIENT_CLIENT_TWO:-${run_id}-two}"
 
@@ -72,6 +73,14 @@ if [[ "${check_result}" != "approve" && "${check_approval}" != "oidc" ]]; then
   echo "REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL=cli is only valid with REAL_CLIENT_OIDC_SSH_CHECK_RESULT=approve" >&2
   exit 2
 fi
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "${check_result}" == "cancel" ]]; then
   ssh_deny_status="${REAL_CLIENT_OIDC_SSH_DENY_STATUS:-124}"
@@ -153,6 +162,14 @@ tls_cert_path=""
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 headscale_rs_socket_path="${REAL_CLIENT_HEADSCALE_RS_SOCKET:-/tmp/hsrs-${run_id}.sock}"
 headscale_go_socket_path="/tmp/hs-ssh-oidc-${run_id}.sock"
+postgres_admin_url=""
+postgres_database_name=""
+postgres_host=""
+postgres_port=""
+postgres_user=""
+postgres_pass=""
+postgres_sslmode=""
+postgres_database_created=0
 
 cleanup() {
   docker rm -f "${client_one}" "${client_two}" >/dev/null 2>&1 || true
@@ -169,6 +186,7 @@ cleanup() {
     kill "${mock_oidc_pid}" >/dev/null 2>&1 || true
     wait "${mock_oidc_pid}" >/dev/null 2>&1 || true
   fi
+  drop_postgres_database || true
 }
 trap cleanup EXIT
 
@@ -181,6 +199,83 @@ need() {
 
 free_port() {
   ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
+}
+
+quoted_string() {
+  ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
+}
+
+parse_postgres_test_url() {
+  eval "$(
+    ruby -ruri -rshellwords -e '
+      url = URI.parse(ARGV.fetch(0))
+      database_name = ARGV.fetch(1)
+      abort("HEADSCALE_DB_POSTGRES_TEST_URL must include a TCP host") if url.host.to_s.empty?
+      query = URI.decode_www_form(url.query.to_s).to_h
+      sslmode = query.fetch("sslmode", "false")
+      admin_db = url.path.to_s.sub(%r{\A/}, "")
+      admin_db = "postgres" if admin_db.empty?
+      admin = url.dup
+      admin.path = "/#{admin_db}"
+      {
+        postgres_admin_url: admin.to_s,
+        postgres_database_name: database_name,
+        postgres_host: url.host.to_s,
+        postgres_port: (url.port || 5432).to_s,
+        postgres_user: URI.decode_www_form_component(url.user.to_s),
+        postgres_pass: URI.decode_www_form_component(url.password.to_s),
+        postgres_sslmode: sslmode,
+      }.each do |key, value|
+        puts "#{key}=#{Shellwords.escape(value)}"
+      end
+    ' "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" "${postgres_database_name}"
+  )"
+}
+
+prepare_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  if [[ -z "${HEADSCALE_DB_POSTGRES_TEST_URL:-}" ]]; then
+    echo "skipping Postgres OIDC SSH real-client smoke: HEADSCALE_DB_POSTGRES_TEST_URL is not set" >&2
+    exit 0
+  fi
+  need psql
+  postgres_database_name="headscale_rs_pg_ssh_oidc_${target//[^a-zA-Z0-9]/_}_$(date +%s)_$$"
+  parse_postgres_test_url
+  if ! [[ "${postgres_database_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "internal temporary Postgres database name is invalid: ${postgres_database_name}" >&2
+    exit 2
+  fi
+  echo "::group::create temporary Postgres database"
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${postgres_database_name}" >"${work_dir}/postgres-create.stdout" 2>"${work_dir}/postgres-create.stderr"; then
+    echo "skipping Postgres OIDC SSH real-client smoke: cannot create temporary database ${postgres_database_name}" >&2
+    cat "${work_dir}/postgres-create.stderr" >&2 || true
+    echo "::endgroup::"
+    exit 0
+  fi
+  postgres_database_created=1
+  echo "created ${postgres_database_name}"
+  echo "::endgroup::"
+}
+
+drop_postgres_database() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  ((postgres_database_created)) || return 0
+  echo "::group::drop temporary Postgres database"
+  psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${postgres_database_name}' AND pid <> pg_backend_pid()" \
+    >"${work_dir}/postgres-terminate.stdout" \
+    2>"${work_dir}/postgres-terminate.stderr" || true
+  if ! psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${postgres_database_name} WITH (FORCE)" \
+    >"${work_dir}/postgres-drop.stdout" \
+    2>"${work_dir}/postgres-drop.stderr"; then
+    psql "${postgres_admin_url}" -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${postgres_database_name}" \
+      >>"${work_dir}/postgres-drop.stdout" \
+      2>>"${work_dir}/postgres-drop.stderr"
+  fi
+  postgres_database_created=0
+  echo "::endgroup::"
 }
 
 wait_for() {
@@ -342,7 +437,11 @@ start_rust_server() {
   rm -f "${headscale_rs_socket_path}"
 
   echo "::group::build headscale-rs CLI"
-  cargo build --quiet -p headscale-cli --bin headscale
+  if [[ "${database_backend}" == "postgres" ]]; then
+    cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+  else
+    cargo build --quiet -p headscale-cli --bin headscale
+  fi
   echo "::endgroup::"
 
   cat >"${config_path}" <<EOF
@@ -374,10 +473,6 @@ search_domains = []
 [dns.nameservers]
 global = []
 
-[policy]
-mode = "file"
-path = "${work_dir}/ssh-oidc-check.hujson"
-
 [oidc]
 issuer = "http://127.0.0.1:${oidc_port}/oidc"
 client_id = "${oidc_client_id}"
@@ -385,6 +480,34 @@ client_secret = "${oidc_client_secret}"
 allowed_domains = [$(oidc_allowed_domains_toml_items)]
 email_verified_required = true
 EOF
+  case "${database_backend}" in
+    sqlite)
+      cat >>"${config_path}" <<EOF
+
+[policy]
+mode = "file"
+path = "${work_dir}/ssh-oidc-check.hujson"
+EOF
+      ;;
+    postgres)
+      cat >>"${config_path}" <<EOF
+
+[database]
+type = "postgres"
+
+[database.postgres]
+host = $(quoted_string "${postgres_host}")
+port = ${postgres_port}
+name = $(quoted_string "${postgres_database_name}")
+user = $(quoted_string "${postgres_user}")
+pass = $(quoted_string "${postgres_pass}")
+ssl = $(quoted_string "${postgres_sslmode}")
+
+[policy]
+mode = "database"
+EOF
+      ;;
+  esac
 
   echo "::group::start headscale-rs OIDC SSH server"
   target/debug/headscale --config "${config_path}" server \
@@ -396,6 +519,41 @@ EOF
   wait_for "headscale-rs gRPC" "headscale_cmd health >/dev/null 2>&1"
   echo "headscale-rs login=${control_url}"
   echo "::endgroup::"
+}
+
+write_headscale_go_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      cat <<EOF
+
+database:
+  type: sqlite
+  sqlite:
+    path: ${db_path}
+
+policy:
+  mode: file
+  path: ${work_dir}/ssh-oidc-check.hujson
+EOF
+      ;;
+    postgres)
+      cat <<EOF
+
+database:
+  type: postgres
+  postgres:
+    host: $(quoted_string "${postgres_host}")
+    port: ${postgres_port}
+    name: $(quoted_string "${postgres_database_name}")
+    user: $(quoted_string "${postgres_user}")
+    pass: $(quoted_string "${postgres_pass}")
+    ssl: $(quoted_string "${postgres_sslmode}")
+
+policy:
+  mode: database
+EOF
+      ;;
+  esac
 }
 
 start_headscale_go_server() {
@@ -454,11 +612,6 @@ prefixes:
   v6: fd7a:115c:a1e0::/48
   allocation: sequential
 
-database:
-  type: sqlite
-  sqlite:
-    path: ${db_path}
-
 dns:
   magic_dns: true
   base_domain: "${base_domain}"
@@ -467,10 +620,6 @@ dns:
     global: []
     split: {}
   search_domains: []
-
-policy:
-  mode: file
-  path: ${work_dir}/ssh-oidc-check.hujson
 
 logtail:
   enabled: false
@@ -503,6 +652,7 @@ oidc:
 $(oidc_allowed_domains_yaml)
   email_verified_required: true
 EOF
+  write_headscale_go_database_config >>"${config_path}"
 
   echo "::group::start headscale-go OIDC SSH server"
   "${headscale_bin}" -c "${config_path}" serve \
@@ -663,10 +813,18 @@ headscale_cmd() {
   case "${target}" in
     rust)
       env -u HEADSCALE_CLI_ADDRESS -u HEADSCALE_CLI_API_KEY -u HEADSCALE_CLI_INSECURE \
-        target/debug/headscale --config "${config_path}" --unix-socket "${socket_path}" "$@"
+        target/debug/headscale --config "${config_path}" --unix-socket "${headscale_rs_socket_path}" "$@"
       ;;
     headscale-go) "${headscale_bin}" -c "${config_path}" "$@" ;;
   esac
+}
+
+load_database_policy_if_requested() {
+  [[ "${database_backend}" == "postgres" ]] || return 0
+  echo "::group::load database policy"
+  headscale_cmd --force -o json policy set --file "${work_dir}/ssh-oidc-check.hujson" \
+    >"${work_dir}/policy-set.json"
+  echo "::endgroup::"
 }
 
 extract_ssh_auth_id() {
@@ -876,6 +1034,7 @@ fi
 if [[ "${target}" == "headscale-go" ]]; then
   need openssl
 fi
+prepare_postgres_database
 
 echo "::group::build headscale-go ${headscale_go_version} for mock OIDC"
 install_headscale_go
@@ -894,6 +1053,7 @@ start_client "${client_one}"
 start_client "${client_two}"
 drive_oidc_login "${client_one}"
 drive_oidc_login "${client_two}"
+load_database_policy_if_requested
 run_ssh_check
 
 if ((check_period_cache_flag)); then

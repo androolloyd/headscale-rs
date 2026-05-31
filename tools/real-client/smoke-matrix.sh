@@ -76,6 +76,7 @@ smoke_ids=(
   postgres-oidc
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
+  postgres-ssh-oidc-check
   postgres-web-register-restart
   postgres-restart-persistence
   postgres-tagged-preauth
@@ -193,6 +194,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -274,6 +276,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-oidc-smoke.sh
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-smoke.sh
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/postgres-tagged-preauth-smoke.sh
@@ -373,6 +376,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/postgres-tagged-preauth-headscale-go-smoke.sh
@@ -472,6 +476,7 @@ smoke_assertions=(
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"
+  "production Postgres OIDC-backed Tailscale SSH check approval"
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
   "production Postgres preauth key with ACL tag owners"

@@ -374,8 +374,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all twenty-six Pg rows; broader Pg stock-client
-  serve smokes remain, especially SSH/OIDC-check production rows
+  CI now provisions Postgres for all twenty-seven Pg rows, including
+  `postgres-ssh-oidc-check`; broader Pg stock-client serve smokes remain,
+  especially the SSH/OIDC denial and CLI-approval production rows
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
 - Broader Tailscale SSH current-head client status/stderr/profile variants;
   the policy-level `acceptEnv`, `check` hold-and-delegate, and host-destination
@@ -413,6 +414,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   invalid tag update, and web reauth tag clearing:
   `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear`.
-- The real-client workflow includes those rows in `PR_SMOKES`; the matrix now
-  has twenty-six Postgres stock-client rows. Next small Pg gap from the
-  subagent audit is `postgres-ssh-oidc-check`.
+- The real-client workflow includes those rows in `PR_SMOKES`; this slice moved
+  the matrix to twenty-six Postgres stock-client rows.
+
+## 2026-05-31 Postgres SSH OIDC-check smoke slice
+
+- `tools/real-client/ssh-oidc-check-smoke.sh` can now run against either SQLite
+  or a temporary Postgres database, builds Rust with `postgres-sqlx` for the Pg
+  target, writes backend-specific config for Rust and headscale-go, loads the
+  SSH policy into the database-backed policy store, and drops the temp database
+  on cleanup.
+- Added paired `postgres-ssh-oidc-check` Rust/headscale-go rows and included
+  the row in `PR_SMOKES`; the matrix now has twenty-seven Postgres
+  stock-client rows.

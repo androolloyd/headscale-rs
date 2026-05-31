@@ -85,6 +85,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
+| Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |

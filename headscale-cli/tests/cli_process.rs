@@ -920,8 +920,36 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         include_str!("snapshots/users_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["help", "user"],
+        include_str!("snapshots/users_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["help", "users", "create"],
         include_str!("snapshots/users_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["user", "new", "--help"],
+        include_str!("snapshots/users_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "users", "c"],
+        include_str!("snapshots/users_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["users", "ls", "-h"],
+        include_str!("snapshots/users_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "user", "show"],
+        include_str!("snapshots/users_list_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["user", "mv", "--help"],
+        include_str!("snapshots/users_rename_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["users", "delete", "--help"],
+        include_str!("snapshots/users_destroy_help.stdout"),
     );
     assert_stdout_snapshot(&["node", "-h"], include_str!("snapshots/nodes_help.stdout"));
     assert_stdout_snapshot(

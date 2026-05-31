@@ -117,6 +117,26 @@ impl RoutingTable {
         self.all_routes().filter(|r| r.approved)
     }
 
+    /// Approve or revoke an existing advertised route.
+    ///
+    /// Returns `false` when the peer has not advertised the exact prefix.
+    pub fn set_route_approved(&mut self, prefix: &IpNet, peer_id: &str, approved: bool) -> bool {
+        let routes = match prefix {
+            IpNet::V4(_) => &mut self.ipv4_routes,
+            IpNet::V6(_) => &mut self.ipv6_routes,
+        };
+
+        let mut found = false;
+        for route in routes {
+            if route.prefix == *prefix && route.peer_id == peer_id && route.advertised {
+                route.approved = approved;
+                found = true;
+            }
+        }
+
+        found
+    }
+
     /// Check if a route would conflict with an existing route.
     ///
     /// A conflict exists if two different peers have overlapping routes
@@ -358,6 +378,43 @@ mod tests {
 
         let v6 = host_route(IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(v6.prefix_len(), 128);
+    }
+
+    #[test]
+    fn test_route_approval_requires_advertised_route() {
+        let mut table = RoutingTable::new();
+        let prefix = "0.0.0.0/0".parse().unwrap();
+
+        assert!(!table.set_route_approved(&prefix, "exit-peer", true));
+        assert_eq!(table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))), None);
+
+        table.add_route(Route {
+            prefix,
+            peer_id: "exit-peer".to_string(),
+            priority: 100,
+            approved: false,
+            advertised: true,
+        });
+
+        assert!(table.set_route_approved(&prefix, "exit-peer", true));
+        assert_eq!(
+            table.lookup(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            Some("exit-peer")
+        );
+
+        table.add_route(Route {
+            prefix: "10.0.0.5/32".parse().unwrap(),
+            peer_id: "host-peer".to_string(),
+            priority: 0,
+            approved: true,
+            advertised: false,
+        });
+
+        assert!(!table.set_route_approved(&"10.0.0.5/32".parse().unwrap(), "host-peer", false));
+        assert_eq!(
+            table.lookup(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
+            Some("host-peer")
+        );
     }
 }
 

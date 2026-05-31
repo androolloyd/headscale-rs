@@ -512,17 +512,21 @@ impl TunnelManager {
         prefix: &IpNet,
         approved: bool,
     ) -> Result<(), TunnelError> {
+        {
+            let tunnels = self.tunnels.read().await;
+            if !tunnels.contains_key(peer_id) {
+                return Err(TunnelError::PeerNotFound(peer_id.to_string()));
+            }
+        }
+
         let mut routing = self.routing_table.write().await;
 
-        // Remove and re-add with new approval status
-        routing.remove_route(prefix, peer_id);
-        routing.add_route(Route {
-            prefix: *prefix,
-            peer_id: peer_id.to_string(),
-            priority: 100,
-            approved,
-            advertised: true,
-        });
+        if !routing.set_route_approved(prefix, peer_id, approved) {
+            return Err(TunnelError::RouteNotFound {
+                peer_id: peer_id.to_string(),
+                prefix: *prefix,
+            });
+        }
 
         tracing::info!(
             peer_id = %peer_id,
@@ -670,6 +674,9 @@ pub enum TunnelError {
 
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
+
+    #[error("Route not found for peer {peer_id}: {prefix}")]
+    RouteNotFound { peer_id: String, prefix: IpNet },
 
     #[error("No endpoint configured for peer: {0}")]
     NoEndpoint(String),
@@ -942,6 +949,46 @@ mod tests {
                 .await,
             Some(peer_id.clone())
         );
+    }
+
+    #[tokio::test]
+    async fn test_route_approval_requires_existing_advertisement() {
+        let local_keypair = WgKeyPair::generate();
+        let peer_keypair = WgKeyPair::generate();
+        let manager = TunnelManager::new(local_keypair, DEFAULT_WG_PORT);
+
+        let peer_id = "exit-peer".to_string();
+        let exit_prefix = "0.0.0.0/0".parse().unwrap();
+
+        manager
+            .add_peer_with_ips(
+                peer_id.clone(),
+                peer_keypair.public_key_bytes(),
+                None,
+                vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2))],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let err = manager
+            .set_route_approved(&peer_id, &exit_prefix, true)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, TunnelError::RouteNotFound { .. }));
+        assert_eq!(
+            manager
+                .route_by_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+                .await,
+            None
+        );
+
+        let missing_peer_err = manager
+            .set_route_approved("missing-peer", &exit_prefix, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_peer_err, TunnelError::PeerNotFound(_)));
     }
 
     #[tokio::test]

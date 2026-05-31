@@ -791,7 +791,10 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     }
     validate_policy_tests(doc, &doc.tests, &mut errs);
     validate_ssh_tests(doc, &doc.ssh_tests, &mut errs);
-    for owners in doc.tag_owners.values() {
+    for (tag, owners) in &doc.tag_owners {
+        if let Err(err) = validate_tag_name(tag) {
+            errs.push(format!("tagOwners[{tag:?}]: {err}"));
+        }
         for owner in owners {
             validate_owner_ref(doc, owner, &mut errs);
         }
@@ -844,6 +847,8 @@ fn validate_grant_rule(doc: &AclDoc, grant: &GrantRule, errs: &mut Vec<String>) 
     for via in &grant.via {
         if !via.starts_with("tag:") {
             errs.push("via can only be a tag".to_string());
+        } else if let Err(err) = validate_tag_name(via) {
+            errs.push(err);
         } else if !tag_defined(doc, via) {
             errs.push(format!("tag {via:?} not found"));
         }
@@ -1041,6 +1046,9 @@ fn validate_policy_test_destination(doc: &AclDoc, dst: &str) -> Result<(), Strin
     if port == "*" || port.contains(',') || port.contains('-') {
         return Err("tests destination must include exactly one port".to_string());
     }
+    if alias.starts_with("tag:") {
+        validate_tag_name(alias)?;
+    }
     let parsed = parse_upstream_port(port)?;
     if parsed == 0 {
         return Err("first port must be >0, or use '*' for wildcard".to_string());
@@ -1094,6 +1102,9 @@ fn validate_ssh_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> 
     {
         return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
     }
+    if dst.starts_with("tag:") {
+        validate_tag_name(dst)?;
+    }
     if dst.starts_with("tag:") && !tag_defined(doc, dst) {
         return Err(format!("SSH tests dst contains unknown tag {dst:?}"));
     }
@@ -1146,11 +1157,30 @@ fn validate_group_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_tag_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
-    if alias.starts_with("tag:") && !tag_defined(doc, alias) {
+    if !alias.starts_with("tag:") {
+        return;
+    }
+    if let Err(err) = validate_tag_name(alias) {
+        errs.push(err);
+    }
+    if !tag_defined(doc, alias) {
         errs.push(format!(
             "Tag {alias:?} is not defined in the Policy, please define or remove the reference to it"
         ));
     }
+}
+
+fn validate_tag_name(tag: &str) -> Result<(), String> {
+    let Some(rest) = tag.strip_prefix("tag:") else {
+        return Err(format!("tag must start with 'tag:', got: {tag:?}"));
+    };
+    let Some(first) = rest.as_bytes().first() else {
+        return Err("tag names must start with a letter, after 'tag:'".to_string());
+    };
+    if !first.is_ascii_alphabetic() {
+        return Err("tag names must start with a letter, after 'tag:'".to_string());
+    }
+    Ok(())
 }
 
 fn group_defined(doc: &AclDoc, group: &str) -> bool {
@@ -4515,6 +4545,73 @@ mod tests {
         .to_string();
 
         assert!(err.contains(r#"Tag "tag:missing" is not defined"#));
+    }
+
+    #[test]
+    fn hujson_rejects_tag_names_without_leading_ascii_letter_like_current_head() {
+        for (name, raw, want) in [
+            (
+                "tag-owner-leading-digit",
+                r#"{"tagOwners":{"tag:1server":["alice@"]}}"#,
+                r#"tagOwners["tag:1server"]: tag names must start with a letter, after 'tag:'"#,
+            ),
+            (
+                "tag-owner-cyrillic",
+                r#"{"tagOwners":{"tag:сервер":["alice@"]}}"#,
+                r#"tagOwners["tag:сервер"]: tag names must start with a letter, after 'tag:'"#,
+            ),
+            (
+                "acl-reference-leading-hyphen",
+                r#"{
+                  "tagOwners": {"tag:server": ["alice@"]},
+                  "acls": [{
+                    "action": "accept",
+                    "src": ["tag:-client"],
+                    "dst": ["tag:server:*"]
+                  }]
+                }"#,
+                "tag names must start with a letter, after 'tag:'",
+            ),
+            (
+                "grant-via-empty-name",
+                r#"{
+                  "tagOwners": {"tag:client": ["alice@"]},
+                  "grants": [{
+                    "src": ["tag:client"],
+                    "dst": ["10.0.0.0/24"],
+                    "ip": ["*"],
+                    "via": ["tag:"]
+                  }]
+                }"#,
+                "tag names must start with a letter, after 'tag:'",
+            ),
+            (
+                "policy-test-destination",
+                r#"{
+                  "tests": [{
+                    "src": "alice@",
+                    "accept": ["tag:1server:22"]
+                  }]
+                }"#,
+                "tag names must start with a letter, after 'tag:'",
+            ),
+            (
+                "ssh-test-destination",
+                r#"{
+                  "sshTests": [{
+                    "src": "alice@",
+                    "dst": ["tag:1server"]
+                  }]
+                }"#,
+                "tag names must start with a letter, after 'tag:'",
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).expect_err(name).to_string();
+            assert!(
+                err.contains(want),
+                "{name} should contain {want:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

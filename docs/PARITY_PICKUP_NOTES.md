@@ -664,3 +664,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   Postgres database using the current-head headscale-go audit baseline.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   fifty-six Postgres stock-client rows.
+
+## 2026-05-31 Multi-agent parity cleanup slice
+
+- Adopted scoped worker fixes for current-head tag-name validation in ACL
+  parsing, upstream tag whitespace error text on admin HTTP/gRPC paths, user
+  command alias help routing, DB-level empty forced-tag persistence, and core
+  route approval semantics that refuse phantom unadvertised routes.
+- Focused local checks completed: `cargo fmt --all -- --check`,
+  `git diff --check`, ACL/DB/core compile-only checks, feature-gated Pg node
+  compile-only checks, and the core route-approval regression test. Local
+  API/CLI compile-only checks were capped and deferred after the `headscale-api`
+  build script stalled; CI should cover those surfaces with the normal gates.

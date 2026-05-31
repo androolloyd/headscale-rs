@@ -114,6 +114,12 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
                 .await?
                 .is_empty()
         );
+        let untagged =
+            headscale_nodes::set_postgres_tags_on_connection(&mut schema.conn, node.id, Vec::new())
+                .await?;
+        assert!(untagged.tag_list().is_empty());
+        assert_eq!(untagged.tags, "[]");
+        assert!(untagged.user_id.is_none());
 
         let mut replacement = node_params(alice.id, auth_key_id);
         replacement.machine_key = "mkey:def".into();

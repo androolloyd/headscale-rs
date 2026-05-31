@@ -345,6 +345,21 @@ async fn api_machine_tags_rejects_malformed_tag() {
 }
 
 #[tokio::test]
+async fn api_machine_tags_rejects_tag_with_space_like_upstream() {
+    let id = "aa".repeat(32);
+    let resp = app()
+        .oneshot(req_post_json(
+            &format!("/api/v1/machines/{id}/tags"),
+            r#"{"tags":["tag:bad tag"]}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body(resp).await.contains("tags must not contain spaces"));
+}
+
+#[tokio::test]
 async fn api_machine_tags_rejects_tags_missing_from_loaded_policy() {
     let app = router(fixture_state_with_tag_policy(&["tag:prod"]));
     let id = "aa".repeat(32);

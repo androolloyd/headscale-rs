@@ -806,19 +806,17 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["auth", "reject", "-h" | "--help"] | ["help", "auth", "reject"] => {
             Some(UPSTREAM_AUTH_REJECT_HELP)
         }
-        ["users", "-h" | "--help"] | ["help", "users"] => Some(UPSTREAM_USERS_HELP),
-        ["users", "create", "-h" | "--help"] | ["help", "users", "create"] => {
-            Some(UPSTREAM_USERS_CREATE_HELP)
+        ["users" | "user", "-h" | "--help"] | ["help", "users" | "user"] => {
+            Some(UPSTREAM_USERS_HELP)
         }
-        ["users", "list", "-h" | "--help"] | ["help", "users", "list"] => {
-            Some(UPSTREAM_USERS_LIST_HELP)
-        }
-        ["users", "rename", "-h" | "--help"] | ["help", "users", "rename"] => {
-            Some(UPSTREAM_USERS_RENAME_HELP)
-        }
-        ["users", "destroy", "-h" | "--help"] | ["help", "users", "destroy"] => {
-            Some(UPSTREAM_USERS_DESTROY_HELP)
-        }
+        ["users" | "user", "create" | "c" | "new", "-h" | "--help"]
+        | ["help", "users" | "user", "create" | "c" | "new"] => Some(UPSTREAM_USERS_CREATE_HELP),
+        ["users" | "user", "list" | "ls" | "show", "-h" | "--help"]
+        | ["help", "users" | "user", "list" | "ls" | "show"] => Some(UPSTREAM_USERS_LIST_HELP),
+        ["users" | "user", "rename" | "mv", "-h" | "--help"]
+        | ["help", "users" | "user", "rename" | "mv"] => Some(UPSTREAM_USERS_RENAME_HELP),
+        ["users" | "user", "destroy" | "delete", "-h" | "--help"]
+        | ["help", "users" | "user", "destroy" | "delete"] => Some(UPSTREAM_USERS_DESTROY_HELP),
         ["nodes" | "node", "-h" | "--help"] | ["help", "nodes" | "node"] => {
             Some(UPSTREAM_NODES_HELP)
         }
@@ -2745,8 +2743,36 @@ mod tests {
             Some(UPSTREAM_USERS_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "user"]),
+            Some(UPSTREAM_USERS_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["help", "users", "create"]),
             Some(UPSTREAM_USERS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["user", "new", "--help"]),
+            Some(UPSTREAM_USERS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "users", "c"]),
+            Some(UPSTREAM_USERS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["users", "ls", "-h"]),
+            Some(UPSTREAM_USERS_LIST_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "user", "show"]),
+            Some(UPSTREAM_USERS_LIST_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["user", "mv", "--help"]),
+            Some(UPSTREAM_USERS_RENAME_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["users", "delete", "--help"]),
+            Some(UPSTREAM_USERS_DESTROY_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["nodes", "--help"]),

@@ -1007,7 +1007,7 @@ fn validate_api_tag(tag: &str) -> Result<(), String> {
         return Err("tag should be lowercase".to_string());
     }
     if tag.split_whitespace().count() > 1 {
-        return Err("tag should not contains space".to_string());
+        return Err("tags must not contain spaces".to_string());
     }
     Ok(())
 }

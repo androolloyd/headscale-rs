@@ -1430,6 +1430,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_message: "tag should be lowercase",
         },
         Case {
+            name: "create preauth key tag with space",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: r#"{"aclTags":["tag:bad tag"]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "tags must not contain spaces",
+        },
+        Case {
             name: "expire api key missing selector",
             method: Method::POST,
             uri: "/api/v1/apikey/expire",

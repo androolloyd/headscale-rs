@@ -1825,7 +1825,7 @@ pub mod upstream {
             return Err(Status::invalid_argument("tag should be lowercase"));
         }
         if tag.split_whitespace().count() > 1 {
-            return Err(Status::invalid_argument("tag should not contains space"));
+            return Err(Status::invalid_argument("tags must not contain spaces"));
         }
         Ok(())
     }
@@ -4641,6 +4641,19 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let err = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: 0,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: vec!["tag:bad tag".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "tags must not contain spaces");
 
         let created = service
             .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {

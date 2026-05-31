@@ -60,7 +60,9 @@ use tokio::sync::{Notify, oneshot, watch};
 use self::routes::{
     DebugRoutes, PrimaryRouteState, active_primary_routes, auto_approved_routes_for_node,
 };
-use self::wire::stable_id_from_key;
+use self::wire::{
+    auto_given_name_base, is_auto_derived_given_name, stable_id_from_key, valid_given_name_label,
+};
 
 /// Headscale-go default: pending interactive registrations are valid
 /// for 15 minutes before the registration cache can evict them.
@@ -2860,6 +2862,50 @@ impl MachineRegistry {
         result
     }
 
+    fn resolve_auto_given_name_from_snapshot(
+        snapshot: &HashMap<String, MachineRecord>,
+        node_key_hex: &str,
+        also_exclude_node_key_hex: Option<&str>,
+        raw_hostname: &str,
+    ) -> String {
+        let base = auto_given_name_base(raw_hostname);
+        let mut candidate = base.clone();
+        for suffix in 1.. {
+            let taken = snapshot.iter().any(|(key, rec)| {
+                key != node_key_hex
+                    && Some(key.as_str()) != also_exclude_node_key_hex
+                    && rec.hostname == candidate
+            });
+            if !taken {
+                return candidate;
+            }
+            candidate = format!("{base}-{suffix}");
+        }
+        unreachable!("unbounded suffix search always returns")
+    }
+
+    /// Resolve the DNS GivenName for a raw client Hostinfo hostname.
+    ///
+    /// This mirrors headscale-go's NodeStore collision handling for
+    /// registration/update paths: sanitize the raw hostname, fall back to
+    /// `node` when nothing survives, then suffix `-1`, `-2`, ... until the
+    /// label is unused. The current node key and an optional replaced node
+    /// key are excluded so same-machine reauth keeps its existing label.
+    pub fn resolve_auto_given_name(
+        &self,
+        node_key_hex: &str,
+        raw_hostname: &str,
+        also_exclude_node_key_hex: Option<&str>,
+    ) -> String {
+        let snapshot = self.inner.read();
+        Self::resolve_auto_given_name_from_snapshot(
+            snapshot.as_ref(),
+            node_key_hex,
+            also_exclude_node_key_hex,
+            raw_hostname,
+        )
+    }
+
     /// Replace a record's node-key index while preserving the record
     /// body. This is the wire-registry equivalent of headscale-go's
     /// `UpdateNode` path during node-key rotation.
@@ -2906,9 +2952,23 @@ impl MachineRegistry {
         pending.user = user.to_string();
         pending.register_method = register_method;
 
+        let mut raw_hostname = pending.host_info.hostname.clone();
+        if raw_hostname.is_empty() {
+            raw_hostname.clone_from(&pending.hostname);
+        }
+        let mut replaced_node_key = None;
+        let mut preserved_explicit_given_name = None;
         if let Some((old_node_key, existing)) =
             self.get_by_machine_key_for_user(&pending.machine_key_hex, user)
         {
+            let existing_raw_hostname = existing.host_info_for_node().hostname;
+            if !is_auto_derived_given_name(&existing.hostname, &existing_raw_hostname) {
+                preserved_explicit_given_name = Some(existing.hostname.clone());
+            }
+            if raw_hostname.is_empty() {
+                raw_hostname = existing_raw_hostname;
+            }
+            replaced_node_key = Some(old_node_key);
             pending.ipv4 = existing.ipv4;
             pending.ipv6 = existing.ipv6;
             pending.created_at = existing.created_at;
@@ -2932,7 +2992,16 @@ impl MachineRegistry {
                 .collect::<std::collections::BTreeSet<_>>();
             approved_routes.extend(pending.approved_routes);
             pending.approved_routes = approved_routes.into_iter().collect();
+        }
 
+        pending.hostname = preserved_explicit_given_name.unwrap_or_else(|| {
+            self.resolve_auto_given_name(
+                &pending.node_key_hex,
+                &raw_hostname,
+                replaced_node_key.as_deref(),
+            )
+        });
+        if let Some(old_node_key) = replaced_node_key {
             self.replace_node_key(&old_node_key, pending.node_key_hex.clone(), pending.clone());
         } else {
             self.upsert(pending.node_key_hex.clone(), pending.clone());
@@ -3050,11 +3119,18 @@ impl MachineRegistry {
     }
 
     /// Rename a machine. Upstream's `db.NodeRenameNode` validates
-    /// against a regex; we trust the admin layer to have done that. An
-    /// empty `new_hostname` is rejected as a no-op (returns `false`)
-    /// because the upstream behaviour is identical.
+    /// against `dnsname.ValidLabel` and rejects duplicate GivenNames
+    /// without auto-suffixing.
     pub fn rename(&self, node_key_hex: &str, new_hostname: String) -> bool {
-        if new_hostname.is_empty() {
+        if !valid_given_name_label(&new_hostname) {
+            return false;
+        }
+        if self
+            .inner
+            .read()
+            .iter()
+            .any(|(key, rec)| key != node_key_hex && rec.hostname == new_hostname)
+        {
             return false;
         }
         let node_id = self.stable_node_id_for_key(node_key_hex);
@@ -4367,17 +4443,93 @@ mod registry_tests {
         assert!(stored.is_expired_at(Utc::now()));
     }
 
-    /// `rename` rewrites hostname; empty input is a no-op.
+    #[test]
+    fn resolve_auto_given_name_sanitizes_fallbacks_and_suffixes() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(1);
+        existing.hostname = "peer-one".into();
+        existing.host_info.hostname = "Peer.One!".into();
+        reg.upsert("nk-existing".into(), existing);
+
+        assert_eq!(
+            reg.resolve_auto_given_name("nk-new", "Peer.One!", None),
+            "peer-one-1"
+        );
+        assert_eq!(reg.resolve_auto_given_name("nk-new", "!!!", None), "node");
+
+        let long_hostname = "node".repeat(20);
+        let expected_base = "node".repeat(15) + "nod";
+        let mut long_existing = mk_record(2);
+        long_existing.hostname.clone_from(&expected_base);
+        reg.upsert("nk-long".into(), long_existing);
+        assert_eq!(
+            reg.resolve_auto_given_name("nk-new", &long_hostname, None),
+            format!("{expected_base}-1")
+        );
+    }
+
+    #[test]
+    fn complete_web_registration_resolves_pending_raw_hostname() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(1);
+        existing.hostname = "peer-one".into();
+        existing.host_info.hostname = "Peer.One!".into();
+        reg.upsert("nk-existing".into(), existing);
+
+        let mut pending = mk_record(2);
+        pending.node_key_hex = "nk-pending".into();
+        pending.machine_key_hex = "mkey-pending".into();
+        pending.hostname = "Peer.One!".into();
+        pending.host_info.hostname = "Peer.One!".into();
+
+        let completed = reg.complete_web_registration(pending, "alice", 2);
+        assert_eq!(completed.hostname, "peer-one-1");
+        assert_eq!(reg.get("nk-pending").unwrap().hostname, "peer-one-1");
+    }
+
+    #[test]
+    fn complete_web_registration_preserves_admin_renamed_given_name() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(1);
+        existing.node_key_hex = "nk-existing".into();
+        existing.machine_key_hex = "mkey-same".into();
+        existing.hostname = "admin-name".into();
+        existing.host_info.hostname = "old-host".into();
+        reg.upsert("nk-existing".into(), existing);
+
+        let mut pending = mk_record(2);
+        pending.node_key_hex = "nk-pending".into();
+        pending.machine_key_hex = "mkey-same".into();
+        pending.hostname = "client-new-host".into();
+        pending.host_info.hostname = "client-new-host".into();
+
+        let completed = reg.complete_web_registration(pending, "alice", 2);
+        assert_eq!(completed.hostname, "admin-name");
+        assert!(reg.get("nk-existing").is_none());
+        let stored = reg.get("nk-pending").unwrap();
+        assert_eq!(stored.hostname, "admin-name");
+        assert_eq!(stored.host_info_for_node().hostname, "client-new-host");
+    }
+
+    /// `rename` rewrites the explicit GivenName; invalid or duplicate labels are rejected.
     #[test]
     fn rename_writes_hostname() {
         let reg = MachineRegistry::new();
         reg.upsert("nk-a".to_string(), mk_record(2));
         assert!(reg.rename("nk-a", "newhost".into()));
         assert_eq!(reg.get("nk-a").unwrap().hostname, "newhost");
+        assert!(reg.rename("nk-a", "A".into()));
+        assert_eq!(reg.get("nk-a").unwrap().hostname, "A");
 
-        // Empty rejected.
+        // Invalid labels are rejected.
         assert!(!reg.rename("nk-a", String::new()));
-        assert_eq!(reg.get("nk-a").unwrap().hostname, "newhost");
+        assert!(!reg.rename("nk-a", "bad.name".into()));
+        assert_eq!(reg.get("nk-a").unwrap().hostname, "A");
+
+        let mut taken = mk_record(3);
+        taken.hostname = "taken".into();
+        reg.upsert("nk-b".to_string(), taken);
+        assert!(!reg.rename("nk-a", "taken".into()));
 
         // Unknown rejected.
         assert!(!reg.rename("nk-zzz", "x".into()));

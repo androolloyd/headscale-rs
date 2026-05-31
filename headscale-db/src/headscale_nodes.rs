@@ -228,14 +228,225 @@ fn expand_exit_routes(mut routes: Vec<String>) -> Vec<String> {
     routes
 }
 
+fn is_dns_label_alphanumeric(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
+fn is_dns_label_char(byte: u8) -> bool {
+    is_dns_label_alphanumeric(byte) || byte == b'-'
+}
+
 fn validate_given_name(name: &str) -> Result<()> {
-    crate::users::validate_hostname(name).map_err(|e| DbError::General(e.to_string()))
+    let bytes = name.as_bytes();
+    if bytes.is_empty() {
+        return Err(DbError::General("empty DNS label".into()));
+    }
+    if bytes.len() > 63 {
+        return Err(DbError::General(format!(
+            "{name:?} is too long, max length is 63 bytes"
+        )));
+    }
+    if !is_dns_label_alphanumeric(bytes[0]) {
+        return Err(DbError::General(format!(
+            "{name:?} is not a valid DNS label: must start with a letter or number"
+        )));
+    }
+    if !is_dns_label_alphanumeric(bytes[bytes.len() - 1]) {
+        return Err(DbError::General(format!(
+            "{name:?} is not a valid DNS label: must end with a letter or number"
+        )));
+    }
+    if bytes.len() > 2 {
+        for byte in &bytes[1..bytes.len() - 1] {
+            if !is_dns_label_char(*byte) {
+                return Err(DbError::General(format!(
+                    "{name:?} is not a valid DNS label: contains invalid character {:?}",
+                    char::from(*byte)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sanitize_hostname_for_given_name(hostname: &str) -> String {
+    let hostname = hostname
+        .strip_suffix(".local")
+        .or_else(|| hostname.strip_suffix(".localdomain"))
+        .or_else(|| hostname.strip_suffix(".lan"))
+        .unwrap_or(hostname);
+    let bytes = hostname.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len().min(63);
+
+    while start < end && !is_dns_label_alphanumeric(bytes[start]) {
+        start += 1;
+    }
+    while start < end && !is_dns_label_alphanumeric(bytes[end - 1]) {
+        end -= 1;
+    }
+
+    let mut out = String::with_capacity(end.saturating_sub(start));
+    for (offset, byte) in bytes[start..end].iter().enumerate() {
+        let absolute = start + offset;
+        let boundary = absolute == start || absolute == end - 1;
+        match *byte {
+            b' ' | b'.' | b'@' | b'_' if !boundary => out.push('-'),
+            b'a'..=b'z' | b'0'..=b'9' | b'-' => out.push(char::from(*byte)),
+            b'A'..=b'Z' => out.push(char::from(byte.to_ascii_lowercase())),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn auto_given_name_base(hostname: &str) -> String {
+    let sanitized = sanitize_hostname_for_given_name(hostname);
+    if sanitized.is_empty() {
+        "node".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn resolve_given_name_from_existing<I>(base: &str, existing: I) -> String
+where
+    I: IntoIterator<Item = String>,
+{
+    let taken = existing
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut candidate = base.to_string();
+    for suffix in 1.. {
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        candidate = format!("{base}-{suffix}");
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+async fn resolve_auto_given_name(
+    pool: &SqlitePool,
+    self_id: Option<i64>,
+    hostname: &str,
+) -> Result<String> {
+    let base = auto_given_name_base(hostname);
+    let rows: Vec<String> = sqlx::query_scalar(
+        "
+        SELECT given_name
+        FROM nodes
+        WHERE deleted_at IS NULL
+          AND given_name IS NOT NULL
+          AND given_name != ''
+          AND (? IS NULL OR id != ?)
+        ",
+    )
+    .bind(self_id)
+    .bind(self_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(resolve_given_name_from_existing(&base, rows))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn resolve_postgres_auto_given_name(
+    conn: &mut PgConnection,
+    self_id: Option<i64>,
+    hostname: &str,
+) -> Result<String> {
+    let base = auto_given_name_base(hostname);
+    let rows: Vec<String> = sqlx::query_scalar(
+        "
+        SELECT given_name
+        FROM nodes
+        WHERE deleted_at IS NULL
+          AND given_name IS NOT NULL
+          AND given_name != ''
+          AND ($1::BIGINT IS NULL OR id != $1)
+        ",
+    )
+    .bind(self_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(resolve_given_name_from_existing(&base, rows))
+}
+
+async fn create_given_name(pool: &SqlitePool, params: &CreateParams) -> Result<String> {
+    if params.given_name.is_empty() {
+        resolve_auto_given_name(pool, None, &params.hostname).await
+    } else {
+        validate_given_name(&params.given_name)?;
+        Ok(params.given_name.clone())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn create_postgres_given_name(
+    conn: &mut PgConnection,
+    params: &CreateParams,
+) -> Result<String> {
+    if params.given_name.is_empty() {
+        resolve_postgres_auto_given_name(conn, None, &params.hostname).await
+    } else {
+        validate_given_name(&params.given_name)?;
+        Ok(params.given_name.clone())
+    }
+}
+
+async fn auth_path_given_name(pool: &SqlitePool, id: i64, params: &CreateParams) -> Result<String> {
+    if params.given_name.is_empty() {
+        return resolve_auto_given_name(pool, Some(id), &params.hostname).await;
+    }
+
+    validate_given_name(&params.given_name)?;
+    let count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM nodes
+        WHERE given_name = ? AND id != ? AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.given_name)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    if count > 0 {
+        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
+    }
+    Ok(params.given_name.clone())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn auth_path_postgres_given_name(
+    conn: &mut PgConnection,
+    id: i64,
+    params: &CreateParams,
+) -> Result<String> {
+    if params.given_name.is_empty() {
+        return resolve_postgres_auto_given_name(conn, Some(id), &params.hostname).await;
+    }
+
+    validate_given_name(&params.given_name)?;
+    let count: i64 = sqlx::query_scalar(
+        "
+        SELECT COUNT(*)
+        FROM nodes
+        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
+        ",
+    )
+    .bind(&params.given_name)
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if count > 0 {
+        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
+    }
+    Ok(params.given_name.clone())
 }
 
 pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<HeadscaleNodeRow> {
-    if !params.given_name.is_empty() {
-        validate_given_name(&params.given_name)?;
-    }
+    let given_name = create_given_name(pool, &params).await?;
 
     let now = now_unix();
     let tags = normalize_tags(params.tags);
@@ -300,7 +511,7 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&params.given_name)
+    .bind(&given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -330,9 +541,7 @@ pub async fn create_postgres_on_connection(
     conn: &mut PgConnection,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    if !params.given_name.is_empty() {
-        validate_given_name(&params.given_name)?;
-    }
+    let given_name = create_postgres_given_name(conn, &params).await?;
 
     let now = now_unix();
     let tags = normalize_tags(params.tags);
@@ -403,7 +612,7 @@ pub async fn create_postgres_on_connection(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&params.given_name)
+    .bind(&given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -556,24 +765,7 @@ pub async fn update_from_auth_path(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    if !params.given_name.is_empty() {
-        validate_given_name(&params.given_name)?;
-    }
-
-    let duplicate_given_name_count: i64 = sqlx::query_scalar(
-        "
-        SELECT COUNT(*)
-        FROM nodes
-        WHERE given_name = ? AND id != ? AND deleted_at IS NULL
-        ",
-    )
-    .bind(&params.given_name)
-    .bind(id)
-    .fetch_one(pool)
-    .await?;
-    if duplicate_given_name_count > 0 {
-        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
-    }
+    let given_name = auth_path_given_name(pool, id, &params).await?;
 
     let tags = normalize_tags(params.tags);
     let user_id = tag_owned_user_id(params.user_id, &tags);
@@ -614,7 +806,7 @@ pub async fn update_from_auth_path(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&params.given_name)
+    .bind(&given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -652,24 +844,7 @@ pub async fn update_postgres_from_auth_path_on_connection(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    if !params.given_name.is_empty() {
-        validate_given_name(&params.given_name)?;
-    }
-
-    let duplicate_given_name_count: i64 = sqlx::query_scalar(
-        "
-        SELECT COUNT(*)
-        FROM nodes
-        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
-        ",
-    )
-    .bind(&params.given_name)
-    .bind(id)
-    .fetch_one(&mut *conn)
-    .await?;
-    if duplicate_given_name_count > 0 {
-        return Err(DbError::General(NodeError::NameNotUnique.to_string()));
-    }
+    let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
 
     let tags = normalize_tags(params.tags);
     let user_id = tag_owned_user_id(params.user_id, &tags);
@@ -716,7 +891,7 @@ pub async fn update_postgres_from_auth_path_on_connection(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&params.given_name)
+    .bind(&given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -1588,6 +1763,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_auto_derives_given_name_like_headscale_go() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+
+        let mut first_params = node_params(user_id, auth_key_id);
+        first_params.hostname = "Peer.One!".into();
+        first_params.given_name.clear();
+        let first = create(db.pool(), first_params).await.unwrap();
+        assert_eq!(first.hostname, "Peer.One!");
+        assert_eq!(first.given_name, "peer-one");
+
+        let mut duplicate_params = node_params(user_id, auth_key_id);
+        duplicate_params.machine_key = "mkey:duplicate-host".into();
+        duplicate_params.node_key = "nodekey:duplicate-host".into();
+        duplicate_params.disco_key = "discokey:duplicate-host".into();
+        duplicate_params.ipv4 = Some("100.64.0.2".into());
+        duplicate_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        duplicate_params.hostname = "Peer.One!".into();
+        duplicate_params.given_name.clear();
+        let duplicate = create(db.pool(), duplicate_params).await.unwrap();
+        assert_eq!(duplicate.given_name, "peer-one-1");
+
+        let mut empty_params = node_params(user_id, auth_key_id);
+        empty_params.machine_key = "mkey:empty-host".into();
+        empty_params.node_key = "nodekey:empty-host".into();
+        empty_params.disco_key = "discokey:empty-host".into();
+        empty_params.ipv4 = Some("100.64.0.3".into());
+        empty_params.ipv6 = Some("fd7a:115c:a1e0::3".into());
+        empty_params.hostname = "!!!".into();
+        empty_params.given_name.clear();
+        let empty = create(db.pool(), empty_params).await.unwrap();
+        assert_eq!(empty.given_name, "node");
+    }
+
+    #[tokio::test]
+    async fn create_truncates_auto_given_name_before_collision_suffix() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let long_hostname = "node".repeat(20);
+        let expected_base = "node".repeat(15) + "nod";
+
+        let mut first_params = node_params(user_id, auth_key_id);
+        first_params.hostname.clone_from(&long_hostname);
+        first_params.given_name.clear();
+        let first = create(db.pool(), first_params).await.unwrap();
+        assert_eq!(first.given_name, expected_base);
+        assert_eq!(first.given_name.len(), 63);
+
+        let mut duplicate_params = node_params(user_id, auth_key_id);
+        duplicate_params.machine_key = "mkey:long-duplicate".into();
+        duplicate_params.node_key = "nodekey:long-duplicate".into();
+        duplicate_params.disco_key = "discokey:long-duplicate".into();
+        duplicate_params.ipv4 = Some("100.64.0.2".into());
+        duplicate_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        duplicate_params.hostname = long_hostname;
+        duplicate_params.given_name.clear();
+        let duplicate = create(db.pool(), duplicate_params).await.unwrap();
+        assert_eq!(duplicate.given_name, format!("{expected_base}-1"));
+    }
+
+    #[tokio::test]
     async fn tagged_nodes_are_tag_owned_without_user_id() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;
@@ -1699,6 +1937,63 @@ mod tests {
         assert_eq!(updated.user_id, Some(user_id));
         assert!(updated.tag_list().is_empty());
         assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_from_auth_path_auto_bumps_colliding_given_name() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut second_params = node_params(user_id, auth_key_id);
+        second_params.machine_key = "mkey:def".into();
+        second_params.node_key = "nodekey:def".into();
+        second_params.disco_key = "discokey:def".into();
+        second_params.hostname = "bob-laptop".into();
+        second_params.given_name = "bob-laptop".into();
+        second_params.ipv4 = Some("100.64.0.2".into());
+        second_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+        let second = create(db.pool(), second_params).await.unwrap();
+
+        let mut reauth_params = node_params(user_id, auth_key_id);
+        reauth_params.machine_key = "mkey:def".into();
+        reauth_params.node_key = "nodekey:reauth".into();
+        reauth_params.disco_key = "discokey:reauth".into();
+        reauth_params.hostname = "alice-laptop".into();
+        reauth_params.given_name.clear();
+        reauth_params.ipv4 = Some("100.64.0.2".into());
+        reauth_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
+
+        let updated = update_from_auth_path(db.pool(), second.id, reauth_params)
+            .await
+            .unwrap();
+        assert_eq!(updated.given_name, "alice-laptop-1");
+    }
+
+    #[tokio::test]
+    async fn update_from_auth_path_preserves_explicit_given_name_verbatim() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let node = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+        let renamed = rename(db.pool(), node.id, "AdminName").await.unwrap();
+        assert_eq!(renamed.given_name, "AdminName");
+
+        let mut reauth_params = node_params(user_id, auth_key_id);
+        reauth_params.node_key = "nodekey:reauth".into();
+        reauth_params.hostname = "client-new-host".into();
+        reauth_params.given_name = "AdminName".into();
+
+        let updated = update_from_auth_path(db.pool(), node.id, reauth_params)
+            .await
+            .unwrap();
+        assert_eq!(updated.hostname, "client-new-host");
+        assert_eq!(updated.given_name, "AdminName");
     }
 
     #[tokio::test]
@@ -1925,11 +2220,21 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(rename(db.pool(), node.id, "Alice").await.is_err());
-        assert!(rename(db.pool(), node.id, "a").await.is_err());
+        assert_eq!(
+            rename(db.pool(), node.id, "Alice")
+                .await
+                .unwrap()
+                .given_name,
+            "Alice"
+        );
+        assert_eq!(
+            rename(db.pool(), node.id, "a").await.unwrap().given_name,
+            "a"
+        );
         assert!(rename(db.pool(), node.id, "alice_laptop").await.is_err());
         assert!(rename(db.pool(), node.id, "-alice").await.is_err());
         assert!(rename(db.pool(), node.id, "alice-").await.is_err());
+        assert!(rename(db.pool(), node.id, "alice.laptop").await.is_err());
     }
 
     #[tokio::test]

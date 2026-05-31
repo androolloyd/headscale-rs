@@ -206,6 +206,83 @@ pub struct MachineRecord {
     pub register_method: i32,
 }
 
+fn is_dns_label_alphanumeric(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
+fn is_dns_label_char(byte: u8) -> bool {
+    is_dns_label_alphanumeric(byte) || byte == b'-'
+}
+
+pub fn valid_given_name_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    if !is_dns_label_alphanumeric(bytes[0]) || !is_dns_label_alphanumeric(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes.len() <= 2
+        || bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| is_dns_label_char(*byte))
+}
+
+fn trim_common_hostname_suffixes(hostname: &str) -> &str {
+    hostname
+        .strip_suffix(".local")
+        .or_else(|| hostname.strip_suffix(".localdomain"))
+        .or_else(|| hostname.strip_suffix(".lan"))
+        .unwrap_or(hostname)
+}
+
+pub fn sanitize_hostname_for_given_name(hostname: &str) -> String {
+    let hostname = trim_common_hostname_suffixes(hostname);
+    let bytes = hostname.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len().min(63);
+
+    while start < end && !is_dns_label_alphanumeric(bytes[start]) {
+        start += 1;
+    }
+    while start < end && !is_dns_label_alphanumeric(bytes[end - 1]) {
+        end -= 1;
+    }
+
+    let mut out = String::with_capacity(end.saturating_sub(start));
+    for (offset, byte) in bytes[start..end].iter().enumerate() {
+        let absolute = start + offset;
+        let boundary = absolute == start || absolute == end - 1;
+        match *byte {
+            b' ' | b'.' | b'@' | b'_' if !boundary => out.push('-'),
+            b'a'..=b'z' | b'0'..=b'9' | b'-' => out.push(char::from(*byte)),
+            b'A'..=b'Z' => out.push(char::from(byte.to_ascii_lowercase())),
+            _ => {}
+        }
+    }
+    out
+}
+
+pub fn auto_given_name_base(hostname: &str) -> String {
+    let sanitized = sanitize_hostname_for_given_name(hostname);
+    if sanitized.is_empty() {
+        "node".to_string()
+    } else {
+        sanitized
+    }
+}
+
+pub fn is_auto_derived_given_name(given_name: &str, hostname: &str) -> bool {
+    let base = auto_given_name_base(hostname);
+    if given_name == base {
+        return true;
+    }
+    let Some(suffix) = given_name.strip_prefix(&format!("{base}-")) else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.parse::<u64>().is_ok()
+}
+
 impl MachineRecord {
     pub fn stable_node_id(&self) -> u64 {
         self.node_id
@@ -383,7 +460,6 @@ impl MachineRecord {
     /// Replace the stored Hostinfo snapshot and refresh compatibility
     /// projections that older admin/runtime paths still read directly.
     pub fn replace_host_info(&mut self, host_info: HostInfo) {
-        self.hostname.clone_from(&host_info.hostname);
         self.os.clone_from(&host_info.os);
         self.os_version.clone_from(&host_info.os_version);
         self.available_routes.clone_from(&host_info.routable_ips);
@@ -1776,6 +1852,52 @@ mod tests {
         assert_eq!(strip_key_prefix("nodekey:1234"), Some("1234"));
         assert_eq!(strip_key_prefix("discokey:beef"), Some("beef"));
         assert_eq!(strip_key_prefix("plainhex"), None);
+    }
+
+    #[test]
+    fn given_name_helpers_match_tailscale_dnsname_edges() {
+        assert_eq!(sanitize_hostname_for_given_name("Peer.One!"), "peer-one");
+        assert_eq!(sanitize_hostname_for_given_name("HOST_NAME"), "host-name");
+        assert_eq!(sanitize_hostname_for_given_name("---a---"), "a");
+        assert_eq!(sanitize_hostname_for_given_name("node.local"), "node");
+        assert_eq!(sanitize_hostname_for_given_name("!!!"), "");
+        assert_eq!(auto_given_name_base("!!!"), "node");
+        assert!(is_auto_derived_given_name("node", "!!!"));
+        assert!(is_auto_derived_given_name("node-1", "!!!"));
+        assert!(!is_auto_derived_given_name("admin-name", "!!!"));
+
+        assert!(valid_given_name_label("a"));
+        assert!(valid_given_name_label("Alice"));
+        assert!(valid_given_name_label("node-1"));
+        assert!(!valid_given_name_label(""));
+        assert!(!valid_given_name_label("alice.laptop"));
+        assert!(!valid_given_name_label("alice_laptop"));
+        assert!(!valid_given_name_label("-alice"));
+        assert!(!valid_given_name_label("alice-"));
+        assert!(!valid_given_name_label(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn replace_host_info_preserves_stored_given_name_projection() {
+        let now = chrono::Utc::now();
+        let mut record = MachineRecord::new_at(
+            now,
+            "node".into(),
+            "machine".into(),
+            "alice".into(),
+            "admin-name".into(),
+            "100.64.0.1".parse().unwrap(),
+            false,
+        );
+
+        record.replace_host_info(HostInfo {
+            hostname: "raw-client-name".into(),
+            os: "linux".into(),
+            ..HostInfo::default()
+        });
+
+        assert_eq!(record.hostname, "admin-name");
+        assert_eq!(record.host_info_for_node().hostname, "raw-client-name");
     }
 
     #[test]

@@ -62,7 +62,7 @@ use super::register::{CAPABILITY_FILE_SHARING, record_to_map_node};
 use super::routes::{active_exit_routes, auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
-    PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX,
+    PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX, is_auto_derived_given_name,
     is_supported_capability_version, stable_id_from_key, strip_key_prefix,
     unsupported_client_error,
 };
@@ -949,7 +949,10 @@ async fn map_inner(
                     .into_response();
             }
         };
-        let mut hostinfo = host_info_for_map_update(&own.host_info_for_node(), hostinfo);
+        let previous_hostinfo = own.host_info_for_node();
+        let previous_raw_hostname = previous_hostinfo.hostname.clone();
+        let auto_derived_name = is_auto_derived_given_name(&own.hostname, &previous_raw_hostname);
+        let mut hostinfo = host_info_for_map_update(&previous_hostinfo, hostinfo);
         hostinfo.routable_ips.clone_from(&announced_routes);
         let addr = own.primary_addr_string().unwrap_or_default();
         let user = (!own.user.is_empty()).then_some(own.user.as_str());
@@ -972,8 +975,15 @@ async fn map_inner(
                     .into_response();
             }
         };
-        if own.host_info_for_node() != hostinfo {
+        if previous_hostinfo != hostinfo {
+            let raw_hostname = hostinfo.hostname.clone();
             own.replace_host_info(hostinfo);
+            if auto_derived_name && !raw_hostname.is_empty() {
+                own.hostname =
+                    state
+                        .machines
+                        .resolve_auto_given_name(&node_key_hex, &raw_hostname, None);
+            }
             record_changed = true;
             record_change_reason = MapChangeReason::FullSelfUpdate;
         }
@@ -3041,6 +3051,93 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn map_request_preserves_admin_renamed_given_name() {
+        let (state, _dir) = fixture();
+        let node_key = "e2".repeat(32);
+        insert_peer(&state, &node_key, "old-host", 10);
+        assert!(state.machines.rename(&node_key, "admin-name".into()));
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "Hostname": "client-new-host",
+                                "OS": "linux"
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state
+            .machines
+            .get(&node_key)
+            .expect("node still registered");
+        assert_eq!(rec.hostname, "admin-name");
+        assert_eq!(rec.host_info_for_node().hostname, "client-new-host");
+    }
+
+    #[tokio::test]
+    async fn map_request_recomputes_node_fallback_given_name() {
+        let (state, _dir) = fixture();
+        let node_key = "e6".repeat(32);
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            node_key.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "node".into(),
+            Ipv4Addr::new(100, 64, 0, 14),
+            false,
+        );
+        record.host_info.hostname = "!!!".into();
+        state.machines.upsert(node_key.clone(), record);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "Hostname": "client-new-host",
+                                "OS": "linux"
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rec = state
+            .machines
+            .get(&node_key)
+            .expect("node still registered");
+        assert_eq!(rec.hostname, "client-new-host");
+        assert_eq!(rec.host_info_for_node().hostname, "client-new-host");
+    }
+
     #[cfg(feature = "admin")]
     #[tokio::test]
     async fn map_request_persists_runtime_state_to_go_nodes() {
@@ -3223,6 +3320,94 @@ mod tests {
         assert_eq!(net_info.working_udp, Some(true));
         assert_eq!(net_info.link_type, "wired");
         assert_eq!(net_info.derp_latency.get("901-v4"), Some(&0.012));
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn map_request_persists_admin_renamed_given_name() {
+        use crate::admin::machines::PersistentMachineAdmin;
+        use crate::admin::users::{PersistentUserAdmin, UserAdmin};
+
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users));
+        let node_key = "e7".repeat(32);
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            node_key.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "alice".into(),
+            "old-host".into(),
+            Ipv4Addr::new(100, 64, 0, 45),
+            false,
+        );
+        record.register_method = 1;
+        machines
+            .create_or_update_auth_key_path(
+                record.clone(),
+                &crate::policy::PolicyStore::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let row = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{node_key}"),
+        )
+        .await
+        .unwrap();
+        headscale_db::headscale_nodes::rename(db.pool(), row.id, "admin-name")
+            .await
+            .unwrap();
+
+        record.hostname = "admin-name".into();
+        record.host_info.hostname = "old-host".into();
+        let (mut state, _dir) = fixture();
+        state.machines.upsert(node_key.clone(), record);
+        state.registration_store = Some(machines.clone());
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "Version": 113,
+                            "OmitPeers": true,
+                            "Hostinfo": {
+                                "Hostname": "client-new-host",
+                                "OS": "linux"
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let row = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{node_key}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.hostname, "client-new-host");
+        assert_eq!(row.given_name, "admin-name");
+        assert_eq!(row.host_info_value()["Hostname"], "client-new-host");
+
+        let hydrated = MachineRegistry::new();
+        machines.hydrate_wire_registry(&hydrated).await.unwrap();
+        let wire = hydrated.get(&node_key).unwrap();
+        assert_eq!(wire.hostname, "admin-name");
+        assert_eq!(wire.host_info_for_node().hostname, "client-new-host");
     }
 
     #[tokio::test]

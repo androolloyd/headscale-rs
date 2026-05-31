@@ -381,3 +381,20 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   especially NodeStore worker batching semantics and remaining reason/state edge
   deltas
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed
+
+## 2026-05-31 GivenName parity slice
+
+- Registration now preserves raw client `Hostname` separately from DNS
+  `GivenName`; SQLite/Postgres node writes auto-derive empty `given_name`
+  from the raw hostname with Tailscale `dnsname.SanitizeHostname` semantics,
+  `node` fallback, and current upstream's monotonic collision suffixes.
+- Explicit rename and explicit update preservation now use
+  `dnsname.ValidLabel`-style validation, so one-byte labels and uppercase are
+  accepted, while dots/underscores/edge hyphens are rejected.
+- Same-machine auth-key, web/CLI, OIDC, and runtime Hostinfo update paths now
+  preserve admin-renamed GivenNames. Auto-derived names still recompute on
+  Hostinfo hostname changes, including the `node` fallback case for empty
+  sanitized labels.
+- Verified locally with `headscale-db --lib` and `headscale-api --features
+  admin --lib`; clippy/format gates should be rerun before the final commit if
+  more edits land.

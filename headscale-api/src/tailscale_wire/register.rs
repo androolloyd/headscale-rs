@@ -79,7 +79,8 @@ use super::noise::{NoisePeerMachineKey, NoiseRequestCancellation};
 use super::routes::{auto_approved_routes_for_node, normalize_routes};
 use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
-    is_supported_capability_version, strip_key_prefix, unsupported_client_error,
+    is_auto_derived_given_name, is_supported_capability_version, strip_key_prefix,
+    unsupported_client_error,
 };
 use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
 
@@ -442,6 +443,19 @@ async fn register_inner(
     } else {
         None
     };
+    let given_name = if let Some((_, existing)) = existing_machine.as_ref()
+        && !is_auto_derived_given_name(&existing.hostname, &existing.host_info_for_node().hostname)
+    {
+        existing.hostname.clone()
+    } else {
+        state.machines.resolve_auto_given_name(
+            &node_key_hex,
+            &hostname,
+            existing_machine
+                .as_ref()
+                .map(|(old_node_key, _)| old_node_key.as_str()),
+        )
+    };
     let rec = MachineRecord {
         node_id: None,
         node_key_hex: node_key_hex.clone(),
@@ -450,7 +464,7 @@ async fn register_inner(
         user_id: None,
         user_display_name: String::new(),
         user_profile_pic_url: String::new(),
-        hostname,
+        hostname: given_name,
         os,
         os_version,
         host_info,
@@ -2109,6 +2123,48 @@ mod tests {
             rotated.approved_routes,
             vec!["10.40.0.0/24", "10.41.0.0/24"]
         );
+    }
+
+    #[tokio::test]
+    async fn authkey_reregister_preserves_admin_renamed_given_name() {
+        let (state, redeemer, _dir) = fixture();
+        let first_authkey = "hskey-auth-admin-name-first";
+        let second_authkey = "hskey-auth-admin-name-second";
+        redeemer.insert(first_authkey, "alice");
+        redeemer.insert(second_authkey, "alice");
+        let app = router(state.clone());
+        let first_node_key = "3c".repeat(32);
+        let second_node_key = "3d".repeat(32);
+        let machine_key_hex = "8c".repeat(32);
+
+        let body = req_body(&first_node_key, first_authkey);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{first_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.rename(&first_node_key, "admin-name".into()));
+
+        let mut body = req_body(&second_node_key, second_authkey);
+        body["Hostinfo"]["Hostname"] = serde_json::json!("client-new-host");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{second_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(state.machines.get(&first_node_key).is_none());
+        let rotated = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(rotated.hostname, "admin-name");
+        assert_eq!(rotated.host_info_for_node().hostname, "client-new-host");
     }
 
     #[tokio::test]

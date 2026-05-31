@@ -60,8 +60,9 @@ use sqlx::SqlitePool;
 use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
     IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
-    PersistedMachineRegistration, RegistrationCache, routes::auto_approved_routes_for_node,
-    wire::HostInfo,
+    PersistedMachineRegistration, RegistrationCache,
+    routes::auto_approved_routes_for_node,
+    wire::{HostInfo, is_auto_derived_given_name, valid_given_name_label},
 };
 
 use super::auth::now_unix;
@@ -676,7 +677,13 @@ impl PersistentMachineAdmin {
             let row = headscale_db::headscale_nodes::update_from_auth_path(
                 &self.pool,
                 existing.id,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+                create_params_for_auth_path(
+                    &record,
+                    wire_record,
+                    user_id,
+                    auth_key_id,
+                    Some(&existing),
+                ),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -700,7 +707,7 @@ impl PersistentMachineAdmin {
             self.reject_duplicate_addresses(None, &record).await?;
             let row = headscale_db::headscale_nodes::create(
                 &self.pool,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -1161,7 +1168,13 @@ impl PersistentPostgresMachineAdmin {
             let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
                 &self.pool,
                 existing.id,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+                create_params_for_auth_path(
+                    &record,
+                    wire_record,
+                    user_id,
+                    auth_key_id,
+                    Some(&existing),
+                ),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -1185,7 +1198,7 @@ impl PersistentPostgresMachineAdmin {
             self.reject_duplicate_addresses(None, &record).await?;
             let row = headscale_db::headscale_nodes::create_postgres(
                 &self.pool,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id),
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None),
             )
             .await
             .map_err(|e| db_error_to_machine(e, &record.id))?;
@@ -2605,8 +2618,23 @@ impl MachineAdmin for WireMachineAdmin {
                 "hostname must not be empty".into(),
             ));
         }
+        if !valid_given_name_label(hostname) {
+            return Err(MachineAdminError::BadRequest(
+                "given name is not a valid DNS label".into(),
+            ));
+        }
         if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
             return Err(MachineAdminError::NotFound(id.to_string()));
+        }
+        if self
+            .registry
+            .snapshot()
+            .iter()
+            .any(|(node_key, rec)| node_key != id && rec.hostname == hostname)
+        {
+            return Err(MachineAdminError::BadRequest(
+                "given name already in use by another node".into(),
+            ));
         }
         if !self.registry.rename(id, hostname.to_string()) {
             return Err(MachineAdminError::NotFound(id.to_string()));
@@ -2703,11 +2731,23 @@ fn create_params_for_auth_path(
     wire_record: Option<&MachineRecord>,
     user_id: Option<i64>,
     auth_key_id: Option<i64>,
+    existing: Option<&headscale_db::headscale_nodes::HeadscaleNodeRow>,
 ) -> headscale_db::headscale_nodes::CreateParams {
     let Ok(canonical) = canonical_wire_record_for_auth_path(record, wire_record) else {
         return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
     };
     let mut params = create_params_for_wire_record(&canonical, user_id, auth_key_id);
+    if let Some(existing) = existing {
+        if !existing.given_name.is_empty()
+            && !is_auto_derived_given_name(&existing.given_name, &existing.hostname)
+        {
+            params.given_name.clone_from(&existing.given_name);
+        } else {
+            params.given_name.clear();
+        }
+    } else {
+        params.given_name.clear();
+    }
     params.ipv6.clone_from(&record.ipv6);
     params
 }
@@ -2755,6 +2795,7 @@ fn create_params_for_wire_record(
 ) -> headscale_db::headscale_nodes::CreateParams {
     let admin = machine_admin_record_from_wire(record);
     let mut params = create_params_for_record_with_auth_key(&admin, user_id, auth_key_id);
+    params.hostname = record.host_info_for_node().hostname;
     params.disco_key = record.disco_key.clone().unwrap_or_default();
     params.endpoints.clone_from(&record.endpoints);
     params.host_info = host_info_for_wire_record(record);
@@ -4143,10 +4184,18 @@ mod tests {
             )
             .await
             .unwrap();
+        headscale_db::headscale_nodes::rename(
+            db.pool(),
+            created.record.node_id as i64,
+            "AdminName",
+        )
+        .await
+        .unwrap();
 
         let mut rotated = original.clone();
         rotated.node_key_hex = "cc".repeat(32);
         rotated.hostname = "alice-rotated".into();
+        rotated.host_info.hostname = "alice-rotated".into();
         rotated.ipv4 = Some(Ipv4Addr::new(100, 64, 99, 99));
         rotated.available_routes = vec!["10.1.0.0/24".into()];
         let result = admin
@@ -4162,6 +4211,7 @@ mod tests {
         assert_eq!(result.replaced_node_key_hex, Some(original.node_key_hex));
         assert_eq!(result.record.node_id, created.record.node_id);
         assert_eq!(result.record.id, rotated.node_key_hex);
+        assert_eq!(result.record.name, "AdminName");
         assert_eq!(result.record.ipv4, created.record.ipv4);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
             .fetch_one(db.pool())
@@ -4173,6 +4223,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(raw.node_key, format!("nodekey:{}", rotated.node_key_hex));
+        assert_eq!(raw.hostname, "alice-rotated");
+        assert_eq!(raw.given_name, "AdminName");
         assert_eq!(raw.auth_key_id, Some(second_key.row.id));
         assert_eq!(
             raw.register_method,

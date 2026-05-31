@@ -148,10 +148,6 @@ if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
   exit 2
 fi
-if ((route_via_reload_restart_flag && route_via_multiprefix_restart_flag)); then
-  echo "REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD cannot be combined with REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX yet" >&2
-  exit 2
-fi
 if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
   exit 2
@@ -594,6 +590,54 @@ write_route_health_reload_policy() {
 }
 
 write_route_via_reload_policy() {
+  if ((route_via_multiprefix_restart_flag)); then
+    cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-a": ["router@"],
+    "tag:router-b": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-a", "tag:router-b"],
+      "${route_b}": ["tag:router-a", "tag:router-b"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-a", "tag:router-b"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route_b}"],
+      "ip": ["*"],
+      "via": ["tag:router-a"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-a"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route_b}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    }
+  ]
+}
+EOF
+    return
+  fi
   cat >"${work_dir}/policy.hujson" <<EOF
 {
   "tagOwners": {
@@ -1916,6 +1960,22 @@ wait_for_route_via_peer_maps() {
 wait_for_route_via_reloaded_peer_maps() {
   local label="$1"
   local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  if ((route_via_multiprefix_restart_flag)); then
+    wait_for_route_via_owner "${label} alice route ${route} via router-b" \
+      "${observer_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-a-reloaded.json"
+    wait_for_route_via_owner "${label} alice route ${route_b} via router-a" \
+      "${observer_name}" "${router_name}" "${route_b}" "${work_dir}/route-via-${safe_label}-alice-b-reloaded.json"
+    wait_for_route_via_owner "${label} bob route ${route} via router-a" \
+      "${bob_name}" "${router_name}" "${route}" "${work_dir}/route-via-${safe_label}-bob-a-reloaded.json"
+    wait_for_route_via_owner "${label} bob route ${route_b} via router-b" \
+      "${bob_name}" "${router_b_name}" "${route_b}" "${work_dir}/route-via-${safe_label}-bob-b-reloaded.json"
+    cat "${work_dir}/route-via-${safe_label}-alice-a-reloaded.json"
+    cat "${work_dir}/route-via-${safe_label}-alice-b-reloaded.json"
+    cat "${work_dir}/route-via-${safe_label}-bob-a-reloaded.json"
+    cat "${work_dir}/route-via-${safe_label}-bob-b-reloaded.json"
+    return
+  fi
+
   wait_for_route_via_owner "${label} alice route via router-b" \
     "${observer_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-reloaded.json"
   wait_for_route_via_owner "${label} bob route via router-b" \

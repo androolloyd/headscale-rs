@@ -81,6 +81,7 @@ smoke_ids=(
   postgres-route-via-restart
   postgres-route-via-reload-restart
   postgres-route-via-multiprefix-restart
+  postgres-route-via-multiprefix-reload-restart
   postgres-route-health-restart
   postgres-route-health-primary-restart
   postgres-route-health-reload-restart
@@ -159,6 +160,7 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
   database
   database
   database
@@ -263,6 +265,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-via-restart-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-restart-smoke.sh
+  tools/real-client/postgres-route-via-multiprefix-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-restart-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-smoke.sh
@@ -354,6 +357,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-multiprefix-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
@@ -445,6 +449,7 @@ smoke_assertions=(
   "production Postgres current-head grants via survives server restart"
   "production Postgres current-head grants via policy reload survives server restart"
   "production Postgres current-head multi-prefix grants via survives server restart"
+  "production Postgres current-head multi-prefix grants via policy reload survives server restart"
   "production Postgres current-head route-health survives server restart"
   "production Postgres route-health primary selection survives server restart"
   "production Postgres route-health policy reload survives server restart"

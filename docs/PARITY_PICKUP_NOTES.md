@@ -362,7 +362,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production Pg `serve` process smoke covers public
   health plus local gRPC health/user/preauth/API-key/policy/node CLI paths, and
-  paired env-gated Pg auth-key, web-registration, route-approval, exit-node
+  paired env-gated Pg auth-key, online/LastSeen, web-registration, route-approval, exit-node
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health restart, route-health
@@ -375,7 +375,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-six Pg rows, including
+  CI now provisions Postgres for all thirty-seven Pg rows, including
+  `postgres-online-lastseen`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-via-same-tag-restart`,
   `postgres-ssh-oidc-check`,
@@ -495,3 +496,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `grants[].via` route ownership survives production Postgres restart.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-six Postgres stock-client rows.
+
+## 2026-05-31 Postgres online/LastSeen smoke slice
+
+- Added paired `postgres-online-lastseen` Rust/headscale-go rows over the
+  backend-aware online/LastSeen harness. The row proves the standalone
+  production Postgres lifecycle smoke records online state and LastSeen after
+  disconnect, without relying only on the broader auth-key row.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-seven Postgres stock-client rows.

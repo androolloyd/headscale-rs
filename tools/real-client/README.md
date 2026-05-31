@@ -78,6 +78,7 @@ predates the executable PingRequest lifecycle.
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
+| Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
 | Database | `postgres-web-register-unowned-tag` | `postgres-web-register-unowned-tag-smoke.sh` | `postgres-web-register-unowned-tag-headscale-go-smoke.sh` | Production Postgres web registration rejects unowned requested tag |
@@ -599,18 +600,26 @@ Additional knobs:
   wrappers.
 - `REAL_CLIENT_EXPECT_APPROVED_ROUTES` defaults to the approved routes.
 
-The Postgres route-approval scenario runs the same single-node route
-advertisement and approval flow through production `headscale server`/headscale-go
-`serve` processes backed by a temporary Postgres database:
+The Postgres online/LastSeen scenario runs the single-node lifecycle flow
+through production `headscale server`/headscale-go `serve` processes backed by
+a temporary Postgres database:
+
+```sh
+tools/real-client/postgres-online-lastseen-smoke.sh
+tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
+```
+
+The Postgres route-approval scenario adds route advertisement and approval on
+top of the same production Postgres lifecycle harness:
 
 ```sh
 tools/real-client/postgres-route-approve-smoke.sh
 tools/real-client/postgres-route-approve-headscale-go-smoke.sh
 ```
 
-It uses `HEADSCALE_DB_POSTGRES_TEST_URL`, skips cleanly when that URL is not
-set, and asserts the CLI route state, approved-route netmap projection, online
-state, and LastSeen transition after disconnect.
+Both use `HEADSCALE_DB_POSTGRES_TEST_URL` and skip cleanly when that URL is not
+set. The route row additionally asserts CLI route state and approved-route
+netmap projection.
 
 The Postgres OIDC scenario runs the production OIDC confirmation flow against
 Rust and headscale-go with a temporary Postgres database:

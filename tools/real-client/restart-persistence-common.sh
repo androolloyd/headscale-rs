@@ -24,6 +24,7 @@ initial_tag="${REAL_CLIENT_RESTART_INITIAL_TAG:-tag:server}"
 mutated_tag="${REAL_CLIENT_RESTART_MUTATED_TAG:-tag:db}"
 route_via_restart="${REAL_CLIENT_RESTART_ROUTE_VIA:-false}"
 route_via_multiprefix_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX:-false}"
+route_via_reload_restart="${REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD:-false}"
 route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
@@ -62,6 +63,19 @@ case "${route_via_multiprefix_restart}" in
     ;;
   *)
     echo "REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX must be true or false, got ${route_via_multiprefix_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_via_reload_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_via_reload_restart_flag=1
+    route_via_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_via_reload_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD must be true or false, got ${route_via_reload_restart}" >&2
     exit 2
     ;;
 esac
@@ -132,6 +146,10 @@ if ((web_register_restart_flag && (route_via_restart_flag || route_health_restar
 fi
 if ((route_via_restart_flag && route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
+  exit 2
+fi
+if ((route_via_reload_restart_flag && route_via_multiprefix_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_VIA_RELOAD cannot be combined with REAL_CLIENT_RESTART_ROUTE_VIA_MULTIPREFIX yet" >&2
   exit 2
 fi
 if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
@@ -573,6 +591,41 @@ write_route_health_reload_policy() {
       ],
     })
   ' "${route}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
+}
+
+write_route_via_reload_policy() {
+  cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-a": ["router@"],
+    "tag:router-b": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-a", "tag:router-b"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-a", "tag:router-b"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-b"]
+    }
+  ]
+}
+EOF
 }
 
 write_database_config() {
@@ -1860,6 +1913,26 @@ wait_for_route_via_peer_maps() {
   cat "${work_dir}/route-via-${safe_label}-bob.json"
 }
 
+wait_for_route_via_reloaded_peer_maps() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for_route_via_owner "${label} alice route via router-b" \
+    "${observer_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-alice-reloaded.json"
+  wait_for_route_via_owner "${label} bob route via router-b" \
+    "${bob_name}" "${router_b_name}" "${route}" "${work_dir}/route-via-${safe_label}-bob-reloaded.json"
+  cat "${work_dir}/route-via-${safe_label}-alice-reloaded.json"
+  cat "${work_dir}/route-via-${safe_label}-bob-reloaded.json"
+}
+
+reload_route_via_policy() {
+  echo "::group::reload route-via policy"
+  write_route_via_reload_policy
+  kill -HUP "${server_pid}"
+  wait_for_server "${target} health after route-via policy reload" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for_route_via_reloaded_peer_maps "after policy reload"
+  echo "::endgroup::"
+}
+
 peer_map_has_route_and_tag() {
   local observer="$1"
   local peer="$2"
@@ -2068,6 +2141,9 @@ elif ((route_via_restart_flag)); then
   login_observer_with_web_registration "${bob_name}" bob
   assert_route_via_persisted_nodes "before-restart"
   wait_for_route_via_peer_maps "before restart"
+  if ((route_via_reload_restart_flag)); then
+    reload_route_via_policy
+  fi
 
   stop_server
   start_server
@@ -2076,7 +2152,11 @@ elif ((route_via_restart_flag)); then
   wait_for "alice reconnected after restart" "tailscale_logged_in '${observer_name}'"
   wait_for "bob reconnected after restart" "tailscale_logged_in '${bob_name}'"
   assert_route_via_persisted_nodes "after-restart"
-  wait_for_route_via_peer_maps "after restart"
+  if ((route_via_reload_restart_flag)); then
+    wait_for_route_via_reloaded_peer_maps "after restart"
+  else
+    wait_for_route_via_peer_maps "after restart"
+  fi
 elif ((route_health_restart_flag)); then
   if ((route_health_reload_restart_flag)); then
     create_route_health_reload_users_and_keys

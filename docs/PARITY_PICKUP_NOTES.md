@@ -161,10 +161,12 @@ Recent accepted slices:
   metadata before Postgres-backed CLI route approval.
 - This slice expands the backend-aware restart harness into current-head
   route-edge coverage with paired `postgres-route-via-restart`,
+  `postgres-route-via-reload-restart`,
   `postgres-route-health-restart`, and `postgres-route-health-reload-restart`
   rows. They cover Pg-backed persisted nodes/routes/policies across production
-  restart while exercising `grants[].via`, route-health failover, and
-  route-health policy reload behavior against Rust and headscale-go.
+  restart while exercising `grants[].via`, route-via policy reload,
+  route-health failover, and route-health policy reload behavior against Rust
+  and headscale-go.
 - This slice broadens those Postgres route-edge restart rows with paired
   `postgres-route-via-multiprefix-restart`,
   `postgres-route-health-primary-restart`,
@@ -195,7 +197,7 @@ Current multi-agent split:
   stock-client auth-key, web-registration, route-approval, exit-node
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval restart,
   web-registration restart, restart-persistence, route-via restart,
-  route-via multiprefix restart, route-health restart, route-health
+  route-via reload+restart, route-via multiprefix restart, route-health restart, route-health
   primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, and route-health
   mixed-exit all-unhealthy restart smokes are now checked into the real-client
@@ -335,7 +337,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   paired env-gated Pg auth-key, web-registration, route-approval, exit-node
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
-  route-via multiprefix restart, route-health restart, route-health
+  route-via reload+restart, route-via multiprefix restart, route-health restart, route-health
   primary-selection restart, reload+restart, route-health all-unhealthy restart,
   route-health mixed-exit restart, and route-health mixed-exit all-unhealthy
   restart stock-client smokes are checked into the real-client matrix and

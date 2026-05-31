@@ -1596,11 +1596,7 @@ fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
         cert_name: String::new(),
         ipv4: cfg.ipv4.clone(),
         ipv6: cfg.ipv6.clone(),
-        derp_port: if cfg.derp_port == 443 {
-            0
-        } else {
-            cfg.derp_port
-        },
+        derp_port: cfg.derp_port,
         stun_port,
         stun_only: cfg.stun_only,
         insecure_for_tests: cfg.insecure_for_tests,
@@ -3070,7 +3066,7 @@ database:
     }
 
     #[test]
-    fn embedded_derp_map_omits_default_tls_derp_port() {
+    fn embedded_derp_map_preserves_default_tls_derp_port_like_headscale_go() {
         let cfg = EmbeddedDerpConfig {
             enabled: true,
             host_name: "derp.example.com".into(),
@@ -3083,7 +3079,7 @@ database:
         let map = derp_map_from_embedded_config(&cfg);
         let node = &map.regions.get(&900).unwrap().nodes[0];
 
-        assert_eq!(node.derp_port, 0);
+        assert_eq!(node.derp_port, 443);
         assert_eq!(node.stun_port, 3478);
     }
 

@@ -1392,14 +1392,12 @@ pub mod upstream {
 
     impl ApiKeySelector {
         fn from_parts(prefix: String, id: u64) -> Result<Self, Status> {
-            match (prefix.trim().is_empty(), id) {
-                (true, 0) => Err(Status::invalid_argument(
-                    "either prefix or id must be provided",
-                )),
+            match (prefix.is_empty(), id) {
+                (true, 0) => Err(Status::invalid_argument("must provide id or prefix")),
                 (false, 0) => Ok(Self::Prefix(prefix)),
                 (true, id) => Ok(Self::Id(id)),
                 (false, _) => Err(Status::invalid_argument(
-                    "only one of prefix or id can be provided",
+                    "provide either id or prefix, not both",
                 )),
             }
         }
@@ -4623,6 +4621,17 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "must provide id or prefix");
+
+        let err = service
+            .delete_api_key(Request::new(DeleteApiKeyRequest {
+                prefix: String::new(),
+                id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "must provide id or prefix");
 
         let err = service
             .delete_api_key(Request::new(DeleteApiKeyRequest {
@@ -4632,6 +4641,17 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "provide either id or prefix, not both");
+
+        let err = service
+            .expire_api_key(Request::new(ExpireApiKeyRequest {
+                prefix: "hskey-api-abcdefghijkl-***".into(),
+                id: 1,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "provide either id or prefix, not both");
     }
 
     #[tokio::test]

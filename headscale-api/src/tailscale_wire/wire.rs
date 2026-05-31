@@ -99,6 +99,12 @@ pub struct MachineRecord {
     /// headscale-go-compatible database. In-memory embedders leave it
     /// unset and fall back to a deterministic node-key-derived ID.
     pub node_id: Option<u64>,
+    /// Upstream `nodes.auth_key_id` for auth-key registrations.
+    ///
+    /// Used during same-node re-registration to mirror headscale-go:
+    /// a used/expired preauth key may be accepted only by the node
+    /// that originally registered with that key.
+    pub auth_key_id: Option<i64>,
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
     /// path `/machine/{node_key}/map` carries the raw hex.
     pub node_key_hex: String,
@@ -425,6 +431,7 @@ impl MachineRecord {
     ) -> Self {
         Self {
             node_id: None,
+            auth_key_id: None,
             node_key_hex,
             machine_key_hex,
             user,

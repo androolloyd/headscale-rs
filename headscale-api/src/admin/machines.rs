@@ -944,6 +944,7 @@ impl PersistentMachineAdmin {
             ephemeral,
         );
         record.node_id = u64::try_from(row.id).ok();
+        record.auth_key_id = row.auth_key_id;
         record.set_user_identity(
             user_identity.id,
             user_identity.login_name,
@@ -1434,6 +1435,7 @@ impl PersistentPostgresMachineAdmin {
             ephemeral,
         );
         record.node_id = u64::try_from(row.id).ok();
+        record.auth_key_id = row.auth_key_id;
         record.set_user_identity(
             user_identity.id,
             user_identity.login_name,
@@ -2734,7 +2736,8 @@ fn create_params_for_auth_path(
     let Ok(canonical) = canonical_wire_record_for_auth_path(record, wire_record) else {
         return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
     };
-    let mut params = create_params_for_wire_record(&canonical, user_id, auth_key_id);
+    let effective_auth_key_id = auth_key_id.or_else(|| existing.and_then(|row| row.auth_key_id));
+    let mut params = create_params_for_wire_record(&canonical, user_id, effective_auth_key_id);
     if let Some(existing) = existing {
         if !existing.given_name.is_empty()
             && !is_auto_derived_given_name(&existing.given_name, &existing.hostname)

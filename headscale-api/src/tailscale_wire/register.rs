@@ -302,13 +302,16 @@ async fn register_inner(
             let Some(ok) = state.preauth.lookup(authkey).await else {
                 return preauth_error_response(err);
             };
-            let Some((existing_node_key, _)) = state
+            let Some((existing_node_key, existing)) = state
                 .machines
                 .get_by_machine_key_for_user(&machine_key_hex, &ok.user)
             else {
                 return preauth_error_response(err);
             };
             if existing_node_key != node_key_hex {
+                return preauth_error_response(err);
+            }
+            if !failed_authkey_belongs_to_existing_node(&existing, ok.auth_key_id) {
                 return preauth_error_response(err);
             }
             ok
@@ -400,6 +403,11 @@ async fn register_inner(
     let ephemeral = existing_machine
         .as_ref()
         .map_or(redeemed.ephemeral, |(_, existing)| existing.ephemeral);
+    let auth_key_id = redeemed.auth_key_id.or_else(|| {
+        existing_machine
+            .as_ref()
+            .and_then(|(_, existing)| existing.auth_key_id)
+    });
     let (disco_key, endpoints, home_derp) =
         existing_machine
             .as_ref()
@@ -462,6 +470,7 @@ async fn register_inner(
     };
     let rec = MachineRecord {
         node_id: None,
+        auth_key_id,
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
         user,
@@ -569,6 +578,7 @@ async fn register_interactive(
     };
     let record = MachineRecord {
         node_id: None,
+        auth_key_id: None,
         node_key_hex,
         machine_key_hex,
         user: String::new(),
@@ -725,6 +735,18 @@ fn preauth_error_response(err: RedeemError) -> axum::response::Response {
         RedeemError::AlreadyUsed => "preauth key already used",
     };
     register_error_response(error)
+}
+
+fn failed_authkey_belongs_to_existing_node(
+    existing: &MachineRecord,
+    presented_auth_key_id: Option<i64>,
+) -> bool {
+    match (existing.auth_key_id, presented_auth_key_id) {
+        (Some(existing_auth_key_id), Some(presented_auth_key_id)) => {
+            existing_auth_key_id == presented_auth_key_id
+        }
+        _ => true,
+    }
 }
 
 fn logout_existing_node(
@@ -1053,7 +1075,7 @@ mod tests {
     use super::*;
     use crate::tailscale_wire::{
         AllocError, IpAllocator, MachineRegistrationStore, MachineRegistry,
-        PersistedMachineRegistration, RedeemOk, WireState,
+        PersistedMachineRegistration, PreauthRedeemer, RedeemOk, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
@@ -2381,6 +2403,75 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(rr.error, "preauth key already used");
         assert_eq!(state.machines.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn authkey_used_key_reregister_requires_original_auth_key_id_when_known() {
+        let (state, redeemer, _dir) = fixture();
+        let first_authkey = "hskey-auth-used-original-id";
+        let second_authkey = "hskey-auth-used-other-id";
+        redeemer.insert_full(first_authkey, RedeemOk::for_user("alice").auth_key_id(101));
+        redeemer.insert_full(second_authkey, RedeemOk::for_user("alice").auth_key_id(202));
+        let app = router(state.clone());
+        let node_key_hex = "5b".repeat(32);
+        let machine_key_hex = "b5".repeat(32);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&req_body(&node_key_hex, first_authkey)).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let registered = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(registered.auth_key_id, Some(101));
+
+        let consumed = redeemer.redeem(second_authkey).await.unwrap();
+        assert_eq!(consumed.auth_key_id, Some(202));
+
+        let mut wrong_key_body = req_body(&node_key_hex, second_authkey);
+        wrong_key_body["Hostinfo"]["Hostname"] = serde_json::json!("wrong-used-key");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&wrong_key_body).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rr.error, "preauth key already used");
+        let unchanged = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(unchanged.auth_key_id, Some(101));
+        assert_ne!(unchanged.hostname, "wrong-used-key");
+
+        let mut original_key_body = req_body(&node_key_hex, first_authkey);
+        original_key_body["Hostinfo"]["Hostname"] = serde_json::json!("original-used-key");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&original_key_body).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        let reauthed = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(reauthed.auth_key_id, Some(101));
+        assert_eq!(reauthed.hostname, "original-used-key");
     }
 
     #[tokio::test]

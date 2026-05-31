@@ -3157,6 +3157,7 @@ impl MachineRegistry {
             pending.ipv6 = existing.ipv6;
             pending.created_at = existing.created_at;
             pending.ephemeral = existing.ephemeral;
+            pending.auth_key_id = pending.auth_key_id.or(existing.auth_key_id);
             pending.disco_key = existing.disco_key;
             pending.endpoints = existing.endpoints;
             pending.home_derp = existing.home_derp;
@@ -3910,6 +3911,7 @@ mod registry_tests {
         let now = Utc::now();
         MachineRecord {
             node_id: None,
+            auth_key_id: None,
             node_key_hex: format!("nodekey-{host:08x}"),
             machine_key_hex: format!("mkey-{host:08x}"),
             user: "alice".to_string(),
@@ -6154,6 +6156,7 @@ mod registry_tests {
         existing.node_key_hex = "old-node".into();
         existing.machine_key_hex = "same-machine".into();
         existing.user = "alice".into();
+        existing.auth_key_id = Some(7);
         existing.forced_tags = vec!["tag:server".into()];
         existing.approved_routes = vec!["10.0.0.0/24".into(), "10.99.0.0/24".into()];
         existing.available_routes = vec!["10.0.0.0/24".into(), "10.99.0.0/24".into()];
@@ -6173,6 +6176,7 @@ mod registry_tests {
         assert_eq!(registered.node_key_hex, "new-node");
         assert_eq!(registered.machine_key_hex, "same-machine");
         assert_eq!(registered.user, "alice");
+        assert_eq!(registered.auth_key_id, Some(7));
         assert!(registered.forced_tags.is_empty());
         assert_eq!(registered.ipv4, old_ip);
         assert_eq!(registered.created_at, old_created_at);
@@ -6185,6 +6189,7 @@ mod registry_tests {
         assert_eq!(reg.len(), 1, "reauth must not duplicate the node");
         assert!(reg.get("old-node").is_none());
         let stored = reg.get("new-node").unwrap();
+        assert_eq!(stored.auth_key_id, Some(7));
         assert!(stored.forced_tags.is_empty());
         assert_eq!(stored.ipv4, old_ip);
     }

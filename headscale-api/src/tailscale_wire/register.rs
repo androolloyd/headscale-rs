@@ -2131,6 +2131,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authkey_reauth_persists_unadvertised_approved_routes() {
+        let (mut state, redeemer, _dir) = fixture();
+        let store = Arc::new(RecordingRegistrationStore::default());
+        state.registration_store = Some(store.clone());
+        let first_authkey = "hskey-auth-route-persist-first";
+        let second_authkey = "hskey-auth-route-persist-second";
+        redeemer.insert(first_authkey, "alice");
+        redeemer.insert(second_authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "5a".repeat(32);
+        let machine_key_hex = "a5".repeat(32);
+
+        let mut body = req_body(&node_key_hex, first_authkey);
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.40.0.0/24", "10.41.0.0/24"]);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut approved = state.machines.get(&node_key_hex).unwrap();
+        approved.approved_routes = vec!["10.40.0.0/24".into(), "10.41.0.0/24".into()];
+        state.machines.upsert(node_key_hex.clone(), approved);
+
+        let mut body = req_body(&node_key_hex, second_authkey);
+        body["Hostinfo"]["RoutableIPs"] = serde_json::json!(["10.40.0.0/24"]);
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let calls = store.calls.lock();
+        assert_eq!(calls.len(), 2);
+        let reauth_record = &calls[1].0;
+        assert_eq!(reauth_record.available_routes, vec!["10.40.0.0/24"]);
+        assert_eq!(
+            reauth_record.approved_routes,
+            vec!["10.40.0.0/24", "10.41.0.0/24"]
+        );
+        drop(calls);
+
+        let reauthed = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(reauthed.available_routes, vec!["10.40.0.0/24"]);
+        assert_eq!(
+            reauthed.approved_routes,
+            vec!["10.40.0.0/24", "10.41.0.0/24"]
+        );
+    }
+
+    #[tokio::test]
     async fn authkey_reregister_preserves_admin_renamed_given_name() {
         let (state, redeemer, _dir) = fixture();
         let first_authkey = "hskey-auth-admin-name-first";

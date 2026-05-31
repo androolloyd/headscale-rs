@@ -39,6 +39,11 @@ case "${target}" in
 esac
 client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backend}-${login_mode}-$$}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
+magic_dns="${REAL_CLIENT_MAGIC_DNS:-false}"
+accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
+dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
+expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
+expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
@@ -65,6 +70,45 @@ case "${advertise_exit_node}" in
     ;;
   *)
     echo "REAL_CLIENT_ADVERTISE_EXIT_NODE must be true or false, got ${advertise_exit_node}" >&2
+    exit 2
+    ;;
+esac
+
+case "${magic_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    magic_dns_yaml=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    magic_dns_yaml=false
+    ;;
+  *)
+    echo "REAL_CLIENT_MAGIC_DNS must be true or false, got ${magic_dns}" >&2
+    exit 2
+    ;;
+esac
+
+case "${accept_dns}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    accept_dns_arg=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    accept_dns_arg=false
+    ;;
+  *)
+    echo "REAL_CLIENT_ACCEPT_DNS must be true or false, got ${accept_dns}" >&2
+    exit 2
+    ;;
+esac
+
+case "${expected_dns_extra_records_exact}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_dns_extra_records_exact=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_dns_extra_records_exact=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT must be true or false, got ${expected_dns_extra_records_exact}" >&2
     exit 2
     ;;
 esac
@@ -455,6 +499,25 @@ write_policy_file() {
   printf '%s\n' "${policy_json}" >"${policy_path}"
 }
 
+append_dns_extra_records_config() {
+  if [[ -n "${dns_extra_records_json}" ]]; then
+    printf '  extra_records:\n' >>"${config_path}"
+    ruby -rjson -e '
+      JSON.parse(ARGV.fetch(0)).each do |record|
+        name = record["Name"] || record["name"]
+        type = record["Type"] || record["type"] || ""
+        value = record["Value"] || record["value"]
+        abort("extra DNS records need Name/name and Value/value: #{record.inspect}") if name.to_s.empty? || value.to_s.empty?
+        puts "    - name: #{name.to_s.to_json}"
+        puts "      type: #{type.to_s.to_json}" unless type.to_s.empty?
+        puts "      value: #{value.to_s.to_json}"
+      end
+    ' "${dns_extra_records_json}" >>"${config_path}"
+  else
+    printf '  extra_records: []\n' >>"${config_path}"
+  fi
+}
+
 write_config() {
   case "${target}" in
     rust)
@@ -487,7 +550,7 @@ prefixes:
   v4: 100.64.0.0/10
 
 dns:
-  magic_dns: false
+  magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
@@ -495,6 +558,7 @@ dns:
     split: {}
   search_domains: []
 EOF
+      append_dns_extra_records_config
       ;;
     headscale-go)
       cat >"${config_path}" <<EOF
@@ -515,13 +579,16 @@ prefixes:
   v4: 100.64.0.0/10
 
 dns:
-  magic_dns: false
+  magic_dns: ${magic_dns_yaml}
   base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
     global: []
     split: {}
   search_domains: []
+EOF
+      append_dns_extra_records_config
+      cat >>"${config_path}" <<EOF
 
 logtail:
   enabled: false
@@ -693,7 +760,7 @@ login_client() {
     "--hostname=${client_name}"
     --timeout=60s
     --accept-routes=false
-    --accept-dns=false
+    "--accept-dns=${accept_dns_arg}"
   )
   if [[ "${login_mode}" == "authkey" ]]; then
     up_args+=("--authkey=${authkey}")
@@ -784,7 +851,7 @@ reauth_client_if_requested() {
     "--hostname=${client_name}"
     --timeout=60s
     --accept-routes=false
-    --accept-dns=false
+    "--accept-dns=${accept_dns_arg}"
     --force-reauth
     --reset
   )
@@ -865,6 +932,111 @@ wait_for_client_netmap() {
     dump_debug
     return 1
   }
+}
+
+assert_dns_extra_record() {
+  local host="$1"
+  local expected="$2"
+  local expected_type="$3"
+  local output_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      host = ARGV.fetch(1).sub(/\.\z/, "")
+      expected = ARGV.fetch(2)
+      expected_type = ARGV.fetch(3)
+      records = Array(netmap.dig("DNS", "ExtraRecords"))
+      match = records.any? do |record|
+        name = (record["Name"] || record["name"]).to_s.sub(/\.\z/, "")
+        type = (record["Type"] || record["type"]).to_s
+        value = (record["Value"] || record["value"]).to_s
+        name == host && value == expected && (expected_type.empty? || type == expected_type)
+      end
+      want = expected_type.empty? ? "#{host}=#{expected}" : "#{host}=#{expected_type}:#{expected}"
+      abort("expected DNS extra record #{want}, got #{records.inspect}") unless match
+      puts JSON.pretty_generate(records)
+    ' "${netmap_path}" "${host}" "${expected}" "${expected_type}" >"${output_path}"
+}
+
+assert_dns_extra_records_exact() {
+  local expected_spec="$1"
+  local output_path="$2"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      def parse_expectations(spec)
+        spec.split(",").reject(&:empty?).map do |entry|
+          host, expected = entry.split("=", 2)
+          abort("expected DNS extra record entry host=value, got #{entry.inspect}") if host.to_s.empty? || expected.to_s.empty?
+          type = ""
+          if expected =~ /\A(A|AAAA|CNAME):(.*)\z/
+            type = Regexp.last_match(1)
+            expected = Regexp.last_match(2)
+          end
+          [host.sub(/\.\z/, ""), type, expected]
+        end
+      end
+
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected = parse_expectations(ARGV.fetch(1))
+      records = Array(netmap.dig("DNS", "ExtraRecords")).map do |record|
+        [
+          (record["Name"] || record["name"]).to_s.sub(/\.\z/, ""),
+          (record["Type"] || record["type"]).to_s,
+          (record["Value"] || record["value"]).to_s,
+          record,
+        ]
+      end
+      unmatched = records.dup
+      expected.each do |host, type, value|
+        idx = unmatched.index do |name, record_type, record_value, _|
+          name == host && record_value == value && (type.empty? || record_type == type)
+        end
+        abort("expected DNS extra record #{host}=#{type.empty? ? value : "#{type}:#{value}"}, got #{records.map(&:last).inspect}") unless idx
+        unmatched.delete_at(idx)
+      end
+      abort("unexpected DNS extra records #{unmatched.map(&:last).inspect}; expected #{expected.inspect}") unless unmatched.empty?
+      puts JSON.pretty_generate(records.map(&:last))
+    ' "${netmap_path}" "${expected_spec}" >"${output_path}"
+}
+
+assert_dns_extra_records_if_requested() {
+  [[ -n "${expected_dns_extra_records}" ]] || return 0
+  echo "::group::assert DNS extra records"
+  IFS=',' read -r -a dns_expectations <<<"${expected_dns_extra_records}"
+  for expectation in "${dns_expectations[@]}"; do
+    host="${expectation%%=*}"
+    expected="${expectation#*=}"
+    if [[ -z "${host}" || -z "${expected}" || "${host}" == "${expectation}" ]]; then
+      echo "REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS entries must be host=value, got ${expectation}" >&2
+      echo "::endgroup::"
+      return 2
+    fi
+    expected_type=""
+    if [[ "${expected}" =~ ^(A|AAAA|CNAME):(.*)$ ]]; then
+      expected_type="${BASH_REMATCH[1]}"
+      expected="${BASH_REMATCH[2]}"
+    fi
+    safe_host="${host//[^a-zA-Z0-9_.-]/-}"
+    wait_for "DNS extra record ${host}" \
+      "assert_dns_extra_record '${host}' '${expected}' '${expected_type}' '${work_dir}/dns-${safe_host}.json'" || {
+        dump_debug
+        echo "::endgroup::"
+        return 1
+      }
+    cat "${work_dir}/dns-${safe_host}.json"
+  done
+  if ((expect_dns_extra_records_exact)); then
+    wait_for "exact DNS extra records" \
+      "assert_dns_extra_records_exact '${expected_dns_extra_records}' '${work_dir}/dns-extra-records-exact.json'" || {
+        dump_debug
+        echo "::endgroup::"
+        return 1
+      }
+    cat "${work_dir}/dns-extra-records-exact.json"
+  fi
+  echo "::endgroup::"
 }
 
 node_id_for_client() {
@@ -1153,6 +1325,7 @@ approve_routes_if_requested
 set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
+assert_dns_extra_records_if_requested
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled

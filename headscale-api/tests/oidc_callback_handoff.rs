@@ -165,7 +165,9 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         .unwrap();
     assert_eq!(confirm_response.status(), StatusCode::OK);
     let confirm_body = body_string(confirm_response).await;
-    assert!(confirm_body.contains("Signed in successfully"));
+    assert!(confirm_body.contains("Headscale - Node Registered"));
+    assert!(confirm_body.contains("Node registered"));
+    assert!(confirm_body.contains("Registered as"));
     assert!(confirm_body.contains("User Info Name"));
 
     let completed = decode_register_response(

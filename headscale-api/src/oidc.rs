@@ -1135,14 +1135,7 @@ pub async fn handle_register_confirm_with_request_security(
     {
         Ok(result) => {
             runtime.confirmations.remove(&registration_id);
-            let mut response = oidc_success_response(
-                &pending.user,
-                if result.new_node {
-                    "Authenticated"
-                } else {
-                    "Reauthenticated"
-                },
-            );
+            let mut response = oidc_registration_success_response(&pending.user, result.new_node);
             clear_register_confirm_cookie(response.headers_mut(), &auth_id, secure_cookies);
             response
         }
@@ -1806,11 +1799,24 @@ fn display_or_unknown(value: &str) -> String {
         value.to_string()
     }
 }
-fn oidc_success_response(user: &OidcStoredUser, verb: &str) -> Response {
+fn oidc_registration_success_response(user: &OidcStoredUser, new_node: bool) -> Response {
+    let (title, heading, verb) = if new_node {
+        (
+            "Headscale - Node Registered",
+            "Node registered",
+            "Registered",
+        )
+    } else {
+        (
+            "Headscale - Node Reauthenticated",
+            "Node reauthenticated",
+            "Reauthenticated",
+        )
+    };
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        oidc_success_html(&user_display_name(user), verb),
+        oidc_registration_success_html(title, heading, verb, &user_display_name(user)),
     )
         .into_response()
 }
@@ -1825,9 +1831,11 @@ fn oidc_ssh_success_response(user: &OidcStoredUser) -> Response {
         .into_response()
 }
 
-fn oidc_success_html(user: &str, verb: &str) -> String {
+fn oidc_registration_success_html(title: &str, heading: &str, verb: &str, user: &str) -> String {
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale Authentication Succeeded</title></head><body><main><h1>Signed in successfully</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>{}</title></head><body><main><h1>{}</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
+        html_escape(title),
+        html_escape(heading),
         html_escape(verb),
         html_escape(user)
     )
@@ -3140,8 +3148,9 @@ mod tests {
 
         assert_eq!(confirm.status(), StatusCode::OK);
         let success_body = response_body(confirm).await;
-        assert!(success_body.contains("Headscale Authentication Succeeded"));
-        assert!(success_body.contains("Authenticated as"));
+        assert!(success_body.contains("Headscale - Node Registered"));
+        assert!(success_body.contains("Node registered"));
+        assert!(success_body.contains("Registered as"));
         assert!(success_body.contains("Alice Smith"));
         assert!(success_body.contains("You can now close this window"));
 
@@ -3276,6 +3285,32 @@ mod tests {
         let calls = registrations.calls.read();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, None);
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_registration_success_copy_matches_upstream_registered_and_reauth() {
+        let user = OidcStoredUser {
+            id: 42,
+            name: "alice@example.com".into(),
+            display_name: "Alice Smith".into(),
+            email: "alice@example.com".into(),
+            provider_identifier: "https://issuer.example/subject".into(),
+            provider: REGISTER_METHOD_OIDC.into(),
+            profile_pic_url: String::new(),
+        };
+
+        let registered = response_body(oidc_registration_success_response(&user, true)).await;
+        assert!(registered.contains("Headscale - Node Registered"));
+        assert!(registered.contains("Node registered"));
+        assert!(registered.contains("Registered as"));
+        assert!(registered.contains("Alice Smith"));
+
+        let reauthenticated = response_body(oidc_registration_success_response(&user, false)).await;
+        assert!(reauthenticated.contains("Headscale - Node Reauthenticated"));
+        assert!(reauthenticated.contains("Node reauthenticated"));
+        assert!(reauthenticated.contains("Reauthenticated as"));
+        assert!(reauthenticated.contains("Alice Smith"));
     }
 
     #[cfg(feature = "full")]

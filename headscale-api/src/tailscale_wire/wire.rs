@@ -229,11 +229,9 @@ pub fn valid_given_name_label(label: &str) -> bool {
 }
 
 fn trim_common_hostname_suffixes(hostname: &str) -> &str {
-    hostname
-        .strip_suffix(".local")
-        .or_else(|| hostname.strip_suffix(".localdomain"))
-        .or_else(|| hostname.strip_suffix(".lan"))
-        .unwrap_or(hostname)
+    let hostname = hostname.strip_suffix(".local").unwrap_or(hostname);
+    let hostname = hostname.strip_suffix(".localdomain").unwrap_or(hostname);
+    hostname.strip_suffix(".lan").unwrap_or(hostname)
 }
 
 pub fn sanitize_hostname_for_given_name(hostname: &str) -> String {
@@ -273,14 +271,14 @@ pub fn auto_given_name_base(hostname: &str) -> String {
 }
 
 pub fn is_auto_derived_given_name(given_name: &str, hostname: &str) -> bool {
-    let base = auto_given_name_base(hostname);
+    let base = sanitize_hostname_for_given_name(hostname);
     if given_name == base {
         return true;
     }
     let Some(suffix) = given_name.strip_prefix(&format!("{base}-")) else {
         return false;
     };
-    !suffix.is_empty() && suffix.parse::<u64>().is_ok()
+    suffix.parse::<isize>().is_ok()
 }
 
 impl MachineRecord {
@@ -1860,10 +1858,19 @@ mod tests {
         assert_eq!(sanitize_hostname_for_given_name("HOST_NAME"), "host-name");
         assert_eq!(sanitize_hostname_for_given_name("---a---"), "a");
         assert_eq!(sanitize_hostname_for_given_name("node.local"), "node");
+        assert_eq!(
+            sanitize_hostname_for_given_name("node.localdomain.local"),
+            "node"
+        );
+        assert_eq!(
+            sanitize_hostname_for_given_name("node.lan.localdomain"),
+            "node"
+        );
         assert_eq!(sanitize_hostname_for_given_name("!!!"), "");
         assert_eq!(auto_given_name_base("!!!"), "node");
-        assert!(is_auto_derived_given_name("node", "!!!"));
-        assert!(is_auto_derived_given_name("node-1", "!!!"));
+        assert!(!is_auto_derived_given_name("node", "!!!"));
+        assert!(is_auto_derived_given_name("", "!!!"));
+        assert!(is_auto_derived_given_name("-1", "!!!"));
         assert!(!is_auto_derived_given_name("admin-name", "!!!"));
 
         assert!(valid_given_name_label("a"));

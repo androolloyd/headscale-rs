@@ -274,11 +274,9 @@ fn validate_given_name(name: &str) -> Result<()> {
 }
 
 fn sanitize_hostname_for_given_name(hostname: &str) -> String {
-    let hostname = hostname
-        .strip_suffix(".local")
-        .or_else(|| hostname.strip_suffix(".localdomain"))
-        .or_else(|| hostname.strip_suffix(".lan"))
-        .unwrap_or(hostname);
+    let hostname = hostname.strip_suffix(".local").unwrap_or(hostname);
+    let hostname = hostname.strip_suffix(".localdomain").unwrap_or(hostname);
+    let hostname = hostname.strip_suffix(".lan").unwrap_or(hostname);
     let bytes = hostname.as_bytes();
     let mut start = 0usize;
     let mut end = bytes.len().min(63);
@@ -1947,6 +1945,17 @@ mod tests {
         let first = create(db.pool(), first_params).await.unwrap();
         assert_eq!(first.hostname, "Peer.One!");
         assert_eq!(first.given_name, "peer-one");
+
+        let mut compound_suffix_params = node_params(user_id, auth_key_id);
+        compound_suffix_params.machine_key = "mkey:compound-suffix".into();
+        compound_suffix_params.node_key = "nodekey:compound-suffix".into();
+        compound_suffix_params.disco_key = "discokey:compound-suffix".into();
+        compound_suffix_params.ipv4 = Some("100.64.0.22".into());
+        compound_suffix_params.ipv6 = Some("fd7a:115c:a1e0::22".into());
+        compound_suffix_params.hostname = "Peer.localdomain.local".into();
+        compound_suffix_params.given_name.clear();
+        let compound_suffix = create(db.pool(), compound_suffix_params).await.unwrap();
+        assert_eq!(compound_suffix.given_name, "peer");
 
         let mut duplicate_params = node_params(user_id, auth_key_id);
         duplicate_params.machine_key = "mkey:duplicate-host".into();

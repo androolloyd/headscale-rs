@@ -3091,7 +3091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_request_recomputes_node_fallback_given_name() {
+    async fn map_request_preserves_node_fallback_given_name() {
         let (state, _dir) = fixture();
         let node_key = "e6".repeat(32);
         let mut record = MachineRecord::new_at(
@@ -3134,7 +3134,7 @@ mod tests {
             .machines
             .get(&node_key)
             .expect("node still registered");
-        assert_eq!(rec.hostname, "client-new-host");
+        assert_eq!(rec.hostname, "node");
         assert_eq!(rec.host_info_for_node().hostname, "client-new-host");
     }
 

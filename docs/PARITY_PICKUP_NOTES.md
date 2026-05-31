@@ -254,6 +254,9 @@ Current multi-agent split:
   generation is not pursued for the pinned headscale-go baseline because
   upstream accepts those Tailcfg fields but leaves response
   `MapSessionHandle`/`Seq` empty.
+  Persistent auth-key node hydration now derives the live ephemeral flag from
+  the assigned preauth key, matching headscale-go's `Node.IsEphemeral` restart
+  behavior.
 - Explorer lane: Postgres machine admin next-slice inventory. Outcome:
   `headscale_db::headscale_nodes` already exposes the needed Postgres node
   primitives; the feature-gated `PersistentPostgresMachineAdmin` is the safe

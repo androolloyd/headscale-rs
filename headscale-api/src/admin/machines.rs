@@ -521,6 +521,19 @@ impl PersistentMachineAdmin {
         &self.pool
     }
 
+    async fn auth_key_ephemeral(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<bool, MachineAdminError> {
+        let Some(auth_key_id) = row.auth_key_id else {
+            return Ok(false);
+        };
+        headscale_db::preauth_keys::get_by_id(&self.pool, auth_key_id)
+            .await
+            .map(|key| key.ephemeral)
+            .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
+    }
+
     pub async fn hydrate_wire_registry(
         &self,
         registry: &MachineRegistry,
@@ -910,6 +923,7 @@ impl PersistentMachineAdmin {
         } else {
             row.given_name.clone()
         };
+        let ephemeral = self.auth_key_ephemeral(&row).await?;
         let user_identity = self.user_identity_for_row(&row).await;
         let mut record = MachineRecord::new_at_with_addresses(
             created_at,
@@ -919,7 +933,7 @@ impl PersistentMachineAdmin {
             name.clone(),
             ipv4,
             ipv6,
-            false,
+            ephemeral,
         );
         record.node_id = u64::try_from(row.id).ok();
         record.set_user_identity(
@@ -979,6 +993,19 @@ impl PersistentPostgresMachineAdmin {
     pub fn with_wire_registry(mut self, registry: Arc<MachineRegistry>) -> Self {
         self.wire_registry = Some(registry);
         self
+    }
+
+    async fn auth_key_ephemeral(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<bool, MachineAdminError> {
+        let Some(auth_key_id) = row.auth_key_id else {
+            return Ok(false);
+        };
+        headscale_db::preauth_keys::get_postgres_by_id(&self.pool, auth_key_id)
+            .await
+            .map(|key| key.ephemeral)
+            .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -1381,6 +1408,7 @@ impl PersistentPostgresMachineAdmin {
         } else {
             row.given_name.clone()
         };
+        let ephemeral = self.auth_key_ephemeral(&row).await?;
         let user_identity = self.user_identity_for_row(&row).await;
         let mut record = MachineRecord::new_at_with_addresses(
             created_at,
@@ -1390,7 +1418,7 @@ impl PersistentPostgresMachineAdmin {
             name.clone(),
             ipv4,
             ipv6,
-            false,
+            ephemeral,
         );
         record.node_id = u64::try_from(row.id).ok();
         record.set_user_identity(
@@ -3893,7 +3921,7 @@ mod tests {
             headscale_db::preauth_keys::CreateParams {
                 user_id: "1".into(),
                 reusable: false,
-                ephemeral: false,
+                ephemeral: true,
                 tags: vec!["tag:server".into()],
                 expiration: None,
             },
@@ -3954,6 +3982,12 @@ mod tests {
         assert_eq!(raw.auth_key_id, Some(preauth.row.id));
         assert_eq!(raw.tag_list(), vec!["tag:server"]);
         assert_eq!(raw.approved_route_list(), vec!["10.40.0.0/24"]);
+        assert!(
+            headscale_db::preauth_keys::get_by_id(db.pool(), preauth.row.id)
+                .await
+                .unwrap()
+                .ephemeral
+        );
         let host_info = raw.host_info_value();
         assert_eq!(host_info.get("OS").and_then(Value::as_str), Some("linux"));
         assert_eq!(
@@ -3986,6 +4020,10 @@ mod tests {
         let hydrated = registry.get(&record.node_key_hex).unwrap();
         assert_eq!(hydrated.node_key_hex, record.node_key_hex);
         assert_eq!(hydrated.machine_key_hex, record.machine_key_hex);
+        assert!(
+            hydrated.ephemeral,
+            "hydration should derive Node.IsEphemeral from the assigned preauth key"
+        );
         assert_eq!(hydrated.user, "");
         assert_eq!(hydrated.hostname, "authkey-node");
         assert_eq!(

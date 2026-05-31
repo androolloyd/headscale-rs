@@ -4530,7 +4530,7 @@ mod registry_tests {
         let changes = reg.map_change_history();
         let labels = changes
             .iter()
-            .map(|change| change.reason_label())
+            .map(MapChange::reason_label)
             .collect::<Vec<_>>();
         assert_eq!(
             labels,

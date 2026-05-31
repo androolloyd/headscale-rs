@@ -791,14 +791,22 @@ pub mod upstream {
         ) -> Result<Response<DeleteUserResponse>, Status> {
             self.authorize(&request).await?;
             let id = request.into_inner().id;
-            if self
+            let Some(user) = self
                 .users
                 .get_by_id(id)
                 .await
                 .map_err(direct_user_error_to_status)?
-                .is_none()
-            {
+            else {
                 return Err(upstream_user_not_found_status());
+            };
+            if self
+                .machines
+                .list()
+                .await
+                .into_iter()
+                .any(|node| node.user == user.name && node.tags.is_empty())
+            {
+                return Err(upstream_user_not_empty_status());
             }
             self.users
                 .delete_by_id(id)
@@ -1964,12 +1972,22 @@ pub mod upstream {
     fn direct_user_error_to_status(e: UserRegistryError) -> Status {
         match e {
             UserRegistryError::Missing(_) => upstream_user_not_found_status(),
+            UserRegistryError::Exists(_) => Status::unknown(
+                "updating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
+            ),
+            UserRegistryError::Store(msg) if msg.contains("user not empty: node(s) found") => {
+                upstream_user_not_empty_status()
+            }
             other => Status::unknown(other.to_string()),
         }
     }
 
     fn upstream_user_not_found_status() -> Status {
         Status::unknown("user not found")
+    }
+
+    fn upstream_user_not_empty_status() -> Status {
+        Status::unknown("user not empty: node(s) found")
     }
 }
 
@@ -2484,6 +2502,7 @@ mod upstream_tests {
         enum Call {
             CreateDuplicate,
             RenameMissing,
+            RenameDuplicate,
             DeleteMissing,
             ListMissingId,
             ListMissingName,
@@ -2513,6 +2532,14 @@ mod upstream_tests {
                 Expected::Error {
                     code: tonic::Code::Unknown,
                     message: "user not found",
+                },
+            ),
+            (
+                "rename duplicate name",
+                Call::RenameDuplicate,
+                Expected::Error {
+                    code: tonic::Code::Unknown,
+                    message: "updating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
                 },
             ),
             (
@@ -2566,6 +2593,36 @@ mod upstream_tests {
                     }))
                     .await
                     .map(|_| Vec::new()),
+                Call::RenameDuplicate => {
+                    let alice = service
+                        .create_user(Request::new(CreateUserRequest {
+                            name: "alice".into(),
+                            display_name: String::new(),
+                            email: String::new(),
+                            picture_url: String::new(),
+                        }))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .user
+                        .expect("alice");
+                    service
+                        .create_user(Request::new(CreateUserRequest {
+                            name: "bob".into(),
+                            display_name: String::new(),
+                            email: String::new(),
+                            picture_url: String::new(),
+                        }))
+                        .await
+                        .unwrap();
+                    service
+                        .rename_user(Request::new(RenameUserRequest {
+                            old_id: alice.id,
+                            new_name: "bob".into(),
+                        }))
+                        .await
+                        .map(|_| Vec::new())
+                }
                 Call::DeleteMissing => service
                     .delete_user(Request::new(DeleteUserRequest { id: 99 }))
                     .await
@@ -2608,6 +2665,137 @@ mod upstream_tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn upstream_user_grpc_list_users_selector_priority() {
+        let service = admin_service().await;
+        let alice = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: "alice@example.com".into(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("alice");
+        let bob = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "bob".into(),
+                display_name: String::new(),
+                email: "bob@example.com".into(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("bob");
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: bob.id,
+                name: "alice".into(),
+                email: "bob@example.com".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.users.len(), 1);
+        assert_eq!(listed.users[0].id, alice.id);
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: bob.id,
+                name: String::new(),
+                email: "alice@example.com".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.users.len(), 1);
+        assert_eq!(listed.users[0].id, alice.id);
+    }
+
+    #[tokio::test]
+    async fn upstream_user_grpc_delete_refuses_user_owned_nodes_but_allows_tagged_nodes() {
+        let (service, machines) = admin_service_with_machines().await;
+        let alice = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("alice");
+
+        let node_key = "ad".repeat(32);
+        machines.upsert(
+            node_key.clone(),
+            fixture_machine(&node_key, "alice", "alpha"),
+        );
+        let node_id = stable_id_from_key(&node_key);
+
+        let err = service
+            .delete_user(Request::new(DeleteUserRequest { id: alice.id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "user not empty: node(s) found");
+
+        service
+            .set_policy(Request::new(SetPolicyRequest {
+                policy: r#"{"tagOwners":{"tag:server":["alice@"]}}"#.into(),
+            }))
+            .await
+            .expect("tag owner policy");
+        service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap();
+
+        service
+            .delete_user(Request::new(DeleteUserRequest { id: alice.id }))
+            .await
+            .unwrap();
+
+        let listed = service
+            .list_users(Request::new(ListUsersRequest {
+                id: 0,
+                name: String::new(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.users.is_empty());
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let tagged = listed
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .expect("tagged node survives user deletion");
+        assert_eq!(
+            tagged.user.as_ref().expect("tagged node user").name,
+            "tagged-devices"
+        );
     }
 
     #[tokio::test]

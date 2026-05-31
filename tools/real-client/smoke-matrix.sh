@@ -100,6 +100,7 @@ smoke_ids=(
   postgres-route-health-all-unhealthy-restart
   postgres-route-health-all-unhealthy-reload-restart
   postgres-route-health-mixed-exit-restart
+  postgres-route-health-mixed-exit-reload-restart
   postgres-route-health-mixed-exit-all-unhealthy-restart
   postgres-route-health-mixed-exit-all-unhealthy-reload-restart
   ping-lifecycle
@@ -175,6 +176,7 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
   database
   database
   database
@@ -314,6 +316,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/ping-lifecycle-smoke.sh
@@ -421,6 +424,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/ping-lifecycle-headscale-go-smoke.sh
@@ -528,6 +532,7 @@ smoke_assertions=(
   "production Postgres route-health all-unhealthy retention survives server restart"
   "production Postgres route-health all-unhealthy policy reload survives server restart"
   "production Postgres route-health mixed exit-node separation survives server restart"
+  "production Postgres route-health mixed exit-node policy reload survives server restart"
   "production Postgres route-health mixed exit-node all-unhealthy retention survives server restart"
   "production Postgres route-health mixed exit-node all-unhealthy policy reload survives server restart"
   "debug PingRequest dispatch and public HEAD callback correlation"

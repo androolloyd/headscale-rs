@@ -566,17 +566,19 @@ write_route_health_reload_policy() {
       "tag:router-a" => ["router@"],
       "tag:router-b" => ["router@"],
     }
+    exit_node_approvers = []
     auto_routes = {
       route => auto_tags,
     }
     if mixed_exit
       tag_owners["tag:exit"] = ["router@"]
-      exit_routes.each { |exit_route| auto_routes[exit_route] = ["tag:exit"] }
+      exit_node_approvers = ["tag:exit"]
     end
     puts JSON.pretty_generate({
       tagOwners: tag_owners,
       autoApprovers: {
         routes: auto_routes,
+        exitNode: exit_node_approvers,
       },
       grants: [
         {

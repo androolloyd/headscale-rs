@@ -367,14 +367,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   restart, web-registration restart, restart-persistence, route-via restart,
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health restart, route-health
   primary-selection restart, route-health reload+restart, route-health
-  all-unhealthy restart, route-health mixed-exit restart, and route-health
-  mixed-exit all-unhealthy restart, plus route-health mixed-exit all-unhealthy
-  reload+restart stock-client smokes are checked into the real-client matrix.
+  all-unhealthy restart, route-health mixed-exit restart, route-health
+  mixed-exit reload+restart, route-health mixed-exit all-unhealthy restart, and
+  route-health mixed-exit all-unhealthy reload+restart stock-client smokes are
+  checked into the real-client matrix.
   The production Pg stock-client harness also covers tagged preauth, post-login
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-four Pg rows, including
+  CI now provisions Postgres for all thirty-five Pg rows, including
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, and the paired
@@ -476,3 +477,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   requested tag that is not owned by the registering user.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-four Postgres stock-client rows.
+
+## 2026-05-31 Postgres route-health mixed-exit reload+restart smoke slice
+
+- Added paired `postgres-route-health-mixed-exit-reload-restart`
+  Rust/headscale-go rows over the restart persistence harness. The row proves
+  mixed subnet-router/exit-node route-health separation survives policy reload
+  and production Postgres restart without requiring the all-unhealthy variant.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-five Postgres stock-client rows.

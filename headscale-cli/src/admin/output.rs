@@ -36,8 +36,7 @@ impl OutputFormat {
             Some("json") => Ok(Self::Json),
             Some("json-line") => Ok(Self::JsonLine),
             Some("yaml") => Ok(Self::Yaml),
-            Some(_) => Ok(Self::Table),
-            None => Ok(Self::Table),
+            Some(_) | None => Ok(Self::Table),
         }
     }
 

@@ -78,8 +78,12 @@ smoke_ids=(
   postgres-web-register-restart
   postgres-restart-persistence
   postgres-route-via-restart
+  postgres-route-via-multiprefix-restart
   postgres-route-health-restart
   postgres-route-health-reload-restart
+  postgres-route-health-all-unhealthy-restart
+  postgres-route-health-mixed-exit-restart
+  postgres-route-health-mixed-exit-all-unhealthy-restart
   ping-lifecycle
   web-register
   web-register-tags
@@ -152,6 +156,10 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
+  database
+  database
+  database
   database
   database
   database
@@ -246,8 +254,12 @@ smoke_rust_scripts=(
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/postgres-route-via-restart-smoke.sh
+  tools/real-client/postgres-route-via-multiprefix-restart-smoke.sh
   tools/real-client/postgres-route-health-restart-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-smoke.sh
+  tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
   tools/real-client/ping-lifecycle-smoke.sh
   tools/real-client/web-register-smoke.sh
   tools/real-client/web-register-tags-smoke.sh
@@ -330,8 +342,12 @@ smoke_go_scripts=(
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-multiprefix-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/web-register-headscale-go-smoke.sh
   tools/real-client/web-register-tags-headscale-go-smoke.sh
@@ -414,8 +430,12 @@ smoke_assertions=(
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
   "production Postgres current-head grants via survives server restart"
+  "production Postgres current-head multi-prefix grants via survives server restart"
   "production Postgres current-head route-health survives server restart"
   "production Postgres route-health policy reload survives server restart"
+  "production Postgres route-health all-unhealthy retention survives server restart"
+  "production Postgres route-health mixed exit-node separation survives server restart"
+  "production Postgres route-health mixed exit-node all-unhealthy retention survives server restart"
   "debug PingRequest dispatch and public HEAD callback correlation"
   "no-auth pending registration and CLI approval"
   "web registration with owned requested tag"

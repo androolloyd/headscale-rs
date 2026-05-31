@@ -87,8 +87,12 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-route-via-restart` | `postgres-route-via-restart-smoke.sh` | `postgres-route-via-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` survives server restart |
+| Database | `postgres-route-via-multiprefix-restart` | `postgres-route-via-multiprefix-restart-smoke.sh` | `postgres-route-via-multiprefix-restart-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` survives server restart |
 | Database | `postgres-route-health-restart` | `postgres-route-health-restart-smoke.sh` | `postgres-route-health-restart-headscale-go-smoke.sh` | Production Postgres current-head route-health survives server restart |
 | Database | `postgres-route-health-reload-restart` | `postgres-route-health-reload-restart-smoke.sh` | `postgres-route-health-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health policy reload survives server restart |
+| Database | `postgres-route-health-all-unhealthy-restart` | `postgres-route-health-all-unhealthy-restart-smoke.sh` | `postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention survives server restart |
+| Database | `postgres-route-health-mixed-exit-restart` | `postgres-route-health-mixed-exit-restart-smoke.sh` | `postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node separation survives server restart |
+| Database | `postgres-route-health-mixed-exit-all-unhealthy-restart` | `postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention survives server restart |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
@@ -598,6 +602,27 @@ tools/real-client/postgres-oidc-headscale-go-smoke.sh
 It uses the same mock OIDC provider and stock Tailscale client as `oidc`, skips
 cleanly when `HEADSCALE_DB_POSTGRES_TEST_URL` is not set, and asserts the OIDC
 node row, user profile/provider fields, CLI node projection, and client netmap.
+
+The Postgres route-edge restart rows reuse the restart harness with a temporary
+Postgres database to prove persisted route-via and route-health state across a
+production server restart:
+
+```sh
+tools/real-client/postgres-route-via-restart-smoke.sh
+tools/real-client/postgres-route-via-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-restart-smoke.sh
+tools/real-client/postgres-route-via-multiprefix-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-restart-smoke.sh
+tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-reload-restart-smoke.sh
+tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
+```
 
 The primary-route scenario starts two stock clients, advertises and approves
 the same subnet route on both, and asserts that exactly one node is selected as

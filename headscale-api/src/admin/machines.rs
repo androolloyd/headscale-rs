@@ -531,9 +531,8 @@ impl PersistentMachineAdmin {
         let Some(auth_key_id) = row.auth_key_id else {
             return Ok(false);
         };
-        headscale_db::preauth_keys::get_by_id(&self.pool, auth_key_id)
+        headscale_db::preauth_keys::is_ephemeral_by_id(&self.pool, auth_key_id)
             .await
-            .map(|key| key.ephemeral)
             .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
     }
 
@@ -1011,9 +1010,8 @@ impl PersistentPostgresMachineAdmin {
         let Some(auth_key_id) = row.auth_key_id else {
             return Ok(false);
         };
-        headscale_db::preauth_keys::get_postgres_by_id(&self.pool, auth_key_id)
+        headscale_db::preauth_keys::is_postgres_ephemeral_by_id(&self.pool, auth_key_id)
             .await
-            .map(|key| key.ephemeral)
             .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
     }
 
@@ -3964,6 +3962,46 @@ mod tests {
         );
         assert_eq!(raw.auth_key_id, Some(preauth.row.id));
         assert_eq!(raw.tag_list(), vec!["tag:server"]);
+    }
+
+    #[tokio::test]
+    async fn persistent_auth_key_hydration_derives_ephemeral_from_preauth_key() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let preauth = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: true,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let record = machine_admin_record_to_wire(&persistent_record()).unwrap();
+
+        admin
+            .create_or_update_auth_key_path(
+                record.clone(),
+                &PolicyStore::new(),
+                Some(preauth.row.id),
+            )
+            .await
+            .unwrap();
+
+        let raw = headscale_db::headscale_nodes::get_by_node_key(
+            db.pool(),
+            &format!("nodekey:{}", record.node_key_hex),
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.auth_key_id, Some(preauth.row.id));
+
+        let registry = MachineRegistry::new();
+        assert_eq!(admin.hydrate_wire_registry(&registry).await.unwrap(), 1);
+        let hydrated = registry.get(&record.node_key_hex).unwrap();
+        assert!(hydrated.ephemeral);
     }
 
     #[tokio::test]

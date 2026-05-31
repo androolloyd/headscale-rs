@@ -357,6 +357,13 @@ async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
                 .collect::<Vec<_>>(),
             vec![(ephemeral.id, Some(ephemeral_key_id))]
         );
+        assert!(
+            preauth_keys::is_postgres_ephemeral_by_id_on_connection(
+                &mut schema.conn,
+                ephemeral_key_id,
+            )
+            .await?
+        );
 
         Ok::<(), DbError>(())
     }

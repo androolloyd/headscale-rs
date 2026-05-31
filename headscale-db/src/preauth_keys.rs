@@ -457,6 +457,18 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PreauthKeyRow> {
         })
 }
 
+/// Return only the auth-key ephemeral bit needed when hydrating nodes.
+pub async fn is_ephemeral_by_id(pool: &SqlitePool, id: i64) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT ephemeral FROM pre_auth_keys WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+            e => DbError::from(e),
+        })
+}
+
 #[cfg(feature = "postgres-sqlx")]
 pub async fn get_postgres_by_id(pool: &PgPool, id: i64) -> Result<PreauthKeyRow> {
     let mut conn = pool.acquire().await?;
@@ -470,6 +482,27 @@ pub async fn get_postgres_by_id_on_connection(
 ) -> Result<PreauthKeyRow> {
     let query = postgres_preauth_key_select("WHERE id = $1");
     sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+            e => DbError::from(e),
+        })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn is_postgres_ephemeral_by_id(pool: &PgPool, id: i64) -> Result<bool> {
+    let mut conn = pool.acquire().await?;
+    is_postgres_ephemeral_by_id_on_connection(&mut conn, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn is_postgres_ephemeral_by_id_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT ephemeral FROM pre_auth_keys WHERE id = $1")
         .bind(id)
         .fetch_one(&mut *conn)
         .await
@@ -1121,6 +1154,16 @@ mod tests {
         let c = create_for_test(db.pool(), p).await.unwrap();
         let r = get_by_token(db.pool(), &c.plaintext).await.unwrap();
         assert!(r.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn is_ephemeral_by_id_reads_flag() {
+        let db = fresh_db().await;
+        let mut p = alice();
+        p.ephemeral = true;
+        let c = create_for_test(db.pool(), p).await.unwrap();
+
+        assert!(is_ephemeral_by_id(db.pool(), c.row.id).await.unwrap());
     }
 
     /// Go: TestExpiredPreAuthKey — past expiration ⇒ try_use rejects.

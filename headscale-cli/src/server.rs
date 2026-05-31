@@ -4366,8 +4366,8 @@ database:
         let acme_server =
             LocalAcmeServer::spawn_http01_listener(challenge_addr, LOCAL_ACME_HOSTNAME).await;
         let mut cfg = test_run_server_config(&dir);
-        cfg.listen = unused_loopback_addr().to_string();
-        cfg.grpc_listen_addr = unused_loopback_addr().to_string();
+        cfg.listen = "127.0.0.1:0".into();
+        cfg.grpc_listen_addr = "127.0.0.1:0".into();
         cfg.metrics_listen_addr = None;
         cfg.server_url = Some(format!("https://{LOCAL_ACME_HOSTNAME}"));
         cfg.disable_check_updates = true;

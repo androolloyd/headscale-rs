@@ -767,33 +767,42 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
-        ["dumpConfig", "-h" | "--help"] => Some(UPSTREAM_DUMP_CONFIG_HELP),
-        ["mockoidc", "-h" | "--help"] => Some(UPSTREAM_MOCKOIDC_HELP),
+        ["dumpConfig", "-h" | "--help"] | ["help", "dumpConfig"] => Some(UPSTREAM_DUMP_CONFIG_HELP),
+        ["mockoidc", "-h" | "--help"] | ["help", "mockoidc"] => Some(UPSTREAM_MOCKOIDC_HELP),
         ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
             Some(UPSTREAM_COMPLETION_HELP)
         }
-        ["completion", "bash", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_BASH_HELP),
-        ["completion", "fish", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_FISH_HELP),
-        ["completion", "powershell", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_POWERSHELL_HELP),
-        ["completion", "zsh", "-h" | "--help"] => Some(UPSTREAM_COMPLETION_ZSH_HELP),
-        ["completion", shell, ..]
-            if !matches!(
-                *shell,
-                "bash" | "fish" | "powershell" | "zsh" | "-h" | "--help"
-            ) =>
-        {
+        ["completion", "bash", tail @ ..] if completion_shell_help_tail(tail) => {
+            Some(UPSTREAM_COMPLETION_BASH_HELP)
+        }
+        ["completion", "fish", tail @ ..] if completion_shell_help_tail(tail) => {
+            Some(UPSTREAM_COMPLETION_FISH_HELP)
+        }
+        ["completion", "powershell", tail @ ..] if completion_shell_help_tail(tail) => {
+            Some(UPSTREAM_COMPLETION_POWERSHELL_HELP)
+        }
+        ["completion", "zsh", tail @ ..] if completion_shell_help_tail(tail) => {
+            Some(UPSTREAM_COMPLETION_ZSH_HELP)
+        }
+        ["help", "completion", "bash"] => Some(UPSTREAM_COMPLETION_BASH_HELP),
+        ["help", "completion", "fish"] => Some(UPSTREAM_COMPLETION_FISH_HELP),
+        ["help", "completion", "powershell"] => Some(UPSTREAM_COMPLETION_POWERSHELL_HELP),
+        ["help", "completion", "zsh"] => Some(UPSTREAM_COMPLETION_ZSH_HELP),
+        ["completion", shell, tail @ ..] if completion_unknown_shell_help_tail(shell, tail) => {
             Some(UPSTREAM_COMPLETION_HELP)
         }
-        ["generate", "-h" | "--help"] | ["help", "generate"] | ["generate" | "gen"] => {
-            Some(UPSTREAM_GENERATE_HELP)
-        }
-        ["generate" | "gen", subcommand, ..]
-            if !matches!(*subcommand, "private-key" | "-h" | "--help") =>
+        ["generate" | "gen", "-h" | "--help"]
+        | ["help", "generate" | "gen"]
+        | ["generate" | "gen"] => Some(UPSTREAM_GENERATE_HELP),
+        ["generate" | "gen", subcommand, tail @ ..]
+            if generate_group_help_tail(subcommand, tail) =>
         {
             Some(UPSTREAM_GENERATE_HELP)
         }
-        ["generate" | "gen", "private-key", "-h" | "--help"]
-        | ["help", "generate" | "gen", "private-key"] => Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP),
+        ["generate" | "gen", "private-key", tail @ ..] if private_key_help_tail(tail) => {
+            Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
+        }
+        ["help", "generate" | "gen", "private-key"] => Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP),
         ["debug", "-h" | "--help"] | ["help", "debug"] => Some(UPSTREAM_DEBUG_HELP),
         ["debug", "create-node", "-h" | "--help"] | ["help", "debug", "create-node"] => {
             Some(UPSTREAM_DEBUG_CREATE_NODE_HELP)
@@ -1023,10 +1032,16 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
         ] if !tail.is_empty() && !completion_tail_is_supported(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::CompletionShell)
         }
-        ["generate" | "gen", "private-key", tail @ ..]
-            if !tail.is_empty() && !tail_is_help_or_force(tail) =>
+        ["completion", shell, ..]
+            if !matches!(
+                *shell,
+                "bash" | "fish" | "powershell" | "zsh" | "-h" | "--help"
+            ) =>
         {
-            first_unknown_flag(tail, UtilityFlagScope::HelpOnly)
+            first_unknown_flag(&parts[1..], UtilityFlagScope::CompletionCommand)
+        }
+        ["generate" | "gen", tail @ ..] if !tail.is_empty() => {
+            first_unknown_flag(tail, UtilityFlagScope::GenerateGroup)
         }
         _ => None,
     }
@@ -1036,9 +1051,10 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
 enum UtilityFlagScope {
     Version,
     Serve,
+    GenerateGroup,
     GlobalConfig,
+    CompletionCommand,
     CompletionShell,
-    HelpOnly,
 }
 
 fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> {
@@ -1047,38 +1063,53 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
         let arg = tail[i];
         match (scope, arg) {
             (_, "-h" | "--help")
-            | (UtilityFlagScope::Serve | UtilityFlagScope::HelpOnly, "--force")
+            | (UtilityFlagScope::Serve | UtilityFlagScope::GenerateGroup, "--force")
             | (UtilityFlagScope::CompletionShell, "--no-descriptions") => {
                 i += 1;
                 continue;
             }
-            (UtilityFlagScope::Version | UtilityFlagScope::Serve, "-o" | "--output")
-                if i + 1 < tail.len() =>
-            {
+            (
+                UtilityFlagScope::Version
+                | UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup,
+                "-o" | "--output",
+            ) if i + 1 < tail.len() => {
                 i += 2;
                 continue;
             }
-            (UtilityFlagScope::Version | UtilityFlagScope::Serve, value)
-                if value.starts_with("--output=") =>
-            {
+            (
+                UtilityFlagScope::Version
+                | UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup,
+                value,
+            ) if value.starts_with("--output=") => {
                 i += 1;
                 continue;
             }
-            (UtilityFlagScope::Version | UtilityFlagScope::Serve, value)
-                if value.starts_with("-o") && value.len() > 2 =>
-            {
+            (
+                UtilityFlagScope::Version
+                | UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup,
+                value,
+            ) if value.starts_with("-o") && value.len() > 2 => {
                 i += 1;
                 continue;
             }
-            (UtilityFlagScope::Serve | UtilityFlagScope::GlobalConfig, "-c" | "--config")
-                if i + 1 < tail.len() =>
-            {
+            (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                "-c" | "--config",
+            ) if i + 1 < tail.len() => {
                 i += 2;
                 continue;
             }
-            (UtilityFlagScope::Serve | UtilityFlagScope::GlobalConfig, value)
-                if value.starts_with("--config=") =>
-            {
+            (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                value,
+            ) if value.starts_with("--config=") => {
                 i += 1;
                 continue;
             }
@@ -1102,8 +1133,36 @@ fn tail_is_help(tail: &[&str]) -> bool {
     matches!(tail, ["-h" | "--help"])
 }
 
-fn tail_is_help_or_force(tail: &[&str]) -> bool {
-    matches!(tail, ["-h" | "--help" | "--force"])
+fn completion_shell_help_tail(tail: &[&str]) -> bool {
+    !tail.is_empty()
+        && tail.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+        && first_unknown_flag(tail, UtilityFlagScope::CompletionShell).is_none()
+}
+
+fn completion_unknown_shell_help_tail(shell: &str, tail: &[&str]) -> bool {
+    !matches!(
+        shell,
+        "bash" | "fish" | "powershell" | "zsh" | "-h" | "--help"
+    ) && !shell.starts_with('-')
+        && first_unknown_flag(tail, UtilityFlagScope::CompletionCommand).is_none()
+}
+
+fn generate_group_help_tail(subcommand: &str, tail: &[&str]) -> bool {
+    !matches!(subcommand, "private-key" | "-h" | "--help")
+        && first_unknown_flag(
+            std::iter::once(subcommand)
+                .chain(tail.iter().copied())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            UtilityFlagScope::GenerateGroup,
+        )
+        .is_none()
+}
+
+fn private_key_help_tail(tail: &[&str]) -> bool {
+    !tail.is_empty()
+        && tail.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+        && first_unknown_flag(tail, UtilityFlagScope::GenerateGroup).is_none()
 }
 
 fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
@@ -2723,15 +2782,51 @@ mod tests {
             Some(UPSTREAM_DUMP_CONFIG_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "dumpConfig"]),
+            Some(UPSTREAM_DUMP_CONFIG_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["mockoidc", "--help"]),
             Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "mockoidc"]),
+            Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["gen", "--help"]),
+            Some(UPSTREAM_GENERATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "gen"]),
+            Some(UPSTREAM_GENERATE_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["gen", "private-key", "--help"]),
             Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["generate", "private-key", "--force", "--help"]),
+            Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["generate", "bad", "--help"]),
+            Some(UPSTREAM_GENERATE_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["completion", "bash", "--help"]),
+            Some(UPSTREAM_COMPLETION_BASH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "bash", "--no-descriptions", "--help"]),
+            Some(UPSTREAM_COMPLETION_BASH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["completion", "bash", "extra", "--help"]),
+            Some(UPSTREAM_COMPLETION_BASH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "completion", "bash"]),
             Some(UPSTREAM_COMPLETION_BASH_HELP)
         );
         assert_eq!(
@@ -2739,11 +2834,23 @@ mod tests {
             Some(UPSTREAM_COMPLETION_FISH_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "completion", "fish"]),
+            Some(UPSTREAM_COMPLETION_FISH_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["completion", "powershell", "--help"]),
             Some(UPSTREAM_COMPLETION_POWERSHELL_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "completion", "powershell"]),
+            Some(UPSTREAM_COMPLETION_POWERSHELL_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["completion", "zsh", "--help"]),
+            Some(UPSTREAM_COMPLETION_ZSH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "completion", "zsh"]),
             Some(UPSTREAM_COMPLETION_ZSH_HELP)
         );
         assert_eq!(

@@ -910,6 +910,18 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["help", "version"],
         include_str!("snapshots/version_help.stdout"),
     );
+    assert_stdout_snapshot(
+        &["help", "mockoidc"],
+        include_str!("snapshots/mockoidc_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "dumpConfig"],
+        include_str!("snapshots/dump_config_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "completion", "bash"],
+        include_str!("snapshots/completion_bash_help.stdout"),
+    );
     assert_stdout_snapshot(&["auth", "-h"], include_str!("snapshots/auth_help.stdout"));
     assert_stdout_snapshot(
         &["help", "auth", "register"],
@@ -1277,19 +1289,23 @@ fn generate_missing_or_unknown_subcommand_matches_upstream_help() {
 }
 
 #[test]
-fn utility_fallback_flags_match_upstream_help_snapshots() {
+fn utility_unknown_subcommands_with_help_flags_match_upstream_help_snapshots() {
     for args in [
-        &["completion", "--bad"][..],
-        &["completion", "bad", "--bad"][..],
+        &["completion", "bad", "--help"][..],
+        &["completion", "bad", "extra", "--help"][..],
     ] {
         assert_stdout_snapshot(args, include_str!("snapshots/completion_help.stdout"));
     }
+    assert_stdout_snapshot(
+        &["completion", "bash", "extra", "--help"],
+        include_str!("snapshots/completion_bash_help.stdout"),
+    );
 
     for args in [
-        &["generate", "--bad"][..],
-        &["gen", "--bad"][..],
-        &["generate", "bad", "--bad"][..],
-        &["gen", "bad", "--bad"][..],
+        &["generate", "bad", "--help"][..],
+        &["gen", "bad", "--help"][..],
+        &["generate", "bad", "extra", "--help"][..],
+        &["gen", "bad", "extra", "--help"][..],
     ] {
         assert_stdout_snapshot(args, include_str!("snapshots/generate_help.stdout"));
     }
@@ -1368,12 +1384,62 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["completion", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "bad", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "bad", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["completion", "bash", "--bad"],
         1,
         include_str!("snapshots/utility_completion_bash_unknown_flag.stderr"),
     );
     assert_stderr_snapshot(
         &["completion", "bash", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["gen", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "bad", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["gen", "bad", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "bad", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["gen", "bad", "-x"],
         1,
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
@@ -2195,7 +2261,19 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["help", "dumpConfig"],
+        include_str!("snapshots/dump_config_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["generate", "--help"],
+        include_str!("snapshots/generate_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["gen", "--help"],
+        include_str!("snapshots/generate_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "gen"],
         include_str!("snapshots/generate_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -2211,6 +2289,10 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/mockoidc_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["help", "mockoidc"],
+        include_str!("snapshots/mockoidc_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["completion", "--help"],
         include_str!("snapshots/completion_help.stdout"),
     );
@@ -2219,11 +2301,27 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/completion_bash_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["completion", "bash", "--no-descriptions", "--help"],
+        include_str!("snapshots/completion_bash_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "completion", "bash"],
+        include_str!("snapshots/completion_bash_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["completion", "fish", "--help"],
         include_str!("snapshots/completion_fish_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["help", "completion", "fish"],
+        include_str!("snapshots/completion_fish_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["completion", "powershell", "--help"],
+        include_str!("snapshots/completion_powershell_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "completion", "powershell"],
         include_str!("snapshots/completion_powershell_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -2232,6 +2330,10 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_snapshot(
         &["completion", "zsh", "--help"],
+        include_str!("snapshots/completion_zsh_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "completion", "zsh"],
         include_str!("snapshots/completion_zsh_help.stdout"),
     );
 }

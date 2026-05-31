@@ -59,8 +59,10 @@ after confirming the Rust and Go outputs match. Refresh it with
 `PARITY_UPDATE_GOLDEN=1 ./scripts/headscale_go_diff.sh` only after reviewing the
 semantic change.
 
-Current-head-only scenarios live in `tools/parity/current-head/*.json`. They use
-Rust golden verification through `./scripts/headscale_rs_current_head_golden.sh`
-until they are promoted into the default differential scenario set. Current-head
-SSH scenarios cover fields such as `acceptEnv`, and behavior such as
-hold-and-delegate SSH checks, that were introduced after the old v0.28 baseline.
+Current-head-only scenarios live in `tools/parity/current-head/*.json` while
+they are being staged. They use Rust golden verification through
+`./scripts/headscale_rs_current_head_golden.sh` until they are promoted into the
+default differential scenario set. The current default v0.29 gate now directly
+compares formerly staged route-via steering, SSH `acceptEnv`,
+hold-and-delegate SSH checks, and SSH host-destination rejection against
+headscale-go.

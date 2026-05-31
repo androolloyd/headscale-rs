@@ -173,9 +173,11 @@ It compares `tools/parity/headscale-rs` with headscale-go at commit
 `tools/parity/scenarios/*.json` scenario, then checks the normalized current-head
 golden at
 `tools/parity/golden/headscale-go-v0.29.0-beta.2.json`.
-Current-head-only scenarios such as `grants[].via` route steering live under
-`tools/parity/current-head/` and run through the Rust golden gate until they are
-promoted into the default differential scenario set:
+Former current-head-only route-via steering, SSH `acceptEnv`,
+hold-and-delegate SSH checks, and SSH host-destination rejection now live in the
+default Go-vs-Rust differential scenario set. New current-head-only scenarios
+can still stage under `tools/parity/current-head/` and run through the Rust
+golden gate until they are promoted:
 
 ```sh
 ./scripts/headscale_rs_current_head_golden.sh

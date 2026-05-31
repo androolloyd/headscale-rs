@@ -1,10 +1,15 @@
 # Current-head parity scenarios
 
 Scenarios in this directory exercise behavior observed in upstream headscale
-outside the default scenario set for the pinned
-`github.com/juanfont/headscale v0.29.0-beta.2`
-harness. They are tracked by a Rust golden until each scenario is promoted into
-the default `./scripts/headscale_go_diff.sh` differential run.
+while it is being staged outside the default scenario set. They are tracked by a
+Rust golden until each scenario is promoted into the default
+`./scripts/headscale_go_diff.sh` differential run.
+
+The default v0.29 differential gate now directly compares the former
+current-head route-via steering, SSH `acceptEnv`, hold-and-delegate SSH check,
+and SSH host-destination rejection scenarios against headscale-go. Keep new
+current-head-only scenarios here only when the Go harness or Rust implementation
+is not ready for default promotion yet.
 
 Run the current-head Rust golden gate from the repository root:
 

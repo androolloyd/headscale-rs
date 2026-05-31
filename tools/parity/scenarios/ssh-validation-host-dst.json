@@ -1,0 +1,17 @@
+{
+  "name": "ssh-validation-host-dst",
+  "expect_policy_error": "invalid dst \"server\"",
+  "policy": {
+    "hosts": {
+      "server": "100.64.0.4/32"
+    },
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["alice@"],
+        "dst": ["server"],
+        "users": ["root"]
+      }
+    ]
+  }
+}

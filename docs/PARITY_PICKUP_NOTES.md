@@ -342,7 +342,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   push/PR CI now provisions Postgres for them; broader Pg stock-client serve
   smokes remain
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
-- Broader Tailscale SSH current-head client status/stderr/profile variants
+- Broader Tailscale SSH current-head client status/stderr/profile variants;
+  the policy-level `acceptEnv`, `check` hold-and-delegate, and host-destination
+  rejection scenarios are now promoted into the default Go-vs-Rust differential
+  gate
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,
   including canonical map-batcher reason/state deltas
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed

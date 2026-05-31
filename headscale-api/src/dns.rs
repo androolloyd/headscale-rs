@@ -144,7 +144,8 @@ pub struct DnsConfigSpec {
     pub extra_records_path: Option<PathBuf>,
     /// Search-domain list emitted in `DNSConfig.Domains`. The base
     /// domain is always prepended at build time; this list extends
-    /// it.
+    /// it. Runtime emission preserves configured values exactly,
+    /// matching headscale-go's `dnsToTailcfgDNS`.
     pub search_domains: Vec<String>,
     /// Last-resort resolvers (`FallbackResolvers`).
     pub fallback_nameservers: Vec<String>,
@@ -160,9 +161,8 @@ pub struct DnsConfigSpec {
     /// through an exit node.
     pub exit_node_filtered_set: Vec<String>,
     /// Override the `AuthoritativeSuffixes` list. When `None`
-    /// (default), the store derives it from `[base_domain]` plus the
-    /// keys of `restricted_nameservers`. Set to `Some(vec![])` to
-    /// emit an empty list.
+    /// (default), nothing is emitted, matching headscale-go.
+    /// Set to `Some(vec![])` to explicitly keep the list empty.
     pub authoritative_suffixes: Option<Vec<String>>,
 }
 
@@ -724,8 +724,7 @@ fn build_dns_config_with_reverse_prefixes(
     extra: &[DnsRecord],
     reverse_prefixes: &MagicDnsReversePrefixes,
 ) -> DnsConfig {
-    let base_domain = normalise_domain(&spec.base_domain);
-    let base_domain_set = !base_domain.is_empty();
+    let base_domain_set = !spec.base_domain.is_empty();
     let magic_dns_enabled = spec.magic_dns && base_domain_set;
     let global_resolvers = effective_global_resolvers(spec);
     let mut routes = effective_split_resolvers(spec);
@@ -745,21 +744,15 @@ fn build_dns_config_with_reverse_prefixes(
         Vec::new()
     };
 
-    // Domains: the base_domain is always first — search-resolution
-    // order matters to the daemon (it walks left-to-right). Operator-
-    // supplied search_domains follow. An empty base_domain (e.g. the
-    // `DnsStore::new()` empty-default) drops the leading entry so the
-    // wire output is `{}` byte-for-byte.
+    // Domains: headscale-go v0.28 copies BaseDomain and SearchDomains
+    // directly into tailcfg.DNSConfig. Preserve case, trailing dots,
+    // duplicates, empty search-domain entries, and order here because
+    // this is stock-client wire configuration.
     let mut domains = Vec::with_capacity(1 + spec.search_domains.len());
     if base_domain_set {
-        domains.push(base_domain.clone());
+        domains.push(spec.base_domain.clone());
     }
-    for d in &spec.search_domains {
-        let domain = normalise_domain(d);
-        if !domain.is_empty() && domain != base_domain && !domains.contains(&domain) {
-            domains.push(domain);
-        }
-    }
+    domains.extend(spec.search_domains.iter().cloned());
 
     let authoritative = spec
         .authoritative_suffixes
@@ -1090,10 +1083,6 @@ fn effective_split_resolvers(spec: &DnsConfigSpec) -> HashMap<String, Vec<DnsRes
 
     let mut routes = HashMap::new();
     for suffix in keys {
-        let normalised_suffix = normalise_domain(suffix);
-        if normalised_suffix.is_empty() {
-            continue;
-        }
         let resolvers = spec
             .restricted_resolvers
             .get(suffix)
@@ -1106,7 +1095,7 @@ fn effective_split_resolvers(spec: &DnsConfigSpec) -> HashMap<String, Vec<DnsRes
                     .map(|addr| resolver_from_addr(addr))
                     .collect()
             });
-        routes.insert(normalised_suffix, resolvers);
+        routes.insert(suffix.clone(), resolvers);
     }
     routes
 }
@@ -1989,23 +1978,31 @@ mod tests {
     }
 
     #[test]
-    fn search_domain_equal_to_base_is_not_duplicated() {
+    fn search_domain_equal_to_base_is_preserved_like_headscale_go() {
         let spec = DnsConfigSpec {
-            search_domains: vec!["headscale.test".to_string()],
+            search_domains: vec!["headscale.test".to_string(), String::new()],
             ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
-        assert_eq!(cfg.domains.len(), 1);
+        assert_eq!(
+            cfg.domains,
+            vec![
+                "headscale.test".to_string(),
+                "headscale.test".to_string(),
+                String::new()
+            ]
+        );
     }
 
     #[test]
-    fn domains_and_route_suffixes_are_normalised_and_deduplicated() {
+    fn domains_and_route_suffixes_preserve_configured_values_like_headscale_go() {
         let spec = DnsConfigSpec {
             base_domain: "HeadScale.Test.".into(),
             search_domains: vec![
                 "headscale.test".into(),
                 "Corp.Example.".into(),
                 "corp.example".into(),
+                "Corp.Example.".into(),
             ],
             restricted_nameservers: HashMap::from([(
                 "Corp.Internal.".to_string(),
@@ -2015,8 +2012,17 @@ mod tests {
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
 
-        assert_eq!(cfg.domains, vec!["headscale.test", "corp.example"]);
-        assert!(cfg.routes.contains_key("corp.internal"));
+        assert_eq!(
+            cfg.domains,
+            vec![
+                "HeadScale.Test.".to_string(),
+                "headscale.test".to_string(),
+                "Corp.Example.".to_string(),
+                "corp.example".to_string(),
+                "Corp.Example.".to_string(),
+            ]
+        );
+        assert!(cfg.routes.contains_key("Corp.Internal."));
         assert!(cfg.authoritative_suffixes.is_empty());
         assert!(cfg.proxied);
     }
@@ -2242,13 +2248,13 @@ global = [
         );
 
         let cfg = build_dns_config(&spec, &[], &[]);
-        assert_eq!(cfg.domains, vec!["tail.example"]);
+        assert_eq!(cfg.domains, vec!["Tail.Example."]);
         assert_eq!(cfg.resolvers.len(), 1);
         assert_eq!(cfg.resolvers[0].addr, "https://dns.example/dns-query");
         assert_eq!(cfg.resolvers[0].bootstrap_resolution, vec!["203.0.113.53"]);
         assert!(cfg.resolvers[0].use_with_exit_node);
 
-        let route = cfg.routes.get("corp.internal").expect("split route");
+        let route = cfg.routes.get("Corp.Internal.").expect("split route");
         assert_eq!(route[0].addr, "tls://dns.corp.example");
         assert_eq!(route[0].bootstrap_resolution, vec!["2001:db8::53"]);
         assert!(route[0].use_with_exit_node);

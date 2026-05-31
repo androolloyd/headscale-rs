@@ -50,6 +50,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    hash::{Hash, Hasher},
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -1279,19 +1280,24 @@ pub fn spawn_extra_records_watcher(
     let poll = interval.unwrap_or(EXTRA_RECORDS_POLL_INTERVAL);
     tokio::spawn(async move {
         let mut last_mtime: Option<SystemTime> = None;
+        let mut last_fingerprint: Option<u64> = None;
         // Best-effort: load the file once at start so the initial
         // `/map` response carries the operator's records without
         // waiting one poll-interval.
-        if let Some(mtime) = load_and_apply(&store, &path, true).await {
-            last_mtime = Some(mtime);
+        if let Some(load) = load_and_apply(&store, &path, true, None).await {
+            last_mtime = Some(load.mtime);
+            last_fingerprint = load.fingerprint;
         }
         loop {
             tokio::time::sleep(poll).await;
             match tokio::fs::metadata(&path).await {
                 Ok(meta) => match meta.modified() {
                     Ok(m) if Some(m) != last_mtime => {
-                        if let Some(new) = load_and_apply(&store, &path, false).await {
-                            last_mtime = Some(new);
+                        if let Some(load) =
+                            load_and_apply(&store, &path, false, last_fingerprint).await
+                        {
+                            last_mtime = Some(load.mtime);
+                            last_fingerprint = load.fingerprint;
                         }
                     }
                     Ok(_) => {}
@@ -1315,7 +1321,18 @@ pub fn spawn_extra_records_watcher(
     })
 }
 
-async fn load_and_apply(store: &DnsStore, path: &Path, apply_empty: bool) -> Option<SystemTime> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExtraRecordsLoad {
+    mtime: SystemTime,
+    fingerprint: Option<u64>,
+}
+
+async fn load_and_apply(
+    store: &DnsStore,
+    path: &Path,
+    apply_empty: bool,
+    previous_fingerprint: Option<u64>,
+) -> Option<ExtraRecordsLoad> {
     let bytes = match tokio::fs::read(path).await {
         Ok(b) => b,
         Err(e) => {
@@ -1330,12 +1347,19 @@ async fn load_and_apply(store: &DnsStore, path: &Path, apply_empty: bool) -> Opt
             ?path,
             "extra-records reload read empty file; keeping previous set"
         );
-        return Some(mtime);
+        return Some(ExtraRecordsLoad {
+            mtime,
+            fingerprint: previous_fingerprint,
+        });
+    }
+    let fingerprint = Some(extra_records_fingerprint(&bytes));
+    if !apply_empty && fingerprint == previous_fingerprint {
+        return Some(ExtraRecordsLoad { mtime, fingerprint });
     }
     match parse_extra_records(&bytes) {
         Ok(records) => {
             store.set_extra_records(records);
-            Some(mtime)
+            Some(ExtraRecordsLoad { mtime, fingerprint })
         }
         Err(e) => {
             tracing::warn!(
@@ -1346,6 +1370,12 @@ async fn load_and_apply(store: &DnsStore, path: &Path, apply_empty: bool) -> Opt
             None
         }
     }
+}
+
+fn extra_records_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -2097,22 +2127,54 @@ mod tests {
         )
         .unwrap();
 
-        load_and_apply(&store, &path, true)
+        let initial = load_and_apply(&store, &path, true, None)
             .await
             .expect("initial load");
         assert_eq!(store.extra_records().len(), 1);
 
         std::fs::write(&path, b"  \n\t ").unwrap();
-        load_and_apply(&store, &path, false)
+        let empty_reload = load_and_apply(&store, &path, false, initial.fingerprint)
             .await
             .expect("empty reload advances mtime");
         assert_eq!(store.extra_records().len(), 1);
 
         std::fs::write(&path, b"[]").unwrap();
-        load_and_apply(&store, &path, false)
+        load_and_apply(&store, &path, false, empty_reload.fingerprint)
             .await
             .expect("json empty reload");
         assert!(store.extra_records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn extra_records_reload_same_bytes_does_not_wake_waiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extra-records.json");
+        let store = DnsStore::from_spec(magic_spec());
+        let body = br#"[{"name":"ops.headscale.test","type":"A","value":"100.64.0.50"}]"#;
+        std::fs::write(&path, body).unwrap();
+
+        let initial = load_and_apply(&store, &path, true, None)
+            .await
+            .expect("initial load");
+        assert_eq!(store.extra_records().len(), 1);
+
+        let waiter_store = store.clone();
+        let mut waiter = tokio::spawn(async move {
+            waiter_store.wait_for_change().await;
+        });
+        tokio::task::yield_now().await;
+
+        std::fs::write(&path, body).unwrap();
+        let same = load_and_apply(&store, &path, false, initial.fingerprint)
+            .await
+            .expect("same-content reload");
+
+        assert_eq!(same.fingerprint, initial.fingerprint);
+        tokio::select! {
+            res = &mut waiter => panic!("same-content reload unexpectedly woke waiter: {res:?}"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        waiter.abort();
     }
 
     #[test]

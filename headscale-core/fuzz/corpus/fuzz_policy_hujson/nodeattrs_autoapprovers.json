@@ -1,0 +1,46 @@
+{
+  "groups": {
+    "group:admins": ["alice@example.com", "bob@example.com"]
+  },
+  "tagOwners": {
+    "tag:router": ["group:admins"],
+    "tag:exit": ["alice@example.com"]
+  },
+  "randomizeClientPort": true,
+  "nodeAttrs": [
+    {
+      "target": ["*", "autogroup:member"],
+      "attr": ["randomize-client-port"]
+    },
+    {
+      "target": ["tag:router"],
+      "attr": ["ssh", "randomize-client-port"],
+      "app": {
+        "example.com/cap/connector": [
+          {
+            "name": "prod",
+            "ports": [22, 443]
+          }
+        ]
+      }
+    },
+    {
+      "target": ["tag:exit"],
+      "attr": ["exit-node"]
+    }
+  ],
+  "autoApprovers": {
+    "routes": {
+      "10.0.0.0/8": ["tag:router"],
+      "172.16.0.0/12": ["group:admins"]
+    },
+    "exitNode": ["tag:exit"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["group:admins", "tag:router", "autogroup:member"],
+      "dst": ["*:*"]
+    }
+  ]
+}

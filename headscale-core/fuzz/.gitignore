@@ -1,5 +1,10 @@
 target
 corpus
+!corpus/
+corpus/*
+!corpus/fuzz_policy_hujson/
+corpus/fuzz_policy_hujson/*
+!corpus/fuzz_policy_hujson/*.json
 artifacts
 logs
 coverage

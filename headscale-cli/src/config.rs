@@ -904,6 +904,9 @@ impl CliConfig {
             if server.embedded_derp.host_name.trim().is_empty() {
                 bail!("server.embedded_derp.host_name is required when embedded DERP is enabled");
             }
+            if server.embedded_derp.stun_addr.is_none() {
+                bail!("server.embedded_derp.stun_addr is required when embedded DERP is enabled");
+            }
             if server.embedded_derp.relay_enabled()
                 && server.embedded_derp.derper_binary.as_os_str().is_empty()
             {
@@ -3210,6 +3213,32 @@ verify_clients = true
             Some("https://headscale.example/verify")
         );
         assert!(embedded.verify_clients);
+    }
+
+    #[test]
+    fn configtest_rejects_embedded_derp_without_stun_addr() {
+        let source = r#"
+[server]
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "/var/lib/headscale/noise_private.key"
+
+[server.embedded_derp]
+enabled = true
+host_name = "derp.example.com"
+stun_only = true
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains(
+                "server.embedded_derp.stun_addr is required when embedded DERP is enabled"
+            ),
+            "{err:#}"
+        );
     }
 
     #[test]

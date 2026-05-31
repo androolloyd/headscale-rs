@@ -163,7 +163,7 @@ fn node_attrs_for_collects_via_canonical_doc() {
 
         [[node_attrs]]
         target = ["*"]
-        attr = ["funnel"]
+        attr = ["custom-node-attr"]
 
         [[node_attrs]]
         target = ["tag:exit"]
@@ -180,9 +180,12 @@ fn node_attrs_for_collects_via_canonical_doc() {
     // `PolicyDoc::node_attrs_for`.
     assert_eq!(
         store.node_attrs_for(&exit_node),
-        vec!["exit-node".to_string(), "funnel".to_string()]
+        vec!["custom-node-attr".to_string(), "exit-node".to_string()]
     );
-    assert_eq!(store.node_attrs_for(&plain), vec!["funnel".to_string()]);
+    assert_eq!(
+        store.node_attrs_for(&plain),
+        vec!["custom-node-attr".to_string()]
+    );
 }
 
 #[test]

@@ -50,9 +50,42 @@ fn exercise_doc(doc: &AclDoc) {
 
     let attrs = doc.attrs_for(&src);
     assert!(attrs.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(attrs, doc.node_attrs_for(&src));
+    assert_node_attrs_invariants(doc);
 
-    for prefix in ["0.0.0.0/0", "10.0.0.0/8", "10.1.2.0/24", "::/0"] {
+    assert!(!doc.auto_approves_route(&src, "0.0.0.0/0"));
+    assert!(!doc.auto_approves_route(&src, "::/0"));
+    for prefix in ["10.0.0.0/8", "10.1.2.0/24", "fd7a:115c:a1e0::/48"] {
         let _ = doc.auto_approves_route(&src, prefix);
     }
     let _ = doc.auto_approves_exit_node(&src);
+}
+
+fn assert_node_attrs_invariants(doc: &AclDoc) {
+    let router_tags = vec!["router".to_string()];
+    let prefixed_router_tags = vec!["tag:router".to_string()];
+    let exit_tags = vec!["exit".to_string()];
+    let empty_tags = Vec::new();
+
+    for node in [
+        NodeView::new("100.64.0.10")
+            .with_user("alice@example.com")
+            .with_tags(&router_tags),
+        NodeView::new("100.64.0.11")
+            .with_user("bob@example.com")
+            .with_tags(&prefixed_router_tags),
+        NodeView::new("100.64.0.12").with_tags(&exit_tags),
+        NodeView::new("100.64.0.13").with_tags(&empty_tags),
+    ] {
+        let attrs = doc.node_attrs_for(&node);
+        let mut sorted = attrs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(attrs, sorted);
+        assert_eq!(attrs, doc.attrs_for(&node));
+
+        if doc.randomize_client_port {
+            assert!(attrs.iter().any(|attr| attr == "randomize-client-port"));
+        }
+    }
 }

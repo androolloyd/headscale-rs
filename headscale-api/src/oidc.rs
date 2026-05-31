@@ -8,7 +8,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration as StdDuration, Instant};
 
 use axum::body::Bytes;
@@ -29,6 +32,7 @@ const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const OIDC_CSRF_TOKEN_LEN: usize = 64;
 const OIDC_COOKIE_MAX_AGE_SECS: u64 = 60 * 60;
 const DEFAULT_OIDC_AUTH_CACHE_EXPIRY: StdDuration = StdDuration::from_secs(15 * 60);
+const DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES: usize = 1024;
 const REGISTER_CONFIRM_CSRF_COOKIE: &str = "headscale_register_confirm";
 const REGISTER_CONFIRM_BODY_LIMIT: usize = 4 * 1024;
 
@@ -261,36 +265,49 @@ pub struct OidcRegistrationInfo {
 pub struct OidcRegistrationCache {
     inner: RwLock<BTreeMap<String, OidcRegistrationEntry>>,
     expiry: StdDuration,
+    max_entries: usize,
+    access_counter: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
 struct OidcRegistrationEntry {
     info: OidcRegistrationInfo,
     expires_at: Instant,
+    last_used: u64,
 }
 
 impl OidcRegistrationCache {
     pub fn new(expiry: StdDuration) -> Self {
+        Self::with_max_entries(expiry, DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES)
+    }
+
+    pub fn with_max_entries(expiry: StdDuration, max_entries: usize) -> Self {
         Self {
             inner: RwLock::new(BTreeMap::new()),
             expiry,
+            max_entries: nonzero_cache_max_entries(max_entries),
+            access_counter: AtomicU64::new(0),
         }
     }
 
     pub fn insert(&self, state: String, info: OidcRegistrationInfo) {
         self.prune_expired();
-        self.inner.write().insert(
-            state,
-            OidcRegistrationEntry {
-                info,
-                expires_at: Instant::now() + self.expiry,
-            },
-        );
+        let entry = OidcRegistrationEntry {
+            info,
+            expires_at: Instant::now() + self.expiry,
+            last_used: self.next_access(),
+        };
+        let mut inner = self.inner.write();
+        inner.insert(state, entry);
+        prune_lru(&mut inner, self.max_entries);
     }
 
     pub fn get(&self, state: &str) -> Option<OidcRegistrationInfo> {
         self.prune_expired();
-        self.inner.read().get(state).map(|entry| entry.info.clone())
+        let mut inner = self.inner.write();
+        let entry = inner.get_mut(state)?;
+        entry.last_used = self.next_access();
+        Some(entry.info.clone())
     }
 
     pub fn remove(&self, state: &str) -> Option<OidcRegistrationInfo> {
@@ -305,6 +322,10 @@ impl OidcRegistrationCache {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 
     pub fn prune_expired(&self) -> usize {
@@ -324,6 +345,10 @@ impl OidcRegistrationCache {
             }
         }
         removed
+    }
+
+    fn next_access(&self) -> u64 {
+        self.access_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -347,40 +372,50 @@ pub struct OidcPendingRegistrationConfirmation {
 pub struct OidcRegistrationConfirmationCache {
     inner: RwLock<BTreeMap<String, OidcRegistrationConfirmationEntry>>,
     expiry: StdDuration,
+    max_entries: usize,
+    access_counter: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
 struct OidcRegistrationConfirmationEntry {
     pending: OidcPendingRegistrationConfirmation,
     expires_at: Instant,
+    last_used: u64,
 }
 
 impl OidcRegistrationConfirmationCache {
     fn new(expiry: StdDuration) -> Self {
+        Self::with_max_entries(expiry, DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES)
+    }
+
+    fn with_max_entries(expiry: StdDuration, max_entries: usize) -> Self {
         Self {
             inner: RwLock::new(BTreeMap::new()),
             expiry,
+            max_entries: nonzero_cache_max_entries(max_entries),
+            access_counter: AtomicU64::new(0),
         }
     }
 
     #[cfg_attr(not(feature = "full"), allow(dead_code))]
     fn insert(&self, pending: OidcPendingRegistrationConfirmation) {
         self.prune_expired();
-        self.inner.write().insert(
-            pending.registration_id.clone(),
-            OidcRegistrationConfirmationEntry {
-                pending,
-                expires_at: Instant::now() + self.expiry,
-            },
-        );
+        let entry = OidcRegistrationConfirmationEntry {
+            pending,
+            expires_at: Instant::now() + self.expiry,
+            last_used: self.next_access(),
+        };
+        let mut inner = self.inner.write();
+        inner.insert(entry.pending.registration_id.clone(), entry);
+        prune_lru(&mut inner, self.max_entries);
     }
 
     fn get(&self, registration_id: &str) -> Option<OidcPendingRegistrationConfirmation> {
         self.prune_expired();
-        self.inner
-            .read()
-            .get(registration_id)
-            .map(|entry| entry.pending.clone())
+        let mut inner = self.inner.write();
+        let entry = inner.get_mut(registration_id)?;
+        entry.last_used = self.next_access();
+        Some(entry.pending.clone())
     }
 
     fn remove(&self, registration_id: &str) -> Option<OidcPendingRegistrationConfirmation> {
@@ -408,6 +443,47 @@ impl OidcRegistrationConfirmationCache {
             }
         }
         removed
+    }
+
+    fn next_access(&self) -> u64 {
+        self.access_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+trait LruCacheEntry {
+    fn last_used(&self) -> u64;
+}
+
+impl LruCacheEntry for OidcRegistrationEntry {
+    fn last_used(&self) -> u64 {
+        self.last_used
+    }
+}
+
+impl LruCacheEntry for OidcRegistrationConfirmationEntry {
+    fn last_used(&self) -> u64 {
+        self.last_used
+    }
+}
+
+fn nonzero_cache_max_entries(max_entries: usize) -> usize {
+    if max_entries == 0 {
+        DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES
+    } else {
+        max_entries
+    }
+}
+
+fn prune_lru<T: LruCacheEntry>(inner: &mut BTreeMap<String, T>, max_entries: usize) {
+    while inner.len() > max_entries {
+        let Some(evict_key) = inner
+            .iter()
+            .min_by_key(|(_key, entry)| entry.last_used())
+            .map(|(key, _entry)| key.clone())
+        else {
+            break;
+        };
+        inner.remove(&evict_key);
     }
 }
 
@@ -2100,6 +2176,35 @@ mod tests {
             .find_map(|(part_key, value)| (part_key == key).then(|| value.to_string()))
     }
 
+    fn cache_registration_info(registration_id: &str) -> OidcRegistrationInfo {
+        OidcRegistrationInfo {
+            registration_id: registration_id.to_string(),
+            verifier: None,
+            registration: true,
+        }
+    }
+
+    fn cache_pending_confirmation(
+        registration_id: &str,
+        csrf: &str,
+    ) -> OidcPendingRegistrationConfirmation {
+        OidcPendingRegistrationConfirmation {
+            registration_id: registration_id.to_string(),
+            user: OidcStoredUser {
+                id: 1,
+                name: "alice@example.com".into(),
+                display_name: "Alice Smith".into(),
+                email: "alice@example.com".into(),
+                provider_identifier: "https://issuer.example/subject".into(),
+                provider: REGISTER_METHOD_OIDC.into(),
+                profile_pic_url: String::new(),
+            },
+            node_expiry: None,
+            csrf: csrf.to_string(),
+            device: OidcRegistrationConfirmInfo::default(),
+        }
+    }
+
     fn provider_metadata() -> OidcProviderMetadata {
         OidcProviderMetadata {
             issuer: "https://issuer.example".into(),
@@ -2448,6 +2553,39 @@ mod tests {
         assert_eq!(cached.registration_id, "r".repeat(24));
         assert!(cached.verifier.is_some());
         assert!(cached.registration);
+    }
+
+    #[test]
+    fn oidc_registration_cache_is_bounded_lru_like_upstream() {
+        let cache = OidcRegistrationCache::with_max_entries(StdDuration::from_secs(60), 2);
+        cache.insert("state-1".into(), cache_registration_info("one"));
+        cache.insert("state-2".into(), cache_registration_info("two"));
+
+        assert_eq!(cache.max_entries(), 2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("state-1").unwrap().registration_id, "one");
+
+        cache.insert("state-3".into(), cache_registration_info("three"));
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("state-1").unwrap().registration_id, "one");
+        assert!(cache.get("state-2").is_none());
+        assert_eq!(cache.get("state-3").unwrap().registration_id, "three");
+    }
+
+    #[test]
+    fn oidc_confirmation_cache_is_bounded_lru_like_upstream() {
+        let cache =
+            OidcRegistrationConfirmationCache::with_max_entries(StdDuration::from_secs(60), 2);
+        cache.insert(cache_pending_confirmation("registration-1", "csrf-1"));
+        cache.insert(cache_pending_confirmation("registration-2", "csrf-2"));
+
+        assert_eq!(cache.get("registration-1").unwrap().csrf, "csrf-1");
+        cache.insert(cache_pending_confirmation("registration-3", "csrf-3"));
+
+        assert_eq!(cache.get("registration-1").unwrap().csrf, "csrf-1");
+        assert!(cache.get("registration-2").is_none());
+        assert_eq!(cache.get("registration-3").unwrap().csrf, "csrf-3");
     }
 
     #[test]

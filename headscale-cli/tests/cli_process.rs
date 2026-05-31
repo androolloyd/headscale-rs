@@ -2578,11 +2578,12 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             &config,
             &["-o", "json", "apikeys", "create", "--expiration", "1h"],
         );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
         let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret").to_string();
         assert!(
-            api_key
-                .as_str()
-                .is_some_and(|key| key.starts_with("hskey-api-"))
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
         );
 
         let api_keys = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
@@ -2592,6 +2593,67 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             api_keys[0]["prefix"]
                 .as_str()
                 .is_some_and(|prefix| !prefix.is_empty())
+        );
+
+        let http = reqwest::Client::new();
+        let gateway_health = http
+            .get(format!("{server_url}/api/v1/health"))
+            .send()
+            .await?;
+        assert_eq!(gateway_health.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(gateway_health.text().await?, "Unauthorized");
+
+        let gateway_health = http
+            .get(format!("{server_url}/api/v1/health"))
+            .bearer_auth(&api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(gateway_health.status(), reqwest::StatusCode::OK);
+        let gateway_health = gateway_health.json::<serde_json::Value>().await?;
+        assert_eq!(gateway_health["databaseConnectivity"].as_bool(), Some(true));
+
+        let gateway_users = http
+            .get(format!("{server_url}/api/v1/user?name=alice"))
+            .bearer_auth(&api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(gateway_users.status(), reqwest::StatusCode::OK);
+        let gateway_users = gateway_users.json::<serde_json::Value>().await?;
+        assert_eq!(gateway_users["users"][0]["name"].as_str(), Some("alice"));
+
+        let remote_grpc_dir = tempfile::tempdir()?;
+        let remote_grpc_address = format!("http://{grpc}");
+        let remote_grpc_config = write_remote_grpc_config(
+            remote_grpc_dir.path(),
+            &remote_grpc_address,
+            &api_key_secret,
+        );
+        let remote_health = wait_for_headscale_status(&remote_grpc_config, &["health"], 0).await;
+        assert_eq!(stdout(&remote_health), "\n");
+        assert_eq!(stderr(&remote_health), "");
+
+        let remote_users =
+            headscale_with_config(&remote_grpc_config, &["-o", "json", "users", "list"]);
+        assert!(
+            remote_users.status.success(),
+            "stderr: {}",
+            stderr(&remote_users)
+        );
+        let remote_users = json_output(&remote_users);
+        assert_eq!(remote_users[0]["name"].as_str(), Some("alice"));
+
+        let bad_remote_grpc_dir = tempfile::tempdir()?;
+        let bad_remote_grpc_config = write_remote_grpc_config(
+            bad_remote_grpc_dir.path(),
+            &remote_grpc_address,
+            "bad-token",
+        );
+        let bad_remote_auth =
+            wait_for_headscale_status(&bad_remote_grpc_config, &["health"], 4).await;
+        assert_eq!(stdout(&bad_remote_auth), "");
+        assert_eq!(
+            stderr(&bad_remote_auth),
+            include_str!("snapshots/grpc_remote_auth_failure.stderr")
         );
 
         let policy_path = dir.path().join("pg-policy.hujson");

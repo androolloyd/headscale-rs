@@ -87,6 +87,14 @@ Recent accepted slices:
   database-backed policy set/get through the CLI before dropping the temporary
   database. It skips cleanly when the env var is absent or the role cannot
   create a temporary database.
+- This slice extends that production Postgres `serve` smoke to prove the same
+  temporary Pg-backed admin stores are reachable through the authenticated
+  public grpc-gateway and the optional remote TCP gRPC listener. It checks
+  unauthenticated grpc-gateway rejection, API-key-authenticated
+  `/api/v1/health` and `/api/v1/user`, remote gRPC `health`/`users list`, and
+  remote invalid-token error text before expiring/deleting the Pg-backed API
+  key. The real-client CI workflow now runs this focused cargo test with its
+  Postgres 16 service before the paired stock-client matrix.
 - This slice adds env-gated process coverage for Postgres direct policy DB
   bypass without a running server. The real `headscale` binary opens the
   configured Pg database through
@@ -293,14 +301,15 @@ registration and SSH-check approval wired, Postgres foundation migration now
 rejects unsupported existing version state before running migrations, and an
 env-gated live-Pg runtime smoke proves register/persist/hydrate behavior without
 adding non-upstream config. The first production Postgres `serve` process smoke
-now starts the real binary and exercises public health plus local gRPC CLI
-admin operations against Pg, including users, preauth keys, API keys, policy,
-debug node creation, registration, node mutation, backfill, and deletion; direct
-policy DB bypass now round-trips against configured Pg without a running server.
-The next critical slice is broader production Pg serve coverage beyond the
-auth-key, web-registration, route-approval, OIDC map, and OIDC restart flows. The other
-narrow lanes remain current-upstream CLI output drift snapshots, map/session
-churn parity, and remaining route/SSH stock-client edge rows.
+now starts the real binary and exercises public health, local gRPC CLI admin,
+public grpc-gateway API-key auth, and remote TCP gRPC API-key auth against Pg,
+including users, preauth keys, API keys, policy, debug node creation,
+registration, node mutation, backfill, and deletion; direct policy DB bypass now
+round-trips against configured Pg without a running server. The next critical
+slice is broader production Pg stock-client/mutation coverage beyond the
+auth-key, web-registration, route-approval, OIDC map, and OIDC restart flows.
+The other narrow lanes remain current-upstream CLI output drift snapshots,
+map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 ## Remaining Larger Parity Tracks
 

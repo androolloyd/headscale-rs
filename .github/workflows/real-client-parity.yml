@@ -89,6 +89,10 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y openssl postgresql-client protobuf-compiler ruby sqlite3
+      - name: Run Postgres serve topology smoke
+        run: >-
+          cargo test -p headscale-cli --features postgres-sqlx --test cli_process
+          serve_postgres_runtime_local_grpc_admin_surface_smoke -- --nocapture
       - name: Check Docker availability
         run: |
           set -euo pipefail

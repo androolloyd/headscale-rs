@@ -105,6 +105,7 @@ smoke_ids=(
   postgres-tag-reauth-clear
   postgres-acl-allow
   postgres-route-via
+  postgres-route-via-same-tag
   postgres-route-via-reload
   postgres-route-via-multiprefix
   postgres-route-via-multiprefix-reload
@@ -195,6 +196,7 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  database
   database
   database
   database
@@ -359,6 +361,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-tag-reauth-clear-smoke.sh
   tools/real-client/postgres-acl-allow-smoke.sh
   tools/real-client/postgres-route-via-smoke.sh
+  tools/real-client/postgres-route-via-same-tag-smoke.sh
   tools/real-client/postgres-route-via-reload-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-smoke.sh
@@ -486,6 +489,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh
   tools/real-client/postgres-acl-allow-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-headscale-go-smoke.sh
@@ -613,6 +617,7 @@ smoke_assertions=(
   "production Postgres web reauth clears forced tags"
   "production Postgres ACL allowed peers visible"
   "production Postgres current-head grants via route steering"
+  "production Postgres current-head same-tag grants via route steering"
   "production Postgres current-head grants via policy reload steering"
   "production Postgres current-head multi-prefix grants via route steering"
   "production Postgres current-head multi-prefix grants via policy reload steering"

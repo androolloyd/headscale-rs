@@ -114,6 +114,7 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-tag-reauth-clear` | `postgres-tag-reauth-clear-smoke.sh` | `postgres-tag-reauth-clear-headscale-go-smoke.sh` | Production Postgres web reauth clears forced tags |
 | Database | `postgres-acl-allow` | `postgres-acl-allow-smoke.sh` | `postgres-acl-allow-headscale-go-smoke.sh` | Production Postgres ACL allowed peers visible |
 | Database | `postgres-route-via` | `postgres-route-via-smoke.sh` | `postgres-route-via-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` route steering |
+| Database | `postgres-route-via-same-tag` | `postgres-route-via-same-tag-smoke.sh` | `postgres-route-via-same-tag-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route steering |
 | Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
 | Database | `postgres-route-via-multiprefix` | `postgres-route-via-multiprefix-smoke.sh` | `postgres-route-via-multiprefix-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` route steering |
 | Database | `postgres-route-via-multiprefix-reload` | `postgres-route-via-multiprefix-reload-smoke.sh` | `postgres-route-via-multiprefix-reload-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload steering |
@@ -689,6 +690,8 @@ persisted route-via/route-health state across production server boundaries:
 ```sh
 tools/real-client/postgres-route-via-smoke.sh
 tools/real-client/postgres-route-via-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-same-tag-smoke.sh
+tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-reload-smoke.sh
 tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-multiprefix-smoke.sh

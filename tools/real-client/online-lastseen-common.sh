@@ -16,6 +16,7 @@ esac
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
+client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
@@ -34,13 +35,15 @@ policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
 prefix_v6="${REAL_CLIENT_PREFIX_V6:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
+expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
+expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
   rust) client_target="rs" ;;
   headscale-go) client_target="go" ;;
 esac
-client_name="${REAL_CLIENT_CLIENT_NAME:-hs-ol-${client_target}-${database_backend}-${login_mode}-$$}"
+client_name_override="${REAL_CLIENT_CLIENT_NAME:-}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 magic_dns="${REAL_CLIENT_MAGIC_DNS:-false}"
 accept_dns="${REAL_CLIENT_ACCEPT_DNS:-false}"
@@ -55,6 +58,7 @@ expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
+expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
@@ -71,6 +75,11 @@ case "${login_mode}" in
     exit 2
     ;;
 esac
+
+if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
+  echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
 
 case "${advertise_exit_node}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -165,6 +174,19 @@ if [[ -z "${prefix_v4}" && -z "${prefix_v6}" ]]; then
   exit 2
 fi
 
+case "${expected_debug_ping}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_debug_ping=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_debug_ping=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DEBUG_PING must be true or false, got ${expected_debug_ping}" >&2
+    exit 2
+    ;;
+esac
+
 case "${expected_set_tags_failure}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     expect_set_tags_failure=1
@@ -241,6 +263,36 @@ case "${expected_tags_exact}" in
     ;;
 esac
 
+if [[ -n "${expected_peer_count}" ]] && ! [[ "${expected_peer_count}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_PEER_COUNT must be a non-negative integer, got ${expected_peer_count}" >&2
+  exit 2
+fi
+expected_peer_counts_values=()
+if [[ -n "${expected_peer_counts}" ]]; then
+  IFS=',' read -r -a expected_peer_counts_values <<<"${expected_peer_counts}"
+  if ((${#expected_peer_counts_values[@]} != client_count)); then
+    echo "REAL_CLIENT_EXPECT_PEER_COUNTS must contain ${client_count} comma-separated counts, got ${expected_peer_counts}" >&2
+    exit 2
+  fi
+  for count in "${expected_peer_counts_values[@]}"; do
+    if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+      echo "REAL_CLIENT_EXPECT_PEER_COUNTS must contain non-negative integers, got ${expected_peer_counts}" >&2
+      exit 2
+    fi
+  done
+fi
+
+client_names=()
+for ((idx = 1; idx <= client_count; idx++)); do
+  if ((client_count == 1)); then
+    client_names+=("${client_name_override:-hs-ol-${client_target}-${database_backend}-${login_mode}-$$}")
+  else
+    client_prefix="${client_name_override:-hs-ol-${client_target}-${database_backend}-${login_mode}-$$}"
+    client_names+=("${client_prefix}-${idx}")
+  fi
+done
+client_name="${client_names[0]}"
+
 if [[ -z "${policy_json}" ]]; then
   policy_json="$(
     ruby -rjson -e '
@@ -291,7 +343,10 @@ postgres_sslmode=""
 postgres_database_created=0
 
 cleanup() {
-  docker rm -f "${client_name}" >/dev/null 2>&1 || true
+  local cleanup_client_name
+  for cleanup_client_name in "${client_names[@]}"; do
+    docker rm -f "${cleanup_client_name}" >/dev/null 2>&1 || true
+  done
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
@@ -453,6 +508,64 @@ dump_debug() {
   headscale_cmd -o json nodes list 2>&1 || true
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2 || true
+}
+
+dump_client_debug() {
+  local debug_client_name="$1"
+  docker exec "${debug_client_name}" tailscale status 2>&1 || true
+  docker exec "${debug_client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2 || true
+}
+
+tailscale_peer_count_matches() {
+  local peer_client_name="$1"
+  local count="$2"
+  local status_json
+  status_json="$(docker exec "${peer_client_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    peers = status["Peer"] || {}
+    exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
+  ' "${count}" <<<"${status_json}"
+}
+
+assert_peer_visibility_if_requested() {
+  [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]] || return 0
+  echo "::group::assert client peer visibility"
+  local peer_status_paths=()
+  local peer_expected_counts=()
+  local idx peer_client_name expected_count status_path peer_expected_counts_csv
+  for idx in "${!client_names[@]}"; do
+    peer_client_name="${client_names[$idx]}"
+    expected_count="${expected_peer_count}"
+    if [[ -n "${expected_peer_counts}" ]]; then
+      expected_count="${expected_peer_counts_values[$idx]}"
+    fi
+    if ! wait_for "tailscale peer count ${expected_count} for ${peer_client_name}" \
+      "tailscale_peer_count_matches '${peer_client_name}' '${expected_count}'"; then
+      dump_client_debug "${peer_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    status_path="${work_dir}/${peer_client_name}.peer-status.json"
+    docker exec "${peer_client_name}" tailscale status --json >"${status_path}" || true
+    peer_status_paths+=("${status_path}")
+    peer_expected_counts+=("${expected_count}")
+  done
+  peer_expected_counts_csv="$(IFS=,; echo "${peer_expected_counts[*]}")"
+  ruby -rjson -e '
+    expected_counts = ARGV.fetch(0).split(",").map { |value| Integer(value) }
+    status_paths = ARGV.drop(1)
+    status_paths.each_with_index do |path, idx|
+      expected_count = expected_counts.fetch(idx)
+      status = JSON.parse(File.read(path))
+      self_host = status.fetch("Self").fetch("HostName")
+      peers = status["Peer"] || {}
+      abort("#{path}: expected #{expected_count} peers, got #{peers.length}") unless peers.length == expected_count
+      peer_hosts = peers.each_value.map { |peer| peer.fetch("HostName") }.sort
+      puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
+    end
+  ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
+  echo "::endgroup::"
 }
 
 install_or_build_headscale() {
@@ -1027,6 +1140,34 @@ wait_for_client_netmap() {
   }
 }
 
+debug_ping_url() {
+  case "${target}" in
+    rust) printf '%s/debug/ping' "${local_control_url}" ;;
+    headscale-go) printf 'http://127.0.0.1:%s/debug/ping' "${metrics_port}" ;;
+  esac
+}
+
+assert_debug_ping_if_requested() {
+  ((expect_debug_ping)) || return 0
+  echo "::group::assert debug PingRequest lifecycle"
+  local ping_url
+  ping_url="$(debug_ping_url)"
+  curl -fsS --max-time "${timeout_secs}" \
+    --get \
+    --data-urlencode "node=${client_name}" \
+    "${ping_url}" \
+    >"${work_dir}/debug-ping.html"
+  if ! grep -Eq 'Ping OK|Pong|responded' "${work_dir}/debug-ping.html"; then
+    echo "expected /debug/ping to report a successful PingRequest callback" >&2
+    cat "${work_dir}/debug-ping.html" >&2 || true
+    dump_debug
+    echo "::endgroup::"
+    return 1
+  fi
+  ruby -rjson -e 'puts JSON.pretty_generate({debug_ping: "ok", node: ARGV.fetch(0)})' "${client_name}"
+  echo "::endgroup::"
+}
+
 assert_magic_dns_status() {
   local output_path="${work_dir}/${client_name}.magicdns-status.json"
   docker exec "${client_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
@@ -1592,8 +1733,11 @@ if [[ "${target}" == "headscale-go" ]]; then
 fi
 start_server
 create_user_and_key
-start_client
-login_client
+for client_name in "${client_names[@]}"; do
+  start_client
+  login_client
+done
+client_name="${client_names[0]}"
 if ((expect_register_failure)); then
   if ((registration_failed_as_expected == 0)); then
     echo "expected web registration failure path was not observed" >&2
@@ -1608,6 +1752,8 @@ approve_routes_if_requested
 set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
+assert_peer_visibility_if_requested
+assert_debug_ping_if_requested
 assert_magic_dns_if_requested
 assert_no_magic_dns_if_requested
 assert_dns_extra_records_if_requested

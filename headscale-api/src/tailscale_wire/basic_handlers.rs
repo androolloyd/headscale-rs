@@ -2485,7 +2485,7 @@ fn resolve_debug_ping_node(state: &WireState, query: &str) -> Option<u64> {
         .snapshot()
         .iter()
         .find_map(|(node_key, rec)| {
-            let node_id = stable_id_from_key(node_key);
+            let node_id = rec.stable_node_id_for_key(node_key);
             let id_matches = query == node_id.to_string();
             let key_matches = query_node_key == node_key;
             let name_matches = rec.hostname == query
@@ -2507,7 +2507,7 @@ fn debug_ping_connected_nodes(state: &WireState) -> Vec<DebugPingConnectedNode> 
     let mut nodes = snapshot
         .iter()
         .filter_map(|(node_key, rec)| {
-            let id = stable_id_from_key(node_key);
+            let id = rec.stable_node_id_for_key(node_key);
             if active.get(&id).copied().unwrap_or(0) == 0 || rec.is_expired_at(now) {
                 return None;
             }
@@ -5416,6 +5416,53 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Pong"));
         assert!(body.contains(&format!("Node {node_id} responded in")));
+    }
+
+    #[tokio::test]
+    async fn debug_ping_resolves_persisted_node_id_for_connected_stream() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-ping-persisted";
+        let node_id = 42;
+        let mut rec = record(node_key, 35, &[], &[]);
+        rec.node_id = Some(node_id);
+        state.machines.upsert(node_key.to_string(), rec);
+        let _guard = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+
+        let app = router(state.clone());
+        let request = axum::http::Request::builder()
+            .uri("/debug/ping?node=host-35")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let pending_response = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+
+        let ping_request = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(request) = state.pings.pop_next_for_node(node_id) {
+                    return request;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("debug ping queued a request for persisted node id");
+        let ping_id = ping_request
+            .url
+            .split_once("id=")
+            .expect("callback URL carries id")
+            .1
+            .to_string();
+        state
+            .pings
+            .complete(&ping_id)
+            .expect("pending ping completes");
+
+        let resp = pending_response.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Pong"));
+        assert!(body.contains(&format!("Node {node_id} responded in")));
+        assert!(body.contains(&format!("/debug/ping?node={node_id}")));
     }
 
     #[tokio::test]

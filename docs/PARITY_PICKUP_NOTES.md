@@ -375,8 +375,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all forty-eight Pg rows, including
-  `postgres-online-lastseen`, `postgres-magicdns`,
+  CI now provisions Postgres for all forty-nine Pg rows, including
+  `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
   `postgres-dns-hot-reload`,
@@ -609,3 +609,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   stock-client netmap.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   forty-eight Postgres stock-client rows.
+
+## 2026-05-31 Postgres ping lifecycle smoke slice
+
+- Fixed production `/debug/ping` lookup to resolve persisted node IDs instead
+  of deriving IDs only from node keys, so Postgres-hydrated connected streams
+  can receive PingRequest callbacks.
+- Added paired `postgres-ping-lifecycle` Rust/headscale-go rows over a
+  temporary Postgres database. The row uses the current-head headscale-go audit
+  baseline because pinned v0.28.0 predates executable `/debug/ping`.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  forty-nine Postgres stock-client rows.

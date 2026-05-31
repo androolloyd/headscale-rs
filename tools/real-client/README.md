@@ -86,6 +86,9 @@ predates the executable PingRequest lifecycle.
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
+| Database | `postgres-route-via-restart` | `postgres-route-via-restart-smoke.sh` | `postgres-route-via-restart-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` survives server restart |
+| Database | `postgres-route-health-restart` | `postgres-route-health-restart-smoke.sh` | `postgres-route-health-restart-headscale-go-smoke.sh` | Production Postgres current-head route-health survives server restart |
+| Database | `postgres-route-health-reload-restart` | `postgres-route-health-reload-restart-smoke.sh` | `postgres-route-health-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health policy reload survives server restart |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
 | Registration | `web-register` | `web-register-smoke.sh` | `web-register-headscale-go-smoke.sh` | No-auth pending registration and CLI approval |
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |

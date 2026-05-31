@@ -1006,6 +1006,12 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
         ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::Version)
         }
+        [
+            "health" | "configtest" | "dumpConfig" | "mockoidc",
+            tail @ ..,
+        ] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
+            first_unknown_flag(tail, UtilityFlagScope::GlobalConfig)
+        }
         ["serve", tail @ ..] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::Serve)
         }
@@ -1029,6 +1035,7 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
 enum UtilityFlagScope {
     Version,
     Serve,
+    GlobalConfig,
     CompletionShell,
     HelpOnly,
 }
@@ -1067,6 +1074,14 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
                 continue;
             }
             (UtilityFlagScope::Serve, value) if value.starts_with("--config=") => {
+                i += 1;
+                continue;
+            }
+            (UtilityFlagScope::GlobalConfig, "-c" | "--config") if i + 1 < tail.len() => {
+                i += 2;
+                continue;
+            }
+            (UtilityFlagScope::GlobalConfig, value) if value.starts_with("--config=") => {
                 i += 1;
                 continue;
             }

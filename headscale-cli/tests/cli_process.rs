@@ -1267,6 +1267,46 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["health", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["health", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["configtest", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["configtest", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["dumpConfig", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["dumpConfig", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["mockoidc", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["mockoidc", "-x"],
+        1,
+        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+    assert_stderr_snapshot(
         &["completion", "bash", "--bad"],
         1,
         include_str!("snapshots/utility_completion_bash_unknown_flag.stderr"),

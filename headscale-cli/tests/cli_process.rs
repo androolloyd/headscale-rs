@@ -1047,7 +1047,7 @@ fn auth_and_preauth_delete_help_are_accepted() {
 }
 
 #[test]
-fn serve_alias_and_debug_create_node_help_are_accepted() {
+fn serve_and_debug_create_node_help_are_accepted() {
     let serve = headscale(&["serve", "--help"]);
     assert!(serve.status.success(), "stderr: {}", stderr(&serve));
     assert!(stdout(&serve).contains("Launches the headscale server"));
@@ -1324,16 +1324,6 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
-        &["server", "--bad"],
-        1,
-        include_str!("snapshots/utility_version_unknown_flag.stderr"),
-    );
-    assert_stderr_snapshot(
-        &["server", "-x"],
-        1,
-        include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
-    );
-    assert_stderr_snapshot(
         &["version", "--bad"],
         1,
         include_str!("snapshots/utility_version_unknown_flag.stderr"),
@@ -1457,6 +1447,58 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         &["generate", "private-key", "-x"],
         1,
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
+    );
+}
+
+#[test]
+fn server_alias_matches_current_upstream_unknown_command() {
+    let expected =
+        "Error: unknown command \"server\" for \"headscale\"\n\nDid you mean this?\n\tserve\n\n";
+    for args in [
+        &["server"][..],
+        &["server", "--help"][..],
+        &["server", "--bad"][..],
+        &["server", "-x"][..],
+        &["server", "ignored"][..],
+    ] {
+        assert_stderr_snapshot(args, 1, expected);
+    }
+}
+
+#[test]
+fn help_server_matches_current_upstream_unknown_topic() {
+    assert_stderr_snapshot(
+        &["help", "server"],
+        0,
+        r#"Unknown help topic [`server`]
+Usage:
+  headscale [command]
+
+Available Commands:
+  apikeys     Handle the Api keys in Headscale
+  auth        Manage node authentication and approval
+  completion  Generate the autocompletion script for the specified shell
+  configtest  Test the configuration.
+  debug       debug and testing commands
+  generate    Generate commands
+  health      Check the health of the Headscale server
+  help        Help about any command
+  mockoidc    Runs a mock OIDC server for testing
+  nodes       Manage the nodes of Headscale
+  policy      Manage the Headscale ACL Policy
+  preauthkeys Handle the preauthkeys in Headscale
+  serve       Launches the headscale server
+  users       Manage the users of Headscale
+  version     Print the version.
+
+Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -h, --help            help for headscale
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale [command] --help" for more information about a command.
+"#,
     );
 }
 
@@ -2233,15 +2275,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/serve_help.stdout"),
     );
     assert_stdout_snapshot(
-        &["server", "--help"],
-        include_str!("snapshots/serve_help.stdout"),
-    );
-    assert_stdout_snapshot(
         &["help", "serve"],
-        include_str!("snapshots/serve_help.stdout"),
-    );
-    assert_stdout_snapshot(
-        &["help", "server"],
         include_str!("snapshots/serve_help.stdout"),
     );
     assert_stdout_snapshot(

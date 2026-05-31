@@ -67,7 +67,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Launches the headscale server.
-    #[command(name = "serve", alias = "server")]
+    #[command(name = "serve")]
     Server {
         /// Listen address for the API.
         #[arg(short, long, default_value = "0.0.0.0:8080")]
@@ -266,6 +266,10 @@ async fn main() -> ExitCode {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let Some(help) = upstream_exact_help(&raw_args) {
         print!("{help}");
+        return ExitCode::SUCCESS;
+    }
+    if let Some(error) = upstream_exact_success_stderr(&raw_args) {
+        eprint!("{error}");
         return ExitCode::SUCCESS;
     }
     if let Some(error) = upstream_exact_error(&raw_args) {
@@ -761,9 +765,7 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
 
     match parts.as_slice() {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
-        ["serve" | "server", "-h" | "--help"] | ["help", "serve" | "server"] => {
-            Some(UPSTREAM_SERVE_HELP)
-        }
+        ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
@@ -959,6 +961,20 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
     }
 }
 
+fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        parts.push(arg.as_ref().to_str()?);
+    }
+
+    match parts.as_slice() {
+        ["help", "server"] => Some(format!(
+            "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_USAGE}"
+        )),
+        _ => None,
+    }
+}
+
 fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     let mut parts = Vec::with_capacity(args.len());
     for arg in args {
@@ -982,6 +998,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
 
     if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
         return Some(format!("Error: {error}\n"));
+    }
+
+    if matches!(parts.first(), Some(&"server")) {
+        return Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into());
     }
 
     let command_is_unknown = match parts.as_slice() {
@@ -1020,9 +1040,7 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
         ] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::GlobalConfig)
         }
-        ["serve" | "server", tail @ ..]
-            if !tail.is_empty() && !tail_is_help_or_global_config(tail) =>
-        {
+        ["serve", tail @ ..] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::Serve)
         }
         [
@@ -1282,6 +1300,9 @@ Global Flags:
       --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
+
+const UPSTREAM_SERVER_UNKNOWN_COMMAND: &str =
+    "Error: unknown command \"server\" for \"headscale\"\n\nDid you mean this?\n\tserve\n\n";
 
 const UPSTREAM_HEALTH_HELP: &str = r"Check the health of the Headscale server. This command will return an exit code of 0 if the server is healthy, or 1 if it is not.
 
@@ -2770,12 +2791,14 @@ mod tests {
             Some(UPSTREAM_VERSION_HELP)
         );
         assert_eq!(
-            upstream_exact_help(&["server", "--help"]),
-            Some(UPSTREAM_SERVE_HELP)
+            upstream_exact_error(&["server", "--help"]),
+            Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into())
         );
         assert_eq!(
-            upstream_exact_help(&["help", "server"]),
-            Some(UPSTREAM_SERVE_HELP)
+            upstream_exact_success_stderr(&["help", "server"]),
+            Some(format!(
+                "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_USAGE}"
+            ))
         );
         assert_eq!(
             upstream_exact_help(&["dumpConfig", "--help"]),

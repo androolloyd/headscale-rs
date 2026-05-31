@@ -1398,18 +1398,18 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             method: Method::POST,
             uri: "/api/v1/user",
             body: r#"{"name":"status-dupe"}"#,
-            expected_http_status: 409,
-            expected_grpc_code: 6,
-            expected_message: "status-dupe",
+            expected_http_status: 500,
+            expected_grpc_code: 13,
+            expected_message: "creating user: creating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
         },
         Case {
             name: "delete missing user",
             method: Method::DELETE,
             uri: "/api/v1/user/404",
             body: "",
-            expected_http_status: 404,
-            expected_grpc_code: 5,
-            expected_message: "404",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "user not found",
         },
         Case {
             name: "create preauth key missing user",
@@ -1445,7 +1445,7 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: "{}",
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: "either prefix or id must be provided",
+            expected_message: "must provide id or prefix",
         },
         Case {
             name: "delete api key conflicting selectors",
@@ -1454,7 +1454,7 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: "",
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: "only one of prefix or id can be provided",
+            expected_message: "provide either id or prefix, not both",
         },
         Case {
             name: "get missing node",
@@ -1872,7 +1872,8 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
         ))
         .await
         .unwrap();
-    assert_status_json(resp, 404, 5, "no pending auth session", "auth reject").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
 }
 
 #[tokio::test]

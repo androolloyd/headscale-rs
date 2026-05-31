@@ -375,8 +375,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, and `postgres-tag-reauth-clear` rows. Push/PR
-  CI now provisions Postgres for all thirty-eight Pg rows, including
-  `postgres-online-lastseen`, `postgres-extra-records`,
+  CI now provisions Postgres for all thirty-nine Pg rows, including
+  `postgres-online-lastseen`, `postgres-magicdns-custom-domain`,
+  `postgres-extra-records`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-via-same-tag-restart`,
   `postgres-ssh-oidc-check`,
@@ -517,3 +518,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   extra records project through the production Postgres serving path.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   thirty-eight Postgres stock-client rows.
+
+## 2026-05-31 Postgres MagicDNS custom-domain smoke slice
+
+- Added paired `postgres-magicdns-custom-domain` Rust/headscale-go rows over
+  the backend-aware online/LastSeen harness and temporary Postgres database.
+- The row proves a non-default `dns.base_domain` projects into stock-client
+  MagicDNS status through the production Postgres serving path.
+- The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
+  thirty-nine Postgres stock-client rows.

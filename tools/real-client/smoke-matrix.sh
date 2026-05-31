@@ -70,6 +70,7 @@ smoke_ids=(
   authkey
   postgres-authkey
   postgres-online-lastseen
+  postgres-magicdns-custom-domain
   postgres-extra-records
   postgres-web-register
   postgres-web-register-tags
@@ -217,6 +218,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -292,6 +294,7 @@ smoke_rust_scripts=(
   tools/real-client/authkey-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
+  tools/real-client/postgres-magicdns-custom-domain-smoke.sh
   tools/real-client/postgres-extra-records-smoke.sh
   tools/real-client/postgres-web-register-smoke.sh
   tools/real-client/postgres-web-register-tags-smoke.sh
@@ -403,6 +406,7 @@ smoke_go_scripts=(
   tools/real-client/authkey-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
+  tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/postgres-extra-records-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-tags-headscale-go-smoke.sh
@@ -514,6 +518,7 @@ smoke_assertions=(
   "auth-key login and one alice node"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres online transition and LastSeen after disconnect"
+  "production Postgres custom MagicDNS base domain"
   "production Postgres MagicDNS suffix and DNS extra record projection"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"
   "production Postgres web registration with owned requested tag"

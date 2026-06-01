@@ -26,6 +26,7 @@ oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
 check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
+policy_mutation_restart="${REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART:-false}"
 check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
 check_approval="${REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL:-oidc}"
 register_cache_expiration="${REAL_CLIENT_REGISTER_CACHE_EXPIRATION:-}"
@@ -53,6 +54,19 @@ case "${check_period_cache}" in
     ;;
 esac
 
+case "${policy_mutation_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    policy_mutation_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    policy_mutation_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART must be true or false, got ${policy_mutation_restart}" >&2
+    exit 2
+    ;;
+esac
+
 case "${check_result}" in
   approve | expire | wrong-user | cancel) ;;
   *)
@@ -72,6 +86,17 @@ esac
 if [[ "${check_result}" != "approve" && "${check_approval}" != "oidc" ]]; then
   echo "REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL=cli is only valid with REAL_CLIENT_OIDC_SSH_CHECK_RESULT=approve" >&2
   exit 2
+fi
+
+if ((policy_mutation_restart_flag)); then
+  if [[ "${database_backend}" != "postgres" ]]; then
+    echo "REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART requires REAL_CLIENT_DATABASE_BACKEND=postgres" >&2
+    exit 2
+  fi
+  if [[ "${check_result}" != "approve" || "${check_approval}" != "oidc" ]]; then
+    echo "REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART requires OIDC-approved SSH checks" >&2
+    exit 2
+  fi
 fi
 
 case "${database_backend}" in
@@ -138,6 +163,8 @@ wrong_user_oidc_email="${REAL_CLIENT_OIDC_SSH_WRONG_USER_EMAIL:-mallory@example.
 wrong_user_oidc_username="${REAL_CLIENT_OIDC_SSH_WRONG_USER_USERNAME:-mallory}"
 wrong_user_oidc_groups="${REAL_CLIENT_OIDC_SSH_WRONG_USER_GROUPS:-engineering}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-$(cat "${default_policy_path}")}"
+policy_mutation_initial_json="${REAL_CLIENT_OIDC_SSH_INITIAL_POLICY_JSON:-$(cat tools/real-client/fixtures/ssh-no-ssh.hujson)}"
+policy_mutation_final_json="${REAL_CLIENT_OIDC_SSH_FINAL_POLICY_JSON:-${policy_json}}"
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -504,13 +531,20 @@ start_mock_oidc() {
 }
 
 write_policy_file() {
-  printf '%s\n' "${policy_json}" >"${work_dir}/ssh-oidc-check.hujson"
+  local policy_body="${1:-${policy_json}}"
+  printf '%s\n' "${policy_body}" >"${work_dir}/ssh-oidc-check.hujson"
 }
 
 start_rust_server() {
-  http_port="$(free_port)"
-  https_port="$(free_port)"
-  grpc_port="$(free_port)"
+  if [[ -z "${http_port}" ]]; then
+    http_port="$(free_port)"
+  fi
+  if [[ -z "${https_port}" ]]; then
+    https_port="$(free_port)"
+  fi
+  if [[ -z "${grpc_port}" ]]; then
+    grpc_port="$(free_port)"
+  fi
   control_port="${https_port}"
   control_url="https://host.docker.internal:${https_port}"
   local_health_url="http://127.0.0.1:${http_port}/health"
@@ -644,9 +678,15 @@ EOF
 }
 
 start_headscale_go_server() {
-  http_port="$(free_port)"
-  metrics_port="$(free_port)"
-  grpc_port="$(free_port)"
+  if [[ -z "${http_port}" ]]; then
+    http_port="$(free_port)"
+  fi
+  if [[ -z "${metrics_port}" ]]; then
+    metrics_port="$(free_port)"
+  fi
+  if [[ -z "${grpc_port}" ]]; then
+    grpc_port="$(free_port)"
+  fi
   control_port="${http_port}"
   control_url="https://host.docker.internal:${http_port}"
   local_health_url="https://127.0.0.1:${http_port}/health"
@@ -655,15 +695,17 @@ start_headscale_go_server() {
   tls_cert_path="${work_dir}/tls.crt"
   rm -f "${headscale_go_socket_path}"
 
-  echo "::group::generate headscale-go TLS certificate"
-  openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
-    -keyout "${work_dir}/tls.key" \
-    -out "${tls_cert_path}" \
-    -subj "/CN=host.docker.internal" \
-    -addext "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1" \
-    >"${work_dir}/openssl.stdout" \
-    2>"${work_dir}/openssl.stderr"
-  echo "::endgroup::"
+  if [[ ! -s "${tls_cert_path}" || ! -s "${work_dir}/tls.key" ]]; then
+    echo "::group::generate headscale-go TLS certificate"
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+      -keyout "${work_dir}/tls.key" \
+      -out "${tls_cert_path}" \
+      -subj "/CN=host.docker.internal" \
+      -addext "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1" \
+      >"${work_dir}/openssl.stdout" \
+      2>"${work_dir}/openssl.stderr"
+    echo "::endgroup::"
+  fi
 
   cat >"${work_dir}/derp.yaml" <<EOF
 regions:
@@ -908,12 +950,54 @@ headscale_cmd() {
   esac
 }
 
-load_database_policy_if_requested() {
+stop_server() {
+  if [[ -n "${server_pid}" ]]; then
+    echo "::group::stop ${target} OIDC SSH server"
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" >/dev/null 2>&1 || true
+    server_pid=""
+    echo "::endgroup::"
+  fi
+}
+
+load_database_policy() {
   [[ "${database_backend}" == "postgres" ]] || return 0
-  echo "::group::load database policy"
+  local label="$1"
+  local policy_body="$2"
+  write_policy_file "${policy_body}"
+  echo "::group::load ${label}"
   headscale_cmd --force -o json policy set --file "${work_dir}/ssh-oidc-check.hujson" \
     >"${work_dir}/policy-set.json"
   echo "::endgroup::"
+}
+
+load_database_policy_if_requested() {
+  load_database_policy "database policy" "${policy_json}"
+}
+
+restart_ssh_oidc_server_and_wait() {
+  echo "::group::restart OIDC SSH server after policy mutation"
+  stop_server
+  if [[ "${target}" == "rust" ]]; then
+    start_rust_server
+  else
+    start_headscale_go_server
+  fi
+  wait_for "tailscale logged-in netmap after policy restart ${client_one}" "tailscale_logged_in '${client_one}'"
+  wait_for "tailscale logged-in netmap after policy restart ${client_two}" "tailscale_logged_in '${client_two}'"
+  docker exec "${client_one}" tailscale status --json >"${work_dir}/${client_one}.after-policy-restart-status.json"
+  docker exec "${client_two}" tailscale status --json >"${work_dir}/${client_two}.after-policy-restart-status.json"
+  echo "::endgroup::"
+}
+
+mutate_database_policy_and_restart_if_requested() {
+  ((policy_mutation_restart_flag)) || return 0
+
+  load_database_policy "initial no-SSH database policy" "${policy_mutation_initial_json}"
+  wait_for "pre-mutation Tailscale peer path ${client_one} to ${client_two}" \
+    "tailscale_ping_succeeded '${client_one}' '${client_two}' '${work_dir}/pre-policy-mutation-ping.txt'"
+  load_database_policy "mutated OIDC SSH database policy" "${policy_mutation_final_json}"
+  restart_ssh_oidc_server_and_wait
 }
 
 extract_ssh_auth_id() {
@@ -1142,7 +1226,11 @@ start_client "${client_one}"
 start_client "${client_two}"
 drive_oidc_login "${client_one}"
 drive_oidc_login "${client_two}"
-load_database_policy_if_requested
+if ((policy_mutation_restart_flag)); then
+  mutate_database_policy_and_restart_if_requested
+else
+  load_database_policy_if_requested
+fi
 run_ssh_check
 
 if ((check_period_cache_flag)); then

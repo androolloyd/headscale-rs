@@ -108,6 +108,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
 | Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache |
+| Database | `postgres-ssh-oidc-policy-restart` | `postgres-ssh-oidc-policy-restart-smoke.sh` | `postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh` | Production Postgres OIDC SSH policy mutation survives server restart |
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
@@ -1010,7 +1011,10 @@ check auth request expire, and asserts the same denied SSH output shape. The
 cancelled-denial row lets the stock client enter the SSH `check` flow and
 emit the auth URL, then relies on the inner `timeout` to cancel the parked SSH
 attempt and asserts the nonzero exit, empty stdout, and auth-prompt stderr
-shape.
+shape. The Postgres policy-restart row starts from a database policy with no SSH
+rules, proves ordinary peer connectivity remains available, mutates the
+database policy to the OIDC SSH check policy, restarts the server on the same
+ports, and then completes the browser-approved stock-client SSH check.
 
 ```sh
 tools/real-client/ssh-oidc-check-smoke.sh
@@ -1019,6 +1023,8 @@ tools/real-client/ssh-cli-check-smoke.sh
 tools/real-client/ssh-cli-check-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
+tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh
+tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-deny-smoke.sh

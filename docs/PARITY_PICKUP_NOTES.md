@@ -925,7 +925,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-prefix-family-dual-stack-to-ipv6-only-backfill` Rust/headscale-go
   wrappers over the same backend-aware harness and wired them into the
   real-client matrix and PR smoke set. The Postgres stock-client matrix now
-  covers sixty-one rows, including configured family-removal backfill parity
+  covers sixty-two rows, including OIDC SSH policy-restart and configured family-removal backfill parity
   after production restart plus `nodes backfillips`.
 
 ## 2026-06-01 CLI and DERP patch churn slice
@@ -967,3 +967,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   record set in place.
 - Focused DNS tests cover startup parsing, hot-reload preservation for
   zero-byte and whitespace-only edits, and existing extra-record e2e behavior.
+
+## 2026-06-01 Postgres OIDC SSH policy-restart smoke slice
+
+- Added paired `postgres-ssh-oidc-policy-restart` Rust/headscale-go stock-client
+  smokes. They start production Postgres OIDC SSH registration with a database
+  policy that has no SSH rules, prove ordinary peer connectivity, mutate the
+  database policy to the OIDC SSH `check` policy, restart the server, and then
+  complete the browser-approved stock-client SSH check.
+- The real-client matrix and PR smoke set now include the row; the Postgres
+  stock-client matrix covers sixty-two rows.

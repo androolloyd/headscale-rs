@@ -977,3 +977,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   complete the browser-approved stock-client SSH check.
 - The real-client matrix and PR smoke set now include the row; the Postgres
   stock-client matrix covers sixty-two rows.
+
+## 2026-06-01 DERP clear map-churn slice
+
+- Hostinfo churn that clears `NetInfo.PreferredDERP` now records a peer
+  `node updated` delta instead of a full self-update reason. This keeps
+  non-patch peer state changes in the upstream-style peer-delta path while
+  preserving PreferredDERP-only moves as endpoint/DERP patches.
+- Focused streaming tests cover DERP-map refresh history, DERP patch updates,
+  and batched DERP clears.

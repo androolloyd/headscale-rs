@@ -16,6 +16,7 @@ esac
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
+server_start_retries="${REAL_CLIENT_SERVER_START_RETRIES:-3}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
@@ -78,6 +79,10 @@ esac
 
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+if ! [[ "${server_start_retries}" =~ ^[0-9]+$ ]] || ((server_start_retries < 1)); then
+  echo "REAL_CLIENT_SERVER_START_RETRIES must be a positive integer, got ${server_start_retries}" >&2
   exit 2
 fi
 
@@ -367,6 +372,25 @@ free_port() {
   ruby -rsocket -e 's=TCPServer.new("127.0.0.1",0); puts s.addr[1]; s.close'
 }
 
+assign_server_ports() {
+  http_port="$(free_port)"
+  metrics_port="$(free_port)"
+  grpc_port="$(free_port)"
+  case "${target}" in
+    rust)
+      https_port="$(free_port)"
+      control_url="https://host.docker.internal:${https_port}"
+      local_control_url="http://127.0.0.1:${http_port}"
+      ;;
+    headscale-go)
+      https_port=""
+      control_url="https://host.docker.internal:${http_port}"
+      local_control_url="https://127.0.0.1:${http_port}"
+      health_curl_opts="-fsSk"
+      ;;
+  esac
+}
+
 yaml_string() {
   ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
 }
@@ -442,6 +466,14 @@ drop_postgres_database() {
   fi
   postgres_database_created=0
   echo "::endgroup::"
+}
+
+stop_server() {
+  if [[ -n "${server_pid}" ]]; then
+    kill "${server_pid}" >/dev/null 2>&1 || true
+    wait "${server_pid}" >/dev/null 2>&1 || true
+    server_pid=""
+  fi
 }
 
 wait_for() {
@@ -909,22 +941,70 @@ start_server() {
       ;;
   esac
   server_pid="$!"
-  wait_for_server "${target} health" \
-    "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null 2>'${work_dir}/${target}-health.stderr'"
+  if ! wait_for_server "${target} health" \
+    "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null 2>'${work_dir}/${target}-health.stderr'"; then
+    echo "::endgroup::"
+    return 1
+  fi
   if [[ "${target}" == "rust" ]]; then
-    wait_for_server "${target} TLS certificate" "test -s '${tls_cert_path}'"
+    if ! wait_for_server "${target} TLS certificate" "test -s '${tls_cert_path}'"; then
+      echo "::endgroup::"
+      return 1
+    fi
   fi
   if ((expect_debug_ping)); then
-    wait_for_server "${target} metrics debug" \
-      "curl ${health_curl_opts} '$(debug_ping_url)' >/dev/null 2>'${work_dir}/${target}-metrics-debug.stderr'"
+    if ! wait_for_server "${target} metrics debug" \
+      "curl ${health_curl_opts} '$(debug_ping_url)' >/dev/null 2>'${work_dir}/${target}-metrics-debug.stderr'"; then
+      echo "::endgroup::"
+      return 1
+    fi
   fi
   wait_for_server "${target} gRPC" "headscale_health_probe" || {
     dump_grpc_health_debug
+    echo "::endgroup::"
     return 1
   }
   echo "${target} control=${local_control_url}"
   echo "${target} login=${control_url}"
   echo "::endgroup::"
+}
+
+server_startup_retryable() {
+  local path
+  for path in \
+    "${work_dir}/${target}.stderr" \
+    "${work_dir}/${target}.stdout" \
+    "${work_dir}/${target}-health.stderr" \
+    "${work_dir}/${target}-metrics-debug.stderr" \
+    "${work_dir}/${target}-grpc-health.stderr" \
+    "${work_dir}/${target}-grpc-health.stdout"; do
+    if [[ -s "${path}" ]] && grep -Eiq 'address already in use|addrinuse|os error 48|os error 98' "${path}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+start_server_with_retries() {
+  local attempt status
+  for ((attempt = 1; attempt <= server_start_retries; attempt++)); do
+    assign_server_ports
+    if ((server_start_retries > 1)); then
+      echo "${target} server startup attempt ${attempt}/${server_start_retries}" >&2
+    fi
+    if start_server; then
+      return 0
+    fi
+    status="$?"
+    if ((attempt >= server_start_retries)) || ! server_startup_retryable; then
+      stop_server
+      return "${status}"
+    fi
+    echo "${target} server listener was already in use; retrying with fresh ports" >&2
+    stop_server
+    sleep 1
+  done
+  return 1
 }
 
 load_policy_if_requested() {
@@ -1753,29 +1833,13 @@ case "${target}" in
     ;;
 esac
 
-http_port="$(free_port)"
-metrics_port="$(free_port)"
-grpc_port="$(free_port)"
-case "${target}" in
-  rust)
-    https_port="$(free_port)"
-    control_url="https://host.docker.internal:${https_port}"
-    local_control_url="http://127.0.0.1:${http_port}"
-    ;;
-  headscale-go)
-    control_url="https://host.docker.internal:${http_port}"
-    local_control_url="https://127.0.0.1:${http_port}"
-    health_curl_opts="-fsSk"
-    ;;
-esac
-
 write_derp_map
 write_policy_file
 install_or_build_headscale
 if [[ "${target}" == "headscale-go" ]]; then
   generate_headscale_go_tls
 fi
-start_server
+start_server_with_retries
 create_user_and_key
 for client_name in "${client_names[@]}"; do
   start_client

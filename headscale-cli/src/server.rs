@@ -4892,6 +4892,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 trusted_proxies:
   - "127.0.0.1/32"
 disable_check_updates: true

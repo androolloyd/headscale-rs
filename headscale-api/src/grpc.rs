@@ -618,6 +618,7 @@ pub mod upstream {
                 created_at: now,
                 expiry: None,
                 machine_key_hex: random_key_hex(),
+                disco_key: String::new(),
                 os: "TestOS".into(),
                 version: "unknown".into(),
                 tags: Vec::new(),
@@ -1576,6 +1577,7 @@ pub mod upstream {
         record.available_routes.clone_from(&machine.routes);
         record.approved_routes.clone_from(&machine.approved_routes);
         record.register_method = machine.register_method;
+        record.disco_key = (!machine.disco_key.is_empty()).then_some(machine.disco_key.clone());
         record
     }
 
@@ -1612,6 +1614,9 @@ pub mod upstream {
         record.available_routes.clone_from(&machine.routes);
         record.approved_routes.clone_from(&machine.approved_routes);
         record.register_method = machine.register_method;
+        if !machine.disco_key.is_empty() {
+            record.disco_key = Some(machine.disco_key.clone());
+        }
         record
     }
 
@@ -1629,6 +1634,7 @@ pub mod upstream {
             created_at: record.created_at.timestamp().max(0) as u64,
             expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
             machine_key_hex: record.machine_key_hex,
+            disco_key: record.disco_key.unwrap_or_default(),
             os: if record.os.is_empty() {
                 "unknown".into()
             } else {
@@ -1657,7 +1663,7 @@ pub mod upstream {
             id: machine_numeric_id(machine),
             machine_key: prefix_key("mkey:", &machine.machine_key_hex),
             node_key: prefix_key("nodekey:", &machine.id),
-            disco_key: String::new(),
+            disco_key: machine.disco_key.clone(),
             ip_addresses: node_ip_addresses(machine),
             name: machine.name.clone(),
             user,
@@ -4120,6 +4126,7 @@ mod upstream_tests {
         assert!(registered.user.is_none());
         assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(registered.machine_key, format!("mkey:{machine_key_hex}"));
+        assert_eq!(registered.disco_key, "discokey:web-restart");
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
         assert_eq!(registered.tags, vec!["tag:server"]);
         assert_eq!(registered.available_routes, vec!["10.80.0.0/24"]);
@@ -4223,6 +4230,7 @@ mod upstream_tests {
         assert_eq!(listed_user.name, "tagged-devices");
         assert_eq!(listed_node.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(listed_node.machine_key, format!("mkey:{machine_key_hex}"));
+        assert_eq!(listed_node.disco_key, "discokey:web-restart");
         assert_eq!(listed_node.register_method, RegisterMethod::Cli as i32);
         assert_eq!(listed_node.tags, vec!["tag:server"]);
         assert_eq!(listed_node.available_routes, vec!["10.80.0.0/24"]);
@@ -4236,6 +4244,7 @@ mod upstream_tests {
             .node
             .expect("node after restart");
         assert_eq!(got.node_key, listed_node.node_key);
+        assert_eq!(got.disco_key, "discokey:web-restart");
         assert_eq!(got.available_routes, listed_node.available_routes);
         drop(fresh_service);
         reopened.close().await;
@@ -4733,6 +4742,7 @@ mod upstream_tests {
             created_at: 0,
             expiry: Some(1_780_000_000),
             machine_key_hex: "bb".repeat(32),
+            disco_key: String::new(),
             os: "unknown".into(),
             version: "unknown".into(),
             tags: vec!["tag:server".into()],

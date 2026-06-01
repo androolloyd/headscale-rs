@@ -116,6 +116,9 @@ pub struct MachineAdminRecord {
     pub expiry: Option<u64>,
     /// Hex machine key bound to the node's Noise identity.
     pub machine_key_hex: String,
+    /// Tailscale discovery key as an upstream `discokey:` string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub disco_key: String,
     /// OS placeholder. The wire `MachineRecord` doesn't carry OS today
     /// (HostInfo is only used inside the register handler); v0 shows
     /// "unknown" and the field exists for the JSON contract.
@@ -350,6 +353,7 @@ impl WireMachineAdmin {
             created_at: rec.created_at.timestamp().max(0) as u64,
             expiry: rec.expiry.map(|t| t.timestamp().max(0) as u64),
             machine_key_hex: rec.machine_key_hex.clone(),
+            disco_key: rec.disco_key.clone().unwrap_or_default(),
             os: nonempty_or_unknown(&rec.os),
             version: nonempty_or_unknown(&rec.os_version),
             tags: rec.forced_tags.clone(),
@@ -886,6 +890,7 @@ impl PersistentMachineAdmin {
             created_at: row.created_at.max(0) as u64,
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
+            disco_key: row.disco_key.clone(),
             os: os_from_host_info(&host_info),
             version: version_from_host_info(&host_info),
             tags: row.tag_list(),
@@ -1377,6 +1382,7 @@ impl PersistentPostgresMachineAdmin {
             created_at: row.created_at.max(0) as u64,
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
+            disco_key: row.disco_key.clone(),
             os: os_from_host_info(&host_info),
             version: version_from_host_info(&host_info),
             tags: row.tag_list(),
@@ -2814,7 +2820,7 @@ fn create_params_for_record_with_auth_key(
     headscale_db::headscale_nodes::CreateParams {
         machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
         node_key: key_with_prefix("nodekey:", &record.id),
-        disco_key: String::new(),
+        disco_key: record.disco_key.clone(),
         endpoints: Vec::new(),
         host_info: host_info_for_record(record),
         ipv4: optional_ipv4_string(&record.ipv4),
@@ -2922,6 +2928,7 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
         created_at: record.created_at.timestamp().max(0) as u64,
         expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
         machine_key_hex: record.machine_key_hex.clone(),
+        disco_key: record.disco_key.clone().unwrap_or_default(),
         os: nonempty_or_unknown(&record.os),
         version: nonempty_or_unknown(&record.os_version),
         tags: record.forced_tags.clone(),
@@ -2967,6 +2974,7 @@ fn machine_admin_record_to_wire(
     record.available_routes.clone_from(&machine.routes);
     record.approved_routes.clone_from(&machine.approved_routes);
     record.register_method = machine.register_method;
+    record.disco_key = (!machine.disco_key.is_empty()).then_some(machine.disco_key.clone());
     record.host_info = HostInfo {
         hostname: record.hostname.clone(),
         os: record.os.clone(),
@@ -3463,6 +3471,7 @@ mod tests {
             created_at: 1_700_000_000,
             expiry: None,
             machine_key_hex: "dd".repeat(32),
+            disco_key: String::new(),
             os: "TestOS".into(),
             version: "unknown".into(),
             tags: Vec::new(),
@@ -3569,6 +3578,7 @@ mod tests {
             created_at: 1_700_000_000,
             expiry: None,
             machine_key_hex: "bb".repeat(32),
+            disco_key: String::new(),
             os: "linux".into(),
             version: "unknown".into(),
             tags: Vec::new(),

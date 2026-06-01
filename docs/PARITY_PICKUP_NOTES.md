@@ -1389,3 +1389,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused coverage proves env `policy.mode=database` skips a configured
   missing policy file and env `policy.path` can replace the configured file
   path for `configtest`.
+
+## 2026-06-01 gRPC node disco-key projection slice
+
+- `MachineAdminRecord` now carries the upstream `discokey:` string through
+  wire-registry, SQLite, and feature-gated Postgres projections.
+- `RegisterNode`, `ListNodes`, and `GetNode` now emit `Node.disco_key` instead
+  of dropping it during admin/gRPC conversion.
+- The file-backed `RegisterNode` restart test now asserts the same
+  `discokey:web-restart` value across registration, DB reopen, registry
+  hydration, list, and get paths.
+- The runtime config snapshot fixture now explicitly disables DNS override,
+  fixing the CI failure introduced when configtest began applying upstream DNS
+  defaults to absent DNS blocks.

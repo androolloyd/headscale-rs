@@ -1207,6 +1207,7 @@ mod tests {
             created_at: 0,
             expiry: None,
             machine_key_hex: String::new(),
+            disco_key: String::new(),
             os: "unknown".to_string(),
             version: "unknown".to_string(),
             tags: Vec::new(),

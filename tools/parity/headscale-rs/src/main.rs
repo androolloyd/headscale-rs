@@ -1237,9 +1237,7 @@ fn append_cap_grant_rules(
     append_companion_cap_grant_rules(out, &dst_ip_strings, src_ips, app);
 }
 
-fn wire_cap_map(
-    app: &BTreeMap<String, Vec<Value>>,
-) -> BTreeMap<String, Option<Vec<Value>>> {
+fn wire_cap_map(app: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, Option<Vec<Value>>> {
     app.iter()
         .map(|(cap, values)| (cap.clone(), Some(values.clone())))
         .collect()
@@ -1273,7 +1271,10 @@ fn append_companion_cap_grant_rules(
         return;
     }
 
-    let mut caps = app.keys().filter_map(|cap| companion_cap(cap)).collect::<Vec<_>>();
+    let mut caps = app
+        .keys()
+        .filter_map(|cap| companion_cap(cap))
+        .collect::<Vec<_>>();
     caps.sort_unstable();
     for cap in caps {
         let mut rule = FilterRuleOut {
@@ -1887,14 +1888,11 @@ fn append_coalesced_filter_rule(out: &mut Vec<FilterRuleOut>, mut rule: FilterRu
         out.push(rule);
         return;
     }
-    if let Some(existing) = out
-        .iter_mut()
-        .find(|existing| {
-            existing.cap_grant.is_empty()
-                && existing.src_ips == rule.src_ips
-                && existing.ip_proto == rule.ip_proto
-        })
-    {
+    if let Some(existing) = out.iter_mut().find(|existing| {
+        existing.cap_grant.is_empty()
+            && existing.src_ips == rule.src_ips
+            && existing.ip_proto == rule.ip_proto
+    }) {
         existing.dst_ports.extend(rule.dst_ports);
         normalize_filter_rule(existing);
     } else {

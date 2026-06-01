@@ -353,6 +353,7 @@ impl MachineRecord {
                 login_name: TAGGED_DEVICES_LOGIN_NAME.to_string(),
                 display_name: TAGGED_DEVICES_DISPLAY_NAME.to_string(),
                 profile_pic_url: String::new(),
+                groups: Vec::new(),
             }
         } else {
             UserProfile {
@@ -360,6 +361,7 @@ impl MachineRecord {
                 login_name: self.user.clone(),
                 display_name: self.user_display_name(),
                 profile_pic_url: self.user_profile_pic_url.clone(),
+                groups: Vec::new(),
             }
         }
     }
@@ -598,6 +600,36 @@ pub struct RegisterAuth {
     /// upstream wire this is `AuthKey`.
     #[serde(default)]
     pub auth_key: String,
+    /// Legacy OAuth2 token payload used by old Android clients. Current
+    /// headscale-rs auth-key registration ignores it, but keeping the field
+    /// round-trippable matches `tailcfg.RegisterResponseAuth`.
+    #[serde(
+        default,
+        rename = "Oauth2Token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub oauth2_token: Option<Oauth2Token>,
+}
+
+/// `tailcfg.Oauth2Token`.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
+pub struct Oauth2Token {
+    #[serde(default, rename = "access_token")]
+    pub access_token: String,
+    #[serde(
+        default,
+        rename = "token_type",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub token_type: String,
+    #[serde(
+        default,
+        rename = "refresh_token",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub refresh_token: String,
+    #[serde(default, rename = "expiry", skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
@@ -1308,6 +1340,9 @@ pub struct UserProfile {
         skip_serializing_if = "String::is_empty"
     )]
     pub profile_pic_url: String,
+    /// Optional SCIM/policy groups reported to the client for WhoIs/UI data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 /// `tailcfg.FilterRule`. The default zero-value here is unreachable —
@@ -1381,6 +1416,8 @@ pub struct SshPolicy {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SshRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_expires: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub principals: Vec<SshPrincipal>,
     #[serde(
@@ -1407,6 +1444,10 @@ pub struct SshPrincipal {
     pub user_login: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub any: bool,
+    /// Deprecated public-key SSH principal stub retained upstream so the JSON
+    /// field name is not reused with different semantics.
+    #[serde(default, rename = "pubKeys", skip_serializing_if = "Vec::is_empty")]
+    pub unused_pub_keys: Vec<String>,
 }
 
 /// `tailcfg.SSHAction`.
@@ -1430,6 +1471,27 @@ pub struct SshAction {
     pub allow_local_port_forwarding: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_remote_port_forwarding: bool,
+    /// SSH session recorder endpoints as `ip:port` strings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recorders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_recording_failure: Option<SshRecorderFailureAction>,
+}
+
+/// `tailcfg.SSHRecorderFailureAction`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SshRecorderFailureAction {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reject_session_with_message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub terminate_session_with_message: String,
+    #[serde(
+        default,
+        rename = "NotifyURL",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub notify_url: String,
 }
 
 /// A single node record inside a `MapResponse`.
@@ -1950,6 +2012,7 @@ mod tests {
             nl_key: "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             auth: Some(RegisterAuth {
                 auth_key: "hskey-auth-abc".into(),
+                oauth2_token: None,
             }),
             hostinfo: Some(HostInfo {
                 hostname: "peer-a".into(),

@@ -17,9 +17,10 @@ use headscale_api::tailscale_wire::wire::{
     CapGrant, ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams,
     DerpMap, DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig,
     DnsResolver, FilterRule, HostInfo, HostInfoLocation, HostInfoService, MapNode, MapRequest,
-    MapResponse, NetInfo, NetPortRange, PeerChange, PingRequest, PortRange, RegisterAuth,
-    RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy, SshPrincipal,
-    SshRule, TkaInfo, TpmInfo, UserProfile, stable_id_from_key, strip_key_prefix,
+    MapResponse, NetInfo, NetPortRange, Oauth2Token, PeerChange, PingRequest, PortRange,
+    RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy,
+    SshPrincipal, SshRecorderFailureAction, SshRule, TkaInfo, TpmInfo, UserProfile,
+    stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -364,6 +365,32 @@ fn register_auth_default_is_empty_string() {
     assert_eq!(a.auth_key, "");
     let v = serde_json::to_value(&a).unwrap();
     assert_eq!(v["AuthKey"], "");
+    assert!(v.get("Oauth2Token").is_none());
+}
+
+#[test]
+fn register_auth_round_trips_legacy_oauth2_token() {
+    let auth = RegisterAuth {
+        auth_key: String::new(),
+        oauth2_token: Some(Oauth2Token {
+            access_token: "access-1".into(),
+            token_type: "Bearer".into(),
+            refresh_token: "refresh-1".into(),
+            expiry: Some("2026-06-01T00:00:00Z".parse().unwrap()),
+        }),
+    };
+
+    let v = serde_json::to_value(&auth).unwrap();
+    assert_eq!(v["Oauth2Token"]["access_token"], "access-1");
+    assert_eq!(v["Oauth2Token"]["token_type"], "Bearer");
+    assert_eq!(v["Oauth2Token"]["refresh_token"], "refresh-1");
+    assert_eq!(v["Oauth2Token"]["expiry"], "2026-06-01T00:00:00Z");
+
+    let back: RegisterAuth = serde_json::from_value(v).unwrap();
+    let token = back.oauth2_token.expect("oauth2 token round trips");
+    assert_eq!(token.access_token, "access-1");
+    assert_eq!(token.token_type, "Bearer");
+    assert!(token.expiry.is_some());
 }
 
 #[test]
@@ -733,6 +760,7 @@ fn map_response_user_profiles_round_trip() {
             login_name: "alice@example.com".into(),
             display_name: "Alice".into(),
             profile_pic_url: "https://example.com/alice.png".into(),
+            groups: vec!["group:eng".into(), "engineering@example.com".into()],
         }],
         dns_config: Some(DnsConfig::default()),
         derp_map: Some(DerpMap::default()),
@@ -748,6 +776,15 @@ fn map_response_user_profiles_round_trip() {
         v["UserProfiles"][0]["ProfilePicURL"],
         "https://example.com/alice.png"
     );
+    assert_eq!(
+        v["UserProfiles"][0]["Groups"],
+        serde_json::json!(["group:eng", "engineering@example.com"])
+    );
+    let back: MapResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        back.user_profiles[0].groups,
+        vec!["group:eng", "engineering@example.com"]
+    );
 
     r.user_profiles.clear();
     let v: Value = serde_json::to_value(&r).unwrap();
@@ -761,8 +798,10 @@ fn ssh_policy_serialises_tailcfg_shape() {
     ssh_users.insert("root".to_string(), String::new());
     let policy = SshPolicy {
         rules: vec![SshRule {
+            rule_expires: Some("2026-06-01T00:00:00Z".parse().unwrap()),
             principals: vec![SshPrincipal {
                 node_ip: "100.64.0.3".into(),
+                unused_pub_keys: vec!["ssh-ed25519 AAAAC3NzaDeprecated".into()],
                 ..SshPrincipal::default()
             }],
             ssh_users,
@@ -772,6 +811,12 @@ fn ssh_policy_serialises_tailcfg_shape() {
                 allow_agent_forwarding: true,
                 allow_local_port_forwarding: true,
                 allow_remote_port_forwarding: true,
+                recorders: vec!["100.64.0.10:1234".into()],
+                on_recording_failure: Some(SshRecorderFailureAction {
+                    reject_session_with_message: "recording required".into(),
+                    terminate_session_with_message: "recording failed".into(),
+                    notify_url: "https://control.example/ssh/recording-failed".into(),
+                }),
                 ..SshAction::default()
             },
             accept_env: vec!["LANG".into(), "LC_*".into()],
@@ -780,13 +825,50 @@ fn ssh_policy_serialises_tailcfg_shape() {
     let v = serde_json::to_value(policy).unwrap();
     assert!(v.get("rules").is_some());
     let rule = &v["rules"][0];
+    assert_eq!(rule["ruleExpires"], "2026-06-01T00:00:00Z");
     assert_eq!(rule["principals"][0]["nodeIP"], "100.64.0.3");
     assert!(rule["principals"][0].get("nodeIp").is_none());
+    assert_eq!(
+        rule["principals"][0]["pubKeys"],
+        serde_json::json!(["ssh-ed25519 AAAAC3NzaDeprecated"])
+    );
     assert_eq!(rule["sshUsers"]["*"], "=");
     assert_eq!(rule["sshUsers"]["root"], "");
     assert_eq!(rule["acceptEnv"], serde_json::json!(["LANG", "LC_*"]));
     assert_eq!(rule["action"]["accept"], true);
     assert_eq!(rule["action"]["sessionDuration"], 86_400_000_000_000_i64);
+    assert_eq!(
+        rule["action"]["recorders"],
+        serde_json::json!(["100.64.0.10:1234"])
+    );
+    assert_eq!(
+        rule["action"]["onRecordingFailure"]["RejectSessionWithMessage"],
+        "recording required"
+    );
+    assert_eq!(
+        rule["action"]["onRecordingFailure"]["TerminateSessionWithMessage"],
+        "recording failed"
+    );
+    assert_eq!(
+        rule["action"]["onRecordingFailure"]["NotifyURL"],
+        "https://control.example/ssh/recording-failed"
+    );
+
+    let back: SshPolicy = serde_json::from_value(v).unwrap();
+    assert!(back.rules[0].rule_expires.is_some());
+    assert_eq!(
+        back.rules[0].principals[0].unused_pub_keys,
+        vec!["ssh-ed25519 AAAAC3NzaDeprecated"]
+    );
+    assert_eq!(back.rules[0].action.recorders, vec!["100.64.0.10:1234"]);
+    assert_eq!(
+        back.rules[0]
+            .action
+            .on_recording_failure
+            .as_ref()
+            .map(|action| action.notify_url.as_str()),
+        Some("https://control.example/ssh/recording-failed")
+    );
 }
 
 #[test]

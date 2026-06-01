@@ -224,6 +224,7 @@ fn push_ssh_rule(
         ssh_users: ssh_users.clone(),
         action: action.clone(),
         accept_env: accept_env.to_vec(),
+        ..SshRule::default()
     });
 }
 

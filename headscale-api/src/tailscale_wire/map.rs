@@ -7212,6 +7212,7 @@ mod tests {
             "DiscoKey": &disco_a,
             "Endpoints": &endpoints_a,
             "Hostinfo": {
+                "PeerRelay": true,
                 "sshHostKeys": &ssh_host_keys_a,
                 "NetInfo": {
                     "PreferredDERP": home_derp_a
@@ -7278,6 +7279,10 @@ mod tests {
             raw_str.contains("\"sshHostKeys\""),
             "sshHostKeys tag present on the wire: {raw_str}"
         );
+        assert!(
+            raw_str.contains("\"PeerRelay\""),
+            "PeerRelay tag present on the wire: {raw_str}"
+        );
         let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(mr.peers.len(), 1);
         let peer_a = &mr.peers[0];
@@ -7297,6 +7302,7 @@ mod tests {
             Some(home_derp_a)
         );
         assert_eq!(peer_a.hostinfo.ssh_host_keys, ssh_host_keys_a);
+        assert!(peer_a.hostinfo.peer_relay);
     }
 
     #[tokio::test]

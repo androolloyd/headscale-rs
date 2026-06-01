@@ -137,6 +137,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
         userspace_router: Some(true),
         app_connector: Some(false),
         services_hash: "services-hash-1".into(),
+        peer_relay: true,
         exit_node_id: "n99".into(),
         location: Some(HostInfoLocation {
             country: "Canada".into(),
@@ -201,6 +202,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(v["Userspace"], false);
     assert_eq!(v["UserspaceRouter"], true);
     assert_eq!(v["AppConnector"], false);
+    assert_eq!(v["PeerRelay"], true);
     assert_eq!(v["Location"]["Country"], "Canada");
     assert_eq!(v["Location"]["CountryCode"], "CA");
     assert_eq!(v["Location"]["City"], "Halifax");
@@ -245,6 +247,7 @@ fn hostinfo_emits_pascal_case_with_all_caps_os() {
     assert_eq!(back.userspace, Some(false));
     assert_eq!(back.userspace_router, Some(true));
     assert_eq!(back.app_connector, Some(false));
+    assert!(back.peer_relay);
     assert_eq!(back.state_encrypted, Some(true));
     assert_eq!(back.services.len(), 2);
     assert_eq!(back.services[0].proto, "tcp");

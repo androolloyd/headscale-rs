@@ -823,6 +823,9 @@ pub struct HostInfo {
     pub app_connector: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub services_hash: String,
+    /// Whether this client is willing to relay traffic for other peers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub peer_relay: bool,
     #[serde(
         default,
         rename = "ExitNodeID",

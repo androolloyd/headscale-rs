@@ -6,6 +6,7 @@ cd "${repo_root}"
 
 smoke_spec="${REAL_CLIENT_SMOKES:-authkey}"
 target_spec="${REAL_CLIENT_TARGETS:-rust headscale-go}"
+matrix_report_dir="${REAL_CLIENT_MATRIX_REPORT_DIR:-target/real-client}"
 list_only=0
 arg_smokes=()
 
@@ -774,6 +775,24 @@ group_end() {
   fi
 }
 
+record_matrix_result() {
+  local smoke="$1"
+  local target="$2"
+  local script="$3"
+  local status="$4"
+  local elapsed_secs="$5"
+
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "${smoke}" "${target}" "${status}" "${elapsed_secs}" "${script}" \
+    >>"${matrix_summary_path}"
+
+  if ((status != 0)); then
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "${smoke}" "${target}" "${status}" "${elapsed_secs}" "${script}" \
+      >>"${matrix_failures_path}"
+  fi
+}
+
 print_matrix() {
   printf '%-28s %-14s %-52s %-62s %s\n' \
     "smoke" "area" "headscale-rs script" "headscale-go script" "assertion"
@@ -825,9 +844,18 @@ for target in "${selected_targets[@]}"; do
   fi
 done
 
+mkdir -p "${matrix_report_dir}"
+matrix_summary_path="${matrix_report_dir%/}/smoke-matrix-summary.tsv"
+matrix_failures_path="${matrix_report_dir%/}/smoke-matrix-failures.tsv"
+printf 'smoke\ttarget\tstatus\telapsed_secs\tscript\n' >"${matrix_summary_path}"
+printf 'smoke\ttarget\tstatus\telapsed_secs\tscript\n' >"${matrix_failures_path}"
+
 ran=0
+first_failure_status=0
+first_failure_label=""
 for i in "${!smoke_ids[@]}"; do
   selected_smoke "${smoke_ids[$i]}" || continue
+  smoke_failed=0
   for target in "${selected_targets[@]}"; do
     if [[ "${target}" == "rust" ]]; then
       script="${smoke_rust_scripts[$i]}"
@@ -836,17 +864,35 @@ for i in "${!smoke_ids[@]}"; do
     fi
 
     group_start "real-client ${target} ${smoke_ids[$i]}"
+    echo "script=${script}"
+    started_at="${SECONDS}"
     set +e
     bash "${repo_root}/${script}"
     status="$?"
     set -e
+    elapsed_secs=$((SECONDS - started_at))
+    record_matrix_result "${smoke_ids[$i]}" "${target}" "${script}" "${status}" "${elapsed_secs}"
     group_end
 
     if ((status != 0)); then
-      exit "${status}"
+      echo "real-client ${target} ${smoke_ids[$i]} failed with status ${status} after ${elapsed_secs}s" >&2
+      if ((first_failure_status == 0)); then
+        first_failure_status="${status}"
+        first_failure_label="${target} ${smoke_ids[$i]}"
+      fi
+      smoke_failed=1
     fi
     ran=$((ran + 1))
   done
+
+  if ((smoke_failed != 0)); then
+    echo "real-client smoke matrix failed at ${smoke_ids[$i]} after completing selected target(s) for that smoke" >&2
+    echo "summary: ${matrix_summary_path}" >&2
+    echo "failures: ${matrix_failures_path}" >&2
+    echo "first failure: ${first_failure_label}" >&2
+    exit "${first_failure_status}"
+  fi
 done
 
 echo "real-client smoke matrix passed (${ran} script runs)"
+echo "summary: ${matrix_summary_path}"

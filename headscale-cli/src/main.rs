@@ -1111,12 +1111,11 @@ fn auth_required_flag_error(parts: &[&str]) -> Option<String> {
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
-            "-h" | "--help" => return None,
             "--auth-id" if i + 1 < tail.len() => {
                 saw_auth_id = true;
                 i += 2;
             }
-            "--auth-id" => return None,
+            "-h" | "--help" | "--auth-id" => return None,
             value if value.starts_with("--auth-id=") => {
                 saw_auth_id = true;
                 i += 1;
@@ -1172,14 +1171,14 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
-            "-h" | "--help" => return false,
             "--" => return i + 1 >= tail.len(),
             "-d" | "--display-name" | "-e" | "--email" | "-p" | "--picture-url"
                 if i + 1 < tail.len() =>
             {
                 i += 2;
             }
-            "-d" | "--display-name" | "-e" | "--email" | "-p" | "--picture-url" => return false,
+            "-h" | "--help" | "-d" | "--display-name" | "-e" | "--email" | "-p"
+            | "--picture-url" => return false,
             value
                 if value.starts_with("--display-name=")
                     || value.starts_with("--email=")

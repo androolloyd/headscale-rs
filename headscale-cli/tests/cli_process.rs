@@ -1675,7 +1675,11 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         ),
         (
             &["completion", "zsh", "bad"][..],
-            "Error: unknown command \"bad\" for \"headscale completion zsh\"\n",
+            include_str!("snapshots/utility_completion_zsh_unknown_command.stderr"),
+        ),
+        (
+            &["completion", "zsh", "--no-descriptions", "bad"][..],
+            include_str!("snapshots/utility_completion_zsh_unknown_command.stderr"),
         ),
         (
             &["completion", "fish", "bad"][..],

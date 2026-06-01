@@ -3532,10 +3532,7 @@ impl MachineRegistry {
                             .is_empty();
                     (
                         true,
-                        Some(PendingMapChange::broadcast_peer(
-                            MapChangeReason::RouteUpdate,
-                            node_id,
-                        )),
+                        Some(PendingMapChange::global(MapChangeReason::PolicyChange)),
                     )
                 }
                 None => (false, None),
@@ -5800,6 +5797,27 @@ mod registry_tests {
 
         assert!(reg.set_approved_routes(node_key, Vec::new()));
         assert!(reg.is_route_candidate_healthy(node_id));
+    }
+
+    #[test]
+    fn set_approved_routes_records_policy_change_reason() {
+        let reg = MachineRegistry::new();
+        let node_key = "route-approval-policy-change";
+        let route = "10.0.0.0/24";
+        reg.upsert(node_key.to_string(), route_record(node_key, 10, route));
+        let history_len = reg.map_change_history().len();
+
+        assert!(reg.set_approved_routes(node_key, Vec::new()));
+
+        let changes = reg.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("route approval mutation records a map change");
+        assert_eq!(change.reason_labels(), vec!["policy change"]);
+        assert_eq!(change.change_type(), "policy");
+        assert!(change.content.include_policy);
+        assert!(change.content.requires_runtime_peer_computation);
+        assert!(change.content.peers_changed.is_empty());
     }
 
     #[test]

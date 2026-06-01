@@ -830,6 +830,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Current-head process snapshots now also pin completion fish/powershell
   extra-positional errors, including their `--no-descriptions` variants, to the
   audited upstream nested Cobra command path.
+- This slice adds the matching zsh `--no-descriptions` extra-positional stderr
+  snapshot, audited against current upstream headscale-go `171fd7a`.
 
 ## 2026-06-01 Fourth-wave parity coverage
 
@@ -871,3 +873,24 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   script paths before the expensive Docker-backed stock-client matrix starts.
 - Added `--list-selected` so the real-client workflow prints the exact
   push/PR/scheduled smoke rows it is about to run instead of the full catalog.
+
+## 2026-06-01 Runtime route-approval reason slice
+
+- Inspected current headscale-go `State.SetApprovedRoutes`: route-approval
+  mutations fan out as `PolicyChange`, not a peer-only route delta.
+- Updated the in-memory runtime registry's `set_approved_routes` map-change
+  reason to `policy change` while preserving the stored approval and stale
+  unhealthy-route cleanup behavior; a focused unit test now pins the bounded
+  reason/type/content shape.
+- Remaining runtime churn work: persistent wire-registry sync, map-request
+  auto-approval reasons, and the broader NodeStore worker batching semantics.
+
+## 2026-06-01 Postgres route-health mixed-exit no-restart slice
+
+- Added paired `postgres-route-health-mixed-exit-all-unhealthy` Rust and
+  headscale-go real-client wrappers over the existing route-health harness.
+  The row covers mixed exit-node/subnet-router all-unhealthy last-known subnet
+  primary retention on production Postgres without combining it with server
+  restart.
+- Added the row to the real-client matrix and PR smoke set; the Postgres
+  stock-client matrix now covers fifty-eight rows.

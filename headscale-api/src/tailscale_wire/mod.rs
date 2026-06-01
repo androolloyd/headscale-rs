@@ -3541,10 +3541,11 @@ impl MachineRegistry {
                 None => (false, None),
             }
         });
-        if changed && clear_unhealthy {
-            if let Some(node_id) = changed_node_id {
-                self.primary_routes.write().clear_unhealthy(node_id);
-            }
+        if changed
+            && clear_unhealthy
+            && let Some(node_id) = changed_node_id
+        {
+            self.primary_routes.write().clear_unhealthy(node_id);
         }
         changed
     }

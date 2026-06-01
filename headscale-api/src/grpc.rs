@@ -5408,7 +5408,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("cannot SSH to destination"));
+        assert!(
+            err.message()
+                .contains("alice@/ubuntu -> alice-laptop: expected ALLOWED, got DENIED")
+        );
 
         let err = service
             .set_policy(Request::new(SetPolicyRequest {
@@ -5417,7 +5420,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("cannot SSH to destination"));
+        assert!(
+            err.message()
+                .contains("alice@/ubuntu -> alice-laptop: expected ALLOWED, got DENIED")
+        );
 
         let got = service
             .get_policy(Request::new(GetPolicyRequest {}))

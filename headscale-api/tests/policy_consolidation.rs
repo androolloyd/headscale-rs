@@ -4,9 +4,9 @@
 //!
 //! Before this commit, `headscale-api::policy` carried its own
 //! [`PolicyDoc`] serde mirror + hujson parser + NodeView access
-//! helpers. Both were duplicates of the same logic in
-//! `octravpn-mesh::acl`. Both implementations now share
-//! `headscale-api-acl` (the canonical leaf crate).
+//! helpers. That duplicated the same logic in downstream consumer code.
+//! Both implementations now share `headscale-api-acl` (the canonical
+//! leaf crate).
 //!
 //! Acceptance checks here:
 //!

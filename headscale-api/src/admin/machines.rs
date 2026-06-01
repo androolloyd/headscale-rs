@@ -225,7 +225,7 @@ pub trait MachineAdmin: Send + Sync {
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError>;
     /// Assign missing node IPs where the backing store supports it.
     ///
-    /// The current Octra allocator contract returns IPv4 only, so the
+    /// Legacy wire-only allocators may return IPv4 only, so the
     /// persistent implementation can backfill missing IPv4 without
     /// inventing IPv6 prefix/config semantics.
     async fn backfill_node_ips(
@@ -412,9 +412,9 @@ fn optional_ipv4_string(value: &str) -> Option<String> {
 /// `nodes` table.
 ///
 /// The URL/admin slug remains the node key hex (`MachineAdminRecord::id`)
-/// so existing Octra admin routes stay stable. The upstream-visible
-/// numeric ID is carried separately in `MachineAdminRecord::node_id`
-/// and is what gRPC uses when present.
+/// for legacy admin route stability. The upstream-visible numeric ID is
+/// carried separately in `MachineAdminRecord::node_id` and is what gRPC
+/// uses when present.
 #[derive(Clone)]
 pub struct PersistentMachineAdmin {
     pool: SqlitePool,

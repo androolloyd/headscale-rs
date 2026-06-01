@@ -3,21 +3,19 @@
 //! The wire layer only exposes `PreauthRedeemer` (a one-way redeem
 //! verb). The admin panel needs `list` + `mint` + `expire` too, so we
 //! define a separate trait — [`PreauthAdmin`] — which the embedding
-//! host implements on its real key store (e.g. OctraVPN's
-//! `PreauthMinter`).
+//! host implements on its real key store.
 //!
 //! For testing + standalone admin-panel-only deployments we ship an
-//! in-memory implementation [`InMemoryPreauthAdmin`] that mirrors the
-//! shape of `octravpn-mesh::PreauthMinter` but doesn't depend on it.
+//! in-memory implementation [`InMemoryPreauthAdmin`] with the same
+//! upstream-facing fields exposed by the persistent pre-auth-key store.
 //!
 //! ## Wire compatibility
 //!
-//! `PreauthAdminKey` carries the same field names that
-//! `octravpn-mesh::headscale_bridge::PreauthKey` serialises with (key,
-//! user, created_at, expires_at, reusable) plus two admin-only fields
-//! (`ephemeral`, `tags`). Implementations are free to keep `ephemeral`
-//! / `tags` flat-mapped or stub them out — the admin panel renders
-//! "[none]" when the slice is empty.
+//! `PreauthAdminKey` carries the fields the admin UI and upstream gRPC
+//! compatibility paths need (`key`, `user`, timestamps, reuse state,
+//! lifecycle flags, and tags). Implementations are free to keep
+//! `ephemeral` / `tags` flat-mapped or stub them out — the admin panel
+//! renders "[none]" when the slice is empty.
 
 use std::collections::HashMap;
 use std::sync::Arc;

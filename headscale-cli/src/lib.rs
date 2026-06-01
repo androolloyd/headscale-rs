@@ -8,9 +8,8 @@
 //!
 //! ## Embedding the admin surface in other crates
 //!
-//! `octravpn-node` (sibling repo) re-exposes the entire admin CLI under
-//! `octravpn-node headscale …` so operators only install one binary.
-//! It builds on the two public items below:
+//! Downstream binaries may embed the upstream-compatible admin CLI under
+//! their own command tree. They build on the two public items below:
 //!
 //!   * [`AdminCmd`] — a clap `Subcommand` enum that bundles every
 //!     admin verb (`users`, `nodes`, `preauthkeys`, `auth`, `apikeys`, `policy`,
@@ -23,10 +22,10 @@
 //!     Stable contract: 0 success / 3 connection / 4 auth / 5 not
 //!     found / 6 server-side (see `admin::ExitCode`).
 //!
-//! The contract is *byte-identical to the standalone binary*. Both
-//! `headscale users list` and `octravpn-node headscale users list`
-//! call the same `admin::run_users` dispatcher, so stdout, exit code,
-//! and the stderr `Error: …`/machine-readable error envelope match.
+//! The embedded contract is the same as the standalone `headscale`
+//! admin surface. Downstream-specific commands and policy layers stay
+//! outside this crate; this module only exposes the shared headscale-go
+//! compatibility surface.
 
 // Keep compatibility with downstream toolchains that predate
 // Duration::from_mins/from_hours while newer clippy versions prefer them.
@@ -114,9 +113,9 @@ pub enum AdminCmd {
 /// envelope to stderr, matching the standalone binary's `main()` so
 /// consumers of either binary see the same output.
 ///
-/// This is the entry-point [`octravpn-node`] (sibling repo) calls. The
-/// standalone binary's `main()` still routes its admin variants through
-/// the same `admin::run_*` dispatchers, so output is byte-identical.
+/// This is the entry point embedders call. The standalone binary's
+/// `main()` still routes its admin variants through the same
+/// `admin::run_*` dispatchers, so output is byte-identical.
 pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
     let result: Result<(), AdminError> = match cmd {
         AdminCmd::Users { action } => admin::run_users(&connect, &action).await,

@@ -483,10 +483,10 @@ async fn xss_escaped_in_machine_detail() {
 
 // -- Policy CRUD --------------------------------------------------------
 //
-// The wire layer's `/map` consumer is covered by an end-to-end test
-// in `octravpn-node/tests/policy_e2e.rs`. Here we pin the admin-side
-// HTTP contract: PUT applies a parsed doc, GET round-trips raw bytes,
-// validate-only doesn't mutate, and bearer-auth gates everything.
+// The wire layer's `/map` policy application is covered by wire and
+// real-client tests. Here we pin the admin-side HTTP contract: PUT
+// applies a parsed doc, GET round-trips raw bytes, validate-only
+// doesn't mutate, and bearer-auth gates everything.
 
 fn req_put_text(uri: &str, body: &str, token: &str) -> Request<Body> {
     Request::builder()

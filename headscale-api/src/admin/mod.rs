@@ -1,4 +1,4 @@
-//! OctraVPN admin GUI v0 — Tailscale-admin-equivalent web panel.
+//! Optional headscale-rs admin GUI v0.
 //!
 //! This module is mounted by the operator at a dedicated port —
 //! recommended `127.0.0.1:51822` (a new port; never 443 / 51820 /
@@ -17,14 +17,14 @@
 //!   deployments can use [`users::PersistentUserAdmin`] against the
 //!   Go-shaped SQLite `users` table.
 //! * Machines come from either [`crate::tailscale_wire::MachineRegistry`] via
-//!   [`machines::WireMachineAdmin`] for wire-only Octra deployments, or from
-//!   the Go-shaped SQLite `nodes` table via [`machines::PersistentMachineAdmin`]
-//!   for replacement-compatible admin/gRPC deployments.
+//!   [`machines::WireMachineAdmin`] for wire-only embedding deployments, or
+//!   from the Go-shaped SQLite `nodes` table via
+//!   [`machines::PersistentMachineAdmin`] for replacement-compatible
+//!   admin/gRPC deployments.
 //! * Pre-auth keys come from the embedding host through the
-//!   [`preauth::PreauthAdmin`] trait; OctraVPN's `PreauthMinter`
-//!   implements this in the mesh crate's bridge code. An in-process
-//!   default ([`preauth::InMemoryPreauthAdmin`]) is shipped here for
-//!   tests + standalone deployments.
+//!   [`preauth::PreauthAdmin`] trait. An in-process default
+//!   ([`preauth::InMemoryPreauthAdmin`]) is shipped here for tests and
+//!   standalone deployments.
 //!
 //! ## Mount point
 //!

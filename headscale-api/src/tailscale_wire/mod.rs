@@ -1,18 +1,13 @@
 //! Tailscale wire-protocol compatibility layer.
 //!
-//! Migrated from `octravpn-mesh::tailscale_wire` in 2026-05-19 — this
-//! module is where the Rust port of headscale-go's control plane
-//! actually belongs. Downstream callers (e.g. OctraVPN's
-//! `octravpn-mesh`) bridge their preauth / IP-allocation policy into
-//! the wire layer via the [`PreauthRedeemer`] and [`IpAllocator`]
-//! traits.
+//! This module owns the Rust port of headscale-go's Tailscale wire
+//! control plane. Downstream callers bridge their preauth and
+//! IP-allocation policy into the wire layer via the [`PreauthRedeemer`]
+//! and [`IpAllocator`] traits.
 //!
-//! Implements just enough of the Tailscale coordination protocol for
-//! a stock `tailscale up` client to make progress against a
-//! headscale-rs-derived node. See `docs/tailscale-interop-blocker.md`
-//! in the OctraVPN repo for the four-PR plan
-//! (`/key` → `/ts2021` → `/register` → `/map`) this module is built
-//! against.
+//! Implements the Tailscale coordination endpoints required by
+//! headscale-go-compatible clients: `/key`, `/ts2021`, `/register`,
+//! `/map`, and the related auth/SSH/debug control routes.
 //!
 //! ## What ships in this commit
 //!
@@ -29,8 +24,8 @@
 //! - **Noise-inner `POST /machine/{node_key}/map`** ([`map`]) — long-poll
 //!   peer map.
 //!
-//! See the upstream OctraVPN module's decision log (preserved in git
-//! history) for the rationale behind each wire choice.
+//! Headscale-go and Tailscale client behavior define compatibility
+//! here; downstream product policy is injected at the trait boundary.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
@@ -715,9 +710,8 @@ pub enum WireError {
 
 /// Why a preauth redemption failed.
 ///
-/// Lifted from the original `octravpn-mesh::headscale_bridge::RedeemError`
-/// so the wire layer can stay free of OctraVPN-specific concerns.
-/// Downstream impls of [`PreauthRedeemer`] map their native errors into
+/// Normalized errors from whichever pre-auth-key store backs
+/// [`PreauthRedeemer`]. Downstream impls map their native errors into
 /// these variants — the register handler turns each into a 401 with a
 /// canonical Tailscale-shape `{"error": "..."}` body.
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
@@ -736,10 +730,9 @@ pub enum RedeemError {
 
 /// Why an IP allocation failed.
 ///
-/// The current OctraVPN allocator never fails (it's a deterministic
-/// hash → 32-bit slot mapping), so the variant set is intentionally
-/// small. Future allocators that talk to a real IPAM service can grow
-/// this enum without rippling through the handler signatures.
+/// The variant set is intentionally small. Stateful allocators that
+/// talk to a real IPAM service can grow this enum without rippling
+/// through the handler signatures.
 #[derive(Debug, Error)]
 pub enum AllocError {
     #[error("ip allocator exhausted")]
@@ -815,8 +808,8 @@ impl From<String> for RedeemOk {
 /// [`RedeemError`].
 ///
 /// Async because production impls may need to talk to a database or
-/// rate-limit service; the in-tree OctraVPN bridge is sync but adopts
-/// the async signature trivially.
+/// rate-limit service; simple in-memory impls can adopt the async
+/// signature trivially.
 ///
 /// Legacy impls that return only a `String` user label can call
 /// `redeem` → `Ok(user_string.into())` to satisfy the trait — `From<String>`
@@ -841,10 +834,10 @@ pub trait PreauthRedeemer: Send + Sync {
 /// Allocates tailnet addresses for a registering node.
 ///
 /// Implementations are expected to be deterministic given
-/// `node_key_hex` (the in-tree OctraVPN allocator hashes
-/// `(tailnet_id, member_addr, ip_salt)` into the CGNAT host space), but
-/// the trait does not mandate determinism — a stateful allocator that
-/// rotates assignments on each call is also valid.
+/// `node_key_hex` when they are mirroring headscale-go's persistent
+/// address semantics, but the trait does not mandate determinism — a
+/// stateful allocator that rotates assignments on each call is also
+/// valid.
 pub trait IpAllocator: Send + Sync {
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError>;
 
@@ -7034,8 +7027,8 @@ fn is_machine_subpath(path: &str, suffix: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Shared test fixtures: `MockRedeemer` + `MockIpAllocator` that
-    //! the per-module unit tests use instead of OctraVPN's
-    //! `PreauthMinter` + `TailnetIpAllocator`.
+    //! the per-module unit tests use instead of a downstream preauth
+    //! minter or production address allocator.
     use super::*;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
@@ -7045,8 +7038,8 @@ pub(crate) mod test_support {
     ///
     /// Single-use: a successful redeem removes the key from the map so
     /// the second redeem of the same token returns
-    /// [`RedeemError::Unknown`] — matches the OctraVPN minter's
-    /// non-reusable default.
+    /// [`RedeemError::Unknown`] — matches the non-reusable preauth-key
+    /// behavior exercised by the wire registration path.
     #[derive(Default, Clone)]
     pub struct MockRedeemer {
         pub inner: Arc<parking_lot::RwLock<HashMap<String, RedeemOk>>>,
@@ -7126,10 +7119,8 @@ pub(crate) mod test_support {
     }
 
     /// Deterministic-ish allocator for tests. Hashes the input string
-    /// with FNV-1a into the CGNAT /10 host space — same first-octet
-    /// invariant the OctraVPN allocator preserves, but with a much
-    /// simpler implementation so the test fixture has no transitive
-    /// deps.
+    /// with FNV-1a into the CGNAT /10 host space with a simple
+    /// implementation so the test fixture has no transitive deps.
     pub struct MockIpAllocator;
 
     impl IpAllocator for MockIpAllocator {

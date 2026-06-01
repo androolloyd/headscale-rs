@@ -2,10 +2,10 @@
 //!
 //! Pre-2026-05-20 this module carried a copy of the hujson stripper
 //! and most of the `parse_hujson_policy` entry-point. The shared parser
-//! lives in `headscale-api-acl` so `octravpn-mesh` and `headscale-api`
+//! lives in `headscale-api-acl` so headscale-rs and downstream embedders
 //! parse identical bytes through the same state machine. This file keeps
 //! the existing `headscale_api::policy::{parse_hujson_policy,
-//! PolicyParseError}` symbols stable for admin callers + the
+//! PolicyParseError}` symbols stable for admin callers and the
 //! `headscale-cli` admin client, while preserving a few public
 //! headscale-go compatibility shims that only affect admin policy input.
 

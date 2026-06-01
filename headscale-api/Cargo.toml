@@ -14,8 +14,8 @@ default = ["full"]
 # (`tailscale_wire::router`, `WireState`, traits) can disable the
 # default feature with `default-features = false` and avoid pulling
 # in the boringtun-flavoured x25519-dalek that those crates carry.
-# That escape hatch is what `octravpn-mesh` uses — it depends only on
-# the wire layer, not the full headscale control plane.
+# That escape hatch is for embedders that need only the wire layer, not
+# the full headscale control plane.
 full = [
     "dep:headscale-core",
     "dep:headscale-identity",
@@ -65,7 +65,7 @@ headscale-identity = { workspace = true, optional = true }
 headscale-resources = { workspace = true, optional = true }
 headscale-payments = { workspace = true, optional = true }
 # Canonical ACL evaluator. Pulled out into its own leaf crate on
-# 2026-05-20 so `octravpn-mesh` and `headscale-api` share the same
+# 2026-05-20 so headscale-rs and downstream embedders share the same
 # implementation without forming a dep cycle. See
 # `headscale-api-acl/Cargo.toml` for the rationale; the
 # `headscale-api::policy` module is a thin facade over the types
@@ -103,10 +103,9 @@ sha2 = "0.10"
 # parsing, not string compare.
 ipnet = "2"
 
-# Tailscale wire-protocol layer (migrated from
-# octravpn-mesh::tailscale_wire 2026-05-19). The Noise IK handshake
-# (`tailscale_wire::noise`) is pinned to snow 0.9 per the upstream
-# OctraVPN blocker doc. The `risky-raw-split` feature exposes
+# Tailscale wire-protocol layer. The Noise IK handshake
+# (`tailscale_wire::noise`) is pinned to snow 0.9. The
+# `risky-raw-split` feature exposes
 # `HandshakeState::dangerously_get_raw_split()`, which we need to
 # extract the two ChaCha20Poly1305 keys after the IK handshake so the
 # post-handshake transport (`tailscale_wire::be_transport`) can encrypt
@@ -119,8 +118,7 @@ snow = { version = "0.9.6", features = ["risky-raw-split"] }
 # Post-handshake transport AEAD. We use the audited
 # `chacha20poly1305` crate directly (NOT any custom cipher math) and
 # only deviate from the Noise spec in the nonce-encoding step. Same
-# crate version OctraVPN already uses workspace-wide for the WG
-# throughput bench.
+# crate version already used elsewhere in the workspace.
 chacha20poly1305 = "0.10"
 # `/ts2021` HTTP/2 server over the Noise-wrapped hijacked socket.
 h2 = "0.4"

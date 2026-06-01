@@ -1,7 +1,7 @@
 //! End-to-end coverage for policy v2 surfaces. Headscale-go v0.28
-//! HuJSON fixtures use the strict upstream schema; Octra/internal
-//! extension surfaces such as `node_attrs` are exercised through the
-//! TOML/internal parser instead of the public Go-shaped HuJSON parser.
+//! HuJSON fixtures use the strict upstream schema; internal extension
+//! surfaces such as `node_attrs` are exercised through the TOML/internal
+//! parser instead of the public Go-shaped HuJSON parser.
 //!
 //! 1. The hujson parser accepts the upstream-shape document.
 //! 2. The PolicyDoc fields land in the right places (no silent drop).

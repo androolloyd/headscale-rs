@@ -7,30 +7,27 @@ license.workspace = true
 
 # ## Why this crate exists (2026-05-20)
 #
-# Headscale-rs and OctraVPN both need to evaluate tailnet ACL
-# documents. Before this crate, the logic lived twice — once in
-# `octravpn-mesh::acl` (the canonical evaluator, signed-doc support
-# + 51 tests) and once in `headscale-api::policy::{doc,filter,hujson}`
-# (the admin-facade copy — parser, FilterRule translator, NodeView
-# access helpers). Both diverged from a shared lineage; #230 wired
-# them together but kept two implementations.
+# Headscale-rs and downstream embedders both need to evaluate tailnet
+# ACL documents. Before this crate, the logic lived twice — once in a
+# downstream ACL module with signed-doc support and once in
+# `headscale-api::policy::{doc,filter,hujson}` (the admin-facade copy:
+# parser, FilterRule translator, NodeView access helpers). Both
+# diverged from a shared lineage; #230 wired them together but kept two
+# implementations.
 #
-# `octravpn-mesh` already depends on `headscale-api` (`tailscale_wire`
-# layer migrated 2026-05-19), so a `headscale-api → octravpn-mesh`
-# back-edge would form a cycle. The solution is this small leaf
-# crate that both depend on: the canonical types + evaluator live
-# here, `headscale-api::policy` becomes a thin facade (re-exports +
+# That downstream crate already depends on `headscale-api`, so a
+# `headscale-api` back-edge would form a cycle. The solution is this
+# small leaf crate that both depend on: the canonical types + evaluator
+# live here, `headscale-api::policy` becomes a thin facade (re-exports +
 # the `PolicyStore` admin shell + the `FilterRule` translator), and
-# `octravpn-mesh::acl` becomes a thin facade too (re-exports + the
-# OctraVPN-specific `SignedAclDoc` that carries the on-chain hash
-# binding).
+# downstream signed-policy support remains outside headscale-rs.
 #
 # Dep graph after this split:
 #
-#   headscale-api-acl (this crate; pure, no headscale/octra deps)
+#   headscale-api-acl (this crate; pure, no headscale/downstream deps)
 #     ↑                ↑
 #     ├─ headscale-api (PolicyStore, FilterRule translator)
-#     └─ octravpn-mesh (SignedAclDoc — ed25519 owner-signed wrapper)
+#     └─ downstream embedders (optional signed-policy wrappers)
 
 [dependencies]
 serde = { workspace = true }
@@ -39,8 +36,9 @@ thiserror = { workspace = true }
 # Policy v2: CIDR / IPNet parsing for `hosts` and
 # `auto_approvers.routes` prefix matching. Same version as `headscale-api`.
 ipnet = "2"
-# `policy_hash` returns SHA-256(canonical_bytes) — matches the
-# on-chain `acl_policy` field for an OctraVPN tailnet.
+# `policy_hash` returns SHA-256(canonical_bytes) for downstream
+# signed-policy consumers; it is not part of headscale-go's public
+# policy API.
 sha2 = "0.10"
 toml = { workspace = true }
 

@@ -1,32 +1,29 @@
 //! Canonical tailnet ACL document, parser, canonicalisation, and
-//! evaluator — shared by `headscale-api` and `octravpn-mesh`.
+//! evaluator — shared by `headscale-api` and downstream embedders.
 //!
 //! ## Why this crate exists
 //!
 //! Before the 2026-05-20 consolidation the ACL evaluator lived twice:
 //!
-//! * `octravpn-mesh::acl` — the battle-tested evaluator (51 tests),
-//!   plus the OctraVPN-specific `SignedAclDoc` carrying the on-chain
-//!   `acl_policy` hash binding.
+//! * A downstream ACL module with signed-doc support and an on-chain
+//!   hash binding.
 //! * `headscale-api::policy::{doc,filter,hujson}` — the admin-facade
 //!   copy: parser, NodeView access helpers, FilterRule translator.
 //!
-//! `octravpn-mesh` already depends on `headscale-api`
-//! (`tailscale_wire` migrated 2026-05-19), so a back-edge from
-//! `headscale-api → octravpn-mesh` is a cycle. This crate is the leaf
-//! both repos consume; `headscale-api::policy` becomes a thin facade
-//! over re-exports + the `PolicyStore` admin shell + the
-//! `FilterRule` translator (which depends on wire types). The
-//! OctraVPN extensions (`SignedAclDoc`, owner-key signing) stay in
-//! `octravpn-mesh::acl`.
+//! A downstream crate already depended on `headscale-api`, so a
+//! back-edge from `headscale-api` into that consumer would form a Cargo
+//! cycle. This crate is the leaf both sides consume;
+//! `headscale-api::policy` becomes a thin facade over re-exports + the
+//! `PolicyStore` admin shell + the `FilterRule` translator (which
+//! depends on wire types). Downstream extensions such as signed
+//! documents and owner-key signing stay outside the headscale-go
+//! compatibility surface.
 //!
-//! ## On-chain hash binding
+//! ## Downstream hash binding
 //!
-//! The `acl_policy` field of an OctraVPN tailnet is the SHA-256 of
-//! the canonicalised ACL document. The full document is distributed
-//! off-chain (HTTPS, IPFS, gossip), and every member fetches it,
-//! verifies the hash matches what's on-chain, then enforces the
-//! decisions at the data plane. See [`AclDoc::policy_hash`].
+//! [`AclDoc::policy_hash`] returns the SHA-256 of the canonicalised ACL
+//! document for downstream signed-policy consumers. It is not part of
+//! headscale-go's public policy API.
 //!
 //! ## Headscale-go compatibility
 //!
@@ -41,16 +38,18 @@
 //!
 //! ## Document shape
 //!
-//! TOML for the OctraVPN off-chain distribution; HuJSON for the
-//! headscale admin PUT endpoint. Both parse to the same [`AclDoc`].
+//! HuJSON is the public headscale admin policy format. TOML is an
+//! internal/downstream convenience parser. Both parse to the same
+//! [`AclDoc`], but only the HuJSON surface is used for headscale-go
+//! compatibility.
 //!
 //! The HuJSON parser is intentionally strict to match headscale-go:
 //! upstream top-level names only (`groups`, `hosts`, `tagOwners`,
 //! `acls`, `grants`, `nodeAttrs`, `autoApprovers`, `ssh`),
 //! ACL `action` must be `accept`, and ports live in `dst` entries
 //! (`host:22`), not a rule-level `ports` field. TOML keeps the
-//! canonical/internal field names used by OctraVPN (`rules`,
-//! `tag_owners`, `node_attrs`, ...).
+//! canonical/internal Rust field names (`rules`, `tag_owners`,
+//! `node_attrs`, ...).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -344,9 +343,9 @@ pub struct AclDoc {
     /// Upstream policy `sshTests` block.
     #[serde(default, rename = "ssh_tests", alias = "sshTests")]
     pub ssh_tests: Vec<SshPolicyTest>,
-    /// Rule list. Upstream `juanfont/headscale` calls this field
-    /// `acls`; OctraVPN calls it `rules`. The `alias = "acls"` makes
-    /// either spelling acceptable.
+    /// Rule list. Upstream `juanfont/headscale` HuJSON calls this field
+    /// `acls`; TOML/internal docs call it `rules`. The `alias = "acls"`
+    /// makes either spelling acceptable.
     #[serde(default, alias = "acls")]
     pub rules: Vec<AclRule>,
 }
@@ -572,9 +571,8 @@ impl AclDoc {
         value
     }
 
-    /// SHA-256 of `canonical_bytes`. Matches the on-chain
-    /// `acl_policy` field for the OctraVPN tailnet that owns this
-    /// document.
+    /// SHA-256 of `canonical_bytes`, retained for downstream
+    /// signed-policy consumers.
     pub fn policy_hash(&self) -> [u8; 32] {
         let bytes = self.canonical_bytes();
         let mut h = Sha256::new();
@@ -2819,8 +2817,8 @@ fn port_part_matches(port_part: &str, port: u16) -> bool {
 }
 
 // =====================================================================
-// Tests — ported from `octravpn-mesh::acl` (51 cases) plus the unit
-// blocks from `headscale-api::policy::{doc,filter,hujson}`.
+// Tests — ported from the pre-consolidation downstream ACL cases plus
+// the unit blocks from `headscale-api::policy::{doc,filter,hujson}`.
 // =====================================================================
 
 #[cfg(test)]

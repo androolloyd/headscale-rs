@@ -6,12 +6,9 @@
 //! The policy document on the wire is hujson (Tailscale's flavour of
 //! JSON with `//` line comments, `/* … */` block comments, and trailing
 //! commas). After stripping comments + trailing commas the body must
-//! parse as a [`PolicyDoc`] — a serde mirror of OctraVPN's
-//! `octravpn_mesh::acl::AclDoc`. We intentionally duplicate the type
-//! here rather than depend on `octravpn-mesh`: that crate already
-//! depends on `headscale-api`, and cycles in cargo are loud and
-//! permanent. The struct is small and the wire format is the contract,
-//! not the Rust type.
+//! parse as a [`PolicyDoc`] backed by the shared `headscale-api-acl`
+//! leaf crate. The public contract is the upstream headscale policy
+//! wire format, not any downstream Rust type.
 //!
 //! [`PolicyStore`] is the single mutable cell. It carries:
 //!

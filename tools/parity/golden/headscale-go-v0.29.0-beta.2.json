@@ -970,6 +970,33 @@
         ]
       }
     ],
+    "node_attrs": [
+      {
+        "name": "alice-dual-nodeattrs",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "bob-v6-only-nodeattrs",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "router-dual-nodeattrs",
+        "attrs": [
+          "disable-captive-portal-detection",
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "server-v6-only-nodeattrs",
+        "attrs": [
+
+        ]
+      }
+    ],
     "ssh_policies": [
       {
         "name": "server-v6-only",
@@ -1033,6 +1060,28 @@
               "GIT_*"
             ]
           }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "policy-v2-randomize-client-port-nodeattrs",
+    "filter": [
+
+    ],
+    "node_attrs": [
+      {
+        "name": "global-randomize-user-node",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "global-randomize-plus-tagged-attr",
+        "attrs": [
+          "disable-captive-portal-detection",
+          "randomize-client-port"
         ]
       }
     ]

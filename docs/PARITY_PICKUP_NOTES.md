@@ -829,5 +829,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added `policy-v2-nodeattrs-grants-ssh-route-profile` to the default pinned
   differential suite for combined `nodeAttrs`, `grants`, route-via,
   localpart SSH, profile email, and dual-stack/IPv6-only policy behavior.
+- Added `node_attr_checks` to the pinned differential harness and a
+  `policy-v2-randomize-client-port-nodeattrs` scenario so
+  `randomizeClientPort` plus per-node `nodeAttrs` CapMap output is compared
+  directly against headscale-go.
 - Added paired non-Postgres `route-health-all-unhealthy-reload-restart`
   real-client rows over the existing restart harness.

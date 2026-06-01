@@ -37,6 +37,8 @@ Scenarios may also include:
   `headscale-go`'s `PolicyManager.BuildPeerMap`, including symmetric
   one-way ACL visibility and route-backed subnet-router visibility.
 - `tag_checks`: `NodeCanHaveTag` checks for `tagOwners` behavior.
+- `node_attr_checks`: per-node policy `NodeCapMap`/`nodeAttrs` checks,
+  including top-level `randomizeClientPort`.
 - `ssh_checks`: per-node `SSHPolicy` checks, including SSH user maps,
   `autogroup:self`, tagged destinations, and host destinations.
 - `expect_policy_error`: a substring that both engines must reject during

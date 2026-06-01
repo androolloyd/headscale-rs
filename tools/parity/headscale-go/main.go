@@ -29,6 +29,7 @@ type scenario struct {
 	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
 	ViaRouteChecks   []viaRouteCheck   `json:"via_route_checks,omitempty"`
 	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
+	NodeAttrChecks   []nodeAttrCheck   `json:"node_attr_checks,omitempty"`
 	SSHChecks        []sshCheck        `json:"ssh_checks,omitempty"`
 	ExpectPolicyErr  string            `json:"expect_policy_error,omitempty"`
 	Wire             *wireScenario     `json:"wire,omitempty"`
@@ -61,6 +62,7 @@ type scenarioOutput struct {
 	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
 	ViaRoutes      []viaRouteOut      `json:"via_routes,omitempty"`
 	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
+	NodeAttrs      []nodeAttrOut      `json:"node_attrs,omitempty"`
 	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
 	Wire           *wireOutput        `json:"wire,omitempty"`
 }
@@ -120,6 +122,16 @@ type tagCheck struct {
 type tagCheckOut struct {
 	Name    string `json:"name"`
 	Allowed bool   `json:"allowed"`
+}
+
+type nodeAttrCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
+}
+
+type nodeAttrOut struct {
+	Name  string   `json:"name"`
+	Attrs []string `json:"attrs"`
 }
 
 type sshCheck struct {
@@ -492,6 +504,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
+	nodeAttrs, err := runNodeAttrChecks(sc.NodeAttrChecks, pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	sshPolicies, err := runSSHChecks(sc.SSHChecks, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
@@ -509,6 +525,7 @@ func runScenario(path string) (scenarioOutput, error) {
 		RouteApprovals: routeApprovals,
 		ViaRoutes:      viaRoutes,
 		TagChecks:      tagChecks,
+		NodeAttrs:      nodeAttrs,
 		SSHPolicies:    sshPolicies,
 		Wire:           wire,
 	}, nil
@@ -731,6 +748,29 @@ func runTagChecks(checks []tagCheck, pm policy.PolicyManager, nodes types.Nodes)
 		out = append(out, tagCheckOut{
 			Name:    check.Name,
 			Allowed: pm.NodeCanHaveTag(node.View(), check.Tag),
+		})
+	}
+	return out, nil
+}
+
+func runNodeAttrChecks(checks []nodeAttrCheck, pm policy.PolicyManager, nodes types.Nodes) ([]nodeAttrOut, error) {
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	out := make([]nodeAttrOut, 0, len(checks))
+	for _, check := range checks {
+		if findNode(nodes, check.NodeID) == nil {
+			return nil, fmt.Errorf("node attr check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		capMap := pm.NodeCapMap(types.NodeID(check.NodeID))
+		attrs := make([]string, 0, len(capMap))
+		for attr := range capMap {
+			attrs = append(attrs, string(attr))
+		}
+		sort.Strings(attrs)
+		out = append(out, nodeAttrOut{
+			Name:  check.Name,
+			Attrs: attrs,
 		})
 	}
 	return out, nil

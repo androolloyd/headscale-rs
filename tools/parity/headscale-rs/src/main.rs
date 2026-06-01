@@ -40,6 +40,8 @@ struct Scenario {
     #[serde(default)]
     tag_checks: Vec<TagCheck>,
     #[serde(default)]
+    node_attr_checks: Vec<NodeAttrCheck>,
+    #[serde(default)]
     ssh_checks: Vec<SshCheck>,
     #[serde(default)]
     expect_policy_error: Option<String>,
@@ -107,6 +109,12 @@ struct TagCheck {
 }
 
 #[derive(Debug, Deserialize)]
+struct NodeAttrCheck {
+    name: String,
+    node_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct SshCheck {
     name: String,
     node_id: u64,
@@ -148,6 +156,8 @@ struct ScenarioOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tag_checks: Vec<TagCheckOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    node_attrs: Vec<NodeAttrOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     ssh_policies: Vec<SshPolicyOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wire: Option<WireOutput>,
@@ -184,6 +194,12 @@ struct ViaRouteOut {
 struct TagCheckOut {
     name: String,
     allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct NodeAttrOut {
+    name: String,
+    attrs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -705,6 +721,7 @@ fn main() -> Result<()> {
                         route_approvals: Vec::new(),
                         via_routes: Vec::new(),
                         tag_checks: Vec::new(),
+                        node_attrs: Vec::new(),
                         ssh_policies: Vec::new(),
                         wire: None,
                     });
@@ -735,6 +752,7 @@ fn main() -> Result<()> {
             route_approvals: run_route_checks(&scenario, &doc)?,
             via_routes: run_via_route_checks(&scenario, &doc, &filter_nodes)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
+            node_attrs: run_node_attr_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
             wire: normalize_wire(scenario.wire, &scenario.nodes)?,
         });
@@ -923,6 +941,35 @@ fn run_tag_checks(
         out.push(TagCheckOut {
             name: check.name.clone(),
             allowed: doc.node_can_have_tag(&view, &check.tag),
+        });
+    }
+    Ok(out)
+}
+
+fn run_node_attr_checks(
+    scenario: &Scenario,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+) -> Result<Vec<NodeAttrOut>> {
+    let mut out = Vec::with_capacity(scenario.node_attr_checks.len());
+    for check in &scenario.node_attr_checks {
+        let node = nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "node attr check {} references unknown node {}",
+                    check.name, check.node_id
+                )
+            })?;
+        let view = NodeView {
+            addr: node.addrs.first().map(String::as_str),
+            user: node.user.as_deref(),
+            tags: &node.tags,
+        };
+        out.push(NodeAttrOut {
+            name: check.name.clone(),
+            attrs: doc.attrs_for(&view),
         });
     }
     Ok(out)

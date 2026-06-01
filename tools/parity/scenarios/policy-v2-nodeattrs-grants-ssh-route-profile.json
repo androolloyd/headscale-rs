@@ -195,6 +195,24 @@
       "peer_id": 3
     }
   ],
+  "node_attr_checks": [
+    {
+      "name": "alice-dual-nodeattrs",
+      "node_id": 1
+    },
+    {
+      "name": "bob-v6-only-nodeattrs",
+      "node_id": 2
+    },
+    {
+      "name": "router-dual-nodeattrs",
+      "node_id": 3
+    },
+    {
+      "name": "server-v6-only-nodeattrs",
+      "node_id": 4
+    }
+  ],
   "ssh_checks": [
     {
       "name": "server-v6-only",

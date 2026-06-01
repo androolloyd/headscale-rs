@@ -1,0 +1,61 @@
+{
+  "name": "policy-v2-randomize-client-port-nodeattrs",
+  "policy": {
+    "randomizeClientPort": true,
+    "tagOwners": {
+      "tag:server": [
+        "ops@example.com"
+      ]
+    },
+    "acls": [],
+    "nodeAttrs": [
+      {
+        "target": [
+          "autogroup:tagged"
+        ],
+        "attr": [
+          "disable-captive-portal-detection"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "ops",
+      "email": "ops@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice",
+      "ipv4": "100.64.0.10"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "server",
+      "ipv4": "100.64.0.20",
+      "tags": [
+        "tag:server"
+      ]
+    }
+  ],
+  "node_attr_checks": [
+    {
+      "name": "global-randomize-user-node",
+      "node_id": 1
+    },
+    {
+      "name": "global-randomize-plus-tagged-attr",
+      "node_id": 2
+    }
+  ]
+}

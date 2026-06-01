@@ -1576,9 +1576,6 @@ impl RegistrationCache {
         let Some(entry) = self.get_entry(registration_id) else {
             return RegistrationWaitOutcome::Missing;
         };
-        if entry.record.is_none() {
-            return RegistrationWaitOutcome::Missing;
-        }
 
         loop {
             let notified = entry.notify.notified();
@@ -5204,6 +5201,63 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn registration_cache_registration_wait_tracks_ssh_auth_request_lifecycle() {
+        let cache = Arc::new(RegistrationCache::with_tuning(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+        ));
+        let approve_id = "s".repeat(24);
+        let binding = SshCheckBinding {
+            src_node_id: 101,
+            dst_node_id: 202,
+        };
+        cache.insert_ssh_check(approve_id.clone(), binding);
+
+        let approve_waiter = {
+            let cache = cache.clone();
+            let approve_id = approve_id.clone();
+            tokio::spawn(async move { cache.wait_for_registration(&approve_id).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !approve_waiter.is_finished(),
+            "SSH-check auth requests should wait instead of looking missing"
+        );
+
+        assert!(cache.approve_without_node(&approve_id));
+        let outcome = tokio::time::timeout(Duration::from_secs(1), approve_waiter)
+            .await
+            .expect("approved SSH auth wait should finish")
+            .expect("waiter task should not panic");
+        assert!(matches!(
+            outcome,
+            RegistrationWaitOutcome::ApprovedWithoutNode
+        ));
+
+        let reject_id = "t".repeat(24);
+        cache.insert_ssh_check(reject_id.clone(), binding);
+        assert!(cache.reject(&reject_id, "auth request rejected"));
+        match cache.wait_for_registration(&reject_id).await {
+            RegistrationWaitOutcome::Rejected(reason) => {
+                assert_eq!(reason, "auth request rejected");
+            }
+            other => panic!("expected rejected outcome, got {other:?}"),
+        }
+
+        let expiring =
+            RegistrationCache::with_tuning(Duration::from_millis(10), Duration::from_millis(20));
+        let expired_id = "u".repeat(24);
+        expiring.insert_ssh_check(expired_id.clone(), binding);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            expiring.wait_for_registration(&expired_id),
+        )
+        .await
+        .expect("expired SSH auth wait should finish");
+        assert!(matches!(outcome, RegistrationWaitOutcome::Expired));
+    }
+
+    #[tokio::test]
     async fn registration_cache_rejection_keeps_entry_until_expiry() {
         let cache =
             RegistrationCache::with_tuning(Duration::from_millis(200), Duration::from_millis(400));
@@ -5471,6 +5525,36 @@ mod registry_tests {
             .unwrap_err();
 
         assert_eq!(err, crate::oidc::OidcRegistrationError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_classifies_auth_request_kind() {
+        let state = test_state();
+        let registration_id = "q".repeat(24);
+        state
+            .registration_cache
+            .insert(registration_id.clone(), mk_record(20));
+        let ssh_id = "s".repeat(24);
+        state.registration_cache.insert_ssh_check(
+            ssh_id.clone(),
+            SshCheckBinding {
+                src_node_id: 1,
+                dst_node_id: 2,
+            },
+        );
+        let handler = WireOidcRegistrationHandler { state };
+
+        assert!(handler.oidc_registration_exists(&registration_id));
+        assert_eq!(
+            handler.oidc_auth_request_kind(&registration_id),
+            Some(crate::oidc::OidcAuthRequestKind::Registration)
+        );
+        assert!(!handler.oidc_registration_exists(&ssh_id));
+        assert_eq!(
+            handler.oidc_auth_request_kind(&ssh_id),
+            Some(crate::oidc::OidcAuthRequestKind::SshCheck)
+        );
+        assert_eq!(handler.oidc_auth_request_kind("missing"), None);
     }
 
     #[tokio::test]
@@ -8067,7 +8151,19 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
     }
 
     fn oidc_registration_exists(&self, registration_id: &str) -> bool {
-        self.state.registration_cache.get(registration_id).is_some()
+        matches!(
+            self.state
+                .registration_cache
+                .auth_request_kind(registration_id),
+            Some(AuthRequestKind::Registration)
+        )
+    }
+
+    fn oidc_auth_request_kind(&self, auth_id: &str) -> Option<crate::oidc::OidcAuthRequestKind> {
+        match self.state.registration_cache.auth_request_kind(auth_id)? {
+            AuthRequestKind::Registration => Some(crate::oidc::OidcAuthRequestKind::Registration),
+            AuthRequestKind::SshCheck(_) => Some(crate::oidc::OidcAuthRequestKind::SshCheck),
+        }
     }
 
     fn oidc_registration_confirmation_info(

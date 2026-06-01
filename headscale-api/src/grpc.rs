@@ -3508,7 +3508,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("invalid auth_id"));
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
     }
 
     #[tokio::test]
@@ -3583,7 +3586,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("auth ID has invalid prefix"));
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
     }
 
     #[tokio::test]
@@ -3620,9 +3626,9 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
-        assert!(
-            err.message()
-                .contains("no pending auth session for auth_id")
+        assert_eq!(
+            err.message(),
+            "no pending auth session for auth_id hskey-authreq-eeeeeeeeeeeeeeeeeeeeeeee"
         );
         assert!(registration_cache.is_empty());
 
@@ -3638,9 +3644,9 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
-        assert!(
-            err.message()
-                .contains("no pending auth session for auth_id")
+        assert_eq!(
+            err.message(),
+            "no pending auth session for auth_id hskey-authreq-ffffffffffffffffffffffff"
         );
         assert!(registration_cache.is_empty());
     }
@@ -4613,6 +4619,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "node not found");
 
         let err = service
             .set_tags(Request::new(SetTagsRequest {
@@ -4622,6 +4629,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "tag must start with the string 'tag:'");
 
         let err = service
             .set_tags(Request::new(SetTagsRequest {
@@ -4631,7 +4639,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("requested tags"));
+        assert_eq!(
+            err.message(),
+            "requested tags [tag:server] are invalid or not permitted"
+        );
 
         let err = service
             .set_approved_routes(Request::new(SetApprovedRoutesRequest {
@@ -4650,6 +4661,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.message(),
+            "cannot remove all tags from a node - tagged nodes must have at least one tag"
+        );
 
         let err = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
@@ -4661,6 +4676,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
 
         let err = service
             .debug_create_node(Request::new(DebugCreateNodeRequest {
@@ -4672,7 +4691,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("auth ID has invalid prefix"));
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
 
         let err = service
             .register_node(Request::new(RegisterNodeRequest {
@@ -4682,7 +4704,10 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("auth ID has invalid prefix"));
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
     }
 
     #[test]
@@ -4716,7 +4741,10 @@ mod upstream_tests {
 
         let err = apply_requested_tags(&policy, &mut record).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("requested tags [tag:server]"));
+        assert_eq!(
+            err.message(),
+            "requested tags [tag:server] are invalid or not permitted"
+        );
     }
 
     #[tokio::test]

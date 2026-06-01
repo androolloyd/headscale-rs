@@ -135,27 +135,19 @@ Current-head audit overlay, refreshed 2026-05-30:
 - Active P0 default-scenario regressions against the current-head executable
   baseline: none known from the 2026-05-23 audit. Full replacement parity still
   has P0 upgrade/drop-in backlog, led by broader production Postgres
-  stock-client coverage beyond the CI-backed auth-key, tagged preauth,
-  tag update, invalid tag update, tag reauth clear, web-registration tag
-  ownership/rejection,
-  route-approval, exit-node route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC
-  route-approval restart, web-registration restart, restart-persistence,
-  ACL allowed peers, empty ACL streaming edge, autogroup:self peer isolation, route-via steering, route-via same-tag, route-via reload, route-via multiprefix, route-via multiprefix reload, route-via restart, route-via same-tag restart, route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health, route-health restart,
-  route-via plus route-health failover, route-health primary-selection restart, route-health reload+restart,
-  route-health all-unhealthy, route-health all-unhealthy reload, route-health all-unhealthy restart, route-health all-unhealthy reload+restart, route-health mixed-exit, route-health mixed-exit restart,
-  route-health mixed-exit reload+restart, route-health mixed-exit all-unhealthy, route-health mixed-exit all-unhealthy restart, and route-health mixed-exit
-  all-unhealthy reload+restart rows, remaining NodeStore batching/churn
-  semantics, remaining route reload/restart edges, and broader stock-client SSH
-  status coverage.
+  process-level serve/mutation coverage beyond the CI-backed paired
+  stock-client matrix, remaining NodeStore reason/churn map-stream tests,
+  current-upstream route edge cases beyond the covered default/Postgres row
+  symmetry set, and broader stock-client SSH status coverage.
 - Remaining P1 current-head gaps from the audit: broader paired
-  stock-client route-via/route-health reload, restart, and failure-mode
-  edge matrices beyond the covered same-tag route-via and failover rows, broader SSH
+  stock-client route-via/route-health edge matrices beyond the now-symmetric
+  default/Postgres reload, restart, mixed-exit, and failure-mode rows, broader SSH
   client-facing status/stderr and profile-variant edges beyond the
   covered `localpart:*@domain` compiler/checker plus localpart/profile
   stock-client allow/deny snapshots,
   broader TLS-ALPN live-CA ACME smoke coverage beyond the controlled local CA
   issuer/reloader tests and HTTP-01/TLS-ALPN production-listener process smokes,
-  remaining broader production Postgres stock-client serve coverage,
+  remaining broader production Postgres process-level serve/mutation coverage,
   native DERP relay decision beyond the supported sidecar boundary, and remaining production backfill/restart
   edges beyond the covered restart-persistence row.
 - Remaining P2 current-head gaps from the audit: broader CLI output/error
@@ -456,6 +448,16 @@ Recent coverage note (2026-06-01): paired `postgres-derp-private` stock-client
 rows now cover production Postgres private DERP through the supported upstream
 `derper` sidecar, including configured DERP map metadata, STUN, and forced DERP
 relay pings, bringing the Postgres stock-client matrix to eighty-four rows.
+For Rust sidecar admission, `verify_client_url` is the headscale-style registry
+verification path; `derper -verify-clients`/`verify_clients` verifies against a
+local `tailscaled` and is not a registry-admission substitute.
+
+Recent coverage note (2026-06-01): generic auth-request lifecycle handling now
+waits on live non-registration auth IDs instead of treating them as missing
+registrations, and OIDC registration callback/confirmation paths now reject
+wrong-kind SSH-check auth IDs as bad registration sessions. The grpc-gateway
+suite now pins advertised swagger route/method drift, and direct gRPC tests pin
+exact node/tag/auth-request error messages.
 
 Recent coverage note (2026-06-01): paired `authkey-relogin-same-user`
 stock-client rows now cover logout followed by fresh auth-key relogin as the
@@ -508,32 +510,22 @@ filter reduction. The checked golden now covers eighty-eight scenarios.
 
 ## Next Implementation Order
 
-1. Finish the remaining Postgres runtime dependency chain: broaden production
-   Postgres stock-client smokes beyond auth-key, web/CLI registration,
-   route-approval, OIDC, OIDC SSH-check approval/denial, tag mutation, and the process-level grpc-gateway/remote-gRPC
-   admin topology smoke, especially remaining registration/config production rows,
-   before claiming full database parity.
+1. Broaden production Postgres process-level serve/mutation smokes beyond the
+   CI-backed paired stock-client matrix and the grpc-gateway/remote-gRPC admin
+   topology smoke, especially registration/config mutation rows, before
+   claiming full database parity.
 2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for
    the remaining live-server cases and broader auth/server error variants.
-3. Broaden paired stock-client route reload/restart coverage on top of the
-   current-head route-via, route-via-reload, route-via-restart,
-   route-via-multiprefix, route-via-multiprefix-reload,
-   route-via-multiprefix-restart, route-via-multiprefix-reload-restart,
-   route-health, route-health-reload,
-   route-health-reload-restart, route-health-restart, route-health-primary-restart,
-   route-health-all-unhealthy,
-   route-health-all-unhealthy-reload, route-health-all-unhealthy-restart,
-   route-health-mixed-exit, route-health-mixed-exit-reload,
-   route-health-mixed-exit-restart,
-   route-health-mixed-exit-reload-restart, route-health-mixed-exit-all-unhealthy,
-   route-health-mixed-exit-all-unhealthy-reload, and
-   route-health-mixed-exit-all-unhealthy-restart smokes.
+3. Keep paired stock-client route coverage tracking current upstream route-via
+   and route-health behavior; the checked-in default/Postgres reload, restart,
+   mixed-exit, all-unhealthy, and route-via symmetry rows are present, so the
+   remaining work is new edge semantics rather than row mirroring.
 4. Finish config-runtime gaps: HTTP-01 and
    TLS-ALPN now have production-listener controlled-CA process coverage.
 5. Broaden production-process restart smokes for web/CLI/OIDC policy and
    map churn beyond the auth-key restart-persistence, OIDC route-approval,
-   and web/CLI restart rows.
+   web/CLI restart, and default web-registration route-approval rows.
 6. Decide whether native Rust DERP relay is required beyond the
    supported upstream `derper` sidecar boundary; do not claim native
    relay parity unless that product decision changes.

@@ -59,7 +59,7 @@ use sqlx::SqlitePool;
 
 use crate::policy::{PolicyStore, validate_requested_tags_for_node};
 use crate::tailscale_wire::{
-    IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
+    AuthRequestKind, IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
     PersistedMachineRegistration, RegistrationCache,
     routes::auto_approved_routes_for_node,
     wire::{HostInfo, is_auto_derived_given_name, valid_given_name_label},
@@ -1596,7 +1596,17 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
     }
 
     fn oidc_registration_exists(&self, registration_id: &str) -> bool {
-        self.registration_cache.get(registration_id).is_some()
+        matches!(
+            self.registration_cache.auth_request_kind(registration_id),
+            Some(AuthRequestKind::Registration)
+        )
+    }
+
+    fn oidc_auth_request_kind(&self, auth_id: &str) -> Option<crate::oidc::OidcAuthRequestKind> {
+        match self.registration_cache.auth_request_kind(auth_id)? {
+            AuthRequestKind::Registration => Some(crate::oidc::OidcAuthRequestKind::Registration),
+            AuthRequestKind::SshCheck(_) => Some(crate::oidc::OidcAuthRequestKind::SshCheck),
+        }
     }
 
     fn oidc_registration_confirmation_info(
@@ -1721,7 +1731,17 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
     }
 
     fn oidc_registration_exists(&self, registration_id: &str) -> bool {
-        self.registration_cache.get(registration_id).is_some()
+        matches!(
+            self.registration_cache.auth_request_kind(registration_id),
+            Some(AuthRequestKind::Registration)
+        )
+    }
+
+    fn oidc_auth_request_kind(&self, auth_id: &str) -> Option<crate::oidc::OidcAuthRequestKind> {
+        match self.registration_cache.auth_request_kind(auth_id)? {
+            AuthRequestKind::Registration => Some(crate::oidc::OidcAuthRequestKind::Registration),
+            AuthRequestKind::SshCheck(_) => Some(crate::oidc::OidcAuthRequestKind::SshCheck),
+        }
     }
 
     fn oidc_registration_confirmation_info(

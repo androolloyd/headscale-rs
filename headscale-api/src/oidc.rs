@@ -515,6 +515,8 @@ pub enum OidcRuntimeError {
     RegistrationSessionExpired,
     #[error("registration not OIDC-authorized")]
     RegistrationNotOidcAuthorized,
+    #[error("auth session is not for node registration")]
+    AuthSessionNotRegistration,
     #[error("invalid form")]
     InvalidForm,
     #[error("missing csrf token")]
@@ -843,6 +845,12 @@ pub struct OidcRegistrationResult {
     pub new_node: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OidcAuthRequestKind {
+    Registration,
+    SshCheck,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OidcRegistrationError {
     #[error("login session expired, try again")]
@@ -889,6 +897,11 @@ pub trait OidcRegistrationHandler: Send + Sync {
 
     fn oidc_registration_exists(&self, _registration_id: &str) -> bool {
         false
+    }
+
+    fn oidc_auth_request_kind(&self, auth_id: &str) -> Option<OidcAuthRequestKind> {
+        self.oidc_registration_exists(auth_id)
+            .then_some(OidcAuthRequestKind::Registration)
     }
 
     fn oidc_registration_confirmation_info(
@@ -1114,10 +1127,12 @@ pub async fn handle_register_confirm_with_request_security(
     };
 
     let Some(pending) = runtime.confirmations.get(&registration_id) else {
-        let err = if registration_handler.oidc_registration_exists(&registration_id) {
-            OidcRuntimeError::RegistrationNotOidcAuthorized
-        } else {
-            OidcRuntimeError::RegistrationSessionExpired
+        let err = match registration_handler.oidc_auth_request_kind(&registration_id) {
+            Some(OidcAuthRequestKind::Registration) => {
+                OidcRuntimeError::RegistrationNotOidcAuthorized
+            }
+            Some(OidcAuthRequestKind::SshCheck) => OidcRuntimeError::AuthSessionNotRegistration,
+            None => OidcRuntimeError::RegistrationSessionExpired,
         };
         return oidc_error_response(status_for_runtime_error(&err), err.to_string());
     };
@@ -1239,11 +1254,21 @@ pub async fn handle_callback_with_request_security(
 
         if let Some(registration_handler) = &runtime.registration_handler {
             if registration.registration {
-                if !registration_handler.oidc_registration_exists(&registration.registration_id) {
-                    return oidc_error_response(
-                        StatusCode::GONE,
-                        "login session expired, try again".to_string(),
-                    );
+                match registration_handler.oidc_auth_request_kind(&registration.registration_id) {
+                    Some(OidcAuthRequestKind::Registration) => {}
+                    Some(OidcAuthRequestKind::SshCheck) => {
+                        let err = OidcRuntimeError::AuthSessionNotRegistration;
+                        return oidc_error_response(
+                            status_for_runtime_error(&err),
+                            err.to_string(),
+                        );
+                    }
+                    None => {
+                        return oidc_error_response(
+                            StatusCode::GONE,
+                            "login session expired, try again".to_string(),
+                        );
+                    }
                 }
                 let csrf = random_urlsafe(32);
                 let device = registration_handler
@@ -1693,6 +1718,7 @@ fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
         | OidcRuntimeError::InvalidAuthId
         | OidcRuntimeError::MissingCodeOrState
         | OidcRuntimeError::InvalidStateParameter
+        | OidcRuntimeError::AuthSessionNotRegistration
         | OidcRuntimeError::InvalidForm
         | OidcRuntimeError::MissingCsrfToken
         | OidcRuntimeError::StateCookieMissing
@@ -2069,6 +2095,7 @@ mod tests {
         calls: RwLock<Vec<OidcRegistrationCall>>,
         auth_calls: RwLock<Vec<OidcAuthCall>>,
         fail_expired: bool,
+        auth_kind: Option<OidcAuthRequestKind>,
     }
 
     #[async_trait::async_trait]
@@ -2126,8 +2153,19 @@ mod tests {
             Ok(())
         }
 
-        fn oidc_registration_exists(&self, _registration_id: &str) -> bool {
-            !self.fail_expired
+        fn oidc_registration_exists(&self, registration_id: &str) -> bool {
+            matches!(
+                self.oidc_auth_request_kind(registration_id),
+                Some(OidcAuthRequestKind::Registration)
+            )
+        }
+
+        fn oidc_auth_request_kind(&self, _auth_id: &str) -> Option<OidcAuthRequestKind> {
+            if self.fail_expired {
+                None
+            } else {
+                Some(self.auth_kind.unwrap_or(OidcAuthRequestKind::Registration))
+            }
         }
 
         fn oidc_registration_confirmation_info(
@@ -3391,6 +3429,33 @@ mod tests {
 
     #[cfg(feature = "full")]
     #[tokio::test]
+    async fn oidc_register_confirm_rejects_non_registration_auth_session() {
+        let registrations = Arc::new(MockOidcRegistrationHandler {
+            auth_kind: Some(OidcAuthRequestKind::SshCheck),
+            ..MockOidcRegistrationHandler::default()
+        });
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+
+        let response = handle_register_confirm(
+            runtime,
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=fake-csrf"),
+            Bytes::from("headscale_register_confirm=fake-csrf"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_body(response).await,
+            "auth session is not for node registration"
+        );
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
     async fn oidc_register_confirm_rejects_cached_csrf_mismatch() {
         let registrations = Arc::new(MockOidcRegistrationHandler::default());
         let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
@@ -3497,6 +3562,60 @@ mod tests {
             response_body(response).await,
             "login session expired, try again"
         );
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_callback_rejects_registration_flow_for_non_registration_auth_session() {
+        let token = Arc::new(RwLock::new(String::new()));
+        let captured_form = Arc::new(RwLock::new(BTreeMap::new()));
+        let (_handle, base_url, _) = oidc_callback_fixture(token.clone(), captured_form).await;
+
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.token_endpoint = format!("{base_url}/token");
+        config.jwks_uri = format!("{base_url}/jwks");
+        config.userinfo_endpoint = None;
+        let registrations = Arc::new(MockOidcRegistrationHandler {
+            auth_kind: Some(OidcAuthRequestKind::SshCheck),
+            ..MockOidcRegistrationHandler::default()
+        });
+        let runtime = OidcAuthRuntime::new(config).with_registration_handler(registrations.clone());
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
+        *token.write() = signed_id_token(&start.nonce);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}={}; {}={}",
+                cookie_name("state", &start.state),
+                start.state,
+                cookie_name("nonce", &start.nonce),
+                start.nonce
+            )
+            .parse()
+            .unwrap(),
+        );
+
+        let response = handle_callback(
+            runtime,
+            headers,
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_body(response).await,
+            "auth session is not for node registration"
+        );
+        assert!(registrations.calls.read().is_empty());
+        assert!(registrations.auth_calls.read().is_empty());
     }
 
     #[cfg(feature = "full")]

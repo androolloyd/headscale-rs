@@ -2,7 +2,7 @@
 
 #![cfg(all(feature = "admin", feature = "full"))]
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Router,
@@ -298,6 +298,30 @@ async fn assert_status_json_exact(
     );
     assert_eq!(body["message"], expected_message, "{context}: message");
     assert_eq!(body["details"], serde_json::json!([]), "{context}: details");
+}
+
+async fn assert_not_gateway_route_fallback(resp: Response, context: &str) {
+    let status = resp.status();
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "{context}: content-type"
+    );
+    let body = body_json(resp).await;
+    assert!(
+        !(status.as_u16() == 404
+            && body["code"].as_i64() == Some(5)
+            && body["message"] == "unmatched route"),
+        "{context}: advertised route fell through to unmatched-route fallback: {body}"
+    );
+    assert!(
+        !(status.as_u16() == 501
+            && body["code"].as_i64() == Some(12)
+            && body["message"] == "Method Not Allowed"),
+        "{context}: advertised method fell through to method-not-allowed fallback: {body}"
+    );
 }
 
 async fn assert_plain_unauthorized(resp: Response) {
@@ -639,6 +663,245 @@ async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
             .unwrap();
         assert_status_json_exact(resp, 501, 12, "Method Not Allowed", case.name).await;
     }
+}
+
+#[tokio::test]
+async fn grpc_gateway_mounts_all_advertised_swagger_routes() {
+    struct RouteCase {
+        swagger_path: &'static str,
+        concrete_path: &'static str,
+        allowed_methods: &'static [&'static str],
+        wrong_method: &'static str,
+    }
+
+    fn method(name: &str) -> Method {
+        Method::from_bytes(name.as_bytes()).expect("test method is valid")
+    }
+
+    const SWAGGER: &str = include_str!("../src/tailscale_wire/assets/headscale.swagger.json");
+    const ROUTES: &[RouteCase] = &[
+        RouteCase {
+            swagger_path: "/api/v1/apikey",
+            concrete_path: "/api/v1/apikey",
+            allowed_methods: &["GET", "POST"],
+            wrong_method: "PUT",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/apikey/expire",
+            concrete_path: "/api/v1/apikey/expire",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/apikey/{prefix}",
+            concrete_path: "/api/v1/apikey/testprefix",
+            allowed_methods: &["DELETE"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/auth/approve",
+            concrete_path: "/api/v1/auth/approve",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/auth/register",
+            concrete_path: "/api/v1/auth/register",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/auth/reject",
+            concrete_path: "/api/v1/auth/reject",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/debug/node",
+            concrete_path: "/api/v1/debug/node",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/health",
+            concrete_path: "/api/v1/health",
+            allowed_methods: &["GET"],
+            wrong_method: "DELETE",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node",
+            concrete_path: "/api/v1/node",
+            allowed_methods: &["GET"],
+            wrong_method: "POST",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/backfillips",
+            concrete_path: "/api/v1/node/backfillips",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/register",
+            concrete_path: "/api/v1/node/register",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/{nodeId}",
+            concrete_path: "/api/v1/node/1",
+            allowed_methods: &["GET", "DELETE"],
+            wrong_method: "POST",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/{nodeId}/approve_routes",
+            concrete_path: "/api/v1/node/1/approve_routes",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/{nodeId}/expire",
+            concrete_path: "/api/v1/node/1/expire",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/{nodeId}/rename/{newName}",
+            concrete_path: "/api/v1/node/1/rename/new-name",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/node/{nodeId}/tags",
+            concrete_path: "/api/v1/node/1/tags",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/policy",
+            concrete_path: "/api/v1/policy",
+            allowed_methods: &["GET", "PUT"],
+            wrong_method: "POST",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/policy/check",
+            concrete_path: "/api/v1/policy/check",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/preauthkey",
+            concrete_path: "/api/v1/preauthkey",
+            allowed_methods: &["GET", "POST", "DELETE"],
+            wrong_method: "PUT",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/preauthkey/expire",
+            concrete_path: "/api/v1/preauthkey/expire",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/user",
+            concrete_path: "/api/v1/user",
+            allowed_methods: &["GET", "POST"],
+            wrong_method: "PUT",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/user/{id}",
+            concrete_path: "/api/v1/user/1",
+            allowed_methods: &["DELETE"],
+            wrong_method: "GET",
+        },
+        RouteCase {
+            swagger_path: "/api/v1/user/{oldId}/rename/{newName}",
+            concrete_path: "/api/v1/user/1/rename/new-name",
+            allowed_methods: &["POST"],
+            wrong_method: "GET",
+        },
+    ];
+
+    let swagger: Value = serde_json::from_str(SWAGGER).expect("swagger JSON parses");
+    let paths = swagger["paths"].as_object().expect("swagger has paths");
+    let advertised = paths
+        .iter()
+        .map(|(path, operations)| {
+            let mut methods = operations
+                .as_object()
+                .expect("swagger path has operations")
+                .keys()
+                .filter(|method| matches!(method.as_str(), "delete" | "get" | "post" | "put"))
+                .map(|method| method.to_ascii_uppercase())
+                .collect::<Vec<_>>();
+            methods.sort();
+            (path.clone(), methods)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected = ROUTES
+        .iter()
+        .map(|route| {
+            let mut methods = route
+                .allowed_methods
+                .iter()
+                .map(|method| (*method).to_string())
+                .collect::<Vec<_>>();
+            methods.sort();
+            (route.swagger_path.to_string(), methods)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(advertised, expected, "swagger route/method set drifted");
+
+    let (app, token) = fixture().await;
+    for route in ROUTES {
+        for allowed in route.allowed_methods {
+            let body = if *allowed == "GET" || *allowed == "DELETE" {
+                Body::empty()
+            } else {
+                Body::from("{}")
+            };
+            let resp = app
+                .clone()
+                .oneshot(req(
+                    method(allowed),
+                    route.concrete_path,
+                    Some(&token),
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_not_gateway_route_fallback(resp, &format!("{} {allowed}", route.swagger_path))
+                .await;
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                method(route.wrong_method),
+                route.concrete_path,
+                Some(&token),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(
+            resp,
+            501,
+            12,
+            "Method Not Allowed",
+            &format!("{} wrong method", route.swagger_path),
+        )
+        .await;
+    }
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/tailnet",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_status_json_exact(resp, 404, 5, "Not Found", "tailnet is not grpc-gateway").await;
 }
 
 #[tokio::test]
@@ -1235,6 +1498,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
         uri: &'static str,
         body: &'static str,
         message_fragment: &'static str,
+        exact_message: Option<&'static str>,
     }
 
     let (app, token) = fixture().await;
@@ -1246,6 +1510,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/preauthkey/expire",
             body: r#"{"id":null}"#,
             message_fragment: "invalid value for uint64 field id: null",
+            exact_message: None,
         },
         Case {
             name: "base-prefixed body uint64",
@@ -1253,6 +1518,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/preauthkey/expire",
             body: r#"{"id":"0x1"}"#,
             message_fragment: r#"invalid value for uint64 field id: "0x1""#,
+            exact_message: None,
         },
         Case {
             name: "null string body field",
@@ -1260,6 +1526,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/auth/approve",
             body: r#"{"authId":null}"#,
             message_fragment: "invalid value for string field authId: null",
+            exact_message: Some("invalid value for string field authId: null"),
         },
         Case {
             name: "object timestamp body field",
@@ -1267,6 +1534,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/apikey",
             body: r#"{"expiration":{"seconds":4102444800}}"#,
             message_fragment: "unexpected token { for timestamp field expiration",
+            exact_message: None,
         },
         Case {
             name: "timestamp body underflow",
@@ -1274,6 +1542,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/apikey",
             body: r#"{"expiration":"0001-01-01T00:00:00+01:00"}"#,
             message_fragment: r#"google.protobuf.Timestamp value out of range: "0001-01-01T00:00:00+01:00""#,
+            exact_message: None,
         },
         Case {
             name: "string bool body field",
@@ -1281,6 +1550,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             uri: "/api/v1/preauthkey",
             body: r#"{"reusable":"true"}"#,
             message_fragment: r#"invalid value for bool field reusable: "true""#,
+            exact_message: None,
         },
     ] {
         let resp = app
@@ -1293,7 +1563,11 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             ))
             .await
             .unwrap();
-        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+        if let Some(expected_message) = case.exact_message {
+            assert_status_json_exact(resp, 400, 3, expected_message, case.name).await;
+        } else {
+            assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+        }
     }
 }
 

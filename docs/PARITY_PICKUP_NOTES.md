@@ -408,17 +408,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-ssh-accept-env`, `postgres-ssh-localpart`,
   `postgres-ssh-profile-variants`, and the paired wrong-user, expired, and
   cancelled OIDC SSH-check denial rows plus private DERP sidecar/STUN/relay
-  coverage; broader Pg
-  stock-client serve smokes remain for the remaining registration/config
-  surfaces
-- Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
+  coverage; broader Pg process-level serve/mutation smokes remain for the
+  remaining registration/config surfaces
+- Broader paired route-via and route-health stock-client edge matrices for new
+  upstream semantics beyond the now-symmetric default/Postgres reload/restart
+  row set
 - Broader Tailscale SSH current-head client status/stderr/profile variants;
   the policy-level `acceptEnv`, `check` hold-and-delegate, and host-destination
   rejection scenarios are now promoted into the default Go-vs-Rust differential
   gate
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,
-  especially NodeStore worker batching semantics and remaining reason/state edge
-  deltas
+  especially remaining NodeStore reason/state edge deltas
 - Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed
 
 ## 2026-05-31 GivenName parity slice
@@ -1305,3 +1305,20 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   SSH policy mutation across restart; it also mirrors the web-registration
   route-approval row. The bounded push/PR real-client smoke set includes all of
   those rows.
+
+## 2026-06-01 auth-request and gateway exactness slice
+
+- `RegistrationCache::wait_for_registration` now waits on any live auth request,
+  including SSH-check auth IDs, so follow-up registration requests observe
+  approve/reject/expiry before restarting the web-registration flow.
+- OIDC registration callbacks and confirmation POSTs now classify auth request
+  kind and reject SSH-check auth IDs as wrong-kind registration sessions instead
+  of reporting expired/missing registration state.
+- The grpc-gateway e2e suite now checks the checked-in swagger route/method set
+  against mounted routes and pins `/api/v1/tailnet` as intentionally outside the
+  upstream grpc-gateway surface.
+- Direct gRPC tests now assert exact node/tag/auth-request error messages for
+  the current upstream surfaces covered by the local admin service tests.
+- DERP sidecar parity documentation now calls out that `verify_client_url` is
+  the headscale-style registry admission boundary; `verify_clients` is local
+  `tailscaled` verification in upstream `derper`, not a substitute.

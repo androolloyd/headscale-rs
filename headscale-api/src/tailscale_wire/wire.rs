@@ -969,22 +969,22 @@ pub struct MapRequest {
     /// Whether the client wants the long-poll stream. We ignore this
     /// only for non-streaming test paths; runtime map handling emits
     /// upstream-style framed chunks when this is true.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
     /// Whether the client wants the response in compressed form.
     /// Upstream currently recognizes `"zstd"`; absent or unknown values
     /// still use the length-prefixed frame but leave the JSON body
     /// uncompressed.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub compress: String,
     /// Whether the server should include keepalive frames in a stream.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_alive: bool,
     /// HostInfo the client wants to update on this map call.
     #[serde(default)]
     pub hostinfo: Option<HostInfo>,
     /// `OmitPeers` true ⇒ client just wants a poke / heartbeat.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub omit_peers: bool,
     /// `nodekey:` prefixed hex string. Present on v1.78+ flat-path
     /// requests (`POST /machine/map`) where there's no URL parameter.
@@ -1022,7 +1022,11 @@ pub struct MapRequest {
     /// historically carried `Endpoints []string`; v1.78+ added a typed
     /// `[]netip.AddrPort` shape but the JSON wire still encodes as a
     /// `[]string`. Optional ⇒ empty list when absent.
-    #[serde(default, rename = "Endpoints")]
+    #[serde(
+        default,
+        rename = "Endpoints",
+        skip_serializing_if = "option_vec_is_none_or_empty"
+    )]
     pub endpoints: Option<Vec<String>>,
     /// Parallel endpoint source-type list (`tailcfg.EndpointType`).
     #[serde(
@@ -1033,7 +1037,7 @@ pub struct MapRequest {
     pub endpoint_types: Vec<i32>,
     /// Legacy read-only map fetch bit. Deprecated upstream but still
     /// accepted for parity with older clients.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
     /// Latest local tailnet key authority head hash.
     #[serde(default, rename = "TKAHead", skip_serializing_if = "String::is_empty")]
@@ -1973,6 +1977,13 @@ fn is_zero_i64(v: &i64) -> bool {
 }
 fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
+}
+#[allow(clippy::ref_option)]
+fn option_vec_is_none_or_empty<T>(v: &Option<Vec<T>>) -> bool {
+    match v {
+        None => true,
+        Some(v) => v.is_empty(),
+    }
 }
 
 /// Strip a Tailscale key prefix (`mkey:`, `nodekey:`, `discokey:`)

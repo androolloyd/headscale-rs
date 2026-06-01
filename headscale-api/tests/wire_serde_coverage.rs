@@ -515,6 +515,59 @@ fn map_request_disco_key_skipped_when_none() {
 }
 
 #[test]
+fn map_request_zero_value_omits_go_omitzero_fields() {
+    let r = MapRequest {
+        version: 39,
+        stream: false,
+        compress: String::new(),
+        keep_alive: false,
+        hostinfo: None,
+        omit_peers: false,
+        node_key: "nodekey:dead".into(),
+        map_session_handle: String::new(),
+        map_session_seq: 0,
+        disco_key: None,
+        hardware_attestation_key: None,
+        hardware_attestation_key_signature: String::new(),
+        hardware_attestation_key_signature_timestamp: None,
+        endpoints: Some(Vec::new()),
+        endpoint_types: Vec::new(),
+        read_only: false,
+        tka_head: String::new(),
+        debug_flags: Vec::new(),
+        connection_handle_for_test: String::new(),
+    };
+
+    let v: Value = serde_json::to_value(&r).unwrap();
+    assert_eq!(v["Version"], 39);
+    assert_eq!(v["NodeKey"], "nodekey:dead");
+    // Untagged upstream fields are still present when zero.
+    assert!(v.get("Hostinfo").is_some());
+    assert!(v["Hostinfo"].is_null());
+    // `json:",omitzero"` / `json:",omitempty"` fields should not
+    // serialize as false, "", null, or [] in the zero-value case.
+    for omitted in [
+        "Stream",
+        "Compress",
+        "KeepAlive",
+        "OmitPeers",
+        "Endpoints",
+        "EndpointTypes",
+        "MapSessionHandle",
+        "MapSessionSeq",
+        "HardwareAttestationKey",
+        "HardwareAttestationKeySignature",
+        "HardwareAttestationKeySignatureTimestamp",
+        "ReadOnly",
+        "TKAHead",
+        "DebugFlags",
+        "ConnectionHandleForTest",
+    ] {
+        assert!(v.get(omitted).is_none(), "{omitted} must be omitted");
+    }
+}
+
+#[test]
 fn map_request_endpoints_defaults_to_none_when_absent() {
     let j = r#"{"NodeKey":"nodekey:cafe"}"#;
     let r: MapRequest = serde_json::from_str(j).unwrap();

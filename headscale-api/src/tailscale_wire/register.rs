@@ -200,6 +200,7 @@ async fn register_inner(
     body: RegisterRequest,
     cancellation: Option<NoiseRequestCancellation>,
 ) -> axum::response::Response {
+    let has_auth = body.auth.is_some();
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     let requested_tags = requested_tags_for_body(&body);
     let now = chrono::Utc::now();
@@ -223,7 +224,7 @@ async fn register_inner(
     }
 
     if authkey.is_empty() {
-        if let Some(record) = state.machines.get(&node_key_hex) {
+        if !has_auth && let Some(record) = state.machines.get(&node_key_hex) {
             if let Err(resp) = validate_existing_machine_key(
                 &machine_key_hex,
                 &record,
@@ -2676,6 +2677,61 @@ mod tests {
         assert!(rr.auth_url.is_empty());
         assert_eq!(state.machines.len(), 1);
         assert!(state.registration_cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_node_legacy_oauth2_auth_starts_interactive_registration_like_go() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-legacy-oauth2-existing";
+        redeemer.insert(authkey, "alice");
+        let app = router(state.clone());
+        let node_key_hex = "3a".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let oauth2_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Auth": {
+                "Oauth2Token": {
+                    "access_token": "legacy-access-token",
+                    "token_type": "Bearer"
+                }
+            },
+            "Hostinfo": { "Hostname": "legacy-oauth2-existing" },
+        });
+        let oauth2_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&oauth2_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(oauth2_resp.status(), StatusCode::OK);
+        let raw = to_bytes(oauth2_resp.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(!rr.machine_authorized);
+        assert!(rr.login.login_name.is_empty());
+        assert!(rr.auth_url.starts_with("/register/hskey-authreq-"));
+        assert_eq!(state.machines.len(), 1);
+        assert_eq!(state.registration_cache.len(), 1);
     }
 
     #[tokio::test]

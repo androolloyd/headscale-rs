@@ -119,6 +119,7 @@ smoke_ids=(
   postgres-oidc
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
+  postgres-ssh
   postgres-ssh-oidc-check
   postgres-ssh-cli-check
   postgres-ssh-oidc-check-period-cache
@@ -320,6 +321,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -433,6 +435,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-oidc-smoke.sh
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
+  tools/real-client/postgres-ssh-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-smoke.sh
   tools/real-client/postgres-ssh-cli-check-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
@@ -590,6 +593,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
@@ -747,6 +751,7 @@ smoke_assertions=(
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"
+  "production Postgres Tailscale SSH allow, deny, and ACL timeout"
   "production Postgres OIDC-backed Tailscale SSH check approval"
   "production Postgres CLI-approved Tailscale SSH check approval"
   "production Postgres OIDC-backed Tailscale SSH checkPeriod cache"

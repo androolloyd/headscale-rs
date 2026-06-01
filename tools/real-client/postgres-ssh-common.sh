@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
+target="${REAL_CLIENT_ONLINE_LASTSEEN_TARGET:-}"
+case "${target}" in
+  rust | headscale-go) ;;
+  *)
+    echo "REAL_CLIENT_ONLINE_LASTSEEN_TARGET must be rust or headscale-go" >&2
+    exit 2
+    ;;
+esac
+
+work_root="${REAL_CLIENT_WORKDIR:-target/real-client/postgres-ssh-${target}-smoke}"
+ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
+attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
+autogroup_policy="$(cat tools/real-client/fixtures/ssh-autogroup-self.hujson)"
+blocked_policy="$(cat tools/real-client/fixtures/ssh-acl-blocked.hujson)"
+group_policy="$(cat tools/real-client/fixtures/ssh-group-matrix.hujson)"
+check_policy="$(cat tools/real-client/fixtures/ssh-check-period.hujson)"
+deny_first_line="${REAL_CLIENT_SSH_DENY_STDERR_FIRST_LINE:-tailscale: tailnet policy does not permit you to SSH to this node}"
+
+REAL_CLIENT_WORKDIR="${work_root}/autogroup-self" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=3 \
+REAL_CLIENT_CLIENT_USERS="${REAL_CLIENT_CLIENT_USERS:-user1,user1,user2}" \
+REAL_CLIENT_POLICY_JSON="${REAL_CLIENT_SSH_AUTOGROUP_POLICY:-${autogroup_policy}}" \
+REAL_CLIENT_EXPECT_PEER_COUNT="${REAL_CLIENT_EXPECT_PEER_COUNT:-2}" \
+REAL_CLIENT_ENABLE_TAILSCALE_SSH=true \
+REAL_CLIENT_INSTALL_OPENSSH=true \
+REAL_CLIENT_SSH_USER="${ssh_user}" \
+REAL_CLIENT_EXPECT_SSH_MATRIX="${REAL_CLIENT_EXPECT_SSH_MATRIX:-1:2:allow,2:1:allow,1:3:deny,3:1:deny}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STATUS="${REAL_CLIENT_AUTOGROUP_DENY_STATUS:-255}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE="${REAL_CLIENT_AUTOGROUP_DENY_STDERR_FIRST_LINE:-${deny_first_line}}" \
+REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS="${attempt_timeout}" \
+  tools/real-client/online-lastseen-common.sh
+
+REAL_CLIENT_WORKDIR="${work_root}/group-matrix" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=4 \
+REAL_CLIENT_CLIENT_USERS="${REAL_CLIENT_GROUP_CLIENT_USERS:-user1,user1,user2,user3}" \
+REAL_CLIENT_POLICY_JSON="${REAL_CLIENT_SSH_GROUP_POLICY:-${group_policy}}" \
+REAL_CLIENT_EXPECT_PEER_COUNT="${REAL_CLIENT_GROUP_EXPECT_PEER_COUNT:-3}" \
+REAL_CLIENT_ENABLE_TAILSCALE_SSH=true \
+REAL_CLIENT_INSTALL_OPENSSH=true \
+REAL_CLIENT_SSH_USER="${ssh_user}" \
+REAL_CLIENT_EXPECT_SSH_MATRIX="${REAL_CLIENT_GROUP_EXPECT_SSH_MATRIX:-1:2:allow,2:1:allow,1:3:deny,3:1:deny,3:4:deny,4:3:deny}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STATUS="${REAL_CLIENT_GROUP_DENY_STATUS:-255}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE="${REAL_CLIENT_GROUP_DENY_STDERR_FIRST_LINE:-${deny_first_line}}" \
+REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS="${attempt_timeout}" \
+  tools/real-client/online-lastseen-common.sh
+
+REAL_CLIENT_WORKDIR="${work_root}/check-period" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=2 \
+REAL_CLIENT_CLIENT_USERS="${REAL_CLIENT_CHECK_CLIENT_USERS:-user1,user1}" \
+REAL_CLIENT_POLICY_JSON="${REAL_CLIENT_SSH_CHECK_POLICY:-${check_policy}}" \
+REAL_CLIENT_EXPECT_PEER_COUNT="${REAL_CLIENT_CHECK_EXPECT_PEER_COUNT:-1}" \
+REAL_CLIENT_ENABLE_TAILSCALE_SSH=true \
+REAL_CLIENT_INSTALL_OPENSSH=true \
+REAL_CLIENT_SSH_USER="${ssh_user}" \
+REAL_CLIENT_EXPECT_SSH_MATRIX="${REAL_CLIENT_CHECK_EXPECT_SSH_MATRIX:-1:2:allow}" \
+REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS="${attempt_timeout}" \
+  tools/real-client/online-lastseen-common.sh
+
+REAL_CLIENT_WORKDIR="${work_root}/no-policy" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=2 \
+REAL_CLIENT_CLIENT_USERS="${REAL_CLIENT_NOPOLICY_CLIENT_USERS:-user1,user1}" \
+REAL_CLIENT_EXPECT_PEER_COUNT="${REAL_CLIENT_NOPOLICY_EXPECT_PEER_COUNT:-1}" \
+REAL_CLIENT_ENABLE_TAILSCALE_SSH=true \
+REAL_CLIENT_INSTALL_OPENSSH=true \
+REAL_CLIENT_SSH_USER="${ssh_user}" \
+REAL_CLIENT_EXPECT_SSH_MATRIX="${REAL_CLIENT_NOPOLICY_EXPECT_SSH_MATRIX:-1:2:deny}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STATUS="${REAL_CLIENT_NOPOLICY_DENY_STATUS:-255}" \
+REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE="${REAL_CLIENT_NOPOLICY_DENY_STDERR_FIRST_LINE:-${deny_first_line}}" \
+REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS="${attempt_timeout}" \
+  tools/real-client/online-lastseen-common.sh
+
+REAL_CLIENT_WORKDIR="${work_root}/acl-blocked" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET="${target}" \
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=2 \
+REAL_CLIENT_CLIENT_USERS="${REAL_CLIENT_TIMEOUT_CLIENT_USERS:-user1,user1}" \
+REAL_CLIENT_POLICY_JSON="${REAL_CLIENT_SSH_BLOCKED_POLICY:-${blocked_policy}}" \
+REAL_CLIENT_EXPECT_PEER_COUNT="${REAL_CLIENT_TIMEOUT_EXPECT_PEER_COUNT:-1}" \
+REAL_CLIENT_ENABLE_TAILSCALE_SSH=true \
+REAL_CLIENT_INSTALL_OPENSSH=true \
+REAL_CLIENT_SSH_USER="${ssh_user}" \
+REAL_CLIENT_EXPECT_SSH_MATRIX="${REAL_CLIENT_TIMEOUT_EXPECT_SSH_MATRIX:-1:2:timeout}" \
+REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS="${attempt_timeout}" \
+  tools/real-client/online-lastseen-common.sh

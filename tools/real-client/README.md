@@ -114,6 +114,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
+| Database | `postgres-ssh` | `postgres-ssh-smoke.sh` | `postgres-ssh-headscale-go-smoke.sh` | Production Postgres Tailscale SSH allow, deny, and ACL timeout |
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
 | Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache |

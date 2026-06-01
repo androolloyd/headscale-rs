@@ -387,7 +387,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all seventy-six Pg rows, including
+  all seventy-seven Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
@@ -400,7 +400,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-route-primary-failover`, `postgres-route-primary-sticky`,
   `postgres-route-primary-withdraw`, `postgres-acl-allow`,
   `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
-  `postgres-ssh-oidc-check`,
+  `postgres-ssh`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
@@ -899,6 +899,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   approval state.
 - The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to seventy-six rows.
+
+## 2026-06-01 Postgres SSH smoke slice
+
+- Added paired `postgres-ssh` Rust/headscale-go rows over the production
+  Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now supports per-client users
+  and preauth keys, stock-client `--ssh`, OpenSSH client/user setup, and the
+  shared allow/deny/timeout SSH matrix assertions used by the SQLite/current
+  harness.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to seventy-seven rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

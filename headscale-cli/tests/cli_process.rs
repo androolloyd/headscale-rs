@@ -1588,6 +1588,18 @@ fn removed_hidden_compatibility_aliases_match_current_upstream_unknown_commands(
             &["machines", "--help"][..],
             "Error: unknown command \"machines\" for \"headscale\"\n",
         ),
+        (
+            &["tailnet"][..],
+            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+        ),
+        (
+            &["tailnet", "--help"][..],
+            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+        ),
+        (
+            &["tailnet", "status", "--help"][..],
+            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+        ),
     ] {
         assert_stderr_snapshot(args, 1, expected);
     }
@@ -2799,10 +2811,6 @@ fn implemented_admin_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["auth", "reject", "--help"],
         include_str!("snapshots/auth_reject_help.stdout"),
-    );
-    assert_stdout_snapshot(
-        &["tailnet", "status", "--help"],
-        include_str!("snapshots/tailnet_status_help.stdout"),
     );
     assert_stdout_snapshot(
         &["debug", "create-node", "--help"],

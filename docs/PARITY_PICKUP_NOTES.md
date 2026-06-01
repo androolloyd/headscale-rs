@@ -1444,3 +1444,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   and suppresses the stale update wake.
 - Regression coverage asserts the update/delete batch publishes only the
   `PeersRemoved` map change for the deleted node.
+
+## 2026-06-01 hidden tailnet CLI removal slice
+
+- The standalone `headscale` command and reusable embedded `AdminCmd` no longer
+  expose the old hidden `tailnet` command.
+- Process coverage now asserts `tailnet`, `tailnet --help`, and
+  `tailnet status --help` return the current-upstream unknown-command error
+  instead of rendering the removed local help page.

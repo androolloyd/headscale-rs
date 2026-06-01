@@ -13,7 +13,7 @@
 //!
 //!   * [`AdminCmd`] — a clap `Subcommand` enum that bundles every
 //!     admin verb (`users`, `nodes`, `preauthkeys`, `auth`, `apikeys`, `policy`,
-//!     `tailnet`, `debug`). Drop it into your top-level `clap::Parser` derive
+//!     `debug`). Drop it into your top-level `clap::Parser` derive
 //!     with `#[command(subcommand)]` and the same `users list /
 //!     nodes show / preauthkeys create …` tree appears verbatim.
 //!   * [`dispatch`] — the async entry-point. Takes the parsed
@@ -37,7 +37,7 @@ use clap::Subcommand;
 
 pub use admin::{
     AdminClient, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, ExitCode, NodesCmd,
-    OutputFormat, PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
+    OutputFormat, PolicyCmd, PreauthKeysCmd, UsersCmd,
 };
 
 /// The full set of admin verbs exposed by the standalone `headscale`
@@ -86,11 +86,6 @@ pub enum AdminCmd {
         #[command(subcommand)]
         action: PolicyCmd,
     },
-    /// Inspect tailnet-wide state.
-    Tailnet {
-        #[command(subcommand)]
-        action: TailnetCmd,
-    },
     /// Debug and testing commands.
     Debug {
         #[command(subcommand)]
@@ -124,7 +119,6 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
         AdminCmd::Auth { action } => admin::run_auth(&connect, &action).await,
         AdminCmd::Apikeys { action } => admin::run_apikeys(&connect, &action).await,
         AdminCmd::Policy { action } => admin::run_policy(&connect, &action).await,
-        AdminCmd::Tailnet { action } => admin::run_tailnet(&connect, &action).await,
         AdminCmd::Debug { action } => admin::run_debug(&connect, &action).await,
     };
     match result {
@@ -166,6 +160,7 @@ mod tests {
     fn embedded_admin_rejects_removed_hidden_compatibility_aliases() {
         assert!(AdminHarness::try_parse_from(["headscale", "namespace", "ls"]).is_err());
         assert!(AdminHarness::try_parse_from(["headscale", "machine", "ls"]).is_err());
+        assert!(AdminHarness::try_parse_from(["headscale", "tailnet", "status"]).is_err());
     }
 
     #[test]

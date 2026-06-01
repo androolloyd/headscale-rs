@@ -2,9 +2,9 @@
 //!
 //! Command-line interface for running headscale mesh nodes and control planes.
 //! The admin subcommands (`users`, `nodes`, `auth`, `preauthkeys`, `policy`,
-//! `apikeys`, `tailnet`) are being migrated to the upstream gRPC admin API.
-//! Migrated groups default to the local Unix socket; unmigrated groups still
-//! use the legacy `/api/v1/*` GUI surface.
+//! `apikeys`) are being migrated to the upstream gRPC admin API. Migrated
+//! groups default to the local Unix socket; unmigrated groups still use the
+//! legacy `/api/v1/*` GUI surface.
 
 // Keep compatibility with downstream toolchains that predate
 // Duration::from_mins/from_hours while newer clippy versions prefer them.
@@ -30,7 +30,7 @@ mod server;
 use config::{CliConfig, ServerConfig};
 use headscale_cli::admin::{
     self, AdminError, ApiKeysCmd, AuthCmd, ConnectArgs, DebugCmd, DirectPolicyDatabase, NodesCmd,
-    OutputFormat, PolicyCmd, PreauthKeysCmd, TailnetCmd, UsersCmd,
+    OutputFormat, PolicyCmd, PreauthKeysCmd, UsersCmd,
 };
 use headscale_db::DatabaseBackend;
 
@@ -143,12 +143,6 @@ enum Commands {
     Policy {
         #[command(subcommand)]
         action: PolicyCmd,
-    },
-    /// Inspect tailnet-wide state.
-    #[command(hide = true)]
-    Tailnet {
-        #[command(subcommand)]
-        action: TailnetCmd,
     },
     /// debug and testing commands.
     Debug {
@@ -549,9 +543,6 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             .await
             .map_err(Into::into),
         Commands::Policy { action } => admin::run_policy(&connect, &action)
-            .await
-            .map_err(Into::into),
-        Commands::Tailnet { action } => admin::run_tailnet(&connect, &action)
             .await
             .map_err(Into::into),
         Commands::Debug { action } => admin::run_debug(&connect, &action)
@@ -1539,7 +1530,7 @@ fn upstream_hidden_compatibility_alias_error(parts: &[&str]) -> Option<String> {
     let command = *parts.first()?;
     matches!(
         command,
-        "namespace" | "namespaces" | "ns" | "machine" | "machines"
+        "namespace" | "namespaces" | "ns" | "machine" | "machines" | "tailnet"
     )
     .then(|| format!("unknown command \"{command}\" for \"headscale\""))
 }
@@ -2913,6 +2904,7 @@ mod tests {
     fn standalone_cli_rejects_removed_hidden_compatibility_aliases() {
         assert!(Cli::try_parse_from(["headscale", "namespace", "ls"]).is_err());
         assert!(Cli::try_parse_from(["headscale", "machine", "ls"]).is_err());
+        assert!(Cli::try_parse_from(["headscale", "tailnet", "status"]).is_err());
     }
 
     #[test]

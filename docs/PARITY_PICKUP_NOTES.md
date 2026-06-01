@@ -734,3 +734,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   updated for the sticky primary behavior.
 - Adopted a paired `postgres-route-health-reload` Rust/headscale-go real-client
   row and added it to the push/PR Postgres smoke set.
+
+## 2026-06-01 Real-client CI matrix audit
+
+- Audited `tools/real-client/smoke-matrix.sh --list` against the
+  `.github/workflows/real-client-parity.yml` `PR_SMOKES` set after `aeef5d4`:
+  the checked-in matrix has 127 paired rows, and the push/PR set had no unknown
+  or duplicate row IDs while covering all 57 Postgres stock-client rows.
+- Added the low-risk paired `ping-lifecycle` row to `PR_SMOKES` so the
+  non-Postgres auth-key `/debug/ping` path runs on push/PR beside the existing
+  Postgres ping lifecycle row.

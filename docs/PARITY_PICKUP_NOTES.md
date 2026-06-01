@@ -1379,3 +1379,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Unit and process fixtures now make `dns.override_local_dns=false` explicit
   when they are testing later validation paths such as TLS, listener parsing,
   DERP config, Postgres config, or policy loading.
+
+## 2026-06-01 policy env override parity slice
+
+- `CliConfig::load` and default config discovery now apply Viper-style
+  `HEADSCALE_POLICY_MODE` and `HEADSCALE_POLICY_PATH` overrides after
+  file-relative path resolution, matching current upstream.
+- Process cleanup now scrubs those env vars so parity snapshots are stable.
+- Focused coverage proves env `policy.mode=database` skips a configured
+  missing policy file and env `policy.path` can replace the configured file
+  path for `configtest`.

@@ -41,6 +41,8 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_CLI_API_KEY",
     "HEADSCALE_CLI_INSECURE",
     "HEADSCALE_CLI_TIMEOUT",
+    "HEADSCALE_POLICY_MODE",
+    "HEADSCALE_POLICY_PATH",
     "HEADSCALE_SERVER_URL",
     "HEADSCALE_LISTEN_ADDR",
     "HEADSCALE_METRICS_LISTEN_ADDR",
@@ -2207,6 +2209,53 @@ tuning:
         include_str!("snapshots/configtest_accumulates_upstream_fatal_errors.stderr"),
         "configtest accumulates upstream fatal errors",
     );
+}
+
+#[test]
+fn configtest_applies_policy_env_overrides() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let good_policy = cwd.path().join("policy.hujson");
+    fs::write(
+        &good_policy,
+        r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: file
+  path: missing-policy.hujson
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_POLICY_MODE", "database")],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_POLICY_PATH", good_policy.to_str().unwrap())],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]

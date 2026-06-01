@@ -524,6 +524,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
@@ -558,6 +559,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
@@ -624,6 +626,31 @@ impl CliConfig {
             }
         }
         Ok(())
+    }
+
+    fn apply_policy_env_overrides_from<I, K, V>(&mut self, vars: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_POLICY_MODE" => {
+                    self.policy.mode = value.to_string();
+                }
+                "HEADSCALE_POLICY_PATH" => {
+                    self.policy.path = PathBuf::from(value);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -2583,6 +2610,28 @@ policy:
 
         assert!(config.policy.is_database_mode());
         config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn applies_headscale_policy_env_overrides_to_cli_config() {
+        let mut config = CliConfig {
+            policy: PolicyConfig {
+                mode: "file".to_string(),
+                path: PathBuf::from("configured-policy.hujson"),
+            },
+            ..CliConfig::default()
+        };
+
+        config.apply_policy_env_overrides_from([
+            ("HEADSCALE_POLICY_MODE", "database"),
+            ("HEADSCALE_POLICY_PATH", "/etc/headscale/policy.hujson"),
+        ]);
+
+        assert_eq!(config.policy.mode(), "database");
+        assert_eq!(
+            config.policy.path,
+            PathBuf::from("/etc/headscale/policy.hujson")
+        );
     }
 
     #[test]

@@ -1269,7 +1269,6 @@ fn debug_create_node_namespace_flag_error(parts: &[&str]) -> Option<String> {
                 if i + 1 < tail.len() =>
             {
                 i += 2;
-                continue;
             }
             _ => {
                 i += 1;

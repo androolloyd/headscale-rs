@@ -238,7 +238,7 @@ pub enum UsersCmd {
     #[command(alias = "ls", alias = "show")]
     List {
         /// User identifier (ID).
-        #[arg(short = 'i', long = "identifier")]
+        #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
         identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]
@@ -251,7 +251,7 @@ pub enum UsersCmd {
     #[command(name = "destroy", alias = "delete")]
     Destroy {
         /// User identifier (ID).
-        #[arg(short = 'i', long = "identifier")]
+        #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
         identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]
@@ -261,7 +261,7 @@ pub enum UsersCmd {
     #[command(alias = "mv")]
     Rename {
         /// User identifier (ID).
-        #[arg(short = 'i', long = "identifier")]
+        #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
         identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]

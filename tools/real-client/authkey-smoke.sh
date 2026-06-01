@@ -582,8 +582,16 @@ wait_for_with_timeout() {
   local cmd="$3"
   local deadline=$((SECONDS + wait_secs))
   until eval "${cmd}"; do
+    if [[ -n "${harness_pid}" ]] && ! kill -0 "${harness_pid}" >/dev/null 2>&1; then
+      wait "${harness_pid}" >/dev/null 2>&1 || true
+      harness_pid=""
+      echo "headscale-rs harness exited while waiting for ${label}" >&2
+      dump_harness_logs "harness exited before ${label}"
+      return 1
+    fi
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for ${label}" >&2
+      dump_harness_logs "timed out waiting for ${label}"
       return 1
     fi
     sleep 1
@@ -592,15 +600,21 @@ wait_for_with_timeout() {
 
 dump_harness_logs() {
   local label="${1:-harness}"
-  local stream
-  for stream in stdout stderr; do
-    local path="${work_dir}/harness.${stream}"
+  local path
+  echo "::group::${label}"
+  for path in \
+    "${work_dir}/harness.stderr" \
+    "${work_dir}/harness.stdout" \
+    "${work_dir}/harness-health.stderr" \
+    "${work_dir}/harness-health.stdout" \
+    "${work_dir}/harness-metrics.stderr" \
+    "${work_dir}/harness-metrics.stdout"; do
     if [[ -s "${path}" ]]; then
-      echo "::group::${label} ${stream}"
+      echo "--- ${path} ---" >&2
       tail -200 "${path}" >&2 || true
-      echo "::endgroup::"
     fi
   done
+  echo "::endgroup::"
 }
 
 stop_harness() {
@@ -1141,9 +1155,9 @@ for harness_attempt in 1 2 3; do
   harness_pid="$!"
 
   if wait_for_with_timeout "harness health" "${harness_start_timeout_secs}" \
-    "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >/dev/null" &&
+    "curl -fsS 'http://127.0.0.1:${http_port}/harness/health' >'${work_dir}/harness-health.stdout' 2>'${work_dir}/harness-health.stderr'" &&
     wait_for_with_timeout "harness metrics" "${harness_start_timeout_secs}" \
-      "curl -fsS 'http://127.0.0.1:${metrics_port}/metrics' >/dev/null" &&
+      "curl -fsS 'http://127.0.0.1:${metrics_port}/metrics' >'${work_dir}/harness-metrics.stdout' 2>'${work_dir}/harness-metrics.stderr'" &&
     wait_for_with_timeout "harness TLS certificate" "${harness_start_timeout_secs}" \
       "test -s '${work_dir}/state/tls.crt'"; then
     echo "harness http=http://127.0.0.1:${http_port}"
@@ -1155,11 +1169,10 @@ for harness_attempt in 1 2 3; do
   fi
 
   echo "harness startup attempt ${harness_attempt} failed" >&2
-  if ! kill -0 "${harness_pid}" >/dev/null 2>&1; then
+  if [[ -n "${harness_pid}" ]] && ! kill -0 "${harness_pid}" >/dev/null 2>&1; then
     wait "${harness_pid}" >/dev/null 2>&1 || true
     harness_pid=""
   fi
-  dump_harness_logs "failed harness startup attempt ${harness_attempt}"
   stop_harness
   echo "::endgroup::"
 done

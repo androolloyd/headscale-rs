@@ -697,6 +697,63 @@ wait_for() {
   done
 }
 
+dump_headscale_go_startup_logs() {
+  local reason="$1"
+  local path
+  echo "::group::headscale-go server startup debug (${reason})"
+  for path in \
+    "${work_dir}/headscale.stderr" \
+    "${work_dir}/headscale.stdout" \
+    "${work_dir}/headscale-health.stderr" \
+    "${work_dir}/headscale-health.stdout" \
+    "${work_dir}/headscale-grpc-health.stderr" \
+    "${work_dir}/headscale-grpc-health.stdout" \
+    "${work_dir}/headscale-version.txt"; do
+    if [[ -s "${path}" ]]; then
+      echo "--- ${path} ---" >&2
+      tail -200 "${path}" >&2 || true
+    fi
+  done
+  echo "--- socket ${socket_path} ---" >&2
+  ls -l "${socket_path}" >&2 || true
+  echo "--- direct gRPC health retry ---" >&2
+  "${headscale_bin}" -c "${config_path}" health >&2 || true
+  echo "::endgroup::"
+}
+
+wait_for_server() {
+  local label="$1"
+  local cmd="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  until eval "${cmd}"; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      wait "${server_pid}" >/dev/null 2>&1 || true
+      server_pid=""
+      echo "headscale-go server exited while waiting for ${label}" >&2
+      dump_headscale_go_startup_logs "server exited before ${label}"
+      return 1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      dump_headscale_go_startup_logs "timed out waiting for ${label}"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+headscale_http_health_probe() {
+  curl ${health_curl_opts} "${local_control_url}/health" \
+    >"${work_dir}/headscale-health.stdout" \
+    2>"${work_dir}/headscale-health.stderr"
+}
+
+headscale_grpc_health_probe() {
+  "${headscale_bin}" -c "${config_path}" health \
+    >"${work_dir}/headscale-grpc-health.stdout" \
+    2>"${work_dir}/headscale-grpc-health.stderr"
+}
+
 run_with_timeout() {
   local label="$1"
   shift
@@ -1387,10 +1444,8 @@ echo "::group::start headscale-go"
   2>"${work_dir}/headscale.stderr" &
 server_pid="$!"
 
-wait_for "headscale-go health" \
-  "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
-wait_for "headscale-go gRPC" \
-  "'${headscale_bin}' -c '${config_path}' health >/dev/null 2>&1"
+wait_for_server "headscale-go health" "headscale_http_health_probe"
+wait_for_server "headscale-go gRPC" "headscale_grpc_health_probe"
 echo "headscale-go control=${local_control_url}"
 echo "headscale-go login=${control_url}"
 echo "::endgroup::"
@@ -2102,8 +2157,7 @@ if [[ -n "${policy_reload_json}" ]]; then
   echo "::group::reload policy"
   printf '%s\n' "${policy_reload_json}" >"${work_dir}/policy.hujson"
   kill -HUP "${server_pid}"
-  wait_for "headscale-go health after policy reload" \
-    "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for_server "headscale-go health after policy reload" "headscale_http_health_probe"
   echo "::endgroup::"
 fi
 

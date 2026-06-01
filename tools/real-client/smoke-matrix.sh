@@ -143,6 +143,7 @@ smoke_ids=(
   postgres-route-health-reload-restart
   postgres-route-health-all-unhealthy-restart
   postgres-route-health-all-unhealthy-reload-restart
+  postgres-route-health-mixed-exit
   postgres-route-health-mixed-exit-restart
   postgres-route-health-mixed-exit-reload-restart
   postgres-route-health-mixed-exit-all-unhealthy
@@ -226,6 +227,7 @@ smoke_areas=(
   registration
   registration
   registration
+  database
   database
   database
   database
@@ -425,6 +427,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-health-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-smoke.sh
@@ -566,6 +569,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
@@ -707,6 +711,7 @@ smoke_assertions=(
   "production Postgres route-health policy reload survives server restart"
   "production Postgres route-health all-unhealthy retention survives server restart"
   "production Postgres route-health all-unhealthy policy reload survives server restart"
+  "production Postgres route-health ignores exit-only routes during HA failover"
   "production Postgres route-health mixed exit-node separation survives server restart"
   "production Postgres route-health mixed exit-node policy reload survives server restart"
   "production Postgres route-health mixed exit-node all-unhealthy retention"

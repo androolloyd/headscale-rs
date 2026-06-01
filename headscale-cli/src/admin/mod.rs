@@ -350,7 +350,7 @@ pub enum NodesCmd {
     ApproveRoutes {
         /// Node ID. gRPC mode requires the numeric identifier.
         #[arg(short = 'i', long = "identifier", value_name = "ID")]
-        id: String,
+        id: Option<String>,
         /// Comma-separated route list. Empty list removes approvals.
         #[arg(short = 'r', long = "routes", value_delimiter = ',')]
         routes: Vec<String>,
@@ -645,6 +645,9 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
                 nodes::tags(&client, id, nodes::merged_tags(tags, legacy_tags)).await
             }
             NodesCmd::ApproveRoutes { id, routes } => {
+                let id = id.as_deref().ok_or_else(|| {
+                    AdminError::Local("node identifier is required; use --identifier".into())
+                })?;
                 nodes::approve_routes(&client, id, routes.clone(), fmt).await
             }
             NodesCmd::Delete { id, identifier } => {
@@ -656,6 +659,8 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
             )),
         };
     }
+
+    validate_grpc_node_identifier(cmd)?;
 
     let mut client = conn.build_grpc_client().await?;
     match cmd {
@@ -694,6 +699,9 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
             nodes::tags_grpc(&mut client, id, nodes::merged_tags(tags, legacy_tags), fmt).await
         }
         NodesCmd::ApproveRoutes { id, routes } => {
+            let id = id
+                .as_deref()
+                .ok_or_else(upstream_required_identifier_error)?;
             nodes::approve_routes_grpc(&mut client, id, routes.clone(), fmt).await
         }
         NodesCmd::Delete { id, identifier } => {
@@ -704,6 +712,31 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
             nodes::backfillips_grpc(&mut client, *confirm, conn.force, fmt).await
         }
     }
+}
+
+fn validate_grpc_node_identifier(cmd: &NodesCmd) -> Result<(), AdminError> {
+    let missing = match cmd {
+        NodesCmd::Expire { id, identifier, .. }
+        | NodesCmd::Tags { id, identifier, .. }
+        | NodesCmd::Delete { id, identifier } => id.is_none() && identifier.is_none(),
+        NodesCmd::Rename { identifier, .. } => identifier.is_none(),
+        NodesCmd::ApproveRoutes { id, .. } => id.is_none(),
+        NodesCmd::List { .. }
+        | NodesCmd::ListRoutes { .. }
+        | NodesCmd::Show { .. }
+        | NodesCmd::Register { .. }
+        | NodesCmd::BackfillIps { .. } => false,
+    };
+
+    if missing {
+        Err(upstream_required_identifier_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn upstream_required_identifier_error() -> AdminError {
+    AdminError::Usage(r#"required flag(s) "identifier" not set"#.into())
 }
 
 pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result<(), AdminError> {
@@ -1232,7 +1265,7 @@ mod tests {
             .unwrap()
             .action,
             NodesCmd::ApproveRoutes { id, routes }
-                if id == "42"
+                if id.as_deref() == Some("42")
                     && routes == vec![
                         "10.0.0.0/24".to_string(),
                         "192.168.0.0/24".to_string()
@@ -1270,6 +1303,36 @@ mod tests {
             .is_err(),
             "current upstream only accepts --routes"
         );
+    }
+
+    #[test]
+    fn grpc_node_identifier_preflight_matches_upstream_required_flag_error() {
+        for cmd in [
+            NodesHarness::try_parse_from(["headscale", "expire"])
+                .unwrap()
+                .action,
+            NodesHarness::try_parse_from(["headscale", "rename", "node-new"])
+                .unwrap()
+                .action,
+            NodesHarness::try_parse_from(["headscale", "tag", "--tags", "tag:prod"])
+                .unwrap()
+                .action,
+            NodesHarness::try_parse_from(["headscale", "delete"])
+                .unwrap()
+                .action,
+            NodesHarness::try_parse_from([
+                "headscale",
+                "approve-routes",
+                "--routes",
+                "10.0.0.0/24",
+            ])
+            .unwrap()
+            .action,
+        ] {
+            let err = validate_grpc_node_identifier(&cmd).unwrap_err();
+            assert_eq!(err.to_string(), r#"required flag(s) "identifier" not set"#);
+            assert!(matches!(err, AdminError::Usage(_)));
+        }
     }
 
     #[test]

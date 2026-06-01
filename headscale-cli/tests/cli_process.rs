@@ -2706,6 +2706,24 @@ fn implemented_admin_local_errors_match_snapshots() {
 }
 
 #[test]
+fn grpc_node_identifier_usage_errors_happen_before_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("missing.sock");
+    let config = write_unix_socket_config(dir.path(), &socket);
+    let expected = "Error: required flag(s) \"identifier\" not set\n";
+
+    for args in [
+        &["nodes", "expire"][..],
+        &["nodes", "rename", "node-new"][..],
+        &["nodes", "tag", "--tags", "tag:prod"][..],
+        &["nodes", "delete"][..],
+        &["nodes", "approve-routes", "--routes", "10.0.0.0/24"][..],
+    ] {
+        assert_config_stderr_snapshot(&config, args, 1, expected);
+    }
+}
+
+#[test]
 fn unknown_output_selector_falls_back_to_human_version_output() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

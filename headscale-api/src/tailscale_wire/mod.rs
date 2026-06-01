@@ -1555,9 +1555,7 @@ impl RegistrationCache {
         registration_id: &str,
     ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
         let entry = self.get_entry(registration_id)?;
-        if entry.record.is_none() {
-            return None;
-        }
+        entry.record.as_ref()?;
         entry.oidc_confirmation()
     }
 

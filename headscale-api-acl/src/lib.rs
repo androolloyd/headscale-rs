@@ -134,10 +134,12 @@ impl<'de> Deserialize<'de> for AclRule {
                 &["action", "proto", "src", "dst", "ports"],
             ));
         }
-        let proto = raw.proto.as_deref().map(|p| p.trim().to_ascii_lowercase());
-        if let Some(proto) = proto.as_deref() {
-            validate_upstream_proto(proto).map_err(serde::de::Error::custom)?;
-        }
+        let proto = raw
+            .proto
+            .as_deref()
+            .map(canonical_upstream_proto)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
         let legacy_proto = proto.as_deref().unwrap_or("*");
         let upstream_proto = proto.as_deref().unwrap_or("");
         let mut dst = Vec::with_capacity(raw.dst.len());
@@ -2521,8 +2523,7 @@ fn normalize_grant_ip_spec(spec: &str) -> Result<Vec<String>, String> {
         if ports.contains(':') {
             return Err("expected only one colon in Internet protocol and port type".to_string());
         }
-        let proto = proto.trim().to_ascii_lowercase();
-        validate_upstream_proto(&proto)?;
+        let proto = canonical_upstream_proto(proto.trim())?;
         (proto, ports.trim())
     } else {
         ("*".to_string(), trimmed)
@@ -2553,6 +2554,35 @@ fn validate_upstream_proto(proto: &str) -> Result<(), String> {
                 )),
             }
         }
+    }
+}
+
+fn canonical_upstream_proto(proto: &str) -> Result<String, String> {
+    let proto = proto.trim().to_ascii_lowercase();
+    if let Some(name) = upstream_proto_number_name(&proto) {
+        return Ok(name.to_string());
+    }
+    validate_upstream_proto(&proto)?;
+    Ok(proto)
+}
+
+fn upstream_proto_number_name(proto: &str) -> Option<&'static str> {
+    let number = proto.parse::<u16>().ok()?;
+    match number {
+        1 => Some("icmp"),
+        2 => Some("igmp"),
+        4 => Some("ipv4"),
+        6 => Some("tcp"),
+        8 => Some("egp"),
+        9 => Some("igp"),
+        17 => Some("udp"),
+        47 => Some("gre"),
+        50 => Some("esp"),
+        51 => Some("ah"),
+        58 => Some("ipv6-icmp"),
+        132 => Some("sctp"),
+        133 => Some("fc"),
+        _ => None,
     }
 }
 

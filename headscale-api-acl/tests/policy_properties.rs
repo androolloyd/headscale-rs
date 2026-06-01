@@ -478,3 +478,27 @@ fn hujson_accepts_current_go_protocol_names_beyond_tcp_udp_icmp() {
     assert_eq!(doc.rules[0].ports, vec!["ipv6-icmp/*"]);
     assert_eq!(doc.rules[1].ports, vec!["fc/*"]);
 }
+
+#[test]
+fn hujson_accepts_go_numeric_tcp_udp_sctp_protocols_with_specific_ports() {
+    let doc = parse_hujson_policy(
+        r#"{
+          "acls": [
+            {"action":"accept","proto":"6","src":["*"],"dst":["*:443"]},
+            {"action":"accept","proto":"17","src":["*"],"dst":["*:53"]},
+            {"action":"accept","proto":"132","src":["*"],"dst":["*:9899"]}
+          ],
+          "grants": [{
+            "src": ["*"],
+            "dst": ["*"],
+            "ip": ["6:8443"]
+          }]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(doc.rules[0].ports, vec!["tcp/443"]);
+    assert_eq!(doc.rules[1].ports, vec!["udp/53"]);
+    assert_eq!(doc.rules[2].ports, vec!["sctp/9899"]);
+    assert_eq!(doc.rules[3].ports, vec!["tcp/8443"]);
+}

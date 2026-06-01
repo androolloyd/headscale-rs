@@ -663,18 +663,7 @@ fn render_grpc_routes(nodes: &[NodeOutput]) {
         println!("No routes advertised or approved.");
         return;
     }
-    let rows: Vec<Vec<String>> = nodes
-        .iter()
-        .map(|n| {
-            vec![
-                n.id.to_string(),
-                n.name.clone(),
-                n.approved_routes.join("\n"),
-                n.available_routes.join("\n"),
-                n.subnet_routes.join("\n"),
-            ]
-        })
-        .collect();
+    let rows = grpc_route_rows(nodes);
     print_table(
         &[
             "ID",
@@ -685,6 +674,21 @@ fn render_grpc_routes(nodes: &[NodeOutput]) {
         ],
         &rows,
     );
+}
+
+fn grpc_route_rows(nodes: &[NodeOutput]) -> Vec<Vec<String>> {
+    nodes
+        .iter()
+        .map(|n| {
+            vec![
+                n.id.to_string(),
+                n.given_name.clone(),
+                n.approved_routes.join("\n"),
+                n.available_routes.join("\n"),
+                n.subnet_routes.join("\n"),
+            ]
+        })
+        .collect()
 }
 
 fn parse_node_id(id: &str) -> Result<u64, AdminError> {
@@ -1060,6 +1064,19 @@ mod tests {
             missing.iter().map(|node| node.id).collect::<Vec<_>>(),
             [1, 3]
         );
+    }
+
+    #[test]
+    fn grpc_route_rows_use_given_name_hostname_like_upstream() {
+        let mut node = route_node(7, &["10.0.0.0/24"]);
+        node.name = "node.tail.example.com".into();
+        node.given_name = "node".into();
+        node.available_routes = vec!["10.0.0.0/24".into()];
+        node.subnet_routes = vec!["10.0.0.0/24".into()];
+
+        let rows = grpc_route_rows(&[node]);
+
+        assert_eq!(rows[0][1], "node");
     }
 
     #[test]

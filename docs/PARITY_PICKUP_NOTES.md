@@ -1502,3 +1502,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Process coverage proves an env-provided unsupported
   `tls_letsencrypt_challenge_type` fails the same `configtest` validation as a
   file-provided value.
+
+## 2026-06-01 stream lifecycle policy companion parity slice
+
+- Stream online/offline lifecycle changes now carry an in-batch `policy change`
+  companion like headscale-go `State.Connect` and `State.Disconnect`.
+- The companion is merged into the same pending map change rather than emitted
+  as a second wake, preserving one generation/batch item while setting
+  `include_policy` and runtime peer recomputation.
+- Local history coverage now pins `node online`/`node offline` changes as
+  policy-type batches that still retain the peer patch for the affected node.

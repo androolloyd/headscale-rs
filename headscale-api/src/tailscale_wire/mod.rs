@@ -405,6 +405,7 @@ fn same_string_set(left: &[String], right: &[String]) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingMapChange {
     reason: MapChangeReason,
+    companion_reasons: Vec<MapChangeReason>,
     target_node_id: Option<u64>,
     origin_node_id: Option<u64>,
     content: MapChangeContent,
@@ -419,6 +420,7 @@ impl PendingMapChange {
     ) -> Self {
         Self {
             reason,
+            companion_reasons: Vec::new(),
             target_node_id,
             origin_node_id,
             content: MapChangeContent::for_reason(reason, content_node_id),
@@ -457,6 +459,7 @@ impl PendingMapChange {
     fn peer_patches(reason: MapChangeReason, node_ids: Vec<u64>) -> Self {
         Self {
             reason,
+            companion_reasons: Vec::new(),
             target_node_id: None,
             origin_node_id: None,
             content: MapChangeContent {
@@ -469,6 +472,7 @@ impl PendingMapChange {
     fn peers_removed(node_ids: Vec<u64>) -> Self {
         Self {
             reason: MapChangeReason::PeersRemoved,
+            companion_reasons: Vec::new(),
             target_node_id: None,
             origin_node_id: None,
             content: MapChangeContent {
@@ -478,10 +482,21 @@ impl PendingMapChange {
         }
     }
 
+    fn with_companion_reason(mut self, reason: MapChangeReason) -> Self {
+        if self.reason != reason && !self.companion_reasons.contains(&reason) {
+            self.companion_reasons.push(reason);
+            self.content
+                .merge(MapChangeContent::for_reason(reason, None));
+        }
+        self
+    }
+
     fn into_change(self, generation: u64) -> MapChange {
+        let mut reasons = vec![self.reason];
+        append_unique(&mut reasons, self.companion_reasons);
         MapChange {
             generation,
-            reasons: vec![self.reason],
+            reasons,
             target_node_id: self.target_node_id,
             origin_node_id: self.origin_node_id,
             content: self.content,
@@ -3489,10 +3504,10 @@ impl MachineRegistry {
             !was_online
         };
         if online_changed {
-            machines.wake_waiters_with(PendingMapChange::broadcast_peer(
-                MapChangeReason::NodeOnline,
-                node_id,
-            ));
+            machines.wake_waiters_with(
+                PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_id)
+                    .with_companion_reason(MapChangeReason::PolicyChange),
+            );
         }
         machines.primary_routes.write().clear_unhealthy(node_id);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -3694,10 +3709,10 @@ impl MachineRegistry {
                 NodeStoreBoolUpdateOutcome {
                     applied: true,
                     publish_snapshot: found,
-                    change: Some(PendingMapChange::broadcast_peer(
-                        MapChangeReason::NodeOffline,
-                        node_id,
-                    )),
+                    change: Some(
+                        PendingMapChange::broadcast_peer(MapChangeReason::NodeOffline, node_id)
+                            .with_companion_reason(MapChangeReason::PolicyChange),
+                    ),
                     clear_unhealthy_route_state: None,
                     final_presence_node_id: Some(node_id),
                 }
@@ -7043,7 +7058,7 @@ mod registry_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             types,
-            vec!["peers", "peers", "patch", "patch", "patch", "peers"]
+            vec!["peers", "peers", "patch", "policy", "policy", "peers"]
         );
         assert!(
             changes
@@ -7061,8 +7076,20 @@ mod registry_tests {
         assert_eq!(changes[2].target_node_id, None);
         assert_eq!(changes[2].content.peer_patches, vec![node_id]);
         assert_eq!(changes[3].target_node_id, None);
+        assert_eq!(
+            changes[3].reason_labels(),
+            vec!["node online", "policy change"]
+        );
+        assert!(changes[3].content.include_policy);
+        assert!(changes[3].content.requires_runtime_peer_computation);
         assert_eq!(changes[3].content.peer_patches, vec![node_id]);
         assert_eq!(changes[4].target_node_id, None);
+        assert_eq!(
+            changes[4].reason_labels(),
+            vec!["node offline", "policy change"]
+        );
+        assert!(changes[4].content.include_policy);
+        assert!(changes[4].content.requires_runtime_peer_computation);
         assert_eq!(changes[4].content.peer_patches, vec![node_id]);
         assert_eq!(changes[5].target_node_id, None);
         assert_eq!(changes[5].content.peers_removed, vec![node_id]);

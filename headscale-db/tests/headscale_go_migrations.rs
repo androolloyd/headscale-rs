@@ -528,7 +528,10 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     let preauth_err = preauth_keys::get_by_token(db.pool(), WRONG_MODERN_PREAUTH_TOKEN)
         .await
         .expect_err("wrong modern preauth secret is rejected");
-    assert!(matches!(preauth_err, DbError::NotFound(_)));
+    assert!(matches!(
+        preauth_err,
+        DbError::General(msg) if msg.contains("invalid auth key")
+    ));
     assert!(preauth.key.is_none());
     assert_eq!(preauth.user_id, "1");
     assert_eq!(preauth.prefix.as_deref(), Some("AuthPrefix01"));

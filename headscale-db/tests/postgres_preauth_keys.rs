@@ -75,7 +75,7 @@ async fn postgres_preauth_key_primitives_match_sqlite_contract() -> TestResult {
             preauth_keys::get_postgres_by_token_on_connection(&mut schema.conn, &wrong_secret)
                 .await
                 .unwrap_err(),
-            DbError::NotFound(_)
+            DbError::General(msg) if msg.contains("invalid auth key")
         ));
 
         let alice_keys =

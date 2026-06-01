@@ -567,11 +567,10 @@ pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthK
                 .await
                 .map_err(|_| DbError::NotFound("preauth_key".into()))?;
 
-            if bcrypt::verify(secret, &row.key_hash).unwrap_or(false) {
-                Ok(row)
-            } else {
-                Err(DbError::NotFound("preauth_key (hash mismatch)".into()))
-            }
+            bcrypt::verify(secret, &row.key_hash)
+                .map_err(|e| DbError::General(format!("invalid auth key: {e}")))?
+                .then_some(row)
+                .ok_or_else(|| DbError::General("invalid auth key: hash mismatch".to_string()))
         }
         ParsedAuthKey::Legacy { key } => {
             let query = preauth_key_select("WHERE key = ?");
@@ -604,11 +603,10 @@ pub async fn get_postgres_by_token_on_connection(
                 .await
                 .map_err(|_| DbError::NotFound("preauth_key".into()))?;
 
-            if bcrypt::verify(secret, &row.key_hash).unwrap_or(false) {
-                Ok(row)
-            } else {
-                Err(DbError::NotFound("preauth_key (hash mismatch)".into()))
-            }
+            bcrypt::verify(secret, &row.key_hash)
+                .map_err(|e| DbError::General(format!("invalid auth key: {e}")))?
+                .then_some(row)
+                .ok_or_else(|| DbError::General("invalid auth key: hash mismatch".to_string()))
         }
         ParsedAuthKey::Legacy { key } => {
             let query = postgres_preauth_key_select("WHERE key = $1");
@@ -1088,6 +1086,18 @@ mod tests {
         let bogus = format!("{TOKEN_PREFIX}{}-{}", "A".repeat(12), "0".repeat(64));
         let e = get_by_token(db.pool(), &bogus).await.unwrap_err();
         assert!(matches!(e, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_by_token_reports_invalid_secret_for_known_prefix_like_headscale_go() {
+        let db = fresh_db().await;
+        let c = create_for_test(db.pool(), alice()).await.unwrap();
+        let mut tampered = c.plaintext.clone();
+        let last = tampered.pop().expect("generated key is non-empty");
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+
+        let e = get_by_token(db.pool(), &tampered).await.unwrap_err();
+        assert!(matches!(e, DbError::General(msg) if msg.contains("invalid auth key")));
     }
 
     /// Wrong brand prefix bypasses the bcrypt loop entirely.

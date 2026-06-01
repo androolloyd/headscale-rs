@@ -1425,7 +1425,7 @@ pub struct CapGrant {
     pub caps: Vec<String>,
     /// Modern capability map (`tailcfg.PeerCapMap`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub cap_map: BTreeMap<String, Vec<Value>>,
+    pub cap_map: BTreeMap<String, Option<Vec<Value>>>,
 }
 
 /// `tailcfg.NetPortRange`.

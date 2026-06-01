@@ -686,6 +686,19 @@ struct FilterRuleOut {
     dst_ports: Vec<NetPortRangeOut>,
     #[serde(rename = "IPProto", skip_serializing_if = "Vec::is_empty")]
     ip_proto: Vec<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cap_grant: Vec<CapGrantOut>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+struct CapGrantOut {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dsts: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    caps: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    cap_map: BTreeMap<String, Option<Vec<Value>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -864,6 +877,7 @@ fn allow_all_filter_rules() -> Vec<FilterRuleOut> {
             },
         }],
         ip_proto: Vec::new(),
+        cap_grant: Vec::new(),
     }]
 }
 
@@ -1122,6 +1136,8 @@ fn compile_filter_rules(
         }
     }
 
+    append_app_grant_rules(&mut out, doc, nodes, self_node);
+
     if let Some(node) = self_node {
         append_via_grant_rules_for_node(&mut out, doc, nodes, node);
     }
@@ -1131,6 +1147,170 @@ fn compile_filter_rules(
     } else {
         coalesce_filter_rules(out)
     }
+}
+
+fn append_app_grant_rules(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+    self_node: Option<&FilterNode>,
+) {
+    for grant in &doc.grants {
+        if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+            continue;
+        }
+
+        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+        let mut other_dsts = Vec::new();
+        let mut self_dsts = Vec::new();
+        for dst in &grant.dst {
+            if dst == "autogroup:self" {
+                self_dsts.push(dst.clone());
+            } else {
+                other_dsts.push(dst.clone());
+            }
+        }
+
+        if !other_dsts.is_empty() {
+            append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
+        }
+
+        let Some(node) = self_node else {
+            continue;
+        };
+        if self_dsts.is_empty() || !node.tags.is_empty() {
+            continue;
+        }
+
+        let same_user = same_user_untagged_nodes(nodes, node);
+        let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+        if self_src.is_empty() {
+            continue;
+        }
+        let self_dst = same_user
+            .iter()
+            .flat_map(|node| node_addr_prefixes(node))
+            .collect::<Vec<_>>();
+        append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
+    }
+}
+
+fn append_cap_grant_rules(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+    src_ips: &[String],
+    dsts: &[String],
+    app: &BTreeMap<String, Vec<Value>>,
+) {
+    let mut cap_grants = Vec::new();
+    let mut dst_ip_strings = Vec::new();
+    for dst in dsts {
+        let dst_prefixes = resolve_cap_grant_dst(doc, dst, nodes);
+        if dst_prefixes.is_empty() {
+            continue;
+        }
+        for prefix in &dst_prefixes {
+            if let Some(net) = parse_ip_net(prefix) {
+                push_unique_string(&mut dst_ip_strings, net.addr().to_string());
+            }
+        }
+        cap_grants.push(CapGrantOut {
+            dsts: dst_prefixes,
+            caps: Vec::new(),
+            cap_map: wire_cap_map(app),
+        });
+    }
+    if cap_grants.is_empty() {
+        return;
+    }
+
+    let mut rule = FilterRuleOut {
+        src_ips: src_ips.to_vec(),
+        dst_ports: Vec::new(),
+        ip_proto: Vec::new(),
+        cap_grant: cap_grants,
+    };
+    normalize_filter_rule(&mut rule);
+    append_coalesced_filter_rule(out, rule);
+
+    append_companion_cap_grant_rules(out, &dst_ip_strings, src_ips, app);
+}
+
+fn wire_cap_map(
+    app: &BTreeMap<String, Vec<Value>>,
+) -> BTreeMap<String, Option<Vec<Value>>> {
+    app.iter()
+        .map(|(cap, values)| (cap.clone(), Some(values.clone())))
+        .collect()
+}
+
+fn companion_cap_map(cap: &str) -> BTreeMap<String, Option<Vec<Value>>> {
+    BTreeMap::from([(cap.to_string(), None)])
+}
+
+fn companion_cap(cap: &str) -> Option<&'static str> {
+    match cap {
+        "tailscale.com/cap/drive" => Some("tailscale.com/cap/drive-sharer"),
+        "tailscale.com/cap/relay" => Some("tailscale.com/cap/relay-target"),
+        _ => None,
+    }
+}
+
+fn append_companion_cap_grant_rules(
+    out: &mut Vec<FilterRuleOut>,
+    dst_ip_strings: &[String],
+    src_ips: &[String],
+    app: &BTreeMap<String, Vec<Value>>,
+) {
+    let mut src_prefixes = src_ips
+        .iter()
+        .filter_map(|src| parse_ip_net(src).map(|net| net.to_string()))
+        .collect::<Vec<_>>();
+    src_prefixes.sort();
+    src_prefixes.dedup();
+    if dst_ip_strings.is_empty() || src_prefixes.is_empty() {
+        return;
+    }
+
+    let mut caps = app.keys().filter_map(|cap| companion_cap(cap)).collect::<Vec<_>>();
+    caps.sort_unstable();
+    for cap in caps {
+        let mut rule = FilterRuleOut {
+            src_ips: dst_ip_strings.to_vec(),
+            dst_ports: Vec::new(),
+            ip_proto: Vec::new(),
+            cap_grant: vec![CapGrantOut {
+                dsts: src_prefixes.clone(),
+                caps: Vec::new(),
+                cap_map: companion_cap_map(cap),
+            }],
+        };
+        normalize_filter_rule(&mut rule);
+        append_coalesced_filter_rule(out, rule);
+    }
+}
+
+fn resolve_cap_grant_dst(doc: &PolicyDoc, token: &str, nodes: &[FilterNode]) -> Vec<String> {
+    if let Some(host) = token.strip_prefix("host:") {
+        return doc
+            .hosts
+            .get(host)
+            .and_then(|prefix| parse_ip_net(prefix).map(|net| vec![net.to_string()]))
+            .unwrap_or_default();
+    }
+    if let Some(prefix) = doc.hosts.get(token) {
+        return parse_ip_net(prefix)
+            .map(|net| vec![net.to_string()])
+            .unwrap_or_default();
+    }
+    if let Some(net) = parse_ip_net(token) {
+        return vec![net.to_string()];
+    }
+    let mut out = resolve_principal(doc, token, nodes, None, PrincipalPosition::Destination);
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn append_via_grant_rules_for_node(
@@ -1189,6 +1369,7 @@ fn append_filter_rules(
             src_ips: src_ips.to_vec(),
             dst_ports,
             ip_proto,
+            cap_grant: Vec::new(),
         };
         normalize_filter_rule(&mut rule);
         append_coalesced_filter_rule(out, rule);
@@ -1425,6 +1606,13 @@ fn reduce_filter_rules_for_node(
 ) -> Vec<FilterRuleOut> {
     let mut out = Vec::new();
     for mut rule in rules {
+        if !rule.cap_grant.is_empty() {
+            if let Some(reduced) = reduce_cap_grant_rule_for_node(&rule, node) {
+                out.push(reduced);
+            }
+            continue;
+        }
+
         rule.dst_ports.retain(|dst| {
             if dst.ip == "*" {
                 return true;
@@ -1448,6 +1636,73 @@ fn reduce_filter_rules_for_node(
         out.push(rule);
     }
     out
+}
+
+fn reduce_cap_grant_rule_for_node(
+    rule: &FilterRuleOut,
+    node: &FilterNode,
+) -> Option<FilterRuleOut> {
+    let mut cap_grant = Vec::new();
+    for grant in &rule.cap_grant {
+        let mut dsts = Vec::new();
+
+        for dst in &grant.dsts {
+            let Some(dst_net) = parse_ip_net(dst) else {
+                continue;
+            };
+            if is_single_ip(&dst_net) {
+                if node
+                    .addrs
+                    .iter()
+                    .any(|addr| net_contains_addr(&dst_net, addr))
+                {
+                    push_unique_string(&mut dsts, dst_net.to_string());
+                }
+                continue;
+            }
+
+            for addr in &node.addrs {
+                if net_contains_addr(&dst_net, addr)
+                    && let Some(prefix) = parse_ip_net(addr).map(|net| net.to_string())
+                {
+                    push_unique_string(&mut dsts, prefix);
+                }
+            }
+        }
+
+        for dst in &grant.dsts {
+            if node
+                .routes
+                .iter()
+                .filter(|route| !is_exit_route(route))
+                .any(|route| prefixes_overlap(dst, route))
+            {
+                push_unique_string(&mut dsts, dst.clone());
+            }
+        }
+
+        if !dsts.is_empty() {
+            dsts.sort();
+            cap_grant.push(CapGrantOut {
+                dsts,
+                caps: grant.caps.clone(),
+                cap_map: grant.cap_map.clone(),
+            });
+        }
+    }
+
+    if cap_grant.is_empty() {
+        return None;
+    }
+
+    let mut out = FilterRuleOut {
+        src_ips: rule.src_ips.clone(),
+        dst_ports: Vec::new(),
+        ip_proto: Vec::new(),
+        cap_grant,
+    };
+    normalize_filter_rule(&mut out);
+    Some(out)
 }
 
 fn tailnet_filter_srcs() -> Vec<String> {
@@ -1612,19 +1867,43 @@ fn normalize_filter_rule(rule: &mut FilterRuleOut) {
     });
     rule.ip_proto.sort();
     rule.ip_proto.dedup();
+    for grant in &mut rule.cap_grant {
+        grant.dsts.sort();
+        grant.dsts.dedup();
+        grant.caps.sort();
+        grant.caps.dedup();
+    }
+    rule.cap_grant.sort_by(|a, b| {
+        a.dsts
+            .cmp(&b.dsts)
+            .then(a.caps.cmp(&b.caps))
+            .then(cap_map_sort_key(&a.cap_map).cmp(&cap_map_sort_key(&b.cap_map)))
+    });
 }
 
 fn append_coalesced_filter_rule(out: &mut Vec<FilterRuleOut>, mut rule: FilterRuleOut) {
     normalize_filter_rule(&mut rule);
+    if !rule.cap_grant.is_empty() {
+        out.push(rule);
+        return;
+    }
     if let Some(existing) = out
         .iter_mut()
-        .find(|existing| existing.src_ips == rule.src_ips && existing.ip_proto == rule.ip_proto)
+        .find(|existing| {
+            existing.cap_grant.is_empty()
+                && existing.src_ips == rule.src_ips
+                && existing.ip_proto == rule.ip_proto
+        })
     {
         existing.dst_ports.extend(rule.dst_ports);
         normalize_filter_rule(existing);
     } else {
         out.push(rule);
     }
+}
+
+fn cap_map_sort_key(cap_map: &BTreeMap<String, Option<Vec<Value>>>) -> String {
+    serde_json::to_string(cap_map).unwrap_or_default()
 }
 
 fn coalesce_filter_rules(rules: Vec<FilterRuleOut>) -> Vec<FilterRuleOut> {
@@ -2654,7 +2933,7 @@ fn is_zero_f64(v: &f64) -> bool {
 }
 
 fn filter_rule_out(rule: headscale_api::tailscale_wire::wire::FilterRule) -> FilterRuleOut {
-    FilterRuleOut {
+    let mut out = FilterRuleOut {
         src_ips: rule.src_ips,
         dst_ports: rule
             .dst_ports
@@ -2668,7 +2947,18 @@ fn filter_rule_out(rule: headscale_api::tailscale_wire::wire::FilterRule) -> Fil
             })
             .collect(),
         ip_proto: rule.ip_proto,
-    }
+        cap_grant: rule
+            .cap_grant
+            .into_iter()
+            .map(|grant| CapGrantOut {
+                dsts: grant.dsts,
+                caps: grant.caps,
+                cap_map: grant.cap_map,
+            })
+            .collect(),
+    };
+    normalize_filter_rule(&mut out);
+    out
 }
 
 fn scenario_paths() -> Result<Vec<PathBuf>> {

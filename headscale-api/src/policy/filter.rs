@@ -41,7 +41,7 @@
 //! this layer and enforced only by the on-host
 //! `headscale-api-acl` evaluator.
 
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr};
 
 use ipnet::IpNet;
 
@@ -264,12 +264,18 @@ fn append_cap_grant_rules(
     app: &CapabilityMap,
 ) {
     let mut cap_grants = Vec::new();
+    let mut dst_ip_strings = Vec::new();
     for dst in dsts {
         let dst_prefixes = resolve_cap_grant_dst(doc, dst, nodes);
         if !dst_prefixes.is_empty() {
+            for prefix in &dst_prefixes {
+                if let Some(net) = parse_ip_net(prefix) {
+                    push_unique_string(&mut dst_ip_strings, net.addr().to_string());
+                }
+            }
             cap_grants.push(CapGrant {
                 dsts: dst_prefixes,
-                cap_map: app.clone(),
+                cap_map: wire_cap_map(app),
                 ..CapGrant::default()
             });
         }
@@ -286,6 +292,62 @@ fn append_cap_grant_rules(
     };
     normalize_filter_rule(&mut rule);
     append_coalesced_filter_rule(out, rule);
+
+    append_companion_cap_grant_rules(out, &dst_ip_strings, src_ips, app);
+}
+
+fn wire_cap_map(app: &CapabilityMap) -> BTreeMap<String, Option<Vec<serde_json::Value>>> {
+    app.iter()
+        .map(|(cap, values)| (cap.clone(), Some(values.clone())))
+        .collect()
+}
+
+fn companion_cap_map(cap: &str) -> BTreeMap<String, Option<Vec<serde_json::Value>>> {
+    BTreeMap::from([(cap.to_string(), None)])
+}
+
+fn companion_cap(cap: &str) -> Option<&'static str> {
+    match cap {
+        "tailscale.com/cap/drive" => Some("tailscale.com/cap/drive-sharer"),
+        "tailscale.com/cap/relay" => Some("tailscale.com/cap/relay-target"),
+        _ => None,
+    }
+}
+
+fn append_companion_cap_grant_rules(
+    out: &mut Vec<FilterRule>,
+    dst_ip_strings: &[String],
+    src_ips: &[String],
+    app: &CapabilityMap,
+) {
+    let mut src_prefixes = src_ips
+        .iter()
+        .filter_map(|src| parse_ip_net(src).map(|net| net.to_string()))
+        .collect::<Vec<_>>();
+    src_prefixes.sort();
+    src_prefixes.dedup();
+    if dst_ip_strings.is_empty() || src_prefixes.is_empty() {
+        return;
+    }
+
+    let mut caps = app
+        .keys()
+        .filter_map(|cap| companion_cap(cap))
+        .collect::<Vec<_>>();
+    caps.sort_unstable();
+    for cap in caps {
+        let mut rule = FilterRule {
+            src_ips: dst_ip_strings.to_vec(),
+            cap_grant: vec![CapGrant {
+                dsts: src_prefixes.clone(),
+                cap_map: companion_cap_map(cap),
+                ..CapGrant::default()
+            }],
+            ..FilterRule::default()
+        };
+        normalize_filter_rule(&mut rule);
+        append_coalesced_filter_rule(out, rule);
+    }
 }
 
 fn append_via_grant_rules_for_node(
@@ -481,6 +543,21 @@ fn resolve_cap_grant_dst(doc: &PolicyDoc, token: &str, nodes: &[PacketFilterNode
             .into_iter()
             .flat_map(|prefix| ipset_string_to_cidrs(&prefix))
             .collect();
+    }
+    if let Some(host) = token.strip_prefix("host:") {
+        return doc
+            .hosts
+            .get(host)
+            .and_then(|prefix| parse_ip_net(prefix).map(|net| vec![net.to_string()]))
+            .unwrap_or_default();
+    }
+    if let Some(prefix) = doc.hosts.get(token) {
+        return parse_ip_net(prefix)
+            .map(|net| vec![net.to_string()])
+            .unwrap_or_default();
+    }
+    if let Some(net) = parse_ip_net(token) {
+        return vec![net.to_string()];
     }
     resolve_principal(doc, token, nodes, None, PrincipalPosition::Destination)
 }
@@ -830,6 +907,12 @@ fn normalize_filter_rule(rule: &mut FilterRule) {
         grant.caps.sort();
         grant.caps.dedup();
     }
+    rule.cap_grant.sort_by(|a, b| {
+        a.dsts
+            .cmp(&b.dsts)
+            .then(a.caps.cmp(&b.caps))
+            .then(cap_map_sort_key(&a.cap_map).cmp(&cap_map_sort_key(&b.cap_map)))
+    });
 }
 
 fn append_coalesced_filter_rule(out: &mut Vec<FilterRule>, mut rule: FilterRule) {
@@ -848,6 +931,10 @@ fn append_coalesced_filter_rule(out: &mut Vec<FilterRule>, mut rule: FilterRule)
     } else {
         out.push(rule);
     }
+}
+
+fn cap_map_sort_key(cap_map: &BTreeMap<String, Option<Vec<serde_json::Value>>>) -> String {
+    serde_json::to_string(cap_map).unwrap_or_default()
 }
 
 fn coalesce_filter_rules(rules: Vec<FilterRule>) -> Vec<FilterRule> {
@@ -1451,6 +1538,68 @@ mod tests {
             rs[0].cap_grant[0]
                 .cap_map
                 .contains_key("example.com/cap/use")
+        );
+    }
+
+    #[test]
+    fn app_grant_emits_upstream_companion_cap_grants() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "grants": [{
+                    "src": ["client@"],
+                    "dst": ["server@"],
+                    "app": {
+                        "tailscale.com/cap/drive": [{}],
+                        "tailscale.com/cap/relay": []
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user: Some("client".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user: Some("server".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+        ];
+
+        let server_rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(server_rules.len(), 1);
+        assert!(
+            server_rules[0].cap_grant[0]
+                .cap_map
+                .contains_key("tailscale.com/cap/drive")
+        );
+        assert!(
+            server_rules[0].cap_grant[0]
+                .cap_map
+                .contains_key("tailscale.com/cap/relay")
+        );
+
+        let client_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
+        let companion_caps = client_rules
+            .iter()
+            .flat_map(|rule| &rule.cap_grant)
+            .flat_map(|grant| grant.cap_map.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(companion_caps.contains(&"tailscale.com/cap/drive-sharer".to_string()));
+        assert!(companion_caps.contains(&"tailscale.com/cap/relay-target".to_string()));
+        assert!(
+            client_rules
+                .iter()
+                .flat_map(|rule| &rule.cap_grant)
+                .all(|grant| grant.cap_map.values().all(Option::is_none))
         );
     }
 

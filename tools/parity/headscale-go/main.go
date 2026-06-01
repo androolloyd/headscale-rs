@@ -427,6 +427,13 @@ type filterRuleOut struct {
 	SrcIPs   []string          `json:"SrcIPs"`
 	DstPorts []netPortRangeOut `json:"DstPorts"`
 	IPProto  []int             `json:"IPProto,omitempty"`
+	CapGrant []capGrantOut     `json:"CapGrant,omitempty"`
+}
+
+type capGrantOut struct {
+	Dsts   []string        `json:"Dsts,omitempty"`
+	Caps   []string        `json:"Caps,omitempty"`
+	CapMap json.RawMessage `json:"CapMap,omitempty"`
 }
 
 type netPortRangeOut struct {
@@ -644,10 +651,37 @@ func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 		})
 		ipProto := append([]int(nil), rule.IPProto...)
 		sort.Ints(ipProto)
+		capGrant := make([]capGrantOut, 0, len(rule.CapGrant))
+		for _, grant := range rule.CapGrant {
+			caps := make([]string, 0, len(grant.Caps))
+			for _, cap := range grant.Caps {
+				caps = append(caps, string(cap))
+			}
+			sort.Strings(caps)
+			var capMap json.RawMessage
+			if len(grant.CapMap) > 0 {
+				capMap, _ = marshalRaw(grant.CapMap)
+			}
+			capGrant = append(capGrant, capGrantOut{
+				Dsts:   prefixStrings(grant.Dsts),
+				Caps:   caps,
+				CapMap: capMap,
+			})
+		}
+		sort.Slice(capGrant, func(i, j int) bool {
+			if strings.Join(capGrant[i].Dsts, "\x00") != strings.Join(capGrant[j].Dsts, "\x00") {
+				return strings.Join(capGrant[i].Dsts, "\x00") < strings.Join(capGrant[j].Dsts, "\x00")
+			}
+			if strings.Join(capGrant[i].Caps, "\x00") != strings.Join(capGrant[j].Caps, "\x00") {
+				return strings.Join(capGrant[i].Caps, "\x00") < strings.Join(capGrant[j].Caps, "\x00")
+			}
+			return string(capGrant[i].CapMap) < string(capGrant[j].CapMap)
+		})
 		out = append(out, filterRuleOut{
 			SrcIPs:   src,
 			DstPorts: dst,
 			IPProto:  ipProto,
+			CapGrant: capGrant,
 		})
 	}
 	return out

@@ -1059,3 +1059,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   resolvers, attacker-lookalike NextDNS host preservation, and
   `nextdns:no-device-info`.
 - The refreshed v0.29.0-beta.2 golden now covers eighty-seven parity scenarios.
+
+## 2026-06-01 policy v2 app-cap grant parity scenario
+
+- `FilterRule`/`CapGrant` wire parity now preserves nullable upstream
+  `PeerCapMap` values, which are required for generated companion capability
+  grants.
+- `grants[].app` now emits upstream companion `CapGrant` rules for
+  `tailscale.com/cap/drive` and `tailscale.com/cap/relay`, producing
+  `tailscale.com/cap/drive-sharer` and `tailscale.com/cap/relay-target` with
+  null capability values after per-node packet-filter reduction.
+- Added `policy-v2-app-cap-grants`, covering global and per-node `CapGrant`
+  normalization plus cap-grant peer visibility against pinned headscale-go.
+  The refreshed v0.29.0-beta.2 golden now covers eighty-eight parity scenarios.

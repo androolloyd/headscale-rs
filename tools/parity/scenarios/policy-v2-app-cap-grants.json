@@ -1,0 +1,95 @@
+{
+  "name": "policy-v2-app-cap-grants",
+  "policy": {
+    "hosts": {
+      "relay-host": "100.64.0.3/32"
+    },
+    "grants": [
+      {
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "bob@example.com"
+        ],
+        "app": {
+          "tailscale.com/cap/drive": [
+            {}
+          ]
+        }
+      },
+      {
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "relay-host"
+        ],
+        "app": {
+          "tailscale.com/cap/relay": []
+        }
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "email": "bob@example.com"
+    },
+    {
+      "id": 3,
+      "name": "ops",
+      "email": "ops@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-client",
+      "ipv4": "100.64.0.1"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "bob-drive",
+      "ipv4": "100.64.0.2"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "relay-host",
+      "ipv4": "100.64.0.3"
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "alice-receives-companion-capabilities",
+      "node_id": 1
+    },
+    {
+      "name": "bob-receives-taildrive-capability",
+      "node_id": 2
+    },
+    {
+      "name": "relay-receives-relay-capability",
+      "node_id": 3
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "alice-cap-grant-peers",
+      "node_id": 1
+    },
+    {
+      "name": "relay-cap-grant-peers",
+      "node_id": 3
+    }
+  ]
+}

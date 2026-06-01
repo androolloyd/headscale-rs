@@ -861,6 +861,198 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-app-cap-grants",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.2/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive": [
+                {
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.2"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.1/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive-sharer": null
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.3/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/relay": [
+
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.3"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.1/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/relay-target": null
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "alice-receives-companion-capabilities",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.2"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.1/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive-sharer": null
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.3"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.1/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/relay-target": null
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "bob-receives-taildrive-capability",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.1"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.2/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive": [
+                    {
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "relay-receives-relay-capability",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.1"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.3/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/relay": [
+
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-cap-grant-peers",
+        "peers": [
+          2,
+          3
+        ]
+      },
+      {
+        "name": "relay-cap-grant-peers",
+        "peers": [
+          1
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-nodeattrs-grants-ssh-route-profile",
     "filter": [
       {

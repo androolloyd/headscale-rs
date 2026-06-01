@@ -1477,7 +1477,7 @@ fn filter_rule_src_bits_and_cap_grant_round_trip() {
     let mut cap_map = BTreeMap::new();
     cap_map.insert(
         "https://example.com/cap/admin".into(),
-        vec![serde_json::json!({ "role": "admin" })],
+        Some(vec![serde_json::json!({ "role": "admin" })]),
     );
 
     let f = FilterRule {
@@ -1519,7 +1519,9 @@ fn filter_rule_src_bits_and_cap_grant_round_trip() {
         vec!["https://tailscale.com/cap/file-send"]
     );
     assert_eq!(
-        back.cap_grant[0].cap_map["https://example.com/cap/admin"][0],
+        back.cap_grant[0].cap_map["https://example.com/cap/admin"]
+            .as_ref()
+            .unwrap()[0],
         serde_json::json!({ "role": "admin" })
     );
 }

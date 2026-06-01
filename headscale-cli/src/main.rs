@@ -1328,6 +1328,7 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
     while i < tail.len() {
         let arg = tail[i];
         match (scope, arg) {
+            (UtilityFlagScope::GenerateGroup, "--") => return None,
             (_, "-h" | "--help")
             | (
                 UtilityFlagScope::Serve
@@ -1435,7 +1436,10 @@ fn generate_group_help_tail(subcommand: &str, tail: &[&str]) -> bool {
 
 fn private_key_help_tail(tail: &[&str]) -> bool {
     !tail.is_empty()
-        && tail.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+        && tail
+            .iter()
+            .take_while(|arg| **arg != "--")
+            .any(|arg| matches!(*arg, "-h" | "--help"))
         && first_unknown_flag(tail, UtilityFlagScope::GenerateGroup).is_none()
 }
 
@@ -2595,10 +2599,16 @@ impl CompletionShell {
 
 fn print_version(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
     let version = VersionInfo::current();
-    if fmt.is_structured() {
-        print_structured_value(fmt, &version)?;
-    } else {
-        print!("{}", version.human());
+    match fmt {
+        headscale_cli::admin::OutputFormat::Json | headscale_cli::admin::OutputFormat::JsonLine => {
+            print_structured_value(fmt, &version)?;
+        }
+        headscale_cli::admin::OutputFormat::Yaml => {
+            print_structured_value(fmt, &version.yaml_view())?;
+        }
+        headscale_cli::admin::OutputFormat::Table => {
+            print!("{}", version.human());
+        }
     }
     Ok(())
 }
@@ -2673,6 +2683,15 @@ struct VersionInfo {
 }
 
 #[derive(serde::Serialize)]
+struct VersionInfoYaml<'a> {
+    version: &'static str,
+    commit: &'static str,
+    buildtime: &'static str,
+    go: &'a BuildRuntimeInfo,
+    dirty: bool,
+}
+
+#[derive(serde::Serialize)]
 struct BuildRuntimeInfo {
     version: &'static str,
     os: &'static str,
@@ -2687,10 +2706,20 @@ impl VersionInfo {
             build_time: option_env!("HEADSCALE_RS_BUILD_TIME").unwrap_or("unknown"),
             go: BuildRuntimeInfo {
                 version: option_env!("RUSTC_VERSION").unwrap_or("unknown"),
-                os: std::env::consts::OS,
-                arch: std::env::consts::ARCH,
+                os: go_os_label(std::env::consts::OS),
+                arch: go_arch_label(std::env::consts::ARCH),
             },
             dirty: option_env!("HEADSCALE_RS_DIRTY").is_some_and(|value| value == "true"),
+        }
+    }
+
+    fn yaml_view(&self) -> VersionInfoYaml<'_> {
+        VersionInfoYaml {
+            version: self.version,
+            commit: self.commit,
+            buildtime: self.build_time,
+            go: &self.go,
+            dirty: self.dirty,
         }
     }
 
@@ -2704,6 +2733,22 @@ impl VersionInfo {
             "headscale version {}\ncommit: {}\nbuild time: {}\nbuilt with: {} {}/{}\n",
             version, self.commit, self.build_time, self.go.version, self.go.os, self.go.arch
         )
+    }
+}
+
+fn go_os_label(os: &'static str) -> &'static str {
+    match os {
+        "macos" => "darwin",
+        other => other,
+    }
+}
+
+fn go_arch_label(arch: &'static str) -> &'static str {
+    match arch {
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "x86_64" => "amd64",
+        other => other,
     }
 }
 

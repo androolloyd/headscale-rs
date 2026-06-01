@@ -1268,7 +1268,10 @@ fn generate_private_key_ignores_extra_positionals_like_upstream_cobra() {
 
     for args in [
         &["generate", "private-key", "extra"][..],
+        &["generate", "private-key", "--", "--bad"][..],
+        &["generate", "private-key", "--", "--help"][..],
         &["gen", "private-key", "extra", "--force"][..],
+        &["gen", "private-key", "--", "--bad"][..],
     ] {
         let output = headscale_in(args, cwd.path(), home.path());
 
@@ -1314,6 +1317,37 @@ fn version_json_line_is_machine_readable() {
     assert!(value["go"]["os"].is_string());
     assert!(value["go"]["arch"].is_string());
     assert!(value.get("rust").is_none());
+}
+
+#[test]
+fn version_yaml_uses_upstream_go_yaml_shape() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+    let output = headscale_in(&["version", "-o", "yaml"], cwd.path(), home.path());
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    let expected_os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let expected_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    assert!(out.contains("\nbuildtime: "), "stdout: {out}");
+    assert!(!out.contains("buildTime:"), "stdout: {out}");
+    assert!(
+        out.contains(&format!("\n  os: {expected_os}\n")),
+        "stdout: {out}"
+    );
+    assert!(
+        out.contains(&format!("\n  arch: {expected_arch}\n")),
+        "stdout: {out}"
+    );
 }
 
 #[test]

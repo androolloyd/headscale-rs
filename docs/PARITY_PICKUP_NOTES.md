@@ -1480,3 +1480,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Regression coverage pins the delayed batch behavior: the stream waits for the
   batch tick, then emits no peer/full patch payload and a single
   `PeersRemoved` entry for the deleted peer.
+
+## 2026-06-01 CLI utility output/parser parity slice
+
+- `headscale version -o yaml` now matches upstream Go's YAML field casing by
+  emitting `buildtime` while retaining the JSON/json-line `buildTime` shape.
+- Version runtime labels now use Go-compatible target names such as
+  `darwin`/`arm64` and `amd64` instead of Rust target strings in structured and
+  human output.
+- `generate private-key -- <args>` now treats `--` as Cobra's end-of-options
+  sentinel and ignores the remaining positional arguments, including values
+  that look like flags or help requests.

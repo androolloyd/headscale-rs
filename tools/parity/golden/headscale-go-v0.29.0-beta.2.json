@@ -620,6 +620,160 @@
   },
   {
     "engine": "headscale",
+    "name": "multi-address-policy-ssh-route-matrix",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.10",
+          "fd7a:115c:a1e0::10",
+          "fd7a:115c:a1e0::20"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.30",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::30",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0:b10::/64",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-dual-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.10",
+              "fd7a:115c:a1e0::10",
+              "fd7a:115c:a1e0::20"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.30",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::30",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "router-v6-only-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.10",
+              "fd7a:115c:a1e0::10",
+              "fd7a:115c:a1e0::20"
+            ],
+            "DstPorts": [
+              {
+                "IP": "fd7a:115c:a1e0:b10::/64",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-dual-peers",
+        "peers": [
+          3,
+          4
+        ]
+      },
+      {
+        "name": "alice-v6-only-peers",
+        "peers": [
+          3,
+          4
+        ]
+      },
+      {
+        "name": "server-dual-peers",
+        "peers": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "router-v6-only-peers",
+        "peers": [
+          1,
+          2
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "alice-dual",
+        "rules": [
+
+        ]
+      },
+      {
+        "name": "alice-v6-only",
+        "rules": [
+
+        ]
+      },
+      {
+        "name": "server-dual",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.10",
+              "fd7a:115c:a1e0::10",
+              "fd7a:115c:a1e0::20"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "peer-map-route-visibility",
     "filter": [
       {

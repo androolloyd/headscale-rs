@@ -784,3 +784,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   DNS shape.
 - Removed stale config comments that still described logtail and auto-update
   as projection-only; both now affect map-response runtime fields.
+
+## 2026-06-01 Multi-address policy/SSH/route differential slice
+
+- Added `multi-address-policy-ssh-route-matrix` to the pinned headscale-go
+  differential scenarios. It covers dual-stack plus IPv6-only family-removal
+  nodes through per-node filter reduction, symmetric peer visibility, SSH
+  principals, and an approved IPv6 route.
+- Kept DNS out of this slice because the pinned `wire.runtime_dns_config`
+  differential is config-only and does not consume scenario nodes; node-family
+  MagicDNS A/AAAA helpers remain covered by the existing API DNS tests.
+- Refreshed `tools/parity/golden/headscale-go-v0.29.0-beta.2.json` after the
+  full default differential run matched Rust and pinned headscale-go.

@@ -104,7 +104,7 @@ impl ApiKeyAdmin for PersistentApiKeyAdmin {
     async fn validate(&self, candidate: &str) -> bool {
         headscale_db::api_keys::validate(&self.pool, candidate)
             .await
-            .is_ok()
+            .unwrap_or(false)
     }
 
     async fn mint(&self, req: ApiKeyMintRequest) -> Result<ApiKeyCreated, ApiKeyAdminError> {
@@ -191,7 +191,7 @@ impl ApiKeyAdmin for PersistentPostgresApiKeyAdmin {
     async fn validate(&self, candidate: &str) -> bool {
         headscale_db::api_keys::validate_postgres(&self.pool, candidate)
             .await
-            .is_ok()
+            .unwrap_or(false)
     }
 
     async fn mint(&self, req: ApiKeyMintRequest) -> Result<ApiKeyCreated, ApiKeyAdminError> {

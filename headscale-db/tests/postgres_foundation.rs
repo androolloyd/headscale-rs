@@ -509,9 +509,11 @@ async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
         assert!(created.row.created_at > 0);
         assert!(created.row.last_seen.is_none());
 
-        api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
-            .await
-            .map_err(|e| headscale_db::DbError::General(e.to_string()))?;
+        assert!(
+            api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
+                .await
+                .map_err(|e| headscale_db::DbError::General(e.to_string()))?
+        );
         assert_eq!(
             api_keys::get_postgres_by_id_on_connection(&mut schema.conn, created.row.id)
                 .await?
@@ -542,11 +544,10 @@ async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
         let expired =
             api_keys::get_postgres_by_id_on_connection(&mut schema.conn, created.row.id).await?;
         assert!(expired.expiration.is_some());
-        assert_eq!(
-            api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
+        assert!(
+            !api_keys::validate_postgres_on_connection(&mut schema.conn, &created.plaintext)
                 .await
-                .unwrap_err(),
-            api_keys::ApiKeyError::Expired
+                .map_err(|e| headscale_db::DbError::General(e.to_string()))?
         );
 
         api_keys::destroy_postgres_by_prefix_on_connection(
@@ -597,9 +598,14 @@ async fn postgres_api_key_validation_accepts_legacy_hash_rows() -> TestResult {
         .execute(&mut schema.conn)
         .await?;
 
-        api_keys::validate_postgres_on_connection(&mut schema.conn, &format!("{prefix}.{secret}"))
+        assert!(
+            api_keys::validate_postgres_on_connection(
+                &mut schema.conn,
+                &format!("{prefix}.{secret}")
+            )
             .await
-            .map_err(|e| headscale_db::DbError::General(e.to_string()))?;
+            .map_err(|e| headscale_db::DbError::General(e.to_string()))?
+        );
         let row = api_keys::get_postgres_by_prefix_on_connection(&mut schema.conn, prefix).await?;
         assert_eq!(row.secret_hash, hash);
         assert_eq!(row.expiration, Some(now + 3600));

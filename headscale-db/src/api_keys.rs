@@ -107,8 +107,6 @@ pub enum ApiKeyError {
     NotFound,
     #[error("api key invalid")]
     Invalid,
-    #[error("api key expired")]
-    Expired,
 }
 
 fn now_unix() -> i64 {
@@ -514,7 +512,14 @@ fn parse_api_key(candidate: &str) -> std::result::Result<ParsedKey<'_>, ApiKeyEr
     Ok(ParsedKey::Legacy { prefix, secret })
 }
 
-pub async fn validate(pool: &SqlitePool, candidate: &str) -> std::result::Result<(), ApiKeyError> {
+/// Validate an API-key bearer token.
+///
+/// Returns `Ok(false)` for correctly parsed and authenticated keys that are
+/// expired, matching headscale-go's `ValidateAPIKey` `(false, nil)` result.
+pub async fn validate(
+    pool: &SqlitePool,
+    candidate: &str,
+) -> std::result::Result<bool, ApiKeyError> {
     let parsed = parse_api_key(candidate)?;
     let (prefix, secret) = match parsed {
         ParsedKey::Modern { prefix, secret } | ParsedKey::Legacy { prefix, secret } => {
@@ -533,18 +538,14 @@ pub async fn validate(pool: &SqlitePool, candidate: &str) -> std::result::Result
         .then_some(())
         .ok_or(ApiKeyError::Invalid)?;
 
-    if row.is_expired(now_unix()) {
-        return Err(ApiKeyError::Expired);
-    }
-
-    Ok(())
+    Ok(!row.is_expired(now_unix()))
 }
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn validate_postgres(
     pool: &PgPool,
     candidate: &str,
-) -> std::result::Result<(), ApiKeyError> {
+) -> std::result::Result<bool, ApiKeyError> {
     let mut conn = pool.acquire().await.map_err(|_| ApiKeyError::NotFound)?;
     validate_postgres_on_connection(&mut conn, candidate).await
 }
@@ -553,7 +554,7 @@ pub async fn validate_postgres(
 pub async fn validate_postgres_on_connection(
     conn: &mut PgConnection,
     candidate: &str,
-) -> std::result::Result<(), ApiKeyError> {
+) -> std::result::Result<bool, ApiKeyError> {
     let parsed = parse_api_key(candidate)?;
     let (prefix, secret) = match parsed {
         ParsedKey::Modern { prefix, secret } | ParsedKey::Legacy { prefix, secret } => {
@@ -572,11 +573,7 @@ pub async fn validate_postgres_on_connection(
         .then_some(())
         .ok_or(ApiKeyError::Invalid)?;
 
-    if row.is_expired(now_unix()) {
-        return Err(ApiKeyError::Expired);
-    }
-
-    Ok(())
+    Ok(!row.is_expired(now_unix()))
 }
 
 #[cfg(test)]
@@ -627,7 +624,7 @@ mod tests {
         let c = create_for_test(db.pool(), CreateParams { expiration: None })
             .await
             .unwrap();
-        validate(db.pool(), &c.plaintext).await.unwrap();
+        assert!(validate(db.pool(), &c.plaintext).await.unwrap());
     }
 
     #[tokio::test]
@@ -658,9 +655,11 @@ mod tests {
         .await
         .unwrap();
 
-        validate(db.pool(), &format!("{prefix}.{secret}"))
-            .await
-            .unwrap();
+        assert!(
+            validate(db.pool(), &format!("{prefix}.{secret}"))
+                .await
+                .unwrap()
+        );
         let row = get_by_prefix(db.pool(), prefix).await.unwrap();
         assert_eq!(row.secret_hash, hash);
         assert_eq!(row.expiration, Some(now + 3600));
@@ -682,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_rejects_expired_key() {
+    async fn validate_reports_expired_key_as_invalid_without_error() {
         let db = fresh_db().await;
         let c = create_for_test(
             db.pool(),
@@ -692,8 +691,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = validate(db.pool(), &c.plaintext).await.unwrap_err();
-        assert_eq!(err, ApiKeyError::Expired);
+        assert!(!validate(db.pool(), &c.plaintext).await.unwrap());
     }
 
     #[tokio::test]

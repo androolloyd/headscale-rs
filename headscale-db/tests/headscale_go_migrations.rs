@@ -504,9 +504,11 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
         .await
         .expect("migrate imported headscale-go db");
 
-    api_keys::validate(db.pool(), MODERN_API_KEY)
-        .await
-        .expect("modern imported API key validates");
+    assert!(
+        api_keys::validate(db.pool(), MODERN_API_KEY)
+            .await
+            .expect("modern imported API key validates")
+    );
     let api_err = api_keys::validate(db.pool(), WRONG_MODERN_API_KEY)
         .await
         .expect_err("wrong modern API key secret is rejected");

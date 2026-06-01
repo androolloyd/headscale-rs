@@ -1483,6 +1483,87 @@ fn server_alias_matches_current_upstream_unknown_command() {
 }
 
 #[test]
+fn removed_hidden_compatibility_aliases_match_current_upstream_unknown_commands() {
+    for (args, expected) in [
+        (
+            &["namespace"][..],
+            "Error: unknown command \"namespace\" for \"headscale\"\n",
+        ),
+        (
+            &["namespace", "--help"][..],
+            "Error: unknown command \"namespace\" for \"headscale\"\n",
+        ),
+        (
+            &["namespaces", "--help"][..],
+            "Error: unknown command \"namespaces\" for \"headscale\"\n",
+        ),
+        (
+            &["ns", "users"][..],
+            "Error: unknown command \"ns\" for \"headscale\"\n",
+        ),
+        (
+            &["machine", "--help"][..],
+            "Error: unknown command \"machine\" for \"headscale\"\n",
+        ),
+        (
+            &["machines", "--help"][..],
+            "Error: unknown command \"machines\" for \"headscale\"\n",
+        ),
+    ] {
+        assert_stderr_snapshot(args, 1, expected);
+    }
+}
+
+#[test]
+fn debug_create_node_namespace_alias_matches_current_upstream_unknown_flag() {
+    assert_stderr_snapshot(
+        &[
+            "debug",
+            "create-node",
+            "--namespace",
+            "alice",
+            "--key",
+            "k",
+            "--name",
+            "node-one",
+        ],
+        1,
+        "Error: unknown flag: --namespace\n",
+    );
+    assert_stderr_snapshot(
+        &[
+            "debug",
+            "create-node",
+            "-n",
+            "alice",
+            "--key",
+            "k",
+            "--name",
+            "node-one",
+        ],
+        1,
+        "Error: unknown shorthand flag: 'n' in -n\n",
+    );
+}
+
+#[test]
+fn serve_help_with_extra_args_matches_current_upstream_snapshot() {
+    assert_stdout_snapshot(
+        &["serve", "ignored", "--help"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["serve", "--config", "missing.yaml", "--help"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stderr_snapshot(
+        &["serve", "--listen", "127.0.0.1:0", "--help"],
+        1,
+        "Error: unknown flag: --listen\n",
+    );
+}
+
+#[test]
 fn help_server_matches_current_upstream_unknown_topic() {
     assert_stderr_snapshot(
         &["help", "server"],

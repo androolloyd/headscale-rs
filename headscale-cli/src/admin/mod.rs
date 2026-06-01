@@ -516,10 +516,7 @@ pub enum DebugCmd {
     CreateNode {
         /// User.
         #[arg(short = 'u', long)]
-        user: Option<String>,
-        /// Deprecated upstream namespace alias for user.
-        #[arg(short = 'n', long = "namespace", hide = true)]
-        namespace: Option<String>,
+        user: String,
         /// Registration key.
         #[arg(short = 'k', long)]
         key: String,
@@ -950,14 +947,10 @@ pub async fn run_debug(conn: &ConnectArgs, cmd: &DebugCmd) -> Result<(), AdminEr
     match cmd {
         DebugCmd::CreateNode {
             user,
-            namespace,
             key,
             name,
             routes,
-        } => {
-            let user = select_debug_user(user.as_deref(), namespace.as_deref())?;
-            nodes::debug_create_node_grpc(&mut client, user, key, name, routes.clone(), fmt).await
-        }
+        } => nodes::debug_create_node_grpc(&mut client, user, key, name, routes.clone(), fmt).await,
     }
 }
 
@@ -972,20 +965,6 @@ pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), Adm
 #[derive(Debug, Serialize)]
 struct HealthOutput {
     database_connectivity: bool,
-}
-
-fn select_debug_user<'a>(
-    user: Option<&'a str>,
-    namespace: Option<&'a str>,
-) -> Result<&'a str, AdminError> {
-    match (user, namespace) {
-        (Some(user), None) if !user.trim().is_empty() => Ok(user),
-        (None, Some(namespace)) if !namespace.trim().is_empty() => Ok(namespace),
-        (Some(_), Some(_)) => Err(AdminError::Local(
-            "use either --user or --namespace, not both".into(),
-        )),
-        _ => Err(AdminError::Local("--user is required".into())),
-    }
 }
 
 #[cfg(test)]
@@ -1436,13 +1415,11 @@ mod tests {
         match parsed.action {
             DebugCmd::CreateNode {
                 user,
-                namespace,
                 key,
                 name,
                 routes,
             } => {
-                assert_eq!(user.as_deref(), Some("alice"));
-                assert_eq!(namespace, None);
+                assert_eq!(user, "alice");
                 assert_eq!(key, "abcdefghijklmnopqrstuvwx");
                 assert_eq!(name, "node-one");
                 assert_eq!(
@@ -1455,14 +1432,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn debug_user_selection_rejects_ambiguous_or_missing_user() {
-        assert_eq!(select_debug_user(Some("alice"), None).unwrap(), "alice");
-        assert_eq!(select_debug_user(None, Some("alice")).unwrap(), "alice");
-        assert!(select_debug_user(Some("alice"), Some("legacy")).is_err());
-        assert!(select_debug_user(None, None).is_err());
     }
 
     #[test]

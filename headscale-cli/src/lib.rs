@@ -54,18 +54,13 @@ pub use admin::{
 #[derive(Subcommand, Debug)]
 pub enum AdminCmd {
     /// Manage users on the admin surface.
-    #[command(
-        alias = "user",
-        alias = "namespace",
-        alias = "namespaces",
-        alias = "ns"
-    )]
+    #[command(alias = "user")]
     Users {
         #[command(subcommand)]
         action: UsersCmd,
     },
     /// Manage registered nodes.
-    #[command(alias = "node", alias = "machine", alias = "machines")]
+    #[command(alias = "node")]
     Nodes {
         #[command(subcommand)]
         action: NodesCmd,
@@ -159,13 +154,19 @@ mod tests {
 
     #[test]
     fn embedded_admin_accepts_user_aliases_from_upstream() {
-        let parsed = AdminHarness::try_parse_from(["headscale", "namespace", "ls"]).unwrap();
+        let parsed = AdminHarness::try_parse_from(["headscale", "user", "ls"]).unwrap();
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Users {
                 action: UsersCmd::List { .. }
             }
         ));
+    }
+
+    #[test]
+    fn embedded_admin_rejects_removed_hidden_compatibility_aliases() {
+        assert!(AdminHarness::try_parse_from(["headscale", "namespace", "ls"]).is_err());
+        assert!(AdminHarness::try_parse_from(["headscale", "machine", "ls"]).is_err());
     }
 
     #[test]

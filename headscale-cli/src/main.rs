@@ -111,18 +111,13 @@ enum Commands {
 
     // ----- Admin surface ----------------------------------------------------
     /// Manage the users of Headscale.
-    #[command(
-        alias = "user",
-        alias = "namespace",
-        alias = "namespaces",
-        alias = "ns"
-    )]
+    #[command(alias = "user")]
     Users {
         #[command(subcommand)]
         action: UsersCmd,
     },
     /// Manage the nodes of Headscale.
-    #[command(alias = "node", alias = "machine", alias = "machines")]
+    #[command(alias = "node")]
     Nodes {
         #[command(subcommand)]
         action: NodesCmd,
@@ -769,6 +764,9 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
     match parts.as_slice() {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
         ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
+        ["serve", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Serve) => {
+            Some(UPSTREAM_SERVE_HELP)
+        }
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
@@ -1015,6 +1013,14 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
+    if let Some(error) = upstream_hidden_compatibility_alias_error(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
+    }
+
+    if let Some(error) = debug_create_node_namespace_flag_error(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
+    }
+
     if matches!(parts.first(), Some(&"server")) {
         return Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into());
     }
@@ -1198,6 +1204,12 @@ fn private_key_help_tail(tail: &[&str]) -> bool {
         && first_unknown_flag(tail, UtilityFlagScope::GenerateGroup).is_none()
 }
 
+fn utility_help_tail(tail: &[&str], scope: UtilityFlagScope) -> bool {
+    !tail.is_empty()
+        && tail.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+        && first_unknown_flag(tail, scope).is_none()
+}
+
 fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
     if tail_is_help(tail) {
         return true;
@@ -1225,6 +1237,46 @@ fn version_tail_is_supported(tail: &[&str]) -> bool {
         }
     }
     true
+}
+
+fn upstream_hidden_compatibility_alias_error(parts: &[&str]) -> Option<String> {
+    let command = *parts.first()?;
+    matches!(
+        command,
+        "namespace" | "namespaces" | "ns" | "machine" | "machines"
+    )
+    .then(|| format!("unknown command \"{command}\" for \"headscale\""))
+}
+
+fn debug_create_node_namespace_flag_error(parts: &[&str]) -> Option<String> {
+    let ["debug", "create-node", tail @ ..] = parts else {
+        return None;
+    };
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "--" => return None,
+            "--namespace" => return Some("unknown flag: --namespace".into()),
+            value if value.starts_with("--namespace=") => {
+                return Some("unknown flag: --namespace".into());
+            }
+            "-n" => return Some("unknown shorthand flag: 'n' in -n".into()),
+            value if value.starts_with("-n") && value.len() > 2 => {
+                return Some(format!("unknown shorthand flag: 'n' in {value}"));
+            }
+            "-u" | "--user" | "-k" | "--key" | "--name" | "-r" | "--route" | "-o" | "--output"
+            | "-c" | "--config"
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+                continue;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    None
 }
 
 // Current upstream headscale main (4483fd0) Cobra help. Keep these explicit
@@ -2551,7 +2603,7 @@ mod tests {
 
     #[test]
     fn standalone_cli_accepts_user_aliases_from_upstream() {
-        let parsed = Cli::try_parse_from(["headscale", "ns", "show"]).unwrap();
+        let parsed = Cli::try_parse_from(["headscale", "user", "show"]).unwrap();
         assert!(matches!(
             parsed.command,
             Commands::Users {
@@ -2561,15 +2613,13 @@ mod tests {
     }
 
     #[test]
-    fn standalone_cli_accepts_machine_alias_without_conflicting_with_node_mode() {
-        let parsed = Cli::try_parse_from(["headscale", "machine", "ls"]).unwrap();
-        assert!(matches!(
-            parsed.command,
-            Commands::Nodes {
-                action: NodesCmd::List { .. }
-            }
-        ));
+    fn standalone_cli_rejects_removed_hidden_compatibility_aliases() {
+        assert!(Cli::try_parse_from(["headscale", "namespace", "ls"]).is_err());
+        assert!(Cli::try_parse_from(["headscale", "machine", "ls"]).is_err());
+    }
 
+    #[test]
+    fn standalone_cli_accepts_node_alias_without_conflicting_with_node_mode() {
         let parsed = Cli::try_parse_from(["headscale", "node", "ls"]).unwrap();
         assert!(matches!(
             parsed.command,
@@ -2806,6 +2856,35 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["version", "-h"]),
             Some(UPSTREAM_VERSION_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["serve", "ignored", "--help"]),
+            Some(UPSTREAM_SERVE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["serve", "--config", "missing.yaml", "--help"]),
+            Some(UPSTREAM_SERVE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_error(&["namespace", "--help"]),
+            Some("Error: unknown command \"namespace\" for \"headscale\"\n".into())
+        );
+        assert_eq!(
+            upstream_exact_error(&["machine", "--help"]),
+            Some("Error: unknown command \"machine\" for \"headscale\"\n".into())
+        );
+        assert_eq!(
+            upstream_exact_error(&[
+                "debug",
+                "create-node",
+                "--namespace",
+                "alice",
+                "--key",
+                "k",
+                "--name",
+                "n"
+            ]),
+            Some("Error: unknown flag: --namespace\n".into())
         );
         assert_eq!(
             upstream_exact_error(&["server", "--help"]),

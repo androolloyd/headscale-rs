@@ -65,6 +65,8 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_DERP_UPDATE_FREQUENCY",
     "HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT",
     "HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT",
+    "HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE",
+    "HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT",
     "HEADSCALE_POLICY_MODE",
     "HEADSCALE_POLICY_PATH",
     "HEADSCALE_SERVER_URL",
@@ -2440,6 +2442,68 @@ policy:
         cwd.path(),
         home.path(),
         &[("HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT", "66s")],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_rejects_env_invalid_tuning_node_store_values() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE", "0")],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        "Error: Fatal config error: tuning.node_store_batch_size must be positive, got 0\n",
+        "configtest invalid tuning node store batch size from env",
+    );
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT", "0s")],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        "Error: Fatal config error: tuning.node_store_batch_timeout must be positive, got 0s\n",
+        "configtest invalid tuning node store batch timeout from env",
+    );
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE", "25"),
+            ("HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT", "50ms"),
+        ],
     );
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));

@@ -528,6 +528,7 @@ impl CliConfig {
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
+        config.apply_tuning_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -572,6 +573,7 @@ impl CliConfig {
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
+        config.apply_tuning_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -868,6 +870,35 @@ impl CliConfig {
                 _ => {}
             }
         }
+    }
+
+    fn apply_tuning_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE" => {
+                    self.tuning.node_store_batch_size =
+                        value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT" => {
+                    self.tuning.node_store_batch_timeout = parse_duration_nanos_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -2735,6 +2766,52 @@ expiry = 0
             .apply_derp_env_overrides_from([("HEADSCALE_DERP_UPDATE_FREQUENCY", "1500ms")])
             .unwrap_err();
         assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_UPDATE_FREQUENCY"));
+    }
+
+    #[test]
+    fn applies_headscale_tuning_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_tuning_env_overrides_from([
+                ("HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE", "256"),
+                ("HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT", "250ms"),
+            ])
+            .unwrap();
+
+        assert_eq!(config.tuning.node_store_batch_size, 256);
+        assert_eq!(config.tuning.node_store_batch_timeout, 250_000_000);
+
+        config
+            .apply_tuning_env_overrides_from([
+                ("HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE", "0"),
+                ("HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT", "0s"),
+            ])
+            .unwrap();
+
+        assert_eq!(config.tuning.node_store_batch_size, 0);
+        assert_eq!(config.tuning.node_store_batch_timeout, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_tuning_env_overrides() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_tuning_env_overrides_from([(
+                "HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE",
+                "not-a-number",
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE"));
+
+        let err = config
+            .apply_tuning_env_overrides_from([(
+                "HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT",
+                "not-a-duration",
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT"));
     }
 
     #[test]

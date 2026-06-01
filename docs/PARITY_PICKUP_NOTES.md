@@ -1452,3 +1452,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Process coverage now asserts `tailnet`, `tailnet --help`, and
   `tailnet status --help` return the current-upstream unknown-command error
   instead of rendering the removed local help page.
+
+## 2026-06-01 NodeStore tuning env override parity slice
+
+- `CliConfig::load` and default config discovery now apply current-upstream
+  Viper-style NodeStore tuning env overrides for
+  `HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE` and
+  `HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT`.
+- Process coverage proves env-provided zero values trigger the same
+  `configtest` fatal validation as file-provided tuning values.

@@ -10,7 +10,7 @@
 // Duration::from_mins/from_hours while newer clippy versions prefer them.
 #![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -309,19 +309,19 @@ async fn main() -> ExitCode {
     }
 }
 
-fn output_format_from_raw_args(raw_args: &[OsString]) -> OutputFormat {
+fn output_format_from_raw_args<S: AsRef<OsStr>>(raw_args: &[S]) -> OutputFormat {
     let mut fmt = OutputFormat::Table;
     let mut args = raw_args.iter();
     while let Some(arg) = args.next() {
-        if arg == OsStr::new("--") {
+        if arg.as_ref() == OsStr::new("--") {
             break;
         }
-        let Some(arg) = arg.to_str() else {
+        let Some(arg) = arg.as_ref().to_str() else {
             continue;
         };
         match arg {
             "-o" | "--output" => {
-                if let Some(value) = args.next().and_then(|value| value.to_str()) {
+                if let Some(value) = args.next().and_then(|value| value.as_ref().to_str()) {
                     fmt = raw_output_format(value);
                 }
             }
@@ -1023,6 +1023,7 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     for arg in args {
         parts.push(arg.as_ref().to_str()?);
     }
+    let output_format = output_format_from_raw_args(args);
 
     if parts
         .iter()
@@ -1059,12 +1060,16 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
-    if let Some(error) = auth_required_flag_error(parts.as_slice()) {
-        return Some(format!("Error: {error}\n"));
+    let command_parts = upstream_exact_command_parts(parts.as_slice());
+    if let Some(error) = auth_required_flag_error(command_parts) {
+        return Some(admin::output::format_error(output_format, &error));
     }
 
-    if users_create_missing_name_error(parts.as_slice()) {
-        return Some("Error: missing parameters\n".into());
+    if users_create_missing_name_error(command_parts) {
+        return Some(admin::output::format_error(
+            output_format,
+            "missing parameters",
+        ));
     }
 
     if matches!(parts.first(), Some(&"server")) {
@@ -1094,6 +1099,38 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             parts.join(" ")
         )
     })
+}
+
+fn upstream_exact_command_parts<'a>(parts: &'a [&'a str]) -> &'a [&'a str] {
+    let mut i = 0;
+    while i < parts.len() {
+        match parts[i] {
+            "--" => return &parts[i + 1..],
+            "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
+            | "--api-key" | "--unix-socket" | "--log-level"
+                if i + 1 < parts.len() =>
+            {
+                i += 2;
+            }
+            "--force" | "--insecure" => i += 1,
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("--server=")
+                    || value.starts_with("--token=")
+                    || value.starts_with("--address=")
+                    || value.starts_with("--api-key=")
+                    || value.starts_with("--unix-socket=")
+                    || value.starts_with("--log-level=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            _ => return &parts[i..],
+        }
+    }
+    &parts[i..]
 }
 
 fn auth_required_flag_error(parts: &[&str]) -> Option<String> {

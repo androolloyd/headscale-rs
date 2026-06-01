@@ -434,6 +434,12 @@ Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
 neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and
 message, with grpc-gateway HTTP/status JSON coverage for the same edge.
 
+Recent coverage note (2026-06-01): parser-level CLI `auth register` /
+`auth approve` / `auth reject` missing-flag errors and `users create`
+missing-name errors now honor `-o/--output` structured stderr formatting for
+JSON, JSON-line, and YAML while preserving current-upstream human `Error:`
+output by default.
+
 Recent coverage note (2026-06-01): streamed map responses now use a bounded
 per-subscriber batch event queue for tick-published map changes, preserving
 headscale-go-style ordered delivery when multiple batches publish before a

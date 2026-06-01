@@ -883,6 +883,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   parity now gates current-head Tailscale SSH `acceptEnv` forwarding for
   `LANG` and `LC_*` against Rust and headscale-go.
 
+## 2026-06-01 CLI parser-error output slice
+
+- Parser-level `auth register`/`auth approve`/`auth reject` missing-flag
+  shims and `users create` missing-name shims now reuse the admin structured
+  error formatter when `-o/--output` requests `json`, `json-line`, or `yaml`.
+- Focused process coverage pins JSON, JSON-line, and YAML stderr envelopes for
+  those current-upstream parser errors while preserving the existing human
+  `Error:` snapshots for default output.
+
 ## 2026-06-01 Runtime route-approval reason slice
 
 - Inspected current headscale-go `State.SetApprovedRoutes`: route-approval

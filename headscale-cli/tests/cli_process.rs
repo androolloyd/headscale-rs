@@ -3027,6 +3027,27 @@ fn unknown_output_selector_falls_back_to_human_error_output() {
 
 #[test]
 fn implemented_admin_errors_follow_output_format() {
+    let auth_register = headscale_clean(&["-o", "json", "auth", "register"]);
+    assert_eq!(auth_register.status.code(), Some(1));
+    assert_eq!(stdout(&auth_register), "");
+    assert_eq!(
+        stderr(&auth_register),
+        "{\n\t\"error\": \"required flag(s) \\\"auth-id\\\", \\\"user\\\" not set\"\n}\n"
+    );
+
+    let auth_approve = headscale_clean(&["auth", "approve", "-ojson-line"]);
+    assert_eq!(auth_approve.status.code(), Some(1));
+    assert_eq!(stdout(&auth_approve), "");
+    assert_eq!(
+        stderr(&auth_approve),
+        "{\"error\":\"required flag(s) \\\"auth-id\\\" not set\"}\n"
+    );
+
+    let users_create = headscale_clean(&["--output", "yaml", "users", "create"]);
+    assert_eq!(users_create.status.code(), Some(1));
+    assert_eq!(stdout(&users_create), "");
+    assert_eq!(stderr(&users_create), "error: missing parameters\n\n");
+
     let json = headscale_clean(&["-o", "json", "preauthkeys", "expire"]);
     assert_eq!(json.status.code(), Some(1));
     assert_eq!(stdout(&json), "");

@@ -1812,14 +1812,39 @@ fn map_batch_requires_full_response(changes: &[MapChange]) -> bool {
     })
 }
 
-fn map_batch_peer_delta_options(changes: &[MapChange]) -> PeerDeltaOptions {
-    if changes.iter().any(|change| {
-        change.content.include_policy || change.content.requires_runtime_peer_computation
-    }) {
+fn map_batch_peer_delta_options(changes: &[MapChange], self_node_id: u64) -> PeerDeltaOptions {
+    let requires_policy = changes.iter().any(|change| {
+        (change.content.include_policy || change.content.requires_runtime_peer_computation)
+            && !is_self_lifecycle_policy_companion(change, self_node_id)
+    });
+    if requires_policy {
         PeerDeltaOptions::policy_change()
     } else {
         PeerDeltaOptions::registry_change()
     }
+}
+
+fn is_self_lifecycle_policy_companion(change: &MapChange, self_node_id: u64) -> bool {
+    let is_lifecycle_policy = change.reasons.len() == 2
+        && matches!(
+            change.reasons.first(),
+            Some(MapChangeReason::NodeOnline | MapChangeReason::NodeOffline)
+        )
+        && change.reasons.get(1) == Some(&MapChangeReason::PolicyChange);
+
+    change.origin_node_id == Some(self_node_id)
+        && change.target_node_id.is_none()
+        && is_lifecycle_policy
+        && change.content.include_policy
+        && change.content.requires_runtime_peer_computation
+        && !change.content.include_self
+        && !change.content.include_derp_map
+        && !change.content.include_dns
+        && !change.content.include_domain
+        && !change.content.send_all_peers
+        && change.content.peers_changed.is_empty()
+        && change.content.peers_removed.is_empty()
+        && change.content.peer_patches == [self_node_id]
 }
 
 fn map_batch_response_type(changes: &[MapChange]) -> &'static str {
@@ -1911,7 +1936,7 @@ fn rebuild_map_batch_chunk(
         initial_peer_ids,
         mapresponse_debug,
         public_control_url,
-        map_batch_peer_delta_options(changes),
+        map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
     )
 }
 

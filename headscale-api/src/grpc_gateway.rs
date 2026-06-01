@@ -993,7 +993,9 @@ fn ensure_no_duplicate_field_aliases(
     };
 
     for aliases in allowed_fields {
-        let mut present = aliases.iter().filter(|alias| object.contains_key(**alias));
+        let mut present = aliases
+            .iter()
+            .filter(|alias| object.get(**alias).is_some_and(|value| !value.is_null()));
         if present.next().is_some()
             && let Some(duplicate) = present.next()
         {
@@ -1449,7 +1451,9 @@ fn debug_create_node_request(value: &Value) -> Result<DebugCreateNodeRequest, St
 
 fn field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
     let object = value.as_object()?;
-    names.iter().find_map(|name| object.get(*name))
+    names
+        .iter()
+        .find_map(|name| object.get(*name).filter(|value| !value.is_null()))
 }
 
 fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, Status> {

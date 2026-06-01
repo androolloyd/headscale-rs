@@ -967,6 +967,25 @@ async fn node_uniqueness_indexes_are_partial() {
 }
 
 #[tokio::test]
+async fn nodes_given_name_column_matches_headscale_go_type() {
+    let db = Database::in_memory().await.expect("open db");
+    db.migrate().await.expect("migrate");
+
+    let column_type: String = sqlx::query_scalar(
+        "
+        SELECT type
+        FROM pragma_table_info('nodes')
+        WHERE name = 'given_name'
+        ",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("query nodes.given_name type");
+
+    assert_eq!(column_type, "varchar(63)");
+}
+
+#[tokio::test]
 async fn fresh_rust_migration_stamps_current_database_versions_row() {
     let (_dir, db) = file_db().await;
     db.migrate().await.expect("migrate");

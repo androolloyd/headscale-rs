@@ -20,7 +20,7 @@ CREATE TABLE nodes (
     ipv4            TEXT,
     ipv6            TEXT,
     hostname        TEXT,
-    given_name      TEXT,
+    given_name      varchar(63),
     user_id         INTEGER,
     register_method TEXT,
     tags            TEXT,

@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     ipv4            TEXT,
     ipv6            TEXT,
     hostname        TEXT,
-    given_name      TEXT,
+    given_name      VARCHAR(63),
     user_id         BIGINT,
     register_method TEXT,
     tags            TEXT,

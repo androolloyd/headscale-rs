@@ -308,7 +308,7 @@ async fn postgres_foundation_clears_tagged_node_user_ids_on_go_import() -> TestR
                 ipv4 TEXT,
                 ipv6 TEXT,
                 hostname TEXT,
-                given_name TEXT,
+                given_name VARCHAR(63),
                 user_id BIGINT,
                 register_method TEXT,
                 tags TEXT,

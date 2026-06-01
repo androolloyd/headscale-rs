@@ -456,6 +456,15 @@ impl PendingMapChange {
         Self::with_content_node(reason, None, None, Some(node_id))
     }
 
+    fn lifecycle_peer(reason: MapChangeReason, node_id: u64) -> Self {
+        debug_assert!(matches!(
+            reason,
+            MapChangeReason::NodeOnline | MapChangeReason::NodeOffline
+        ));
+        Self::with_content_node(reason, None, Some(node_id), Some(node_id))
+            .with_companion_reason(MapChangeReason::PolicyChange)
+    }
+
     fn peer_patches(reason: MapChangeReason, node_ids: Vec<u64>) -> Self {
         Self {
             reason,
@@ -3504,10 +3513,10 @@ impl MachineRegistry {
             !was_online
         };
         if online_changed {
-            machines.wake_waiters_with(
-                PendingMapChange::broadcast_peer(MapChangeReason::NodeOnline, node_id)
-                    .with_companion_reason(MapChangeReason::PolicyChange),
-            );
+            machines.wake_waiters_with(PendingMapChange::lifecycle_peer(
+                MapChangeReason::NodeOnline,
+                node_id,
+            ));
         }
         machines.primary_routes.write().clear_unhealthy(node_id);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -3709,10 +3718,10 @@ impl MachineRegistry {
                 NodeStoreBoolUpdateOutcome {
                     applied: true,
                     publish_snapshot: found,
-                    change: Some(
-                        PendingMapChange::broadcast_peer(MapChangeReason::NodeOffline, node_id)
-                            .with_companion_reason(MapChangeReason::PolicyChange),
-                    ),
+                    change: Some(PendingMapChange::lifecycle_peer(
+                        MapChangeReason::NodeOffline,
+                        node_id,
+                    )),
                     clear_unhealthy_route_state: None,
                     final_presence_node_id: Some(node_id),
                 }
@@ -5707,10 +5716,15 @@ mod registry_tests {
     #[tokio::test]
     async fn wire_oidc_registration_handler_clears_tagged_expiry() {
         let state = test_state();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
         let registration_id = "t".repeat(24);
         let mut pending = mk_record(12);
         pending.user.clear();
-        pending.forced_tags = vec!["tag:server".into()];
+        pending.forced_tags = vec!["tag:server".into(), "tag:server".into()];
         pending.expiry = Some(Utc::now() + chrono::Duration::hours(3));
         state
             .registration_cache
@@ -5730,6 +5744,36 @@ mod registry_tests {
         let registered = state.machines.get(&pending.node_key_hex).unwrap();
         assert_eq!(registered.forced_tags, vec!["tag:server"]);
         assert_eq!(registered.expiry, None);
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_rejects_unowned_requested_tags() {
+        let state = test_state();
+        let raw_policy = r#"{"tagOwners":{"tag:server":["alice@example.com"]}}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let registration_id = "u".repeat(24);
+        let mut pending = mk_record(14);
+        pending.user.clear();
+        pending.forced_tags = vec!["tag:db".into()];
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let err = handler
+            .complete_oidc_registration(&registration_id, &oidc_test_user(), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, crate::oidc::OidcRegistrationError::Store(_)));
+        assert!(err.to_string().contains("requested tags [tag:db]"));
+        assert!(state.registration_cache.get(&registration_id).is_some());
+        assert!(state.machines.get(&pending.node_key_hex).is_none());
     }
 
     #[tokio::test]
@@ -7082,6 +7126,7 @@ mod registry_tests {
         );
         assert!(changes[3].content.include_policy);
         assert!(changes[3].content.requires_runtime_peer_computation);
+        assert_eq!(changes[3].origin_node_id, Some(node_id));
         assert_eq!(changes[3].content.peer_patches, vec![node_id]);
         assert_eq!(changes[4].target_node_id, None);
         assert_eq!(
@@ -7090,6 +7135,7 @@ mod registry_tests {
         );
         assert!(changes[4].content.include_policy);
         assert!(changes[4].content.requires_runtime_peer_computation);
+        assert_eq!(changes[4].origin_node_id, Some(node_id));
         assert_eq!(changes[4].content.peer_patches, vec![node_id]);
         assert_eq!(changes[5].target_node_id, None);
         assert_eq!(changes[5].content.peers_removed, vec![node_id]);
@@ -8504,10 +8550,17 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             user.display_name.clone(),
             user.profile_pic_url.clone(),
         );
-        pending.expiry = if pending.forced_tags.is_empty() {
-            node_expiry.or(pending.expiry)
-        } else {
+        let requested_tags = crate::policy::validate_requested_tags_for_node(
+            &self.state.policy,
+            &pending.primary_addr_string().unwrap_or_default(),
+            &user_name,
+            &mut pending.forced_tags,
+        )
+        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+        pending.expiry = if requested_tags {
             None
+        } else {
+            node_expiry.or(pending.expiry)
         };
 
         pending.approved_routes = auto_approved_routes_for_node(

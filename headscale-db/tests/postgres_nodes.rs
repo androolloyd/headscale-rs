@@ -293,6 +293,55 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
 }
 
 #[tokio::test]
+async fn postgres_nodes_given_name_matches_headscale_go_length() -> TestResult {
+    let Some(mut schema) = TempSchema::open("nodes_given_name_length").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let column: (String, Option<i32>) = sqlx::query_as(
+            "
+            SELECT data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'nodes'
+              AND column_name = 'given_name'
+            ",
+        )
+        .fetch_one(&mut schema.conn)
+        .await?;
+        assert_eq!(column, ("character varying".to_string(), Some(63)));
+
+        let max_length_name = "a".repeat(63);
+        sqlx::query("INSERT INTO nodes (given_name) VALUES ($1)")
+            .bind(&max_length_name)
+            .execute(&mut schema.conn)
+            .await?;
+
+        let too_long_name = "b".repeat(64);
+        let err = sqlx::query("INSERT INTO nodes (given_name) VALUES ($1)")
+            .bind(&too_long_name)
+            .execute(&mut schema.conn)
+            .await
+            .expect_err("Postgres should reject nodes.given_name longer than 63 characters");
+        assert!(
+            err.to_string()
+                .contains("value too long for type character varying(63)"),
+            "unexpected error for long given_name: {err}"
+        );
+
+        Ok::<(), DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
     let Some(mut schema) = TempSchema::open("nodes_list_helpers").await? else {
         return Ok(());

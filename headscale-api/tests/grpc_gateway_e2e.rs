@@ -1119,6 +1119,110 @@ async fn grpc_gateway_body_unknown_fields_are_discarded_like_grpc_gateway() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_body_null_fields_are_absent_like_protojson() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(
+                r#"{"name":"null-defaults","displayName":null,"display_name":"Alias Name","email":null,"pictureUrl":null}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["user"]["name"], "null-defaults");
+    assert_eq!(body["user"]["displayName"], "Alias Name");
+    assert_eq!(body["user"]["email"], "");
+    assert_eq!(body["user"]["profilePicUrl"], "");
+
+    let user_id = body["user"]["id"]
+        .as_str()
+        .expect("created user id")
+        .to_string();
+    let create_preauth_body = format!(
+        r#"{{"user":"{user_id}","reusable":null,"ephemeral":null,"expiration":null,"aclTags":null}}"#
+    );
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/preauthkey",
+            Some(&token),
+            Body::from(create_preauth_body),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["preAuthKey"]["user"]["id"], user_id.as_str());
+    assert_eq!(body["preAuthKey"]["reusable"], false);
+    assert_eq!(body["preAuthKey"]["ephemeral"], false);
+    assert_eq!(body["preAuthKey"]["aclTags"], serde_json::json!([]));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/preauthkey/expire",
+            Some(&token),
+            Body::from(r#"{"id":null}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "null uint64 body field defaults to zero"
+    );
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/apikey/expire",
+            Some(&token),
+            Body::from(r#"{"prefix":null}"#),
+        ))
+        .await
+        .unwrap();
+    assert_status_json_exact(
+        resp,
+        400,
+        3,
+        "must provide id or prefix",
+        "null string body field defaults to empty",
+    )
+    .await;
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/approve",
+            Some(&token),
+            Body::from(r#"{"authId":null}"#),
+        ))
+        .await
+        .unwrap();
+    assert_status_json_exact(
+        resp,
+        400,
+        3,
+        r#"invalid auth_id: auth ID has invalid prefix: expected prefix "hskey-authreq-""#,
+        "null string alias body field defaults to empty",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn grpc_gateway_body_duplicate_fields_are_status_json() {
     struct Case {
         name: &'static str,
@@ -1193,13 +1297,6 @@ async fn grpc_gateway_remaining_parser_failures_are_status_json_exact() {
             uri: "/api/v1/policy",
             body: r#"{"policy":1}"#,
             expected_message: "invalid value for string field policy: 1",
-        },
-        Case {
-            name: "expire api key null prefix body field",
-            method: Method::POST,
-            uri: "/api/v1/apikey/expire",
-            body: r#"{"prefix":null}"#,
-            expected_message: "invalid value for string field prefix: null",
         },
         Case {
             name: "register node duplicate key query field",
@@ -1505,28 +1602,12 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
 
     for case in [
         Case {
-            name: "null uint64 body field",
-            method: Method::POST,
-            uri: "/api/v1/preauthkey/expire",
-            body: r#"{"id":null}"#,
-            message_fragment: "invalid value for uint64 field id: null",
-            exact_message: None,
-        },
-        Case {
             name: "base-prefixed body uint64",
             method: Method::POST,
             uri: "/api/v1/preauthkey/expire",
             body: r#"{"id":"0x1"}"#,
             message_fragment: r#"invalid value for uint64 field id: "0x1""#,
             exact_message: None,
-        },
-        Case {
-            name: "null string body field",
-            method: Method::POST,
-            uri: "/api/v1/auth/approve",
-            body: r#"{"authId":null}"#,
-            message_fragment: "invalid value for string field authId: null",
-            exact_message: Some("invalid value for string field authId: null"),
         },
         Case {
             name: "object timestamp body field",

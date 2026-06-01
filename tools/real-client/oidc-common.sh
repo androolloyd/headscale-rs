@@ -668,6 +668,7 @@ start_client() {
 
 drive_oidc_login() {
   echo "::group::tailscale OIDC login"
+  local oidc_registration_success_pattern="Authenticated|Signed in successfully|Node registered|Node reauthenticated"
   local tailscale_up_args=(
     "--login-server=${control_url}" \
     "--hostname=${client_name}" \
@@ -716,8 +717,8 @@ drive_oidc_login() {
       --data "headscale_register_confirm=${confirm_csrf}" \
       "${control_url}/register/confirm/${registration_id}" \
       >"${work_dir}/oidc-confirm.html"
-    grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-confirm.html"
-  elif grep -Eq "Authenticated|Signed in successfully" "${work_dir}/oidc-callback.html"; then
+    grep -Eq "${oidc_registration_success_pattern}" "${work_dir}/oidc-confirm.html"
+  elif grep -Eq "${oidc_registration_success_pattern}" "${work_dir}/oidc-callback.html"; then
     cp "${work_dir}/oidc-callback.html" "${work_dir}/oidc-confirm.html"
     echo "OIDC callback completed registration without explicit confirm form"
   else

@@ -39,9 +39,15 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_ADMIN_TOKEN",
     "HEADSCALE_CLI_ADDRESS",
     "HEADSCALE_CLI_API_KEY",
-    "HEADSCALE_UNIX_SOCKET",
     "HEADSCALE_CLI_INSECURE",
     "HEADSCALE_CLI_TIMEOUT",
+    "HEADSCALE_SERVER_URL",
+    "HEADSCALE_LISTEN_ADDR",
+    "HEADSCALE_METRICS_LISTEN_ADDR",
+    "HEADSCALE_GRPC_LISTEN_ADDR",
+    "HEADSCALE_GRPC_ALLOW_INSECURE",
+    "HEADSCALE_UNIX_SOCKET",
+    "HEADSCALE_UNIX_SOCKET_PERMISSION",
 ];
 
 const MOCKOIDC_ENV: &[&str] = &[
@@ -87,13 +93,17 @@ fn headscale_with_config(config: &Path, args: &[&str]) -> Output {
 }
 
 fn headscale_in(args: &[&str], cwd: &Path, home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_headscale"))
+    headscale_in_with_env(args, cwd, home, &[])
+}
+
+fn headscale_in_with_env(args: &[&str], cwd: &Path, home: &Path, envs: &[(&str, &str)]) -> Output {
+    let mut command = headscale_clean_command();
+    command
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
-        .env_remove("HEADSCALE_CONFIG")
-        .output()
-        .expect("run headscale binary")
+        .envs(envs.iter().copied());
+    command.output().expect("run headscale binary")
 }
 
 fn headscale_in_with_mockoidc_env(
@@ -102,9 +112,8 @@ fn headscale_in_with_mockoidc_env(
     home: &Path,
     mockoidc_env: &[(&str, &str)],
 ) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_headscale"));
+    let mut command = headscale_clean_command();
     command.args(args).current_dir(cwd).env("HOME", home);
-    command.env_remove("HEADSCALE_CONFIG");
     for key in MOCKOIDC_ENV {
         command.env_remove(key);
     }
@@ -1840,6 +1849,38 @@ dns:
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn configtest_rejects_env_invalid_grpc_listen_addr() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_GRPC_LISTEN_ADDR", "not-a-socket")],
+    );
+
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
+        "configtest invalid gRPC listener from env",
+    );
 }
 
 #[test]

@@ -1351,3 +1351,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - SQLite write transactions that protect admin/user/preauth/payment mutations
   now use `BEGIN IMMEDIATE`, matching upstream's `_txlock=immediate` intent
   without changing Postgres transaction behavior.
+
+## 2026-06-01 server transport env override parity slice
+
+- `CliConfig::load` and default config discovery now apply current-upstream
+  Viper-style server transport env overrides for `HEADSCALE_SERVER_URL`,
+  `HEADSCALE_LISTEN_ADDR`, `HEADSCALE_METRICS_LISTEN_ADDR`,
+  `HEADSCALE_GRPC_LISTEN_ADDR`, `HEADSCALE_GRPC_ALLOW_INSECURE`,
+  `HEADSCALE_UNIX_SOCKET`, and `HEADSCALE_UNIX_SOCKET_PERMISSION`.
+- `HEADSCALE_UNIX_SOCKET` updates both the server runtime socket and the
+  top-level local CLI socket fallback so `headscale serve` and local admin
+  commands resolve the same env-provided Unix socket.
+- Focused coverage includes unit tests for the loaded runtime config and a
+  process-level `configtest` snapshot proving env-provided invalid
+  `grpc_listen_addr` fails like the same file-provided value.

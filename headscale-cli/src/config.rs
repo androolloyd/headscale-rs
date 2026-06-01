@@ -524,6 +524,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
@@ -557,6 +558,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
         config.resolve_oidc_client_secret()?;
         Ok(config)
@@ -651,6 +653,67 @@ impl CliConfig {
                     self.cli
                         .get_or_insert_with(AdminCliConfig::default)
                         .insecure = Some(insecure);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_server_transport_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_SERVER_URL" => {
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .server_url = Some(value.to_string());
+                }
+                "HEADSCALE_LISTEN_ADDR" => {
+                    self.server.get_or_insert_with(ServerConfig::default).listen =
+                        value.to_string();
+                }
+                "HEADSCALE_METRICS_LISTEN_ADDR" => {
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .metrics_listen_addr = Some(value.to_string());
+                }
+                "HEADSCALE_GRPC_LISTEN_ADDR" => {
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .grpc_listen_addr = value.to_string();
+                }
+                "HEADSCALE_GRPC_ALLOW_INSECURE" => {
+                    let allow_insecure =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .grpc_allow_insecure = allow_insecure;
+                }
+                "HEADSCALE_UNIX_SOCKET" => {
+                    let path = PathBuf::from(value);
+                    self.unix_socket = Some(path.clone());
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .unix_socket = path;
+                }
+                "HEADSCALE_UNIX_SOCKET_PERMISSION" => {
+                    let permission = parse_u32_repr(U32Repr::String(value.to_string()))
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.unix_socket_permission = Some(permission);
+                    self.server
+                        .get_or_insert_with(ServerConfig::default)
+                        .unix_socket_permission = permission;
                 }
                 _ => {}
             }
@@ -3065,6 +3128,57 @@ timeout = "7s"
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_CLI_TIMEOUT"));
+    }
+
+    #[test]
+    fn applies_headscale_server_transport_env_overrides_to_runtime_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_server_transport_env_overrides_from([
+                ("HEADSCALE_SERVER_URL", "https://env-headscale.example"),
+                ("HEADSCALE_LISTEN_ADDR", "127.0.0.1:18080"),
+                ("HEADSCALE_METRICS_LISTEN_ADDR", "127.0.0.1:19090"),
+                ("HEADSCALE_GRPC_LISTEN_ADDR", "127.0.0.1:150443"),
+                ("HEADSCALE_GRPC_ALLOW_INSECURE", "true"),
+                ("HEADSCALE_UNIX_SOCKET", "/tmp/headscale-env.sock"),
+                ("HEADSCALE_UNIX_SOCKET_PERMISSION", "0o760"),
+            ])
+            .unwrap();
+
+        let server = config.server.as_ref().unwrap();
+        assert_eq!(
+            server.server_url.as_deref(),
+            Some("https://env-headscale.example")
+        );
+        assert_eq!(server.listen, "127.0.0.1:18080");
+        assert_eq!(
+            server.metrics_listen_addr.as_deref(),
+            Some("127.0.0.1:19090")
+        );
+        assert_eq!(server.grpc_listen_addr, "127.0.0.1:150443");
+        assert!(server.grpc_allow_insecure);
+        assert_eq!(server.unix_socket, PathBuf::from("/tmp/headscale-env.sock"));
+        assert_eq!(server.unix_socket_permission, 0o760);
+        assert_eq!(
+            config.unix_socket.as_deref(),
+            Some(Path::new("/tmp/headscale-env.sock"))
+        );
+        assert_eq!(config.unix_socket_permission, Some(0o760));
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_server_transport_env_overrides() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_server_transport_env_overrides_from([(
+                "HEADSCALE_UNIX_SOCKET_PERMISSION",
+                "not-a-permission",
+            )])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_UNIX_SOCKET_PERMISSION"));
     }
 
     #[test]

@@ -1677,6 +1677,22 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
             &["completion", "zsh", "bad"][..],
             "Error: unknown command \"bad\" for \"headscale completion zsh\"\n",
         ),
+        (
+            &["completion", "fish", "bad"][..],
+            include_str!("snapshots/utility_completion_fish_unknown_command.stderr"),
+        ),
+        (
+            &["completion", "fish", "--no-descriptions", "bad"][..],
+            include_str!("snapshots/utility_completion_fish_unknown_command.stderr"),
+        ),
+        (
+            &["completion", "powershell", "bad"][..],
+            include_str!("snapshots/utility_completion_powershell_unknown_command.stderr"),
+        ),
+        (
+            &["completion", "powershell", "--no-descriptions", "bad"][..],
+            include_str!("snapshots/utility_completion_powershell_unknown_command.stderr"),
+        ),
     ] {
         let output = headscale_clean(args);
         assert_eq!(

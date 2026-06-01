@@ -3294,6 +3294,31 @@ impl MachineRegistry {
         self.update_with_operation_and_wake(operation, Some(change), f)
     }
 
+    fn update_with_operation_and_optional_change<R, F>(&self, operation: &str, f: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, MachineRecord>) -> (R, Option<PendingMapChange>),
+    {
+        let start = Instant::now();
+        let (r, change) = {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            let (r, change) = f(&mut next);
+            // `None` means the caller observed no lifecycle mutation, so keep
+            // the current snapshot/generation intact.
+            if change.is_some() {
+                *g = Arc::new(next);
+            }
+            (r, change)
+        };
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation(operation, elapsed);
+        if let Some(change) = change {
+            self.record_nodestore_batch(1, elapsed);
+            self.wake_waiters_with(change);
+        }
+        r
+    }
+
     fn update_with_operation_quiet<R, F>(&self, operation: &str, f: F) -> R
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
@@ -3335,18 +3360,22 @@ impl MachineRegistry {
     /// otherwise. Mirrors `db.SetExpiry` in
     /// `juanfont/headscale@main:hscontrol/db/node.go`.
     pub fn set_expiry(&self, node_key_hex: &str, expiry: Option<DateTime<Utc>>) -> bool {
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        self.update_with_operation_and_optional_change("update", |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
+                    let node_id = rec.stable_node_id_for_key(node_key_hex);
                     rec.expiry = expiry;
-                    true
+                    (
+                        true,
+                        Some(PendingMapChange::origin(
+                            MapChangeReason::KeyExpiry,
+                            node_id,
+                        )),
+                    )
                 }
-                None => false,
-            },
-        )
+                None => (false, None),
+            }
+        })
     }
 
     /// Rename a machine. Upstream's `db.NodeRenameNode` validates
@@ -3364,18 +3393,22 @@ impl MachineRegistry {
         {
             return false;
         }
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        self.update_with_operation_and_optional_change("update", |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
+                    let node_id = rec.stable_node_id_for_key(node_key_hex);
                     rec.hostname = new_hostname;
-                    true
+                    (
+                        true,
+                        Some(PendingMapChange::target(
+                            MapChangeReason::FullSelfUpdate,
+                            node_id,
+                        )),
+                    )
                 }
-                None => false,
-            },
-        )
+                None => (false, None),
+            }
+        })
     }
 
     /// Logout a machine: stamps `expiry = now()` so the next `/map`
@@ -3387,33 +3420,44 @@ impl MachineRegistry {
     /// re-authenticate." `delete` is the destructive counterpart.
     pub fn logout(&self, node_key_hex: &str) -> bool {
         let now = Utc::now();
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        self.update_with_operation_and_optional_change("update", |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
+                    let node_id = rec.stable_node_id_for_key(node_key_hex);
                     rec.expiry = Some(now);
-                    true
+                    (
+                        true,
+                        Some(PendingMapChange::origin(
+                            MapChangeReason::KeyExpiry,
+                            node_id,
+                        )),
+                    )
                 }
-                None => false,
-            },
-        )
+                None => (false, None),
+            }
+        })
     }
 
     /// Remove a machine from the registry entirely. Mirrors
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        let existed = self.inner.read().contains_key(node_key_hex);
-        if existed {
-            self.cancel_stream_connections(node_id);
-        }
-        let removed = self.update_with_operation_and_change(
-            "delete",
-            PendingMapChange::peers_removed(vec![node_id]),
-            |map| map.remove(node_key_hex).is_some(),
-        );
+        let Some(node_id) = self
+            .inner
+            .read()
+            .get(node_key_hex)
+            .map(|rec| rec.stable_node_id_for_key(node_key_hex))
+        else {
+            return false;
+        };
+
+        self.cancel_stream_connections(node_id);
+        let removed = self.update_with_operation_and_optional_change("delete", |map| {
+            if map.remove(node_key_hex).is_some() {
+                (true, Some(PendingMapChange::peers_removed(vec![node_id])))
+            } else {
+                (false, None)
+            }
+        });
         if removed {
             self.forget_batcher_connection_state(node_id);
             if let Some(gc) = self.ephemeral_gc() {
@@ -3456,47 +3500,51 @@ impl MachineRegistry {
         if tags.is_empty() {
             return false;
         }
-        let mut tags_changed = false;
-        let node_exists = self.update_with_operation_and_wake("update", None, |map| {
+        self.update_with_operation_and_optional_change("update", |map| {
             match map.get_mut(node_key_hex) {
-                Some(rec) => {
-                    if rec.forced_tags != tags {
-                        rec.forced_tags = tags;
-                        tags_changed = true;
-                    }
-                    true
+                Some(rec) if rec.forced_tags != tags => {
+                    rec.forced_tags = tags;
+                    (
+                        true,
+                        Some(PendingMapChange::global(MapChangeReason::TagUpdate)),
+                    )
                 }
-                None => false,
+                Some(_) => (true, None),
+                None => (false, None),
             }
-        });
-        if tags_changed {
-            self.wake_waiters_with(PendingMapChange::global(MapChangeReason::TagUpdate));
-        }
-        node_exists
+        })
     }
 
     /// Replace a machine's approved subnet routes. Empty list clears
     /// route approval. The register/map paths maintain
     /// `available_routes`; this method records operator approval.
     pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        let node_id = self.stable_node_id_for_key(node_key_hex);
         let mut clear_unhealthy = false;
-        let changed = self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        let mut changed_node_id = None;
+        let changed = self.update_with_operation_and_optional_change("update", |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
+                    let node_id = rec.stable_node_id_for_key(node_key_hex);
                     rec.approved_routes = routes;
+                    changed_node_id = Some(node_id);
                     clear_unhealthy =
                         active_primary_routes(&rec.available_routes, &rec.approved_routes)
                             .is_empty();
-                    true
+                    (
+                        true,
+                        Some(PendingMapChange::broadcast_peer(
+                            MapChangeReason::RouteUpdate,
+                            node_id,
+                        )),
+                    )
                 }
-                None => false,
-            },
-        );
+                None => (false, None),
+            }
+        });
         if changed && clear_unhealthy {
-            self.primary_routes.write().clear_unhealthy(node_id);
+            if let Some(node_id) = changed_node_id {
+                self.primary_routes.write().clear_unhealthy(node_id);
+            }
         }
         changed
     }
@@ -3504,18 +3552,22 @@ impl MachineRegistry {
     /// Replace a machine's advertised subnet routes. Empty list clears
     /// advertised routes while preserving operator approvals.
     pub fn set_available_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        self.update_with_operation_and_optional_change("update", |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
+                    let node_id = rec.stable_node_id_for_key(node_key_hex);
                     rec.available_routes = routes;
-                    true
+                    (
+                        true,
+                        Some(PendingMapChange::broadcast_peer(
+                            MapChangeReason::RouteUpdate,
+                            node_id,
+                        )),
+                    )
                 }
-                None => false,
-            },
-        )
+                None => (false, None),
+            }
+        })
     }
 
     /// Remove every ephemeral node whose `last_seen` is older than
@@ -4874,6 +4926,35 @@ mod registry_tests {
 
         // Unknown key → false (no mutation).
         assert!(!reg.set_expiry("nk-zzz", Some(when)));
+    }
+
+    #[test]
+    fn unknown_lifecycle_mutators_do_not_emit_ghost_map_changes() {
+        let reg = MachineRegistry::new();
+        let generation = reg.subscribe_gen();
+        let snapshot = reg.snapshot();
+        let when = Utc::now() + chrono::Duration::seconds(60);
+
+        assert!(!reg.set_expiry("nk-missing", Some(when)));
+        assert!(!reg.logout("nk-missing"));
+        assert!(!reg.rename("nk-missing", "renamed".into()));
+        assert!(!reg.delete("nk-missing"));
+        assert!(!reg.set_forced_tags("nk-missing", vec!["tag:dev".into()]));
+        assert!(!reg.set_approved_routes("nk-missing", vec!["10.1.0.0/24".into()]));
+        assert!(!reg.set_available_routes("nk-missing", vec!["10.1.0.0/24".into()]));
+
+        assert!(
+            !generation.has_changed().unwrap(),
+            "unknown lifecycle requests should not wake map streams"
+        );
+        assert!(
+            reg.map_change_history().is_empty(),
+            "unknown lifecycle requests should not record synthetic map changes"
+        );
+        assert!(
+            Arc::ptr_eq(&snapshot, &reg.snapshot()),
+            "unknown lifecycle requests should not publish a fresh NodeStore snapshot"
+        );
     }
 
     #[test]

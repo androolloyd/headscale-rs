@@ -827,6 +827,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   inherited `-o`/`--output` and `--force` flags, plus `mockoidc`'s narrower
   help/unknown-global-flag behavior. The process tests now lock those edges
   against the audited upstream Cobra output.
+- Current-head process snapshots now also pin completion fish/powershell
+  extra-positional errors, including their `--no-descriptions` variants, to the
+  audited upstream nested Cobra command path.
 
 ## 2026-06-01 Fourth-wave parity coverage
 

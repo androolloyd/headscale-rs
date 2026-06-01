@@ -351,6 +351,14 @@
   },
   {
     "engine": "headscale",
+    "name": "acl-validation-tag-src-self-dst",
+    "filter": [
+
+    ],
+    "policy_error": "autogroup:self can only be used with users"
+  },
+  {
+    "engine": "headscale",
     "name": "acl-validation-undefined-group-src",
     "filter": [
 

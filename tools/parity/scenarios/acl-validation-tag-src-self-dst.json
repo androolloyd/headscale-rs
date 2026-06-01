@@ -1,0 +1,16 @@
+{
+  "name": "acl-validation-tag-src-self-dst",
+  "expect_policy_error": "autogroup:self can only be used with users",
+  "policy": {
+    "tagOwners": {
+      "tag:client": ["alice@"]
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "src": ["tag:client"],
+        "dst": ["autogroup:self:22"]
+      }
+    ]
+  }
+}

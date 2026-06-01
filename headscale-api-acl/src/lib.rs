@@ -1012,6 +1012,7 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     }
     for rule in &doc.rules {
         validate_acl_rule(doc, rule, &mut errs);
+        validate_acl_src_dst_combination(rule, &mut errs);
     }
     for grant in &doc.node_attrs {
         validate_node_attr_grant(doc, grant, &mut errs);
@@ -1178,6 +1179,24 @@ fn validate_acl_rule(doc: &AclDoc, rule: &AclRule, errs: &mut Vec<String>) {
     for dst in &rule.dst {
         validate_acl_dst_alias(dst, errs);
         validate_acl_ref(doc, dst, errs);
+    }
+}
+
+fn validate_acl_src_dst_combination(rule: &AclRule, errs: &mut Vec<String>) {
+    if !rule.dst.iter().any(|dst| dst == "autogroup:self") {
+        return;
+    }
+
+    for src in &rule.src {
+        if src == "*" || src.contains('@') || src.starts_with("group:") || src == "autogroup:member"
+        {
+            continue;
+        }
+        errs.push(
+            "autogroup:self can only be used with users, groups, or supported autogroups"
+                .to_string(),
+        );
+        return;
     }
 }
 
@@ -4238,6 +4257,23 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains(r#""autogroup:self" used in source"#));
+    }
+
+    #[test]
+    fn rejects_acl_tag_source_to_autogroup_self_destination_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:client": ["alice@"]},
+              "acls": [{
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["autogroup:self:22"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("autogroup:self can only be used with users"));
     }
 
     #[test]

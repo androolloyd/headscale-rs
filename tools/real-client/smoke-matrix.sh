@@ -223,6 +223,7 @@ smoke_ids=(
   route-health-mixed-exit-all-unhealthy
   route-health-mixed-exit-all-unhealthy-reload
   route-health-mixed-exit-all-unhealthy-restart
+  taildrop-capmap
   derp-private
   ssh
   ssh-localpart
@@ -372,6 +373,7 @@ smoke_areas=(
   routes
   routes
   routes
+  tailcfg
   derp
   ssh
   ssh
@@ -521,6 +523,7 @@ smoke_rust_scripts=(
   tools/real-client/route-health-mixed-exit-all-unhealthy-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-restart-smoke.sh
+  tools/real-client/taildrop-capmap-smoke.sh
   tools/real-client/derp-private-smoke.sh
   tools/real-client/ssh-smoke.sh
   tools/real-client/ssh-localpart-smoke.sh
@@ -670,6 +673,7 @@ smoke_go_scripts=(
   tools/real-client/route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
+  tools/real-client/taildrop-capmap-headscale-go-smoke.sh
   tools/real-client/derp-private-headscale-go-smoke.sh
   tools/real-client/ssh-headscale-go-smoke.sh
   tools/real-client/ssh-localpart-headscale-go-smoke.sh
@@ -819,6 +823,7 @@ smoke_assertions=(
   "current-head route-health mixed exit-node all-unavailable last-known subnet primary retention"
   "current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention"
   "current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart"
+  "taildrop disabled removes file-sharing from stock-client self CapMap"
   "private DERP relay, STUN, verify-client admission, and DERP map metadata"
   "Tailscale SSH allow, deny, and ACL timeout"
   "current-head Tailscale SSH localpart login users from profile emails"

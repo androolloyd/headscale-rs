@@ -416,6 +416,11 @@ relogin against Rust and pinned headscale-go. The paired
 pre-relogin route advertisement/approval and asserts the logical node keeps its
 approved route state after relogin.
 
+Recent coverage note (2026-06-01): paired `taildrop-capmap` stock-client rows
+now disable `taildrop.enabled` in Rust/headscale-go and assert the stock-client
+self `CapMap` omits `https://tailscale.com/cap/file-sharing` through
+`tailscale debug netmap`.
+
 Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
 neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and
 message, with grpc-gateway HTTP/status JSON coverage for the same edge.

@@ -1115,3 +1115,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   fresh auth key, and assert stable IPs plus stable logical node/user/route
   state.
 - The bounded push/PR real-client smoke set now includes the new row.
+
+## 2026-06-01 Taildrop CapMap stock-client smoke slice
+
+- Added `REAL_CLIENT_TAILDROP_ENABLED` and
+  `REAL_CLIENT_EXPECT_FILE_SHARING_CAP` knobs to the paired auth-key stock-client
+  harnesses.
+- The Rust real-client harness now accepts `HSRS_HARNESS_TAILDROP_ENABLED` and
+  projects it through `RuntimeConfigSnapshot.taildrop.enabled`.
+- Added paired `taildrop-capmap` Rust/headscale-go rows that disable Taildrop
+  and assert the stock-client self `CapMap` omits the file-sharing capability.

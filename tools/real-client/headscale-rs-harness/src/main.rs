@@ -165,6 +165,8 @@ struct Args {
         env = "HSRS_HARNESS_ROUTE_HEALTH_PROBE_TIMEOUT_SECS"
     )]
     route_health_probe_timeout_secs: u64,
+    #[arg(long, default_value_t = true, env = "HSRS_HARNESS_TAILDROP_ENABLED")]
+    taildrop_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -458,6 +460,9 @@ async fn main() -> Result<()> {
 
     let registration_cache = Arc::new(RegistrationCache::new());
     let derp_verify = Arc::new(DerpVerifyLog::default());
+    let mut runtime_config = headscale_api::tailscale_wire::RuntimeConfigSnapshot::default();
+    runtime_config.taildrop.enabled = args.taildrop_enabled;
+
     let state = WireState {
         server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(&args.state_dir)?),
         preauth: redeemer.clone(),
@@ -471,7 +476,7 @@ async fn main() -> Result<()> {
         knock: KnockConfig::disabled(),
         dns,
         public_control_url: Some(public_url.clone()),
-        runtime_config: Arc::new(headscale_api::tailscale_wire::RuntimeConfigSnapshot::default()),
+        runtime_config: Arc::new(runtime_config),
         registration_cache: registration_cache.clone(),
         pings: Arc::new(PingTracker::new()),
         mapresponse_debug: Arc::new(MapResponseDebugStore::disabled()),

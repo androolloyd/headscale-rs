@@ -107,6 +107,8 @@ expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIO
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
 expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
+taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
+expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
   enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-true}"
@@ -216,6 +218,36 @@ case "${expected_debug_ping}" in
     exit 2
     ;;
 esac
+taildrop_enabled_bool=""
+if [[ -n "${taildrop_enabled}" ]]; then
+  case "${taildrop_enabled}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      taildrop_enabled_bool=true
+      ;;
+    0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+      taildrop_enabled_bool=false
+      ;;
+    *)
+      echo "REAL_CLIENT_TAILDROP_ENABLED must be true or false, got ${taildrop_enabled}" >&2
+      exit 2
+      ;;
+  esac
+fi
+expected_file_sharing_cap_bool=""
+if [[ -n "${expected_file_sharing_cap}" ]]; then
+  case "${expected_file_sharing_cap}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      expected_file_sharing_cap_bool=true
+      ;;
+    0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+      expected_file_sharing_cap_bool=false
+      ;;
+    *)
+      echo "REAL_CLIENT_EXPECT_FILE_SHARING_CAP must be true or false, got ${expected_file_sharing_cap}" >&2
+      exit 2
+      ;;
+  esac
+fi
 case "${authkey_relogin_same_user}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     authkey_relogin_same_user_flag=1
@@ -1258,6 +1290,25 @@ assert_derp_map() {
     ' "${netmap_path}" "${expected_derp_region_id}" "${expected_derp_region_code}" "${expected_derp_region_name}" "${expected_derp_host}" "${expected_derp_port}" "${expected_derp_stun_port}" "${expected_derp_insecure_for_tests}" "${expected_derp_omit_default_regions}" >"${output_path}"
 }
 
+assert_self_file_sharing_cap() {
+  local client_name="$1"
+  local output_path="$2"
+  local expected="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      path = ARGV.fetch(0)
+      expected = ARGV.fetch(1) == "true"
+      cap = "https://tailscale.com/cap/file-sharing"
+      netmap = JSON.parse(File.read(path))
+      self_node = netmap["SelfNode"] || netmap["selfNode"] || {}
+      cap_map = self_node["CapMap"] || self_node["capMap"] || {}
+      has_cap = cap_map.key?(cap)
+      abort("expected file-sharing CapMap presence #{expected}, got #{has_cap}; CapMap keys=#{cap_map.keys.inspect}") unless has_cap == expected
+      puts JSON.pretty_generate({file_sharing_cap: has_cap, cap_map_keys: cap_map.keys.sort})
+    ' "${netmap_path}" "${expected}" >"${output_path}"
+}
+
 tailscale_derp_ping_succeeded() {
   local source_name="$1"
   local target_name="$2"
@@ -1467,6 +1518,14 @@ log:
   level: info
   format: text
 EOF
+
+if [[ -n "${taildrop_enabled_bool}" ]]; then
+  cat >>"${config_path}" <<EOF
+
+taildrop:
+  enabled: ${taildrop_enabled_bool}
+EOF
+fi
 
 if [[ -n "${route_health_probe_interval_secs}" || -n "${route_health_probe_timeout_secs}" ]]; then
   cat >>"${config_path}" <<EOF
@@ -2418,6 +2477,20 @@ if [[ -n "${policy_reload_json}" ]]; then
   printf '%s\n' "${policy_reload_json}" >"${work_dir}/policy.hujson"
   kill -HUP "${server_pid}"
   wait_for_server "headscale-go health after policy reload" "headscale_http_health_probe"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_file_sharing_cap_bool}" ]]; then
+  echo "::group::assert file-sharing CapMap"
+  for client_name in "${client_names[@]}"; do
+    if ! wait_for "file-sharing CapMap ${client_name}" \
+      "assert_self_file_sharing_cap '${client_name}' '${work_dir}/file-sharing-cap-${client_name}.json' '${expected_file_sharing_cap_bool}'"; then
+      cat "${work_dir}/file-sharing-cap-${client_name}.json.err" >&2 || true
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    cat "${work_dir}/file-sharing-cap-${client_name}.json"
+  done
   echo "::endgroup::"
 fi
 

@@ -131,13 +131,17 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-route-via-multiprefix-reload-restart` | `postgres-route-via-multiprefix-reload-restart-smoke.sh` | `postgres-route-via-multiprefix-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload survives server restart |
 | Database | `postgres-route-health` | `postgres-route-health-smoke.sh` | `postgres-route-health-headscale-go-smoke.sh` | Production Postgres current-head route-health failover |
 | Database | `postgres-route-health-reload` | `postgres-route-health-reload-smoke.sh` | `postgres-route-health-reload-headscale-go-smoke.sh` | Production Postgres current-head route-health policy reload failover |
+| Database | `postgres-route-health-all-unhealthy` | `postgres-route-health-all-unhealthy-smoke.sh` | `postgres-route-health-all-unhealthy-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention |
+| Database | `postgres-route-health-all-unhealthy-reload` | `postgres-route-health-all-unhealthy-reload-smoke.sh` | `postgres-route-health-all-unhealthy-reload-headscale-go-smoke.sh` | Production Postgres route-health policy reload preserves all-unhealthy retention |
 | Database | `postgres-route-health-restart` | `postgres-route-health-restart-smoke.sh` | `postgres-route-health-restart-headscale-go-smoke.sh` | Production Postgres current-head route-health survives server restart |
 | Database | `postgres-route-health-primary-restart` | `postgres-route-health-primary-restart-smoke.sh` | `postgres-route-health-primary-restart-headscale-go-smoke.sh` | Production Postgres route-health primary selection survives server restart |
 | Database | `postgres-route-health-reload-restart` | `postgres-route-health-reload-restart-smoke.sh` | `postgres-route-health-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health policy reload survives server restart |
 | Database | `postgres-route-health-all-unhealthy-restart` | `postgres-route-health-all-unhealthy-restart-smoke.sh` | `postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention survives server restart |
 | Database | `postgres-route-health-all-unhealthy-reload-restart` | `postgres-route-health-all-unhealthy-reload-restart-smoke.sh` | `postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy policy reload survives server restart |
+| Database | `postgres-route-health-mixed-exit` | `postgres-route-health-mixed-exit-smoke.sh` | `postgres-route-health-mixed-exit-headscale-go-smoke.sh` | Production Postgres route-health ignores exit-only routes during HA failover |
 | Database | `postgres-route-health-mixed-exit-restart` | `postgres-route-health-mixed-exit-restart-smoke.sh` | `postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node separation survives server restart |
 | Database | `postgres-route-health-mixed-exit-reload-restart` | `postgres-route-health-mixed-exit-reload-restart-smoke.sh` | `postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node policy reload survives server restart |
+| Database | `postgres-route-health-mixed-exit-all-unhealthy` | `postgres-route-health-mixed-exit-all-unhealthy-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy-restart` | `postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention survives server restart |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy policy reload survives server restart |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
@@ -732,6 +736,10 @@ tools/real-client/postgres-route-health-smoke.sh
 tools/real-client/postgres-route-health-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-reload-smoke.sh
 tools/real-client/postgres-route-health-reload-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-reload-smoke.sh
+tools/real-client/postgres-route-health-all-unhealthy-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-restart-smoke.sh
 tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-primary-restart-smoke.sh
@@ -742,10 +750,14 @@ tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-reload-restart-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-reload-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh

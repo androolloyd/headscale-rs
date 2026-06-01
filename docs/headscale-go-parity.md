@@ -411,7 +411,10 @@ isolation cases, bringing the Postgres stock-client matrix to sixty-nine rows.
 Recent coverage note (2026-06-01): paired `authkey-relogin-same-user`
 stock-client rows now cover logout followed by fresh auth-key relogin as the
 same user, asserting the existing node identity keeps its Tailscale IPs after
-relogin against Rust and pinned headscale-go.
+relogin against Rust and pinned headscale-go. The paired
+`authkey-relogin-route-preserve` row extends the same lifecycle through
+pre-relogin route advertisement/approval and asserts the logical node keeps its
+approved route state after relogin.
 
 Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
 neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and

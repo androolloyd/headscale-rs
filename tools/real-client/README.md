@@ -80,6 +80,7 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `authkey-nonreusable` | `authkey-nonreusable-smoke.sh` | `authkey-nonreusable-headscale-go-smoke.sh` | One-time auth-key rejects second stock-client registration |
 | Registration | `authkey-expired` | `authkey-expired-smoke.sh` | `authkey-expired-headscale-go-smoke.sh` | Expired auth-key rejects stock-client registration |
 | Lifecycle | `authkey-relogin-same-user` | `authkey-relogin-same-user-smoke.sh` | `authkey-relogin-same-user-headscale-go-smoke.sh` | Auth-key logout then same-user relogin preserves node identity and IPs |
+| Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
@@ -317,6 +318,13 @@ directory, starts a local SQLite-backed server with a local DERP map fixture,
 mints the same reusable auth-key shape through the upstream CLI, runs the same
 stock Tailscale client image, and asserts that headscale-go registered one
 `alice` node.
+
+The same-user relogin wrappers run an initial auth-key login, mint a fresh key
+for the same user, run `tailscale logout`, and relogin with the existing
+client state. They assert stable Tailscale IPs and stable logical node state.
+The route-preservation variant advertises and approves `REAL_CLIENT_ROUTE`
+(default `10.40.0.0/24`) before relogin, then asserts the approved route
+remains on the same node.
 
 Additional knobs:
 

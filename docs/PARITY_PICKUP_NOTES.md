@@ -1102,6 +1102,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The shared auth-key harnesses can now opt into a logout plus fresh same-user
   auth-key relogin cycle, wait for the stock client to return to `NeedsLogin`,
   relogin with a newly minted key, and assert the node keeps its Tailscale IPs.
-- This closes the first upstream auth-key lifecycle smoke gap and leaves the
-  route-preservation, deleted-key restart, expired-key relogin rejection, and
-  different-user relogin cases as the next auth-key lifecycle rows.
+- This closes the first upstream auth-key lifecycle smoke gap and leaves
+  deleted-key restart, expired-key relogin rejection, and different-user
+  relogin cases as the next auth-key lifecycle rows.
+
+## 2026-06-01 auth-key relogin route-preservation smoke slice
+
+- Moved the shared same-user auth-key relogin flow to run after route approval,
+  so wrappers can prove approved route state survives the relogin boundary.
+- Added paired `authkey-relogin-route-preserve` Rust/headscale-go rows that
+  advertise and approve a stock-client route, relogin the same user with a
+  fresh auth key, and assert stable IPs plus stable logical node/user/route
+  state.
+- The bounded push/PR real-client smoke set now includes the new row.

@@ -387,7 +387,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty-one Pg rows, including
+  all eighty-three Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-route-preserve`,
@@ -405,8 +405,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
   `postgres-ssh`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`,
-  `postgres-ssh-accept-env`, and the paired wrong-user, expired, and cancelled
-  OIDC SSH-check denial rows; broader Pg
+  `postgres-ssh-accept-env`, `postgres-ssh-localpart`,
+  `postgres-ssh-profile-variants`, and the paired wrong-user, expired, and
+  cancelled OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
   surfaces
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
@@ -948,6 +949,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `acceptEnv` policy fixture.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to eighty-one rows.
+
+## 2026-06-01 Postgres SSH profile/localpart smoke slice
+
+- Added paired `postgres-ssh-localpart` and
+  `postgres-ssh-profile-variants` Rust/headscale-go rows over the production
+  Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now supports per-client user
+  profile emails for production smokes, matching the current-head headscale-go
+  localpart/profile SSH policy cases while preserving username-based Rust
+  compatibility.
+- The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to eighty-three rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

@@ -47,6 +47,7 @@ expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
+client_user_emails_csv="${REAL_CLIENT_CLIENT_USER_EMAILS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
 up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-60s}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
@@ -497,6 +498,23 @@ else
   done
 fi
 
+client_user_emails=()
+for ((idx = 0; idx < client_count; idx++)); do
+  client_user_emails+=("")
+done
+if [[ -n "${client_user_emails_csv}" ]]; then
+  IFS=',' read -r -a client_user_emails <<<"${client_user_emails_csv}"
+  if ((${#client_user_emails[@]} != client_count)); then
+    echo "REAL_CLIENT_CLIENT_USER_EMAILS must contain ${client_count} comma-separated values, got ${client_user_emails_csv}" >&2
+    exit 2
+  fi
+  for idx in "${!client_user_emails[@]}"; do
+    if [[ "${client_user_emails[$idx]}" == "-" ]]; then
+      client_user_emails[$idx]=""
+    fi
+  done
+fi
+
 preauth_tags_values=()
 for ((idx = 0; idx < client_count; idx++)); do
   preauth_tags_values+=("${preauth_tags}")
@@ -560,6 +578,7 @@ authkeys=()
 current_client_index=0
 created_user_names=()
 created_user_ids=()
+created_user_emails=()
 postgres_admin_url=""
 postgres_database_name=""
 postgres_host=""
@@ -1515,21 +1534,33 @@ mint_preauth_key_for_user() {
 
 create_user_and_key() {
   echo "::group::create users"
-  local user idx user_id exists safe_user
-  for user in "${client_users[@]}"; do
+  local user user_email idx created_idx user_id exists safe_user existing_email create_args
+  for idx in "${!client_users[@]}"; do
+    user="${client_users[$idx]}"
+    user_email="${client_user_emails[$idx]}"
     exists=0
-    for idx in "${!created_user_names[@]}"; do
-      if [[ "${created_user_names[$idx]}" == "${user}" ]]; then
+    for created_idx in "${!created_user_names[@]}"; do
+      if [[ "${created_user_names[$created_idx]}" == "${user}" ]]; then
+        existing_email="${created_user_emails[$created_idx]}"
+        if [[ "${user_email}" != "${existing_email}" ]]; then
+          echo "REAL_CLIENT_CLIENT_USER_EMAILS has conflicting emails for user ${user}: ${existing_email} and ${user_email}" >&2
+          exit 2
+        fi
         exists=1
         break
       fi
     done
     ((exists == 0)) || continue
     safe_user="${user//[^a-zA-Z0-9_.-]/-}"
-    headscale_cmd -o json users create "${user}" >"${work_dir}/user-${safe_user}.json"
+    create_args=(-o json users create "${user}")
+    if [[ -n "${user_email}" ]]; then
+      create_args+=(--email "${user_email}")
+    fi
+    headscale_cmd "${create_args[@]}" >"${work_dir}/user-${safe_user}.json"
     user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user-${safe_user}.json")"
     created_user_names+=("${user}")
     created_user_ids+=("${user_id}")
+    created_user_emails+=("${user_email}")
     echo "created user ${user} ${user_id}"
   done
   echo "::endgroup::"

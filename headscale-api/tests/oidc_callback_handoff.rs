@@ -12,17 +12,19 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::Duration as ChronoDuration;
+use chrono::{Duration as ChronoDuration, Utc};
 use headscale_api::{
     dns::DnsStore,
     oidc::{OidcAuthConfig, OidcAuthRuntime, OidcPkceConfig, OidcPkceMethod, OidcPolicyConfig},
-    policy::PolicyStore,
+    policy::{PolicyStore, parse_hujson_policy},
     tailscale_wire::{
-        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRegistry, PreauthRedeemer,
-        RedeemError, RedeemOk, RegisterResponse, RegistrationCache, ServerNoiseKey, WireState,
-        noise::NoisePeerMachineKey, register as wire_register_handlers, router_with_oidc,
+        AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, MapResponse,
+        PreauthRedeemer, RedeemError, RedeemOk, RegisterResponse, RegistrationCache,
+        ServerNoiseKey, WireState, map as wire_map_handlers, noise::NoisePeerMachineKey,
+        register as wire_register_handlers, router_with_oidc,
     },
 };
+use http_body_util::BodyExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -32,6 +34,8 @@ use tower::ServiceExt;
 
 const TEST_MACHINE_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+const VIEWER_MACHINE_KEY_HEX: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
 
 #[tokio::test]
 async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration() {
@@ -40,7 +44,24 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     let oidc = oidc_runtime(&provider.base_url);
     let app = router_with_oidc(state.clone(), oidc.clone());
     let machine_app = wire_machine_router(state.clone());
+    let viewer_key_hex = "cd".repeat(32);
     let node_key_hex = "ab".repeat(32);
+
+    let deny_policy = r#"{"acls":[]}"#;
+    state.policy.set(
+        parse_hujson_policy(deny_policy).unwrap(),
+        deny_policy.to_string(),
+    );
+    state
+        .machines
+        .upsert(viewer_key_hex.clone(), viewer_record(&viewer_key_hex));
+    let mut viewer_map_stream =
+        open_zstd_map_stream(machine_app.clone(), &viewer_key_hex, VIEWER_MACHINE_KEY_HEX).await;
+    let initial_map = next_zstd_map_response(&mut viewer_map_stream).await;
+    assert!(
+        initial_map.peers.is_empty(),
+        "deny-all policy should hide peers before OIDC registration"
+    );
 
     let initial = decode_register_response(
         machine_app
@@ -190,6 +211,44 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     assert!(registered.expiry.is_none());
     assert!(state.registration_cache.is_empty());
 
+    let allow_policy = r#"{
+        "acls": [
+            {"action":"accept","src":["*"],"dst":["*:*"]}
+        ]
+    }"#;
+    state.policy.set(
+        parse_hujson_policy(allow_policy).unwrap(),
+        allow_policy.to_string(),
+    );
+    let policy_delta = tokio::time::timeout(
+        StdDuration::from_secs(2),
+        next_zstd_map_response(&mut viewer_map_stream),
+    )
+    .await
+    .expect("policy mutation after OIDC registration should wake map stream");
+    assert!(
+        policy_delta.peers.is_empty(),
+        "policy wake should use an incremental peer delta, not a full peer snapshot"
+    );
+    assert!(policy_delta.peers_removed.is_empty());
+    let oidc_peer = policy_delta
+        .peers_changed
+        .iter()
+        .find(|peer| peer.name == "oidc-client")
+        .expect("OIDC-registered peer should become visible after policy mutation");
+    let expected_machine_key = format!("mkey:{TEST_MACHINE_KEY_HEX}");
+    assert_eq!(
+        oidc_peer.machine.as_deref(),
+        Some(expected_machine_key.as_str())
+    );
+    assert!(
+        policy_delta
+            .user_profiles
+            .iter()
+            .any(|profile| profile.login_name == "userinfo@example.com"),
+        "policy delta should carry the OIDC user's profile"
+    );
+
     let captured_form = provider.captured_form.read();
     assert_eq!(
         captured_form.get("grant_type").unwrap(),
@@ -300,6 +359,25 @@ fn register_request(node_key_hex: &str, followup: Option<&str>) -> Request<Body>
     req
 }
 
+fn viewer_record(node_key_hex: &str) -> MachineRecord {
+    let mut record = MachineRecord::new_at(
+        Utc::now(),
+        node_key_hex.to_string(),
+        VIEWER_MACHINE_KEY_HEX.to_string(),
+        "alice".into(),
+        "viewer-client".into(),
+        Ipv4Addr::new(100, 64, 0, 7),
+        false,
+    );
+    record.set_user_identity(
+        Some(1001),
+        "alice".into(),
+        "Alice Viewer".into(),
+        String::new(),
+    );
+    record
+}
+
 fn wire_machine_router(state: WireState) -> Router {
     Router::new()
         .route(
@@ -310,6 +388,11 @@ fn wire_machine_router(state: WireState) -> Router {
             "/machine/register",
             post(wire_register_handlers::handle_register_flat),
         )
+        .route(
+            "/machine/:node_key/map",
+            post(wire_map_handlers::handle_map),
+        )
+        .route("/machine/map", post(wire_map_handlers::handle_map_flat))
         .with_state(state)
 }
 
@@ -317,6 +400,42 @@ async fn decode_register_response(response: Response) -> RegisterResponse {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+async fn open_zstd_map_stream(app: Router, node_key_hex: &str, machine_key_hex: &str) -> Body {
+    let body = json!({
+        "Stream": true,
+        "Version": 113,
+        "Compress": "zstd"
+    });
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/machine/nodekey:{node_key_hex}/map"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(NoisePeerMachineKey(machine_key_hex.to_string()));
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body()
+}
+
+async fn next_zstd_map_response(body: &mut Body) -> MapResponse {
+    let frame = BodyExt::frame(body).await.unwrap().unwrap();
+    let chunk = frame.into_data().unwrap();
+    let framed = chunk.as_ref();
+    assert!(framed.len() >= 4, "map stream frame includes size prefix");
+    let len = u32::from_le_bytes(framed[0..4].try_into().unwrap()) as usize;
+    assert_eq!(
+        len,
+        framed.len() - 4,
+        "map stream frame length prefix matches body"
+    );
+    let decoded = zstd::bulk::decompress(&framed[4..], 16 * 1024 * 1024).unwrap();
+    serde_json::from_slice(&decoded).unwrap()
 }
 
 async fn body_string(response: Response) -> String {

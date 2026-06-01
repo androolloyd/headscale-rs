@@ -744,3 +744,43 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added the low-risk paired `ping-lifecycle` row to `PR_SMOKES` so the
   non-Postgres auth-key `/debug/ping` path runs on push/PR beside the existing
   Postgres ping lifecycle row.
+
+## 2026-06-01 SSH profile-variant status audit
+
+- Expanded the paired `ssh-profile-variants` real-client wrappers with a
+  profile-matching `root` login-user denial. Both Rust and pinned headscale-go
+  paths now assert exit status `255`, empty stdout through the shared SSH matrix
+  harness, and the exact first stderr line for a disallowed login user.
+
+## 2026-06-01 Route-via reload+restart SQLite smoke slice
+
+- Added paired non-Postgres `route-via-reload-restart` Rust/headscale-go wrappers
+  over the existing restart-persistence route-via reload mode. This closes the
+  SQLite/runtime side of the route-via policy reload followed by production
+  restart edge; the equivalent Postgres row already existed.
+- Added the row to the real-client matrix and push/PR smoke set so it runs beside
+  the existing route-via, route-via-health, and route-via-multiprefix rows.
+
+## 2026-06-01 OIDC/web registration map-churn audit
+
+- Inspected the OIDC and web-registration real-client harnesses for the open
+  production-process policy/map-churn parity gap. Existing web-registration
+  restart coverage already asserts post-restart tag mutation through a stock
+  client peer netmap; the OIDC route-approval restart row covers persistence
+  and reconnect but not a focused policy-mutation stream assertion.
+- Added a local OIDC callback handoff regression that keeps a registered
+  viewer's streaming map open under deny-all policy, completes OIDC
+  registration for a peer, then mutates policy to allow peers and asserts the
+  stream emits the OIDC peer/profile through an incremental policy delta.
+
+## 2026-06-01 Config/debug topology audit
+
+- Added focused `/debug/config` coverage for the current merge model: static
+  config fields remain sourced from the startup runtime snapshot, while
+  public control URL, DNS, and DERP topology fields are refreshed from live
+  runtime state before serialization.
+- Filled the runtime snapshot's `DNSConfig.OverrideLocalDNS` field so direct
+  snapshot assertions and debug projection start from the same config-backed
+  DNS shape.
+- Removed stale config comments that still described logtail and auto-update
+  as projection-only; both now affect map-response runtime fields.

@@ -138,11 +138,10 @@ pub mod services {
 
 /// Upstream `headscale.v1.HeadscaleService` implementation slices.
 ///
-/// The full headscale-go service contains users, nodes, pre-auth keys,
-/// routes, policies, API keys, and debug/version operations. This
-/// adapter wires implemented admin-backed RPC slices first and leaves
-/// the remaining methods out of the generated descriptor until those
-/// backing behaviours exist in Rust.
+/// The upstream public service is deliberately narrow: user, pre-auth-key,
+/// node/debug, auth, API-key, policy, and health RPCs. Route approval lives on
+/// the node `SetApprovedRoutes` RPC, and version stays on the public HTTP
+/// `/version` endpoint rather than gRPC.
 #[cfg(feature = "admin")]
 pub mod upstream {
     use std::collections::BTreeMap;
@@ -2867,14 +2866,41 @@ mod upstream_tests {
             .iter()
             .filter_map(|method| method.name.as_deref())
             .collect::<Vec<_>>();
-        assert!(methods.contains(&"CreateUser"));
-        assert!(methods.contains(&"RegisterNode"));
-        assert!(methods.contains(&"AuthRegister"));
-        assert!(methods.contains(&"AuthApprove"));
-        assert!(methods.contains(&"AuthReject"));
-        assert!(methods.contains(&"SetApprovedRoutes"));
-        assert!(methods.contains(&"Health"));
-        assert!(!methods.iter().any(|method| method.contains("Version")));
+        assert_eq!(
+            methods,
+            vec![
+                "CreateUser",
+                "RenameUser",
+                "DeleteUser",
+                "ListUsers",
+                "CreatePreAuthKey",
+                "ExpirePreAuthKey",
+                "DeletePreAuthKey",
+                "ListPreAuthKeys",
+                "DebugCreateNode",
+                "GetNode",
+                "SetTags",
+                "SetApprovedRoutes",
+                "RegisterNode",
+                "DeleteNode",
+                "ExpireNode",
+                "RenameNode",
+                "ListNodes",
+                "BackfillNodeIPs",
+                "AuthRegister",
+                "AuthApprove",
+                "AuthReject",
+                "CreateApiKey",
+                "ExpireApiKey",
+                "ListApiKeys",
+                "DeleteApiKey",
+                "GetPolicy",
+                "SetPolicy",
+                "CheckPolicy",
+                "Health",
+            ],
+            "public descriptor must stay on the current upstream HeadscaleService surface"
+        );
 
         let services = descriptors
             .file

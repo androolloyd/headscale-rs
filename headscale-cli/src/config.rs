@@ -111,12 +111,13 @@ pub(crate) struct CliConfig {
     /// Upstream-compatible Taildrop/file-sharing switch.
     #[serde(default, skip_serializing_if = "taildrop_config_is_default")]
     pub(crate) taildrop: TaildropConfig,
-    /// Upstream-compatible Logtail switch. Parsed and projected only.
+    /// Upstream-compatible Logtail switch. Parsed, projected in `/debug/config`,
+    /// and used to drive `MapResponse.Debug.DisableLogTail`.
     #[serde(default, skip_serializing_if = "enabled_config_is_default")]
     pub(crate) logtail: EnabledConfig,
-    /// Upstream-compatible default client auto-update switch. Parsed
-    /// and projected only; Rust map responses do not emit the
-    /// auto-update cap yet.
+    /// Upstream-compatible default client auto-update switch. Parsed,
+    /// projected in `/debug/config`, and emitted in map-response
+    /// default auto-update capabilities.
     #[serde(default, skip_serializing_if = "enabled_config_is_default")]
     pub(crate) auto_update: EnabledConfig,
     /// OpenID Connect configuration

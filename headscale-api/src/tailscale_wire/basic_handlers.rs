@@ -4893,6 +4893,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_config_refreshes_live_topology_without_losing_static_snapshot_fields() {
+        let (mut state, _dir) = fixture_state();
+        let mut snapshot = crate::tailscale_wire::RuntimeConfigSnapshot {
+            server_url: "https://snapshot.example".to_string(),
+            addr: "0.0.0.0:8443".to_string(),
+            metrics_addr: "127.0.0.1:9090".to_string(),
+            grpc_addr: "127.0.0.1:50443".to_string(),
+            grpc_allow_insecure: true,
+            trusted_proxies: vec!["127.0.0.1/32".to_string()],
+            node: DebugNodeConfig {
+                expiry: 86_400_000_000_000,
+                ephemeral: DebugNodeEphemeralConfig {
+                    inactivity_timeout: 180_000_000_000,
+                },
+                routes: DebugNodeRoutesConfig {
+                    ha: DebugNodeRoutesHaConfig {
+                        probe_interval: 15_000_000_000,
+                        probe_timeout: 4_000_000_000,
+                    },
+                },
+            },
+            ..crate::tailscale_wire::RuntimeConfigSnapshot::default()
+        };
+        snapshot.dns_config.magic_dns = false;
+        snapshot.dns_config.base_domain = "stale.example".to_string();
+        snapshot.dns_config.override_local_dns = true;
+        snapshot.dns_config.nameservers.global = vec!["9.9.9.9".to_string()];
+        snapshot.derp.derp_map = serde_json::json!({"stale": true});
+        snapshot.log_tail.enabled = true;
+        snapshot.taildrop.enabled = false;
+        snapshot.auto_update.enabled = true;
+        snapshot.tuning.node_store_batch_size = 321;
+        state.runtime_config = Arc::new(snapshot);
+        state.public_control_url = Some("https://live-control.example".to_string());
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            magic_dns: true,
+            base_domain: "live-tailnet.example".to_string(),
+            override_local_dns: false,
+            nameservers: vec!["1.1.1.1".to_string()],
+            restricted_nameservers: HashMap::from([(
+                "corp.example".to_string(),
+                vec!["10.0.0.53".to_string()],
+            )]),
+            ..crate::dns::DnsConfigSpec::default()
+        });
+
+        let info = debug_config_info(&state);
+
+        assert_eq!(info.server_url, "https://live-control.example");
+        assert_eq!(info.addr, "0.0.0.0:8443");
+        assert_eq!(info.metrics_addr, "127.0.0.1:9090");
+        assert_eq!(info.grpc_addr, "127.0.0.1:50443");
+        assert!(info.grpc_allow_insecure);
+        assert_eq!(info.trusted_proxies, ["127.0.0.1/32"]);
+        assert_eq!(info.node.expiry, 86_400_000_000_000);
+        assert_eq!(info.node.ephemeral.inactivity_timeout, 180_000_000_000);
+        assert_eq!(info.node.routes.ha.probe_interval, 15_000_000_000);
+        assert_eq!(info.node.routes.ha.probe_timeout, 4_000_000_000);
+        assert!(info.log_tail.enabled);
+        assert!(!info.taildrop.enabled);
+        assert!(info.auto_update.enabled);
+        assert_eq!(info.tuning.node_store_batch_size, 321);
+
+        assert!(info.dns_config.magic_dns);
+        assert_eq!(info.base_domain, "live-tailnet.example");
+        assert_eq!(info.dns_config.base_domain, "live-tailnet.example");
+        assert!(!info.dns_config.override_local_dns);
+        assert_eq!(info.dns_config.nameservers.global, ["1.1.1.1"]);
+        assert_eq!(
+            info.dns_config.nameservers.split["corp.example"],
+            ["10.0.0.53"]
+        );
+        assert_eq!(
+            info.derp.derp_map["Regions"]["1"]["RegionName"],
+            "Test region"
+        );
+        assert!(info.derp.derp_map.get("stale").is_none());
+    }
+
+    #[tokio::test]
     async fn debug_config_uses_runtime_config_snapshot_for_static_fields() {
         let (mut state, _dir) = fixture_state();
         let mut snapshot = crate::tailscale_wire::RuntimeConfigSnapshot {

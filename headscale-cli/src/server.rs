@@ -1223,6 +1223,7 @@ fn runtime_config_snapshot(
         .dns_config
         .base_domain
         .clone_from(&dns_spec.base_domain);
+    snapshot.dns_config.override_local_dns = dns_spec.override_local_dns;
     snapshot
         .dns_config
         .nameservers
@@ -4686,6 +4687,7 @@ database:
             DnsStore::try_from_spec(DnsConfigSpec {
                 magic_dns: true,
                 base_domain: "tail.example".to_string(),
+                override_local_dns: false,
                 nameservers: vec!["1.1.1.1".to_string()],
                 cert_domains: vec!["Node.Tail.Example.".to_string()],
                 ..DnsConfigSpec::default()
@@ -4765,6 +4767,7 @@ database:
         assert_eq!(snapshot.acme_email, "ops@example.com");
         assert!(snapshot.dns_config.magic_dns);
         assert_eq!(snapshot.dns_config.base_domain, "tail.example");
+        assert!(!snapshot.dns_config.override_local_dns);
         assert_eq!(
             snapshot.tailcfg_dns_config["CertDomains"],
             serde_json::json!(["node.tail.example"])

@@ -173,6 +173,7 @@ smoke_ids=(
   route-via-health
   route-via-reload
   route-via-restart
+  route-via-reload-restart
   route-via-multiprefix
   route-via-multiprefix-reload
   route-via-multiprefix-restart
@@ -320,6 +321,7 @@ smoke_areas=(
   routes
   routes
   routes
+  routes
   derp
   ssh
   ssh
@@ -433,6 +435,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-health-smoke.sh
   tools/real-client/route-via-reload-smoke.sh
   tools/real-client/route-via-restart-smoke.sh
+  tools/real-client/route-via-reload-restart-smoke.sh
   tools/real-client/route-via-multiprefix-smoke.sh
   tools/real-client/route-via-multiprefix-reload-smoke.sh
   tools/real-client/route-via-multiprefix-restart-smoke.sh
@@ -563,6 +566,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-health-headscale-go-smoke.sh
   tools/real-client/route-via-reload-headscale-go-smoke.sh
   tools/real-client/route-via-restart-headscale-go-smoke.sh
+  tools/real-client/route-via-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-reload-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
@@ -693,6 +697,7 @@ smoke_assertions=(
   "current-head regular-overlap same-tag grants via follows route-health failover"
   "current-head route steering policy reload moves grants via ownership"
   "current-head route steering with grants via survives server restart"
+  "current-head route steering policy reload survives server restart"
   "current-head multi-prefix route steering with grants via"
   "current-head multi-prefix route steering policy reload moves grants via ownership"
   "current-head multi-prefix route steering with grants via survives server restart"

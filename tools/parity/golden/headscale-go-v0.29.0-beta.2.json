@@ -1364,6 +1364,33 @@
         ]
       }
     ],
+    "filter_for_nodes": [
+      {
+        "name": "router-broad-via-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.2"
+            ],
+            "DstPorts": [
+              {
+                "IP": "10.33.0.0/16",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "router-disjoint-no-via-filter",
+        "rules": [
+
+        ]
+      }
+    ],
     "via_routes": [
       {
         "name": "broader-destination-includes-advertised-prefix",

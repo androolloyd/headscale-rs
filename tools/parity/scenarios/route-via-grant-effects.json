@@ -188,6 +188,10 @@
       "tags": ["tag:client-regular"]
     }
   ],
+  "filter_node_checks": [
+    { "name": "router-broad-via-filter", "node_id": 1 },
+    { "name": "router-disjoint-no-via-filter", "node_id": 5 }
+  ],
   "via_route_checks": [
     { "name": "broader-destination-includes-advertised-prefix", "viewer_id": 2, "peer_id": 1 },
     { "name": "narrower-destination-includes-advertised-prefix", "viewer_id": 4, "peer_id": 3 },

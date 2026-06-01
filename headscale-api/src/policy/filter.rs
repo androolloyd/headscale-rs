@@ -8,10 +8,10 @@
 //!
 //! ## Translation semantics
 //!
-//! Only `accept` rules generate `FilterRule` entries. The Tailscale
-//! `filter` matcher treats the list as a deny-by-default allowlist —
-//! the canonical ACL engine encodes the same semantics, so the
-//! mapping is:
+//! `accept` ACL rules and policy v2 grants generate `FilterRule`
+//! entries. The Tailscale `filter` matcher treats the list as a
+//! deny-by-default allowlist — the canonical ACL engine encodes the
+//! same semantics, so the ACL mapping is:
 //!
 //! ```text
 //! AclAction::Accept { src, dst, ports }
@@ -45,8 +45,8 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 
-use super::{PolicyAction, PolicyDoc};
-use crate::tailscale_wire::wire::{FilterRule, NetPortRange, PortRange};
+use super::{CapabilityMap, GrantRule, PolicyAction, PolicyDoc};
+use crate::tailscale_wire::wire::{CapGrant, FilterRule, NetPortRange, PortRange};
 
 /// Node facts needed to compile/reduce a headscale-go-style packet
 /// filter for one map recipient.
@@ -140,6 +140,7 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
             );
         }
     }
+    append_app_grant_rules(&mut out, doc, &doc.grants, &[], None);
     out
 }
 
@@ -201,7 +202,124 @@ pub fn acl_to_filter_rules_for_node(
         }
     }
 
+    append_app_grant_rules(&mut out, doc, &doc.grants, nodes, Some(self_node));
+    append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+
     coalesce_filter_rules(reduce_filter_rules_for_node(out, self_node))
+}
+
+fn append_app_grant_rules(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    grants: &[GrantRule],
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) {
+    for grant in grants {
+        if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+            continue;
+        }
+
+        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+        let mut other_dsts = Vec::new();
+        let mut self_dsts = Vec::new();
+        for dst in &grant.dst {
+            if dst == "autogroup:self" {
+                self_dsts.push(dst.clone());
+            } else {
+                other_dsts.push(dst.clone());
+            }
+        }
+
+        if !other_dsts.is_empty() {
+            append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
+        }
+
+        let Some(node) = self_node else {
+            continue;
+        };
+        if self_dsts.is_empty() || !node.tags.is_empty() {
+            continue;
+        }
+
+        let same_user = same_user_untagged_nodes(nodes, node);
+        let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+        if self_src.is_empty() {
+            continue;
+        }
+        let self_dst = same_user
+            .iter()
+            .flat_map(|node| node_addr_prefixes(node))
+            .collect::<Vec<_>>();
+        append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
+    }
+}
+
+fn append_cap_grant_rules(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    nodes: &[PacketFilterNode],
+    src_ips: &[String],
+    dsts: &[String],
+    app: &CapabilityMap,
+) {
+    let mut cap_grants = Vec::new();
+    for dst in dsts {
+        let dst_prefixes = resolve_cap_grant_dst(doc, dst, nodes);
+        if !dst_prefixes.is_empty() {
+            cap_grants.push(CapGrant {
+                dsts: dst_prefixes,
+                cap_map: app.clone(),
+                ..CapGrant::default()
+            });
+        }
+    }
+
+    if cap_grants.is_empty() {
+        return;
+    }
+
+    let mut rule = FilterRule {
+        src_ips: src_ips.to_vec(),
+        cap_grant: cap_grants,
+        ..FilterRule::default()
+    };
+    normalize_filter_rule(&mut rule);
+    append_coalesced_filter_rule(out, rule);
+}
+
+fn append_via_grant_rules_for_node(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    grants: &[GrantRule],
+    nodes: &[PacketFilterNode],
+    self_node: &PacketFilterNode,
+) {
+    for grant in grants {
+        if grant.via.is_empty() || grant.ip.is_empty() {
+            continue;
+        }
+        if !grant
+            .via
+            .iter()
+            .any(|via| self_node.tags.iter().any(|tag| tag == via))
+        {
+            continue;
+        }
+
+        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+        if src_ips.is_empty() {
+            continue;
+        }
+
+        let dst_ips = resolve_via_destinations_for_node(doc, &grant.dst, nodes, self_node);
+        if dst_ips.is_empty() {
+            continue;
+        }
+
+        let ports = normalize_grant_ip_specs(&grant.ip);
+        append_filter_rules(out, &src_ips, &dst_ips, &ports);
+    }
 }
 
 fn append_filter_rules(
@@ -357,6 +475,53 @@ fn resolve_principal(
     Vec::new()
 }
 
+fn resolve_cap_grant_dst(doc: &PolicyDoc, token: &str, nodes: &[PacketFilterNode]) -> Vec<String> {
+    if token == "*" {
+        return headscale_api_acl::tailnet_filter_srcs()
+            .into_iter()
+            .flat_map(|prefix| ipset_string_to_cidrs(&prefix))
+            .collect();
+    }
+    resolve_principal(doc, token, nodes, None, PrincipalPosition::Destination)
+}
+
+fn resolve_via_destinations_for_node(
+    doc: &PolicyDoc,
+    dsts: &[String],
+    nodes: &[PacketFilterNode],
+    node: &PacketFilterNode,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let node_subnet_routes = node
+        .routes
+        .iter()
+        .filter(|route| !is_exit_route(route))
+        .collect::<Vec<_>>();
+
+    for dst in dsts {
+        if dst == "autogroup:internet" {
+            if node.routes.iter().any(|route| is_exit_route(route)) {
+                for prefix in headscale_api_acl::internet_filter_cidrs() {
+                    push_unique_string(&mut out, prefix);
+                }
+            }
+            continue;
+        }
+
+        for prefix in resolve_principal(doc, dst, nodes, None, PrincipalPosition::Destination) {
+            if node_subnet_routes
+                .iter()
+                .any(|route| prefixes_overlap(&prefix, route))
+            {
+                push_unique_string(&mut out, prefix);
+            }
+        }
+    }
+
+    out.sort();
+    out
+}
+
 fn same_user_untagged_nodes<'a>(
     nodes: &'a [PacketFilterNode],
     node: &PacketFilterNode,
@@ -435,6 +600,13 @@ fn reduce_filter_rules_for_node(
 ) -> Vec<FilterRule> {
     let mut out = Vec::new();
     for mut rule in rules {
+        if !rule.cap_grant.is_empty() {
+            if let Some(reduced) = reduce_cap_grant_rule_for_node(&rule, node) {
+                out.push(reduced);
+            }
+            continue;
+        }
+
         rule.dst_ports.retain(|dst| {
             if dst.ip == "*" {
                 return true;
@@ -458,6 +630,79 @@ fn reduce_filter_rules_for_node(
         out.push(rule);
     }
     out
+}
+
+fn reduce_cap_grant_rule_for_node(
+    rule: &FilterRule,
+    node: &PacketFilterNode,
+) -> Option<FilterRule> {
+    let mut cap_grant = Vec::new();
+    for grant in &rule.cap_grant {
+        let mut dsts = Vec::new();
+
+        for dst in &grant.dsts {
+            let Some(dst_net) = parse_ip_net(dst) else {
+                continue;
+            };
+            if is_single_ip(&dst_net) {
+                if node
+                    .addrs
+                    .iter()
+                    .any(|addr| net_contains_addr(&dst_net, addr))
+                {
+                    push_unique_string(&mut dsts, dst_net.to_string());
+                }
+                continue;
+            }
+
+            for addr in &node.addrs {
+                if net_contains_addr(&dst_net, addr)
+                    && let Some(prefix) = addr_prefix_string(addr)
+                {
+                    push_unique_string(&mut dsts, prefix);
+                }
+            }
+        }
+
+        for dst in &grant.dsts {
+            if node
+                .routes
+                .iter()
+                .filter(|route| !is_exit_route(route))
+                .any(|route| prefixes_overlap(dst, route))
+            {
+                push_unique_string(&mut dsts, dst.clone());
+            }
+        }
+
+        if !dsts.is_empty() {
+            dsts.sort();
+            cap_grant.push(CapGrant {
+                dsts,
+                caps: grant.caps.clone(),
+                cap_map: grant.cap_map.clone(),
+            });
+        }
+    }
+
+    if cap_grant.is_empty() {
+        return None;
+    }
+
+    let mut out = FilterRule {
+        src_ips: rule.src_ips.clone(),
+        cap_grant,
+        ..FilterRule::default()
+    };
+    normalize_filter_rule(&mut out);
+    Some(out)
+}
+
+fn addr_prefix_string(addr: &str) -> Option<String> {
+    let addr = addr.parse::<IpAddr>().ok()?;
+    IpNet::new(addr, if addr.is_ipv4() { 32 } else { 128 })
+        .ok()
+        .map(|net| net.to_string())
 }
 
 fn dst_port_ip_string(ip: &str) -> String {
@@ -511,6 +756,24 @@ fn ipset_string_contains_addr(ipset: &str, addr: &str) -> bool {
     }
 }
 
+fn ipset_string_to_cidrs(ipset: &str) -> Vec<String> {
+    if let Some(net) = parse_ip_net(ipset) {
+        return vec![net.to_string()];
+    }
+    let Some((start, end)) = ipset.split_once('-') else {
+        return Vec::new();
+    };
+    match (start.trim().parse::<IpAddr>(), end.trim().parse::<IpAddr>()) {
+        (Ok(IpAddr::V4(start)), Ok(IpAddr::V4(end))) => {
+            cidrs_for_interval(u32::from(start) as u128, u32::from(end) as u128, 32)
+        }
+        (Ok(IpAddr::V6(start)), Ok(IpAddr::V6(end))) => {
+            cidrs_for_interval(u128::from(start), u128::from(end), 128)
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn prefixes_overlap(a: &str, b: &str) -> bool {
     match (parse_ip_net(a), parse_ip_net(b)) {
         (Some(a), Some(b)) => nets_overlap(&a, &b),
@@ -561,14 +824,25 @@ fn normalize_filter_rule(rule: &mut FilterRule) {
     });
     rule.ip_proto.sort_unstable();
     rule.ip_proto.dedup();
+    for grant in &mut rule.cap_grant {
+        grant.dsts.sort();
+        grant.dsts.dedup();
+        grant.caps.sort();
+        grant.caps.dedup();
+    }
 }
 
 fn append_coalesced_filter_rule(out: &mut Vec<FilterRule>, mut rule: FilterRule) {
     normalize_filter_rule(&mut rule);
-    if let Some(existing) = out
-        .iter_mut()
-        .find(|existing| existing.src_ips == rule.src_ips && existing.ip_proto == rule.ip_proto)
-    {
+    if !rule.cap_grant.is_empty() {
+        out.push(rule);
+        return;
+    }
+    if let Some(existing) = out.iter_mut().find(|existing| {
+        existing.cap_grant.is_empty()
+            && existing.src_ips == rule.src_ips
+            && existing.ip_proto == rule.ip_proto
+    }) {
         existing.dst_ports.extend(rule.dst_ports);
         normalize_filter_rule(existing);
     } else {
@@ -762,6 +1036,37 @@ fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !out.contains(&value) {
         out.push(value);
     }
+}
+
+fn normalize_grant_ip_specs(specs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let trimmed = spec.trim();
+        if trimmed == "*" {
+            out.push("*/*".to_string());
+            continue;
+        }
+        if trimmed.contains('/') || trimmed.starts_with("*:") {
+            out.push(trimmed.to_string());
+            continue;
+        }
+        let (proto, ports) = trimmed
+            .split_once(':')
+            .map_or(("*", trimmed), |(proto, ports)| {
+                (proto.trim(), ports.trim())
+            });
+        if ports.contains(':') {
+            continue;
+        }
+        for port in ports
+            .split(',')
+            .map(str::trim)
+            .filter(|port| !port.is_empty())
+        {
+            out.push(format!("{proto}/{port}"));
+        }
+    }
+    out
 }
 
 /// Map an ACL port pattern (`tcp/22`, `udp/*`, `*/*`, or the legacy
@@ -1104,5 +1409,90 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].src_ips, vec!["100.64.0.1"]);
         assert_eq!(rs[1].src_ips, vec!["100.64.0.3"]);
+    }
+
+    #[test]
+    fn app_grant_emits_reduced_cap_grant_for_destination_node() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["ops@"]},
+                "grants": [{
+                    "src": ["client@"],
+                    "dst": ["tag:server"],
+                    "app": {"example.com/cap/use": [{"mode":"rw"}]}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user: Some("client".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user: Some("ops".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:server".into()],
+                routes: Vec::new(),
+            },
+        ];
+
+        let rs = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].src_ips, vec!["100.64.0.1"]);
+        assert!(rs[0].dst_ports.is_empty());
+        assert_eq!(rs[0].cap_grant.len(), 1);
+        assert_eq!(rs[0].cap_grant[0].dsts, vec!["100.64.0.2/32"]);
+        assert!(
+            rs[0].cap_grant[0]
+                .cap_map
+                .contains_key("example.com/cap/use")
+        );
+    }
+
+    #[test]
+    fn via_grant_emits_per_node_route_filter_for_matching_router() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:router": ["router@"]},
+                "grants": [{
+                    "src": ["client@"],
+                    "dst": ["10.10.0.0/16"],
+                    "ip": ["tcp:443"],
+                    "via": ["tag:router"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user: Some("client".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user: Some("router".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:router".into()],
+                routes: vec!["10.10.1.0/24".into()],
+            },
+        ];
+
+        let router_rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(router_rules.len(), 1);
+        assert_eq!(router_rules[0].src_ips, vec!["100.64.0.1"]);
+        assert_eq!(router_rules[0].ip_proto, vec![6]);
+        assert_eq!(router_rules[0].dst_ports[0].ip, "10.10.0.0/16");
+        assert_eq!(router_rules[0].dst_ports[0].ports.first, 443);
+
+        let client_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
+        assert!(client_rules.is_empty());
     }
 }

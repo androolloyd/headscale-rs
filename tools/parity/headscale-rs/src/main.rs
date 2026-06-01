@@ -1056,9 +1056,46 @@ fn compile_filter_rules(
     }
 
     if let Some(node) = self_node {
+        append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+    }
+
+    if let Some(node) = self_node {
         coalesce_filter_rules(reduce_filter_rules_for_node(out, node))
     } else {
         coalesce_filter_rules(out)
+    }
+}
+
+fn append_via_grant_rules_for_node(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+    self_node: &FilterNode,
+) {
+    for grant in &doc.grants {
+        if grant.via.is_empty() || grant.ip.is_empty() {
+            continue;
+        }
+        if !grant
+            .via
+            .iter()
+            .any(|via| self_node.tags.iter().any(|tag| tag == via))
+        {
+            continue;
+        }
+
+        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+        if src_ips.is_empty() {
+            continue;
+        }
+
+        let dst_ips = resolve_via_destinations_for_node(doc, &grant.dst, nodes, self_node);
+        if dst_ips.is_empty() {
+            continue;
+        }
+
+        let ports = normalize_grant_ip_specs(&grant.ip);
+        append_filter_rules(out, &src_ips, &dst_ips, &ports);
     }
 }
 
@@ -1211,6 +1248,43 @@ fn resolve_principal(
         return resolve_prefix(token, nodes, false);
     }
     Vec::new()
+}
+
+fn resolve_via_destinations_for_node(
+    doc: &PolicyDoc,
+    dsts: &[String],
+    nodes: &[FilterNode],
+    node: &FilterNode,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let node_subnet_routes = node
+        .routes
+        .iter()
+        .filter(|route| !is_exit_route(route))
+        .collect::<Vec<_>>();
+
+    for dst in dsts {
+        if dst == "autogroup:internet" {
+            if node.routes.iter().any(|route| is_exit_route(route)) {
+                for prefix in internet_filter_cidrs() {
+                    push_unique_string(&mut out, prefix);
+                }
+            }
+            continue;
+        }
+
+        for prefix in resolve_principal(doc, dst, nodes, None, PrincipalPosition::Destination) {
+            if node_subnet_routes
+                .iter()
+                .any(|route| prefixes_overlap(&prefix, route))
+            {
+                push_unique_string(&mut out, prefix);
+            }
+        }
+    }
+
+    out.sort();
+    out
 }
 
 fn same_user_untagged_nodes<'a>(nodes: &'a [FilterNode], node: &FilterNode) -> Vec<&'a FilterNode> {
@@ -1672,6 +1746,31 @@ fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !out.contains(&value) {
         out.push(value);
     }
+}
+
+fn normalize_grant_ip_specs(specs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let trimmed = spec.trim();
+        if trimmed == "*" {
+            out.push("*/*".to_string());
+            continue;
+        }
+        if trimmed.contains('/') || trimmed.starts_with("*:") {
+            out.push(trimmed.to_string());
+            continue;
+        }
+        let (proto, ports) = trimmed
+            .split_once(':')
+            .map_or(("*", trimmed), |(proto, ports)| (proto.trim(), ports.trim()));
+        if ports.contains(':') {
+            continue;
+        }
+        for port in ports.split(',').map(str::trim).filter(|port| !port.is_empty()) {
+            out.push(format!("{proto}/{port}"));
+        }
+    }
+    out
 }
 
 fn compile_port_groups(ports: &[String]) -> Vec<(Vec<i32>, Vec<PortRangeOut>)> {

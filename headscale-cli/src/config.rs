@@ -526,6 +526,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
@@ -572,6 +573,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
@@ -625,6 +627,38 @@ impl CliConfig {
             if key.as_ref() == "HEADSCALE_TAILDROP_ENABLED" {
                 self.taildrop.enabled = parse_env_bool(value.as_ref())
                     .with_context(|| format!("invalid {key}", key = key.as_ref()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_runtime_feature_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_DISABLE_CHECK_UPDATES" => {
+                    self.disable_check_updates =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_LOGTAIL_ENABLED" => {
+                    self.logtail.enabled =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_AUTO_UPDATE_ENABLED" => {
+                    self.auto_update.enabled =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -2501,6 +2535,33 @@ taildrop:
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_TAILDROP_ENABLED"));
+    }
+
+    #[test]
+    fn applies_headscale_runtime_feature_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_runtime_feature_env_overrides_from([
+                ("HEADSCALE_DISABLE_CHECK_UPDATES", "true"),
+                ("HEADSCALE_LOGTAIL_ENABLED", "true"),
+                ("HEADSCALE_AUTO_UPDATE_ENABLED", "true"),
+            ])
+            .unwrap();
+
+        assert!(config.disable_check_updates);
+        assert!(config.logtail.enabled);
+        assert!(config.auto_update.enabled);
+
+        config
+            .apply_runtime_feature_env_overrides_from([
+                ("HEADSCALE_LOGTAIL_ENABLED", "false"),
+                ("HEADSCALE_AUTO_UPDATE_ENABLED", "false"),
+            ])
+            .unwrap();
+
+        assert!(!config.logtail.enabled);
+        assert!(!config.auto_update.enabled);
     }
 
     #[test]

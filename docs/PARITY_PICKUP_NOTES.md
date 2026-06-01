@@ -1512,3 +1512,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `include_policy` and runtime peer recomputation.
 - Local history coverage now pins `node online`/`node offline` changes as
   policy-type batches that still retain the peer patch for the affected node.
+
+## 2026-06-01 runtime feature env override parity slice
+
+- `CliConfig::load` and default config discovery now apply current-upstream
+  Viper-style env overrides for `HEADSCALE_DISABLE_CHECK_UPDATES`,
+  `HEADSCALE_LOGTAIL_ENABLED`, and `HEADSCALE_AUTO_UPDATE_ENABLED`.
+- Unit coverage proves those env values override the parsed/default runtime
+  feature flags that project into `/debug/config` and map-response capability
+  shaping.

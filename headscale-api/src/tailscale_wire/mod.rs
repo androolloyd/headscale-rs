@@ -6804,7 +6804,11 @@ fn allow_debug_access(req: &Request) -> bool {
         return false;
     }
 
-    let Some(ip) = debug_peer_ip(req) else {
+    let peer_ip = debug_peer_ip(req);
+    #[cfg(test)]
+    let peer_ip = peer_ip.or(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+
+    let Some(ip) = peer_ip else {
         return false;
     };
 
@@ -6839,19 +6843,9 @@ fn debug_key_from_query(query: &str) -> Option<String> {
 }
 
 fn debug_peer_ip(req: &Request) -> Option<IpAddr> {
-    if let Some(connect_info) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        return Some(connect_info.0.ip());
-    }
-
-    #[cfg(test)]
-    {
-        return Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    }
-
-    #[cfg(not(test))]
-    {
-        None
-    }
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0.ip())
 }
 
 fn is_tailscale_ip(ip: IpAddr) -> bool {

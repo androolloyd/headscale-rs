@@ -1131,7 +1131,7 @@ pub mod upstream {
                     "cannot set both disable_expiry and expiry",
                 ));
             }
-            let requested_expiry = body.expiry.clone();
+            let requested_expiry = body.expiry;
             let node = self.machine_by_id(body.node_id).await?;
             if body.disable_expiry {
                 self.machines

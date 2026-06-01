@@ -7129,12 +7129,12 @@ mod tests {
                 .unwrap_or(0)
                 > 0
         );
-        assert!(
-            node.get("StableID")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .starts_with('n')
-        );
+        let node_id = node
+            .get("ID")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let stable_id = node.get("StableID").and_then(|s| s.as_str()).unwrap_or("");
+        assert_eq!(stable_id, node_id.to_string());
         assert!(node.get("Name").is_some());
     }
 

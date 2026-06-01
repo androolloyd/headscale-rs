@@ -938,3 +938,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `endpoint/DERP update` and emit a batched peer patch instead of a full
   self-update. The focused streaming test pins the reason, patch type, batch
   timing, and `PeerChange.DERPRegion` projection.
+
+## 2026-06-01 No-DB preauth store unification slice
+
+- `InMemoryPreauthAdmin` now also implements the wire `PreauthRedeemer`
+  contract, so no-DB embedders can share one generic preauth store between
+  upstream admin/gRPC mint/list/expire/delete paths and stock-client auth-key
+  registration.
+- Focused tests cover one-shot consumption, reusable redemptions, expired-key
+  rejection, and same-key lookup metadata for used/expired keys.

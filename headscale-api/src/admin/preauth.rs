@@ -25,6 +25,8 @@ use parking_lot::Mutex;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 
+use crate::tailscale_wire::{PreauthRedeemer, RedeemError, RedeemOk};
+
 use super::auth::now_unix;
 
 /// Admin-side view of one preauth key. Stable JSON shape across
@@ -212,6 +214,16 @@ impl InMemoryPreauthAdmin {
     }
 }
 
+fn in_memory_key_to_redeem_ok(key: &PreauthAdminKey) -> RedeemOk {
+    let mut ok = RedeemOk::for_user(key.user.clone())
+        .ephemeral(key.ephemeral)
+        .tags(key.tags.clone());
+    if let Ok(id) = i64::try_from(key.id) {
+        ok = ok.auth_key_id(id);
+    }
+    ok
+}
+
 #[async_trait]
 impl PreauthAdmin for InMemoryPreauthAdmin {
     async fn list(&self) -> Vec<PreauthAdminKey> {
@@ -284,6 +296,30 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         };
         g.remove(&key);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl PreauthRedeemer for InMemoryPreauthAdmin {
+    async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError> {
+        let mut g = self.inner.lock();
+        let Some(rec) = g.get_mut(key) else {
+            return Err(RedeemError::Unknown);
+        };
+        let now = now_unix();
+        if rec.expires_at != NEVER_EXPIRES_AT && rec.expires_at <= now {
+            return Err(RedeemError::Expired);
+        }
+        if !rec.reusable && rec.redemptions > 0 {
+            return Err(RedeemError::AlreadyUsed);
+        }
+        rec.redemptions = rec.redemptions.saturating_add(1);
+        Ok(in_memory_key_to_redeem_ok(rec))
+    }
+
+    async fn lookup(&self, key: &str) -> Option<RedeemOk> {
+        let g = self.inner.lock();
+        g.get(key).map(in_memory_key_to_redeem_ok)
     }
 }
 
@@ -427,5 +463,73 @@ mod tests {
     fn key_prefix_truncates_long_keys() {
         let p = key_prefix("hskey-auth-abcdefghijkl-0123456789abcdef");
         assert_eq!(p, "hskey-auth-abcdefghijkl-***");
+    }
+
+    #[test]
+    fn redeem_one_shot_key_marks_used_and_preserves_metadata() {
+        let a = InMemoryPreauthAdmin::new();
+        let k = block(a.mint(PreauthMintRequest {
+            user: "alice".into(),
+            ttl_secs: 600,
+            reusable: false,
+            ephemeral: true,
+            tags: vec!["tag:dev".into()],
+        }))
+        .unwrap();
+
+        let ok = block(a.redeem(&k.key)).unwrap();
+        assert_eq!(ok.user, "alice");
+        assert!(ok.ephemeral);
+        assert_eq!(ok.tags, vec!["tag:dev"]);
+        let expected_id = i64::try_from(k.id).ok();
+        assert_eq!(ok.auth_key_id, expected_id);
+
+        let keys = block(a.list());
+        assert_eq!(keys[0].redemptions, 1);
+        let err = block(a.redeem(&k.key)).unwrap_err();
+        assert_eq!(err, RedeemError::AlreadyUsed);
+
+        let lookup = block(a.lookup(&k.key)).expect("lookup used key");
+        assert_eq!(lookup.user, "alice");
+        assert_eq!(lookup.auth_key_id, expected_id);
+    }
+
+    #[test]
+    fn redeem_reusable_key_allows_multiple_uses() {
+        let a = InMemoryPreauthAdmin::new();
+        let k = block(a.mint(PreauthMintRequest {
+            user: "alice".into(),
+            ttl_secs: 600,
+            reusable: true,
+            ephemeral: false,
+            tags: vec![],
+        }))
+        .unwrap();
+
+        assert!(block(a.redeem(&k.key)).is_ok());
+        assert!(block(a.redeem(&k.key)).is_ok());
+        let keys = block(a.list());
+        assert_eq!(keys[0].redemptions, 2);
+    }
+
+    #[test]
+    fn redeem_expired_key_fails_but_lookup_surfaces_metadata() {
+        let a = InMemoryPreauthAdmin::new();
+        let k = block(a.mint_with_expiration(
+            PreauthMintRequest {
+                user: "alice".into(),
+                ttl_secs: 0,
+                reusable: false,
+                ephemeral: false,
+                tags: vec![],
+            },
+            Some(i64::try_from(now_unix().saturating_sub(1)).unwrap_or(i64::MAX)),
+        ))
+        .unwrap();
+
+        let err = block(a.redeem(&k.key)).unwrap_err();
+        assert_eq!(err, RedeemError::Expired);
+        let lookup = block(a.lookup(&k.key)).expect("lookup expired key");
+        assert_eq!(lookup.user, "alice");
     }
 }

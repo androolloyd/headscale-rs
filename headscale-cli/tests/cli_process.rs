@@ -1620,6 +1620,17 @@ fn utility_json_flag_matches_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn utility_top_level_unknown_flags_match_upstream_stderr_snapshots() {
+    let unknown_flag =
+        include_str!("snapshots/utility_top_level_json_flag.stderr").replace("--json", "--bad");
+    assert_stderr_snapshot(&["--bad"], 1, &unknown_flag);
+
+    let unknown_shorthand = include_str!("snapshots/utility_top_level_json_flag.stderr")
+        .replace("unknown flag: --json", "unknown shorthand flag: 'x' in -x");
+    assert_stderr_snapshot(&["-x"], 1, &unknown_shorthand);
+}
+
+#[test]
 fn utility_extra_args_match_upstream_unknown_command_errors() {
     for args in [
         &["version", "bad"][..],

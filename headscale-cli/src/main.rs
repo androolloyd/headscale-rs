@@ -1009,6 +1009,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some("Error: unknown flag: --json\n".into());
     }
 
+    if let Some(error) = upstream_top_level_unknown_flag(parts.as_slice()) {
+        return Some(format!("{UPSTREAM_TOP_LEVEL_USAGE}\nError: {error}\n"));
+    }
+
     if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
         return Some(format!("Error: {error}\n"));
     }
@@ -1048,6 +1052,55 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             parts.join(" ")
         )
     })
+}
+
+fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
+    let mut i = 0;
+    while i < parts.len() {
+        let arg = parts[i];
+        if arg == "--" || !arg.starts_with('-') {
+            return None;
+        }
+
+        match arg {
+            "-h" | "--help" | "--force" | "--insecure" => {
+                i += 1;
+            }
+            "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
+            | "--api-key" | "--unix-socket" | "--log-level"
+                if i + 1 < parts.len() =>
+            {
+                i += 2;
+            }
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("--server=")
+                    || value.starts_with("--token=")
+                    || value.starts_with("--address=")
+                    || value.starts_with("--api-key=")
+                    || value.starts_with("--unix-socket=")
+                    || value.starts_with("--log-level=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            _ => return cobra_unknown_flag_error(arg),
+        }
+    }
+    None
+}
+
+fn cobra_unknown_flag_error(arg: &str) -> Option<String> {
+    if arg.starts_with("--") {
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        Some(format!("unknown flag: {flag}"))
+    } else {
+        arg.strip_prefix('-')
+            .and_then(|shorthand| shorthand.chars().next())
+            .map(|flag| format!("unknown shorthand flag: '{flag}' in {arg}"))
+    }
 }
 
 fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {

@@ -1778,7 +1778,7 @@ Global Flags:
 
 const UPSTREAM_NODES_REGISTER_DEPRECATED: &str = "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead\n";
 
-const UPSTREAM_NODES_REGISTER_HELP: &str = r#"Registers a node to your network
+const UPSTREAM_NODES_REGISTER_HELP: &str = r"Registers a node to your network
 
 Usage:
   headscale nodes register [flags]
@@ -1792,7 +1792,7 @@ Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
       --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-"#;
+";
 
 const UPSTREAM_NODES_LIST_ROUTES_HELP: &str = r"List routes available on nodes
 

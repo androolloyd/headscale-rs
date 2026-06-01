@@ -2078,6 +2078,55 @@ struct NodeStoreWriteQueue {
     tx: std_mpsc::Sender<NodeStoreWriteWork>,
 }
 
+type NodeStoreBoolUpdateFn =
+    Box<dyn FnOnce(&mut HashMap<String, MachineRecord>) -> NodeStoreBoolUpdateOutcome + Send>;
+
+#[derive(Debug)]
+struct NodeStoreBoolUpdateOutcome {
+    applied: bool,
+    publish_snapshot: bool,
+    change: Option<PendingMapChange>,
+    clear_unhealthy_route_state: Option<u64>,
+}
+
+impl NodeStoreBoolUpdateOutcome {
+    fn unchanged(applied: bool) -> Self {
+        Self {
+            applied,
+            publish_snapshot: false,
+            change: None,
+            clear_unhealthy_route_state: None,
+        }
+    }
+
+    fn quiet(applied: bool) -> Self {
+        Self {
+            applied,
+            publish_snapshot: applied,
+            change: None,
+            clear_unhealthy_route_state: None,
+        }
+    }
+
+    fn changed(change: PendingMapChange) -> Self {
+        Self {
+            applied: true,
+            publish_snapshot: true,
+            change: Some(change),
+            clear_unhealthy_route_state: None,
+        }
+    }
+
+    fn changed_and_clear_unhealthy(change: PendingMapChange, node_id: Option<u64>) -> Self {
+        Self {
+            applied: true,
+            publish_snapshot: true,
+            change: Some(change),
+            clear_unhealthy_route_state: node_id,
+        }
+    }
+}
+
 enum NodeStoreWriteWork {
     Upsert {
         node_key_hex: String,
@@ -2087,6 +2136,24 @@ enum NodeStoreWriteWork {
     Delete {
         node_key_hex: String,
         result_tx: std_mpsc::Sender<bool>,
+    },
+    UpdateBool {
+        operation: &'static str,
+        update: NodeStoreBoolUpdateFn,
+        result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
+    },
+}
+
+enum NodeStoreWriteCompletion {
+    Bool {
+        operation: &'static str,
+        result_tx: std_mpsc::Sender<bool>,
+        result: bool,
+    },
+    UpdateBool {
+        operation: &'static str,
+        result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
+        outcome: NodeStoreBoolUpdateOutcome,
     },
 }
 
@@ -2475,7 +2542,9 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(NodeStoreWriteWork::Upsert {
                 node_key_hex, rec, ..
             })) => self.apply_nodestore_upsert_direct(node_key_hex, *rec),
-            Err(std_mpsc::SendError(NodeStoreWriteWork::Delete { .. })) => unreachable!(),
+            Err(std_mpsc::SendError(
+                NodeStoreWriteWork::Delete { .. } | NodeStoreWriteWork::UpdateBool { .. },
+            )) => unreachable!(),
         };
         self.metrics
             .nodestore_queue_depth
@@ -2515,7 +2584,9 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(NodeStoreWriteWork::Delete { node_key_hex, .. })) => {
                 self.apply_nodestore_delete_direct(&node_key_hex)
             }
-            Err(std_mpsc::SendError(NodeStoreWriteWork::Upsert { .. })) => unreachable!(),
+            Err(std_mpsc::SendError(
+                NodeStoreWriteWork::Upsert { .. } | NodeStoreWriteWork::UpdateBool { .. },
+            )) => unreachable!(),
         };
         self.metrics
             .nodestore_queue_depth
@@ -2538,6 +2609,80 @@ impl MachineRegistry {
         removed
     }
 
+    fn enqueue_nodestore_bool_update(
+        &self,
+        queue: &NodeStoreWriteQueue,
+        operation: &'static str,
+        update: NodeStoreBoolUpdateFn,
+    ) -> NodeStoreBoolUpdateOutcome {
+        let (result_tx, result_rx) = std_mpsc::channel();
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_add(1, Ordering::SeqCst);
+        let result = match queue.tx.send(NodeStoreWriteWork::UpdateBool {
+            operation,
+            update,
+            result_tx,
+        }) {
+            Ok(()) => result_rx
+                .recv()
+                .unwrap_or_else(|_| NodeStoreBoolUpdateOutcome::unchanged(false)),
+            Err(std_mpsc::SendError(NodeStoreWriteWork::UpdateBool {
+                operation, update, ..
+            })) => self.apply_nodestore_bool_update_direct(operation, update),
+            Err(std_mpsc::SendError(
+                NodeStoreWriteWork::Upsert { .. } | NodeStoreWriteWork::Delete { .. },
+            )) => unreachable!(),
+        };
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    fn apply_nodestore_bool_update_direct(
+        &self,
+        operation: &'static str,
+        update: NodeStoreBoolUpdateFn,
+    ) -> NodeStoreBoolUpdateOutcome {
+        let start = Instant::now();
+        let outcome = {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            let outcome = update(&mut next);
+            if outcome.publish_snapshot {
+                *g = Arc::new(next);
+            }
+            outcome
+        };
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation(operation, elapsed);
+        if outcome.publish_snapshot {
+            self.record_nodestore_batch(1, elapsed);
+        }
+        if let Some(change) = outcome.change.clone() {
+            self.wake_waiters_with(change);
+        }
+        outcome
+    }
+
+    fn apply_nodestore_bool_update(
+        &self,
+        operation: &'static str,
+        update: NodeStoreBoolUpdateFn,
+    ) -> NodeStoreBoolUpdateOutcome {
+        let queue = self.nodestore_write_queue.read().clone();
+        let outcome = if let Some(queue) = queue.as_ref() {
+            self.enqueue_nodestore_bool_update(queue, operation, update)
+        } else {
+            self.apply_nodestore_bool_update_direct(operation, update)
+        };
+        if let Some(node_id) = outcome.clear_unhealthy_route_state {
+            self.primary_routes.write().clear_unhealthy(node_id);
+        }
+        outcome
+    }
+
     fn apply_nodestore_upsert_batch(&self, batch: Vec<NodeStoreWriteWork>) {
         if batch.is_empty() {
             return;
@@ -2545,6 +2690,7 @@ impl MachineRegistry {
 
         let start = Instant::now();
         let mut completions = Vec::with_capacity(batch.len());
+        let mut publish_snapshot = false;
         {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
@@ -2557,27 +2703,70 @@ impl MachineRegistry {
                     } => {
                         let existed = next.contains_key(&node_key_hex);
                         next.insert(node_key_hex, *rec);
-                        completions.push(("put", result_tx, existed));
+                        publish_snapshot = true;
+                        completions.push(NodeStoreWriteCompletion::Bool {
+                            operation: "put",
+                            result_tx,
+                            result: existed,
+                        });
                     }
                     NodeStoreWriteWork::Delete {
                         node_key_hex,
                         result_tx,
                     } => {
                         let removed = next.remove(&node_key_hex).is_some();
-                        completions.push(("delete", result_tx, removed));
+                        publish_snapshot = true;
+                        completions.push(NodeStoreWriteCompletion::Bool {
+                            operation: "delete",
+                            result_tx,
+                            result: removed,
+                        });
+                    }
+                    NodeStoreWriteWork::UpdateBool {
+                        operation,
+                        update,
+                        result_tx,
+                    } => {
+                        let outcome = update(&mut next);
+                        publish_snapshot |= outcome.publish_snapshot;
+                        completions.push(NodeStoreWriteCompletion::UpdateBool {
+                            operation,
+                            result_tx,
+                            outcome,
+                        });
                     }
                 }
             }
-            *g = Arc::new(next);
+            if publish_snapshot {
+                *g = Arc::new(next);
+            }
         }
 
         let elapsed = start.elapsed();
-        for (operation, _, _) in &completions {
+        for completion in &completions {
+            let operation = match completion {
+                NodeStoreWriteCompletion::Bool { operation, .. }
+                | NodeStoreWriteCompletion::UpdateBool { operation, .. } => operation,
+            };
             self.record_nodestore_operation(operation, elapsed);
         }
         self.record_nodestore_batch(completions.len(), elapsed);
-        for (_, tx, result) in completions {
-            let _ = tx.send(result);
+        for completion in completions {
+            match completion {
+                NodeStoreWriteCompletion::Bool {
+                    result_tx, result, ..
+                } => {
+                    let _ = result_tx.send(result);
+                }
+                NodeStoreWriteCompletion::UpdateBool {
+                    result_tx, outcome, ..
+                } => {
+                    if let Some(change) = outcome.change.clone() {
+                        self.wake_waiters_with(change);
+                    }
+                    let _ = result_tx.send(outcome);
+                }
+            }
         }
     }
 
@@ -3565,13 +3754,6 @@ impl MachineRegistry {
         r
     }
 
-    fn update_with_operation_quiet<R, F>(&self, operation: &str, f: F) -> R
-    where
-        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
-    {
-        self.update_with_operation_and_wake(operation, None, f)
-    }
-
     fn update_with_operation_and_wake<R, F>(
         &self,
         operation: &str,
@@ -3606,55 +3788,55 @@ impl MachineRegistry {
     /// otherwise. Mirrors `db.SetExpiry` in
     /// `juanfont/headscale@main:hscontrol/db/node.go`.
     pub fn set_expiry(&self, node_key_hex: &str, expiry: Option<DateTime<Utc>>) -> bool {
-        self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(node_key_hex);
+                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = expiry;
-                    (
-                        true,
-                        Some(PendingMapChange::origin(
-                            MapChangeReason::KeyExpiry,
-                            node_id,
-                        )),
-                    )
+                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::origin(
+                        MapChangeReason::KeyExpiry,
+                        node_id,
+                    ))
                 }
-                None => (false, None),
-            }
-        })
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Rename a machine. Upstream's `db.NodeRenameNode` validates
     /// against `dnsname.ValidLabel` and rejects duplicate GivenNames
     /// without auto-suffixing.
     pub fn rename(&self, node_key_hex: &str, new_hostname: String) -> bool {
-        if !valid_given_name_label(&new_hostname) {
-            return false;
-        }
-        if self
-            .inner
-            .read()
-            .iter()
-            .any(|(key, rec)| key != node_key_hex && rec.hostname == new_hostname)
-        {
-            return false;
-        }
-        self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
-                Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(node_key_hex);
-                    rec.hostname = new_hostname;
-                    (
-                        true,
-                        Some(PendingMapChange::target(
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "set_name",
+            Box::new(move |map| {
+                if !valid_given_name_label(&new_hostname) {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                if map
+                    .iter()
+                    .any(|(key, rec)| key != &node_key_hex && rec.hostname == new_hostname)
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                match map.get_mut(&node_key_hex) {
+                    Some(rec) => {
+                        let node_id = rec.stable_node_id_for_key(&node_key_hex);
+                        rec.hostname = new_hostname;
+                        NodeStoreBoolUpdateOutcome::changed(PendingMapChange::target(
                             MapChangeReason::FullSelfUpdate,
                             node_id,
-                        )),
-                    )
+                        ))
+                    }
+                    None => NodeStoreBoolUpdateOutcome::unchanged(false),
                 }
-                None => (false, None),
-            }
-        })
+            }),
+        )
+        .applied
     }
 
     /// Logout a machine: stamps `expiry = now()` so the next `/map`
@@ -3666,22 +3848,22 @@ impl MachineRegistry {
     /// re-authenticate." `delete` is the destructive counterpart.
     pub fn logout(&self, node_key_hex: &str) -> bool {
         let now = Utc::now();
-        self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(node_key_hex);
+                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = Some(now);
-                    (
-                        true,
-                        Some(PendingMapChange::origin(
-                            MapChangeReason::KeyExpiry,
-                            node_id,
-                        )),
-                    )
+                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::origin(
+                        MapChangeReason::KeyExpiry,
+                        node_id,
+                    ))
                 }
-                None => (false, None),
-            }
-        })
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Remove a machine from the registry entirely. Mirrors
@@ -3738,13 +3920,18 @@ impl MachineRegistry {
     /// registry; the API stays the same.
     pub fn touch_last_seen(&self, node_key_hex: &str) -> bool {
         let now = Utc::now();
-        self.update_with_operation_quiet("touch_last_seen", |map| match map.get_mut(node_key_hex) {
-            Some(rec) => {
-                rec.last_seen = now;
-                true
-            }
-            None => false,
-        })
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "touch_last_seen",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
+                Some(rec) => {
+                    rec.last_seen = now;
+                    NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Replace a machine's `forced_tags` list. Empty-list admin
@@ -3754,72 +3941,67 @@ impl MachineRegistry {
         if tags.is_empty() {
             return false;
         }
-        self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) if rec.forced_tags != tags => {
                     rec.forced_tags = tags;
-                    (
-                        true,
-                        Some(PendingMapChange::global(MapChangeReason::TagUpdate)),
-                    )
+                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::global(
+                        MapChangeReason::TagUpdate,
+                    ))
                 }
-                Some(_) => (true, None),
-                None => (false, None),
-            }
-        })
+                Some(_) => NodeStoreBoolUpdateOutcome::unchanged(true),
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Replace a machine's approved subnet routes. Empty list clears
     /// route approval. The register/map paths maintain
     /// `available_routes`; this method records operator approval.
     pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        let mut clear_unhealthy = false;
-        let mut changed_node_id = None;
-        let changed = self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(node_key_hex);
+                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.approved_routes = routes;
-                    changed_node_id = Some(node_id);
-                    clear_unhealthy =
+                    let clear_unhealthy =
                         active_primary_routes(&rec.available_routes, &rec.approved_routes)
                             .is_empty();
-                    (
-                        true,
-                        Some(PendingMapChange::global(MapChangeReason::PolicyChange)),
+                    NodeStoreBoolUpdateOutcome::changed_and_clear_unhealthy(
+                        PendingMapChange::global(MapChangeReason::PolicyChange),
+                        clear_unhealthy.then_some(node_id),
                     )
                 }
-                None => (false, None),
-            }
-        });
-        if changed
-            && clear_unhealthy
-            && let Some(node_id) = changed_node_id
-        {
-            self.primary_routes.write().clear_unhealthy(node_id);
-        }
-        changed
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Replace a machine's advertised subnet routes. Empty list clears
     /// advertised routes while preserving operator approvals.
     pub fn set_available_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
-        self.update_with_operation_and_optional_change("update", |map| {
-            match map.get_mut(node_key_hex) {
+        let node_key_hex = node_key_hex.to_string();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(node_key_hex);
+                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.available_routes = routes;
-                    (
-                        true,
-                        Some(PendingMapChange::broadcast_peer(
-                            MapChangeReason::RouteUpdate,
-                            node_id,
-                        )),
-                    )
+                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::broadcast_peer(
+                        MapChangeReason::RouteUpdate,
+                        node_id,
+                    ))
                 }
-                None => (false, None),
-            }
-        })
+                None => NodeStoreBoolUpdateOutcome::unchanged(false),
+            }),
+        )
+        .applied
     }
 
     /// Remove every ephemeral node whose `last_seen` is older than
@@ -5218,6 +5400,142 @@ mod registry_tests {
         let batch_size = reg.nodestore_batch_size_metrics();
         assert_eq!(batch_size.count, batch_size_before.count + 1);
         assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_batches_concurrent_updates() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-update-{idx}");
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || first_reg.set_expiry("node-update-1", Some(expiry)));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first update did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.get("node-update-1").and_then(|rec| rec.expiry),
+            None,
+            "first update should wait for another item or the timeout"
+        );
+
+        assert!(reg.set_expiry("node-update-2", Some(expiry)));
+        assert!(first.join().expect("first update thread should finish"));
+
+        assert_eq!(
+            reg.get("node-update-1").and_then(|rec| rec.expiry),
+            Some(expiry)
+        );
+        assert_eq!(
+            reg.get("node-update-2").and_then(|rec| rec.expiry),
+            Some(expiry)
+        );
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_set_name_checks_collision_inside_batch() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-rename-{idx}");
+            rec.hostname = format!("rename-{idx}");
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first =
+            std::thread::spawn(move || first_reg.rename("node-rename-1", "shared-name".into()));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first rename did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.get("node-rename-1").map(|rec| rec.hostname),
+            Some("rename-1".into()),
+            "first rename should wait for another item or the timeout"
+        );
+
+        assert!(!reg.rename("node-rename-2", "shared-name".into()));
+        assert!(first.join().expect("first rename thread should finish"));
+
+        assert_eq!(
+            reg.get("node-rename-1").map(|rec| rec.hostname),
+            Some("shared-name".into())
+        );
+        assert_eq!(
+            reg.get("node-rename-2").map(|rec| rec.hostname),
+            Some("rename-2".into())
+        );
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("set_name")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_noop_update_does_not_publish_snapshot() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(1);
+        rec.node_key_hex = "node-noop-update".into();
+        rec.forced_tags = vec!["tag:server".into()];
+        reg.upsert(rec.node_key_hex.clone(), rec);
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+
+        let before = reg.snapshot();
+        assert!(reg.set_forced_tags("node-noop-update", vec!["tag:server".into()]));
+        let after = reg.snapshot();
+
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "unchanged update should not publish a new snapshot"
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(reg.nodestore_batch_size_metrics().count, 2);
     }
 
     #[test]

@@ -85,6 +85,7 @@ smoke_ids=(
   authkey
   authkey-nonreusable
   authkey-expired
+  authkey-relogin-same-user
   postgres-authkey
   postgres-online-lastseen
   postgres-ping-lifecycle
@@ -232,6 +233,7 @@ smoke_areas=(
   registration
   registration
   registration
+  lifecycle
   database
   database
   database
@@ -379,6 +381,7 @@ smoke_rust_scripts=(
   tools/real-client/authkey-smoke.sh
   tools/real-client/authkey-nonreusable-smoke.sh
   tools/real-client/authkey-expired-smoke.sh
+  tools/real-client/authkey-relogin-same-user-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
@@ -526,6 +529,7 @@ smoke_go_scripts=(
   tools/real-client/authkey-headscale-go-smoke.sh
   tools/real-client/authkey-nonreusable-headscale-go-smoke.sh
   tools/real-client/authkey-expired-headscale-go-smoke.sh
+  tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
@@ -673,6 +677,7 @@ smoke_assertions=(
   "auth-key login and one alice node"
   "one-time auth-key rejects second stock-client registration"
   "expired auth-key rejects stock-client registration"
+  "auth-key logout then same-user relogin preserves node identity and IPs"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"

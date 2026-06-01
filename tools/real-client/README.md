@@ -79,6 +79,7 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
 | Registration | `authkey-nonreusable` | `authkey-nonreusable-smoke.sh` | `authkey-nonreusable-headscale-go-smoke.sh` | One-time auth-key rejects second stock-client registration |
 | Registration | `authkey-expired` | `authkey-expired-smoke.sh` | `authkey-expired-headscale-go-smoke.sh` | Expired auth-key rejects stock-client registration |
+| Lifecycle | `authkey-relogin-same-user` | `authkey-relogin-same-user-smoke.sh` | `authkey-relogin-same-user-headscale-go-smoke.sh` | Auth-key logout then same-user relogin preserves node identity and IPs |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |

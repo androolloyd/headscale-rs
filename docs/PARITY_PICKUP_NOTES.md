@@ -1095,3 +1095,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   the remaining Postgres ACL smoke symmetry gap after `postgres-acl-allow`.
 - The real-client matrix and PR smoke set now include the rows; the Postgres
   stock-client matrix covers sixty-nine rows.
+
+## 2026-06-01 auth-key same-user relogin smoke slice
+
+- Added paired `authkey-relogin-same-user` Rust/headscale-go rows.
+- The shared auth-key harnesses can now opt into a logout plus fresh same-user
+  auth-key relogin cycle, wait for the stock client to return to `NeedsLogin`,
+  relogin with a newly minted key, and assert the node keeps its Tailscale IPs.
+- This closes the first upstream auth-key lifecycle smoke gap and leaves the
+  route-preservation, deleted-key restart, expired-key relogin rejection, and
+  different-user relogin cases as the next auth-key lifecycle rows.

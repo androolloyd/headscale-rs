@@ -49,6 +49,7 @@ set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
+authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 headscale_go_tls="${REAL_CLIENT_HEADSCALE_GO_TLS:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
@@ -215,6 +216,26 @@ case "${expected_debug_ping}" in
     exit 2
     ;;
 esac
+case "${authkey_relogin_same_user}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    authkey_relogin_same_user_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    authkey_relogin_same_user_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER must be true or false, got ${authkey_relogin_same_user}" >&2
+    exit 2
+    ;;
+esac
+if ((authkey_relogin_same_user_flag)) && [[ "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER requires REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+if ((authkey_relogin_same_user_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER cannot be combined with REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES" >&2
+  exit 2
+fi
 if ((expect_derp_ping_flag)) && [[ "${client_count}" =~ ^[0-9]+$ ]] && ((client_count < 2)); then
   echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
   exit 2
@@ -875,6 +896,14 @@ tailscale_logged_in() {
       !ips.empty?
     exit(ok ? 0 : 1)
   ' <<<"${status_json}"
+}
+
+tailscale_status_ips() {
+  local status_path="$1"
+  ruby -rjson -e '
+    status = JSON.parse(File.read(ARGV.fetch(0)))
+    puts Array(status["TailscaleIPs"]).sort.join(",")
+  ' "${status_path}"
 }
 
 tailscale_peer_count_matches() {
@@ -1776,6 +1805,76 @@ for idx in "${!client_names[@]}"; do
   docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
 done
 echo "::endgroup::"
+
+if ((authkey_relogin_same_user_flag)); then
+  echo "::group::auth-key logout and same-user relogin"
+  relogin_authkeys=()
+  relogin_before_ips=()
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
+    relogin_before_ips+=("$(tailscale_status_ips "${work_dir}/${client_name}.tailscale-status.json")")
+    user_id="$(lookup_user_id "${client_users[$idx]}")"
+    preauth_args=(
+      "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
+      --user "${user_id}" \
+      --expiration "${preauth_expiration}"
+      --reusable
+    )
+    if [[ -n "${preauth_tags_values[$idx]}" ]]; then
+      preauth_args+=(--tags "${preauth_tags_values[$idx]}")
+    fi
+    "${preauth_args[@]}" >"${work_dir}/preauth-relogin-${idx}.json"
+    relogin_authkeys+=("$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth-relogin-${idx}.json")")
+  done
+
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
+    docker exec "${client_name}" tailscale logout \
+      >"${work_dir}/${client_name}.logout.stdout" \
+      2>"${work_dir}/${client_name}.logout.stderr"
+    wait_for "tailscale logged out ${client_name}" \
+      "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+
+    up_args=(
+      tailscale up
+      "--login-server=${control_url}"
+      "--hostname=${client_name}"
+      "--timeout=${up_timeout}"
+      --accept-routes=false
+      "--accept-dns=${accept_dns_arg}"
+      "--authkey=${relogin_authkeys[$idx]}"
+    )
+    if [[ -n "${advertise_routes_values[$idx]}" ]]; then
+      up_args+=("--advertise-routes=${advertise_routes_values[$idx]}")
+    fi
+    if ((enable_tailscale_ssh_flag)); then
+      up_args+=(--ssh)
+    fi
+    case "${advertise_exit_node_values[$idx]}" in
+      1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+        up_args+=(--advertise-exit-node)
+        ;;
+    esac
+    relogin_status=0
+    run_with_timeout "tailscale same-user relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+      relogin_status="$?"
+    if ((relogin_status != 0)); then
+      echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
+    fi
+    if ! wait_for "tailscale logged-in netmap after same-user relogin ${client_name}" "tailscale_logged_in '${client_name}'"; then
+      dump_client_debug "${client_name}"
+      exit 1
+    fi
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.relogin-tailscale-status.json"
+    relogin_after_ips="$(tailscale_status_ips "${work_dir}/${client_name}.relogin-tailscale-status.json")"
+    if [[ "${relogin_after_ips}" != "${relogin_before_ips[$idx]}" ]]; then
+      echo "expected stable Tailscale IPs for ${client_name}: ${relogin_before_ips[$idx]}, got ${relogin_after_ips}" >&2
+      exit 1
+    fi
+    cp "${work_dir}/${client_name}.relogin-tailscale-status.json" "${work_dir}/${client_name}.tailscale-status.json"
+  done
+  echo "::endgroup::"
+fi
 
 if ((do_reauth_after_login)); then
   echo "::group::force headscale-go web reauth"

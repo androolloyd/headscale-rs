@@ -69,6 +69,8 @@ expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
 expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
+taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
+expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
 ssh_user="${REAL_CLIENT_SSH_USER:-}"
@@ -269,6 +271,36 @@ case "${expected_debug_ping}" in
     exit 2
     ;;
 esac
+taildrop_enabled_bool=""
+if [[ -n "${taildrop_enabled}" ]]; then
+  case "${taildrop_enabled}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      taildrop_enabled_bool=true
+      ;;
+    0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+      taildrop_enabled_bool=false
+      ;;
+    *)
+      echo "REAL_CLIENT_TAILDROP_ENABLED must be true or false, got ${taildrop_enabled}" >&2
+      exit 2
+      ;;
+  esac
+fi
+expected_file_sharing_cap_bool=""
+if [[ -n "${expected_file_sharing_cap}" ]]; then
+  case "${expected_file_sharing_cap}" in
+    1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+      expected_file_sharing_cap_bool=true
+      ;;
+    0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+      expected_file_sharing_cap_bool=false
+      ;;
+    *)
+      echo "REAL_CLIENT_EXPECT_FILE_SHARING_CAP must be true or false, got ${expected_file_sharing_cap}" >&2
+      exit 2
+      ;;
+  esac
+fi
 case "${enable_tailscale_ssh}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     enable_tailscale_ssh_flag=1
@@ -1003,6 +1035,41 @@ assert_ssh_matrix_if_requested() {
   echo "::endgroup::"
 }
 
+assert_self_file_sharing_cap() {
+  local cap_client_name="$1"
+  local output_path="$2"
+  local expected="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${cap_client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      path = ARGV.fetch(0)
+      expected = ARGV.fetch(1) == "true"
+      cap = "https://tailscale.com/cap/file-sharing"
+      netmap = JSON.parse(File.read(path))
+      self_node = netmap["SelfNode"] || netmap["selfNode"] || {}
+      cap_map = self_node["CapMap"] || self_node["capMap"] || {}
+      has_cap = cap_map.key?(cap)
+      abort("expected file-sharing CapMap presence #{expected}, got #{has_cap}; CapMap keys=#{cap_map.keys.inspect}") unless has_cap == expected
+      puts JSON.pretty_generate({file_sharing_cap: has_cap, cap_map_keys: cap_map.keys.sort})
+    ' "${netmap_path}" "${expected}" >"${output_path}"
+}
+
+assert_file_sharing_cap_if_requested() {
+  [[ -n "${expected_file_sharing_cap_bool}" ]] || return 0
+  echo "::group::assert file-sharing CapMap"
+  local cap_client_name
+  for cap_client_name in "${successful_client_names[@]}"; do
+    if ! wait_for "file-sharing CapMap ${cap_client_name}" \
+      "assert_self_file_sharing_cap '${cap_client_name}' '${work_dir}/file-sharing-cap-${cap_client_name}.json' '${expected_file_sharing_cap_bool}'"; then
+      cat "${work_dir}/file-sharing-cap-${cap_client_name}.json.err" >&2 || true
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${work_dir}/file-sharing-cap-${cap_client_name}.json"
+  done
+  echo "::endgroup::"
+}
+
 install_or_build_headscale() {
   case "${target}" in
     rust)
@@ -1256,6 +1323,13 @@ EOF
       ;;
   esac
   write_database_config >>"${config_path}"
+  if [[ -n "${taildrop_enabled_bool}" ]]; then
+    cat >>"${config_path}" <<EOF
+
+taildrop:
+  enabled: ${taildrop_enabled_bool}
+EOF
+  fi
 }
 
 headscale_cmd() {
@@ -2456,6 +2530,7 @@ wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_peer_visibility_if_requested
 assert_ssh_matrix_if_requested
+assert_file_sharing_cap_if_requested
 assert_debug_ping_if_requested
 assert_magic_dns_if_requested
 assert_no_magic_dns_if_requested

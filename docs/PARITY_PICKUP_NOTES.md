@@ -387,10 +387,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all seventy-nine Pg rows, including
+  all eighty Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-route-preserve`,
+  `postgres-taildrop-capmap`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -924,6 +925,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   approved-route comparisons.
 - The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to seventy-nine rows.
+
+## 2026-06-01 Postgres Taildrop CapMap smoke slice
+
+- Added paired `postgres-taildrop-capmap` Rust/headscale-go rows over the
+  production Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now accepts Taildrop config
+  toggles, emits the production `taildrop.enabled` config, and asserts the
+  stock-client self-node file-sharing CapMap state through `tailscale debug
+  netmap`.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to eighty rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

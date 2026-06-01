@@ -402,6 +402,38 @@ async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_unauthenticated_user_list_does_not_leak_existing_users() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"alice","email":"alice@example.com"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for authorization in [None, Some("Bearer definitely-invalid")] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                Method::GET,
+                "/api/v1/user?name=alice",
+                authorization,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+
+        assert_plain_unauthorized(resp).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_opaque_authorization_header_is_plain_unauthorized() {
     let (app, _token) = fixture().await;
 

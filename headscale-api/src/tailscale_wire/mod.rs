@@ -50,7 +50,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
-use tokio::sync::{Notify, oneshot, watch};
+use tokio::sync::{Notify, broadcast, oneshot, watch};
 
 use self::routes::{
     DebugRoutes, PrimaryRouteState, active_approved_routes, active_primary_routes,
@@ -78,6 +78,7 @@ const STREAM_OFFLINE_GRACE: Duration = Duration::from_secs(10);
 pub const BATCHER_OFFLINE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Headscale-go retains disconnected batcher entries for rapid reconnects.
 pub const BATCHER_OFFLINE_CLEANUP_THRESHOLD: Duration = Duration::from_secs(15 * 60);
+const MAP_BATCH_EVENT_BUFFER: usize = 30;
 const MAP_CHANGE_HISTORY_LIMIT: usize = 128;
 const TS_ALLOW_DEBUG_IP_ENV: &str = "TS_ALLOW_DEBUG_IP";
 const TS_DEBUG_KEY_PATH_ENV: &str = "TS_DEBUG_KEY_PATH";
@@ -1954,6 +1955,10 @@ pub struct MachineRegistry {
     /// Last tick-drained map-change batch. Streaming map responses consume
     /// this watch channel when the batch task is enabled.
     map_batch_tx: Arc<watch::Sender<MapChangeBatch>>,
+    /// Ordered tick-drained batches for active map streams. The watch channel
+    /// above exposes the latest snapshot for tests/debugging; streams need the
+    /// per-session queue semantics of headscale-go's buffered map channel.
+    map_batch_event_tx: Arc<broadcast::Sender<MapChangeBatch>>,
     /// Whether the headscale-go-style batch tick task is active for
     /// this registry. Streams use this to prefer delayed batch delivery
     /// while preserving immediate generation wakes for embedders/tests
@@ -2036,6 +2041,7 @@ impl Default for MachineRegistry {
         let (gen_tx, _gen_rx) = watch::channel(0u64);
         let (map_batch_tx, _map_batch_rx) =
             watch::channel(Arc::new(BTreeMap::<u64, Vec<MapChange>>::new()));
+        let (map_batch_event_tx, _map_batch_event_rx) = broadcast::channel(MAP_BATCH_EVENT_BUFFER);
         Self {
             inner: RwLock::default(),
             notify: Arc::new(Notify::new()),
@@ -2050,6 +2056,7 @@ impl Default for MachineRegistry {
             map_changes: RwLock::new(VecDeque::new()),
             pending_map_changes: RwLock::new(BTreeMap::new()),
             map_batch_tx: Arc::new(map_batch_tx),
+            map_batch_event_tx: Arc::new(map_batch_event_tx),
             map_batcher_enabled: AtomicBool::new(false),
             ephemeral_gc: RwLock::new(None),
             metrics: WireMetrics::default(),
@@ -2125,6 +2132,11 @@ impl MachineRegistry {
     }
 
     #[must_use]
+    pub fn subscribe_map_batch_events(&self) -> broadcast::Receiver<MapChangeBatch> {
+        self.map_batch_event_tx.subscribe()
+    }
+
+    #[must_use]
     pub fn map_batcher_enabled(&self) -> bool {
         self.map_batcher_enabled.load(Ordering::SeqCst)
     }
@@ -2155,6 +2167,7 @@ impl MachineRegistry {
         }
         let batch = Arc::new(pending);
         self.map_batch_tx.send_replace(batch.clone());
+        let _ = self.map_batch_event_tx.send(batch.clone());
         Some(batch)
     }
 

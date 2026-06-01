@@ -1017,3 +1017,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `auth-key must be either tagged or owned by user`.
 - The grpc-gateway e2e matrix covers the corresponding HTTP 500/status JSON
   shape for `POST /api/v1/preauthkey` with an empty body.
+
+## 2026-06-01 map batch ordered-delivery slice
+
+- Streamed map responses now consume tick-published map batches through a
+  bounded per-subscriber event queue instead of only observing the latest watch
+  value.
+- This matches headscale-go's buffered map-session semantics: if two batches
+  publish before a slow stream polls again, the stream still processes the
+  earlier self-targeted batch before skipping later batches that do not concern
+  it. A lagged subscriber falls back to a full map response.

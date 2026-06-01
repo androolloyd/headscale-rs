@@ -1359,7 +1359,7 @@ async fn map_inner(
         // started the batch task.
         let machines = state.machines.clone();
         let gen_rx = state.machines.subscribe_gen();
-        let map_batch_rx = state.machines.subscribe_map_batches();
+        let map_batch_rx = state.machines.subscribe_map_batch_events();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
@@ -1499,11 +1499,34 @@ async fn map_inner(
                     tokio::pin!(dns_changed);
                     let maybe_chunk = tokio::select! {
                     biased;
-                    res = map_batch_rx.changed() => {
-                        if res.is_err() {
-                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                        } else {
-                            let batch = map_batch_rx.borrow_and_update().clone();
+                    res = map_batch_rx.recv() => {
+                        match res {
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                Some((
+                                    rebuild_map_chunk(
+                                        &machines,
+                                        &policy,
+                                        &self_node_key,
+                                        &machines_derp_map,
+                                        &dns,
+                                        cap_version,
+                                        taildrop_enabled,
+                                        auto_update_enabled,
+                                        disable_log_tail,
+                                        compression,
+                                        "full",
+                                        &mapresponse_debug,
+                                        MapResponseDebugType::Change,
+                                        public_control_url.as_deref().unwrap_or(""),
+                                    ),
+                                    visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
+                                    self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
+                                ))
+                            }
+                            Ok(batch) => {
                             let changes = batch.get(&self_node_id).cloned().unwrap_or_default();
                             rebuild_map_batch_chunk(
                                 &machines,
@@ -1523,6 +1546,7 @@ async fn map_inner(
                                 public_control_url.as_deref().unwrap_or(""),
                                 &changes,
                             )
+                            }
                         }
                     }
                     res = gen_rx.changed() => {
@@ -5727,6 +5751,57 @@ mod tests {
              got keepalive instead, indicating the lost-wake race regressed"
         );
         assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
+    }
+
+    #[tokio::test]
+    async fn stream_true_consumes_each_published_map_batch_in_order() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        state.machines.enable_map_batcher();
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 0);
+
+        let node_a_id = stable_id_from_key(&a);
+        let node_b_id = stable_id_from_key(&b);
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            state.machines.clone(),
+            node_b_id,
+            Duration::ZERO,
+        );
+        let _ = state.machines.drain_pending_map_changes();
+
+        insert_peer(&state, &b, "peer-b", 11);
+        let first_batch = state
+            .machines
+            .publish_pending_map_changes()
+            .expect("peer-add batch published");
+        assert!(first_batch.contains_key(&node_a_id));
+
+        state
+            .machines
+            .record_observed_map_change(MapChangeReason::PingNode, Some(node_b_id), None);
+        let second_batch = state
+            .machines
+            .publish_pending_map_changes()
+            .expect("other-node-only batch published");
+        assert!(!second_batch.contains_key(&node_a_id));
+
+        let delta = tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut body))
+            .await
+            .expect("stream should consume the queued peer-add batch before later batches");
+        assert!(
+            delta.peers.is_empty(),
+            "follow-up stream chunks use incremental peer deltas"
+        );
+        assert_eq!(delta.peers_changed.len(), 1);
+        assert_eq!(delta.peers_changed[0].id, node_b_id);
+        assert_eq!(delta.peers_changed[0].name, "peer-b");
+        assert_eq!(delta.peers_changed[0].addresses[0], "100.64.0.11/32");
     }
 
     #[tokio::test(start_paused = true)]

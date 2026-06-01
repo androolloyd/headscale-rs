@@ -386,6 +386,11 @@ Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
 neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and
 message, with grpc-gateway HTTP/status JSON coverage for the same edge.
 
+Recent coverage note (2026-06-01): streamed map responses now use a bounded
+per-subscriber batch event queue for tick-published map changes, preserving
+headscale-go-style ordered delivery when multiple batches publish before a
+stream polls again while retaining full-map fallback on lag.
+
 ## Next Implementation Order
 
 1. Finish the remaining Postgres runtime dependency chain: broaden production

@@ -178,6 +178,7 @@ smoke_ids=(
   oidc
   ssh-oidc-check
   ssh-cli-check
+  ssh-oidc-check-period-cache
   ssh-oidc-check-wrong-user
   ssh-oidc-check-deny
   ssh-oidc-check-cancel
@@ -218,6 +219,7 @@ smoke_ids=(
   route-via-health
   route-via-reload
   route-via-restart
+  route-via-same-tag-restart
   route-via-reload-restart
   route-via-multiprefix
   route-via-multiprefix-reload
@@ -348,6 +350,7 @@ smoke_areas=(
   ssh
   ssh
   ssh
+  ssh
   lifecycle
   lifecycle
   lifecycle
@@ -373,6 +376,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -512,6 +516,7 @@ smoke_rust_scripts=(
   tools/real-client/oidc-smoke.sh
   tools/real-client/ssh-oidc-check-smoke.sh
   tools/real-client/ssh-cli-check-smoke.sh
+  tools/real-client/ssh-oidc-check-period-cache-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/ssh-oidc-check-deny-smoke.sh
   tools/real-client/ssh-oidc-check-cancel-smoke.sh
@@ -552,6 +557,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-health-smoke.sh
   tools/real-client/route-via-reload-smoke.sh
   tools/real-client/route-via-restart-smoke.sh
+  tools/real-client/route-via-same-tag-restart-smoke.sh
   tools/real-client/route-via-reload-restart-smoke.sh
   tools/real-client/route-via-multiprefix-smoke.sh
   tools/real-client/route-via-multiprefix-reload-smoke.sh
@@ -679,6 +685,7 @@ smoke_go_scripts=(
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/ssh-cli-check-headscale-go-smoke.sh
+  tools/real-client/ssh-oidc-check-period-cache-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-cancel-headscale-go-smoke.sh
@@ -719,6 +726,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-health-headscale-go-smoke.sh
   tools/real-client/route-via-reload-headscale-go-smoke.sh
   tools/real-client/route-via-restart-headscale-go-smoke.sh
+  tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh
   tools/real-client/route-via-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-reload-headscale-go-smoke.sh
@@ -846,6 +854,7 @@ smoke_assertions=(
   "OIDC callback, node row, and user profile"
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
   "CLI-approved Tailscale SSH check approval"
+  "OIDC-backed Tailscale SSH checkPeriod cache"
   "wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "cancelled OIDC-backed Tailscale SSH check denial status/stdout/stderr"
@@ -886,6 +895,7 @@ smoke_assertions=(
   "current-head regular-overlap same-tag grants via follows route-health failover"
   "current-head route steering policy reload moves grants via ownership"
   "current-head route steering with grants via survives server restart"
+  "current-head same-tag route steering with grants via survives server restart"
   "current-head route steering policy reload survives server restart"
   "current-head multi-prefix route steering with grants via"
   "current-head multi-prefix route steering policy reload moves grants via ownership"

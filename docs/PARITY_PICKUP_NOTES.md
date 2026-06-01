@@ -1286,3 +1286,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The default SQLite stock-client matrix now mirrors the Postgres mixed-exit
   reload+restart route-health combinations, and the bounded push/PR
   real-client smoke set includes both rows.
+
+## 2026-06-01 SQLite route-via and SSH cache symmetry slice
+
+- Added paired `route-via-same-tag-restart` Rust/headscale-go rows over the
+  existing production restart harness.
+- Added paired `ssh-oidc-check-period-cache` Rust/headscale-go rows over the
+  existing OIDC SSH check harness.
+- The default SQLite stock-client matrix now matches the existing Postgres
+  coverage for same-tag route-via restart and OIDC SSH checkPeriod cache; the
+  bounded push/PR real-client smoke set includes both rows.

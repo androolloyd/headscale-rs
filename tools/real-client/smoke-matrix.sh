@@ -130,6 +130,7 @@ smoke_ids=(
   postgres-ssh-oidc-check-wrong-user
   postgres-ssh-oidc-check-deny
   postgres-ssh-oidc-check-cancel
+  postgres-ssh-accept-env
   postgres-web-register-restart
   postgres-restart-persistence
   postgres-tagged-preauth
@@ -248,6 +249,7 @@ smoke_areas=(
   registration
   lifecycle
   lifecycle
+  database
   database
   database
   database
@@ -452,6 +454,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh
+  tools/real-client/postgres-ssh-accept-env-smoke.sh
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/postgres-tagged-preauth-smoke.sh
@@ -613,6 +616,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-accept-env-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/postgres-tagged-preauth-headscale-go-smoke.sh
@@ -774,6 +778,7 @@ smoke_assertions=(
   "production Postgres wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres cancelled OIDC-backed Tailscale SSH check denial status/stdout/stderr"
+  "production Postgres current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
   "production Postgres preauth key with ACL tag owners"

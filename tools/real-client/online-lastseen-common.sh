@@ -32,6 +32,7 @@ approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
+preauth_tags_by_client="${REAL_CLIENT_PREAUTH_TAGS_BY_CLIENT:-}"
 set_tags_after_login="${REAL_CLIENT_SET_TAGS_AFTER_LOGIN:-}"
 expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
@@ -495,6 +496,23 @@ else
     client_users+=("alice")
   done
 fi
+
+preauth_tags_values=()
+for ((idx = 0; idx < client_count; idx++)); do
+  preauth_tags_values+=("${preauth_tags}")
+done
+if [[ -n "${preauth_tags_by_client}" ]]; then
+  IFS=';' read -r -a preauth_tags_values <<<"${preauth_tags_by_client}"
+  if ((${#preauth_tags_values[@]} != client_count)); then
+    echo "REAL_CLIENT_PREAUTH_TAGS_BY_CLIENT must contain ${client_count} semicolon-separated values, got ${preauth_tags_by_client}" >&2
+    exit 2
+  fi
+  for idx in "${!preauth_tags_values[@]}"; do
+    if [[ "${preauth_tags_values[$idx]}" == "-" ]]; then
+      preauth_tags_values[$idx]=""
+    fi
+  done
+fi
 client_name="${client_names[0]}"
 
 if [[ -z "${policy_json}" ]]; then
@@ -504,6 +522,7 @@ if [[ -z "${policy_json}" ]]; then
       tags.concat(ARGV.fetch(0).split(","))
       tags.concat(ARGV.fetch(1).split(","))
       tags.concat(ARGV.fetch(2).split(",")) unless ARGV.fetch(3) == "true"
+      ARGV.fetch(4).split(";").each { |value| tags.concat(value.split(",")) unless value == "-" }
       tags = tags.reject(&:empty?).sort.uniq
       exit if tags.empty?
       owners = tags.to_h { |tag| [tag, ["alice@"]] }
@@ -511,7 +530,7 @@ if [[ -z "${policy_json}" ]]; then
         tagOwners: owners,
         acls: [{action: "accept", src: ["*"], dst: ["*:*"]}],
       })
-    ' "${preauth_tags}" "${reauth_tags}" "${set_tags_after_login}" "$([[ "${expect_set_tags_failure}" -eq 1 ]] && printf true || printf false)"
+    ' "${preauth_tags}" "${reauth_tags}" "${set_tags_after_login}" "$([[ "${expect_set_tags_failure}" -eq 1 ]] && printf true || printf false)" "${preauth_tags_by_client:-}"
   )"
 fi
 
@@ -1469,6 +1488,10 @@ user_id_for_name() {
 mint_preauth_key_for_user() {
   local key_user_id="$1"
   local output_name="$2"
+  local key_tags="${preauth_tags}"
+  if (($# >= 3)); then
+    key_tags="$3"
+  fi
   local preauth_args=(
     -o json preauthkeys create
     --user "${key_user_id}"
@@ -1477,8 +1500,8 @@ mint_preauth_key_for_user() {
   if ((preauth_reusable_flag)); then
     preauth_args+=(--reusable)
   fi
-  if [[ -n "${preauth_tags}" ]]; then
-    preauth_args+=(--tags "${preauth_tags}")
+  if [[ -n "${key_tags}" ]]; then
+    preauth_args+=(--tags "${key_tags}")
   fi
   headscale_cmd "${preauth_args[@]}" >"${work_dir}/${output_name}.json"
   if ((preauth_expired_flag)); then
@@ -1516,10 +1539,10 @@ create_user_and_key() {
   if [[ "${login_mode}" == "authkey" ]]; then
     echo "::group::mint preauth keys"
     authkeys=()
-    if [[ -n "${client_users_csv}" ]]; then
+    if [[ -n "${client_users_csv}" || -n "${preauth_tags_by_client}" ]]; then
       for idx in "${!client_users[@]}"; do
         user_id="$(user_id_for_name "${client_users[$idx]}")"
-        authkey="$(mint_preauth_key_for_user "${user_id}" "preauth-${idx}")"
+        authkey="$(mint_preauth_key_for_user "${user_id}" "preauth-${idx}" "${preauth_tags_values[$idx]}")"
         authkeys+=("${authkey}")
       done
       echo "minted ${#authkeys[@]} per-client keys"
@@ -1750,7 +1773,7 @@ relogin_with_authkey_if_requested() {
     docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.relogin-before-status.json"
     relogin_before_ips+=("$(tailscale_status_ips "${work_dir}/${client_name}.relogin-before-status.json")")
     user_id="$(user_id_for_name "${client_users[$idx]}")"
-    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}")")
+    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}" "${preauth_tags_values[$idx]}")")
   done
 
   for idx in "${!client_names[@]}"; do

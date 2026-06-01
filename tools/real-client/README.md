@@ -125,6 +125,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
+| Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |

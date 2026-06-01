@@ -387,7 +387,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty Pg rows, including
+  all eighty-one Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-route-preserve`,
@@ -404,8 +404,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-route-primary-withdraw`, `postgres-acl-allow`,
   `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
   `postgres-ssh`, `postgres-ssh-oidc-check`,
-  `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
-  wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
+  `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`,
+  `postgres-ssh-accept-env`, and the paired wrong-user, expired, and cancelled
+  OIDC SSH-check denial rows; broader Pg
   stock-client serve smokes remain for the remaining registration/config
   surfaces
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
@@ -936,6 +937,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   netmap`.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to eighty rows.
+
+## 2026-06-01 Postgres SSH acceptEnv smoke slice
+
+- Added paired `postgres-ssh-accept-env` Rust/headscale-go rows over the
+  production Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now supports per-client
+  preauth-key tags, allowing one same-user client to register as an untagged
+  source and another as the tagged SSH destination required by the upstream
+  `acceptEnv` policy fixture.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to eighty-one rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

@@ -144,6 +144,21 @@ fn assert_stdout_snapshot(args: &[&str], expected: &str) {
     assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
 }
 
+fn assert_stdout_stderr_snapshot(args: &[&str], expected_stdout: &str, expected_stderr: &str) {
+    let output = headscale_clean(args);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        trim_line_end_spaces(&stdout(&output)),
+        trim_line_end_spaces(expected_stdout),
+        "stdout snapshot for {args:?}"
+    );
+    assert_eq!(
+        trim_line_end_spaces(&stderr(&output)),
+        trim_line_end_spaces(expected_stderr),
+        "stderr snapshot for {args:?}"
+    );
+}
+
 fn assert_normalized_node_stdout_snapshot(output: &Output, expected: &str, label: &str) {
     assert!(output.status.success(), "stderr: {}", stderr(output));
     assert_eq!(
@@ -964,13 +979,15 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         include_str!("snapshots/users_destroy_help.stdout"),
     );
     assert_stdout_snapshot(&["node", "-h"], include_str!("snapshots/nodes_help.stdout"));
-    assert_stdout_snapshot(
+    assert_stdout_stderr_snapshot(
         &["nodes", "register", "--help"],
         include_str!("snapshots/nodes_register_help.stdout"),
+        include_str!("snapshots/nodes_register_help.stderr"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_stderr_snapshot(
         &["node", "register", "--help"],
         include_str!("snapshots/nodes_register_help.stdout"),
+        include_str!("snapshots/nodes_register_help.stderr"),
     );
     assert_stdout_snapshot(
         &["help", "nodes", "register"],
@@ -2162,9 +2179,10 @@ fn implemented_admin_command_help_matches_snapshots() {
         &["nodes", "list-routes", "--help"],
         include_str!("snapshots/nodes_list_routes_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_stderr_snapshot(
         &["nodes", "register", "--help"],
         include_str!("snapshots/nodes_register_help.stdout"),
+        include_str!("snapshots/nodes_register_help.stderr"),
     );
     assert_stdout_snapshot(
         &["nodes", "expire", "--help"],
@@ -4577,6 +4595,19 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         &["-o", "json", "users", "rename", "--new-name", "bob"],
         6,
         include_str!("snapshots/grpc_live_user_selector_required_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "users",
+            "rename",
+            "--name",
+            "alice",
+            "--new-name",
+            "alice-renamed-by-name",
+        ],
+        6,
+        include_str!("snapshots/grpc_live_user_rename_name_server_error.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,

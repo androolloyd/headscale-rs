@@ -68,7 +68,7 @@ pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminEr
 
 pub async fn list_grpc(
     client: &mut GrpcAdminClient,
-    id: Option<u64>,
+    id: Option<i64>,
     name: Option<&str>,
     email: Option<&str>,
     fmt: OutputFormat,
@@ -100,7 +100,7 @@ pub async fn delete(client: &AdminClient, name: &str) -> Result<(), AdminError> 
 
 pub async fn destroy_grpc(
     client: &mut GrpcAdminClient,
-    id: Option<u64>,
+    id: Option<i64>,
     name: Option<&str>,
     force: bool,
     fmt: OutputFormat,
@@ -132,13 +132,17 @@ pub async fn destroy_grpc(
 
 pub async fn rename_grpc(
     client: &mut GrpcAdminClient,
-    id: Option<u64>,
+    id: Option<i64>,
     name: Option<&str>,
     new_name: &str,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let user = resolve_single_user(client, id, name).await?;
-    let renamed = UserOutput::from(client.rename_user_by_id(user.id, new_name).await?);
+    let _user = resolve_single_user(client, id, name).await?;
+    let renamed = UserOutput::from(
+        client
+            .rename_user_by_id(upstream_rename_request_id(id), new_name)
+            .await?,
+    );
     if fmt.is_structured() {
         print_structured(fmt, &renamed)?;
     } else {
@@ -184,17 +188,17 @@ fn render_grpc_users(users: &[UserOutput]) {
 
 async fn resolve_single_user(
     client: &mut GrpcAdminClient,
-    id: Option<u64>,
+    id: Option<i64>,
     name: Option<&str>,
 ) -> Result<UserOutput, AdminError> {
-    if id.is_none() && name.unwrap_or_default().is_empty() {
+    if !upstream_user_id_was_supplied(id) && name.unwrap_or_default().is_empty() {
         return Err(AdminError::Local(
             "--name or --identifier flag is required".into(),
         ));
     }
     let users = client
         .list_users(UserSelector {
-            id,
+            id: grpc_user_id_filter(id),
             name: name.filter(|value| !value.is_empty()),
             email: None,
         })
@@ -212,13 +216,13 @@ async fn resolve_single_user(
 }
 
 fn list_selector<'a>(
-    id: Option<u64>,
+    id: Option<i64>,
     name: Option<&'a str>,
     email: Option<&'a str>,
 ) -> UserSelector<'a> {
-    if id.is_some_and(|id| id > 0) {
+    if let Some(id) = grpc_user_id_filter(id) {
         UserSelector {
-            id,
+            id: Some(id),
             name: None,
             email: None,
         }
@@ -237,6 +241,21 @@ fn list_selector<'a>(
     } else {
         UserSelector::default()
     }
+}
+
+fn grpc_user_id_filter(id: Option<i64>) -> Option<u64> {
+    id.filter(|id| *id > 0)
+        .and_then(|id| u64::try_from(id).ok())
+}
+
+fn upstream_user_id_was_supplied(id: Option<i64>) -> bool {
+    id.is_some_and(|id| id >= 0)
+}
+
+fn upstream_rename_request_id(id: Option<i64>) -> u64 {
+    id.filter(|id| *id >= 0)
+        .and_then(|id| u64::try_from(id).ok())
+        .unwrap_or_default()
 }
 
 fn validate_picture_url(url: &str) -> Result<(), AdminError> {
@@ -367,11 +386,23 @@ mod tests {
             list_selector(Some(42), Some("alice"), Some("alice@example.com")).id,
             Some(42)
         );
+        assert_eq!(list_selector(Some(0), None, None).id, None);
+        assert_eq!(list_selector(Some(-1), None, None).id, None);
         let by_name = list_selector(None, Some("alice"), Some("alice@example.com"));
         assert_eq!(by_name.name, Some("alice"));
         assert_eq!(by_name.email, None);
         let by_email = list_selector(None, None, Some("alice@example.com"));
         assert_eq!(by_email.email, Some("alice@example.com"));
+    }
+
+    #[test]
+    fn grpc_user_identifier_helpers_match_cobra_signed_flag_semantics() {
+        assert!(!upstream_user_id_was_supplied(None));
+        assert!(!upstream_user_id_was_supplied(Some(-1)));
+        assert!(upstream_user_id_was_supplied(Some(0)));
+        assert_eq!(upstream_rename_request_id(None), 0);
+        assert_eq!(upstream_rename_request_id(Some(-1)), 0);
+        assert_eq!(upstream_rename_request_id(Some(42)), 42);
     }
 
     #[test]

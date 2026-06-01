@@ -239,7 +239,7 @@ pub enum UsersCmd {
     List {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier")]
-        identifier: Option<u64>,
+        identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -252,7 +252,7 @@ pub enum UsersCmd {
     Destroy {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier")]
-        identifier: Option<u64>,
+        identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -262,7 +262,7 @@ pub enum UsersCmd {
     Rename {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier")]
-        identifier: Option<u64>,
+        identifier: Option<i64>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -1318,6 +1318,15 @@ mod tests {
                 .action,
             UsersCmd::List {
                 identifier: Some(42),
+                ..
+            }
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from(["headscale", "list", "--identifier", "-1"])
+                .unwrap()
+                .action,
+            UsersCmd::List {
+                identifier: Some(-1),
                 ..
             }
         ));

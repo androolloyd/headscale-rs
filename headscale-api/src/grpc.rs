@@ -1131,6 +1131,7 @@ pub mod upstream {
                     "cannot set both disable_expiry and expiry",
                 ));
             }
+            let requested_expiry = body.expiry.clone();
             let node = self.machine_by_id(body.node_id).await?;
             if body.disable_expiry {
                 self.machines
@@ -1154,9 +1155,13 @@ pub mod upstream {
                 .get(&node.id)
                 .await
                 .ok_or_else(|| Status::not_found("node not found"))?;
-            Ok(Response::new(ExpireNodeResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
-            }))
+            let mut node = machine_to_node(&node, &self.users).await?;
+            // MachineAdminRecord stores expiry at Unix-second precision; keep
+            // the validated request timestamp exact in the immediate response.
+            if let Some(expiry) = requested_expiry {
+                node.expiry = Some(expiry);
+            }
+            Ok(Response::new(ExpireNodeResponse { node: Some(node) }))
         }
 
         async fn rename_node(

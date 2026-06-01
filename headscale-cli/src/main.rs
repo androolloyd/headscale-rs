@@ -266,6 +266,9 @@ async fn main() -> ExitCode {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let Some(help) = upstream_exact_help(&raw_args) {
         print!("{help}");
+        if let Some(stderr) = upstream_exact_help_stderr(&raw_args) {
+            eprint!("{stderr}");
+        }
         return ExitCode::SUCCESS;
     }
     if let Some(error) = upstream_exact_success_stderr(&raw_args) {
@@ -971,6 +974,18 @@ fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> 
         ["help", "server"] => Some(format!(
             "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_USAGE}"
         )),
+        _ => None,
+    }
+}
+
+fn upstream_exact_help_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        parts.push(arg.as_ref().to_str()?);
+    }
+
+    match parts.as_slice() {
+        ["nodes" | "node", "register", "-h" | "--help"] => Some(UPSTREAM_NODES_REGISTER_DEPRECATED),
         _ => None,
     }
 }
@@ -1761,8 +1776,9 @@ Global Flags:
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
 
-const UPSTREAM_NODES_REGISTER_HELP: &str = r#"Command "register" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead
-Registers a node to your network
+const UPSTREAM_NODES_REGISTER_DEPRECATED: &str = "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead\n";
+
+const UPSTREAM_NODES_REGISTER_HELP: &str = r#"Registers a node to your network
 
 Usage:
   headscale nodes register [flags]
@@ -2036,7 +2052,8 @@ Global Flags:
 Use "headscale apikeys [command] --help" for more information about a command.
 "#;
 
-const UPSTREAM_APIKEYS_CREATE_HELP: &str = r#"Creates a new Api key, the Api key is only visible on creation
+const UPSTREAM_APIKEYS_CREATE_HELP: &str = r#"
+Creates a new Api key, the Api key is only visible on creation
 and cannot be retrieved again.
 If you lose a key, create a new one and revoke (expire) the old one.
 

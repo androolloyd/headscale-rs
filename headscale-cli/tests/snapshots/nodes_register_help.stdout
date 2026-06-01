@@ -1,4 +1,3 @@
-Command "register" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead
 Registers a node to your network
 
 Usage:

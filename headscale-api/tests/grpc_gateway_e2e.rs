@@ -1715,6 +1715,22 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .clone()
         .oneshot(req(
             Method::POST,
+            &format!(
+                "/api/v1/node/{node_id}/expire?expiry.seconds=1893553445&expiry.nanos=123456789"
+            ),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["node"]["expiry"], "2030-01-02T03:04:05.123456789Z");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
             &format!("/api/v1/node/{node_id}/expire?disableExpiry=true"),
             Some(&token),
             Body::empty(),

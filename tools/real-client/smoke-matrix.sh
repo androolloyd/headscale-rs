@@ -69,6 +69,8 @@ fi
 
 smoke_ids=(
   authkey
+  authkey-nonreusable
+  authkey-expired
   postgres-authkey
   postgres-online-lastseen
   postgres-ping-lifecycle
@@ -177,6 +179,7 @@ smoke_ids=(
   route-via-multiprefix
   route-via-multiprefix-reload
   route-via-multiprefix-restart
+  route-via-multiprefix-reload-restart
   route-health
   route-health-reload
   route-health-reload-restart
@@ -201,6 +204,8 @@ smoke_ids=(
 
 smoke_areas=(
   registration
+  registration
+  registration
   database
   database
   database
@@ -293,6 +298,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -333,6 +339,8 @@ smoke_areas=(
 
 smoke_rust_scripts=(
   tools/real-client/authkey-smoke.sh
+  tools/real-client/authkey-nonreusable-smoke.sh
+  tools/real-client/authkey-expired-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
@@ -441,6 +449,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-multiprefix-smoke.sh
   tools/real-client/route-via-multiprefix-reload-smoke.sh
   tools/real-client/route-via-multiprefix-restart-smoke.sh
+  tools/real-client/route-via-multiprefix-reload-restart-smoke.sh
   tools/real-client/route-health-smoke.sh
   tools/real-client/route-health-reload-smoke.sh
   tools/real-client/route-health-reload-restart-smoke.sh
@@ -465,6 +474,8 @@ smoke_rust_scripts=(
 
 smoke_go_scripts=(
   tools/real-client/authkey-headscale-go-smoke.sh
+  tools/real-client/authkey-nonreusable-headscale-go-smoke.sh
+  tools/real-client/authkey-expired-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
@@ -573,6 +584,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-reload-headscale-go-smoke.sh
   tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
+  tools/real-client/route-via-multiprefix-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-health-headscale-go-smoke.sh
   tools/real-client/route-health-reload-headscale-go-smoke.sh
   tools/real-client/route-health-reload-restart-headscale-go-smoke.sh
@@ -597,6 +609,8 @@ smoke_go_scripts=(
 
 smoke_assertions=(
   "auth-key login and one alice node"
+  "one-time auth-key rejects second stock-client registration"
+  "expired auth-key rejects stock-client registration"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"
@@ -605,7 +619,7 @@ smoke_assertions=(
   "production Postgres MagicDNS suffix and DNS extra record projection"
   "production Postgres MagicDNS disabled fallback names"
   "production Postgres split DNS routes, fallback resolver, and DNS edge records"
-  "production Postgres DNS extra_records hot reload"
+  "production Postgres DNS extra_records hot reload plus client resolver lookup"
   "production Postgres MagicDNS with IPv6-only prefix-family allocation"
   "production Postgres dual-stack prefix-family allocation"
   "production Postgres IPv4-only prefix-family allocation"
@@ -677,7 +691,7 @@ smoke_assertions=(
   "custom DNS base domain"
   "extra DNS A record in client netmap"
   "split DNS routes plus AAAA/CNAME extra records"
-  "production extra-records file hot reload in client netmap"
+  "production extra-records file hot reload in client netmap and resolver"
   "MagicDNS with IPv6-only prefix-family allocation"
   "MagicDNS disabled fallback names"
   "Dual-stack prefix-family allocation"
@@ -705,6 +719,7 @@ smoke_assertions=(
   "current-head multi-prefix route steering with grants via"
   "current-head multi-prefix route steering policy reload moves grants via ownership"
   "current-head multi-prefix route steering with grants via survives server restart"
+  "current-head multi-prefix route steering policy reload survives server restart"
   "current-head route-health failover and sticky recovery"
   "current-head route-health policy reload expands HA failover"
   "current-head route-health policy reload expansion survives production restart"

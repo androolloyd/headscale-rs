@@ -770,6 +770,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added the row to the real-client matrix and push/PR smoke set so it runs beside
   the existing route-via, route-via-health, and route-via-multiprefix rows.
 
+## 2026-06-01 Route-via multiprefix reload+restart SQLite smoke slice
+
+- Added paired non-Postgres `route-via-multiprefix-reload-restart`
+  Rust/headscale-go wrappers over the existing restart-persistence route-via
+  multiprefix reload mode. The row proves current-head multi-prefix
+  `grants[].via` route ownership before reload, after policy reload, and after
+  production restart; the equivalent Postgres row already existed.
+- Added the row to the real-client matrix beside the existing route-via
+  multiprefix, reload, and restart rows.
+
 ## 2026-06-01 OIDC/web registration map-churn audit
 
 - Inspected the OIDC and web-registration real-client harnesses for the open
@@ -839,3 +849,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   v0.29.0-beta.2 parity baseline via
   `tools/real-client/headscale-go-baseline.sh`; explicit
   `HEADSCALE_GO_VERSION` overrides and current-head wrappers still win.
+- Added paired stock-client auth-key lifecycle rows for non-reusable key reuse
+  rejection and expired-key rejection, wired into the real-client matrix and
+  push/PR smoke set.
+
+## 2026-06-01 DNS hot-reload resolver smoke slice
+
+- Strengthened the paired `dns-hot-reload` Rust/headscale-go production smokes
+  to run `tailscale debug resolve` inside the stock client after each
+  `extra_records_path` netmap assertion. The row now proves the original A
+  record and hot-reloaded AAAA record resolve through the client DNS path, not
+  only through `tailscale debug netmap`.

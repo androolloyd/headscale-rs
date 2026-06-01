@@ -295,6 +295,25 @@ assert_dns_netmap() {
     ' "${netmap_path}" "${expected_name}" "${expected_type}" "${expected_value}" >"${output_path}"
 }
 
+assert_dns_resolution() {
+  local expected_name="$1"
+  local network="$2"
+  local expected_value="$3"
+  local output_path="$4"
+  local raw_path="${output_path}.raw"
+  docker exec "${client_name}" tailscale debug resolve "--net=${network}" "${expected_name}" \
+    >"${raw_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      raw_path = ARGV.fetch(0)
+      expected_name = ARGV.fetch(1)
+      network = ARGV.fetch(2)
+      expected_value = ARGV.fetch(3)
+      values = File.read(raw_path).lines.map(&:strip).reject(&:empty?)
+      abort("expected #{expected_name} #{network} resolution #{expected_value.inspect}, got #{values.inspect}") unless values == [expected_value]
+      puts JSON.pretty_generate({"Name" => expected_name, "Network" => network, "Resolved" => values})
+    ' "${raw_path}" "${expected_name}" "${network}" "${expected_value}" >"${output_path}"
+}
+
 need ruby
 if [[ "${database_backend}" == "postgres" ]]; then
   real_client_prepare_postgres_database \
@@ -326,6 +345,15 @@ wait_for "initial DNS extra record" \
 cat "${work_dir}/dns-before.json"
 echo "::endgroup::"
 
+echo "::group::assert initial DNS client resolution"
+wait_for "initial DNS client resolution" \
+  "assert_dns_resolution 'before.${base_domain}' 'ip4' '100.64.0.50' '${work_dir}/dns-before-resolution.json'" || {
+    dump_debug
+    exit 1
+  }
+cat "${work_dir}/dns-before-resolution.json"
+echo "::endgroup::"
+
 echo "::group::edit extra-records file"
 write_records "after.${base_domain}" "AAAA" "fd7a:115c:a1e0::53"
 echo "::endgroup::"
@@ -337,6 +365,15 @@ wait_for "hot-reloaded DNS extra record" \
     exit 1
   }
 cat "${work_dir}/dns-after.json"
+echo "::endgroup::"
+
+echo "::group::assert hot-reloaded DNS client resolution"
+wait_for "hot-reloaded DNS client resolution" \
+  "assert_dns_resolution 'after.${base_domain}' 'ip6' 'fd7a:115c:a1e0::53' '${work_dir}/dns-after-resolution.json'" || {
+    dump_debug
+    exit 1
+  }
+cat "${work_dir}/dns-after-resolution.json"
 echo "::endgroup::"
 
 echo "headscale-rs production ${database_backend} DNS hot-reload real-client smoke passed"

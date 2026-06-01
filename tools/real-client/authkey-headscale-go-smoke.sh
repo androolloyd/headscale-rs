@@ -14,6 +14,11 @@ timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
+preauth_reusable="${REAL_CLIENT_PREAUTH_REUSABLE:-true}"
+preauth_ephemeral="${REAL_CLIENT_PREAUTH_EPHEMERAL:-false}"
+preauth_expired="${REAL_CLIENT_PREAUTH_EXPIRED:-false}"
+preauth_expiration="${REAL_CLIENT_PREAUTH_EXPIRATION:-1h}"
+expected_authkey_failure_indexes="${REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES:-}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_routes_by_client="${REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
@@ -259,6 +264,46 @@ case "${expected_register_failure}" in
 esac
 if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
   echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
+  exit 2
+fi
+case "${preauth_reusable}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_reusable_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_reusable_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_REUSABLE must be true or false, got ${preauth_reusable}" >&2
+    exit 2
+    ;;
+esac
+case "${preauth_ephemeral}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_ephemeral_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_ephemeral_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EPHEMERAL must be true or false, got ${preauth_ephemeral}" >&2
+    exit 2
+    ;;
+esac
+case "${preauth_expired}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_expired_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_expired_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EXPIRED must be true or false, got ${preauth_expired}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${expected_authkey_failure_indexes}" && "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES is only supported with REAL_CLIENT_LOGIN_MODE=authkey" >&2
   exit 2
 fi
 if [[ -n "${expected_primary_sticky_route}" ]]; then
@@ -658,8 +703,33 @@ else
     client_user_emails+=("")
   done
 fi
-expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
-expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
+
+authkey_failure_flags=()
+for ((idx = 0; idx < client_count; idx++)); do
+  authkey_failure_flags+=(0)
+done
+if [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  IFS=',' read -r -a authkey_failure_indexes <<<"${expected_authkey_failure_indexes}"
+  for authkey_failure_index in "${authkey_failure_indexes[@]}"; do
+    if ! [[ "${authkey_failure_index}" =~ ^[0-9]+$ ]] ||
+      ((authkey_failure_index < 1 || authkey_failure_index > client_count)); then
+      echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES values must be 1..${client_count}, got ${authkey_failure_index}" >&2
+      exit 2
+    fi
+    authkey_failure_flags[$((authkey_failure_index - 1))]=1
+  done
+fi
+
+expected_client_names=()
+expected_client_users=()
+for idx in "${!client_names[@]}"; do
+  if ((authkey_failure_flags[$idx] == 0)); then
+    expected_client_names+=("${client_names[$idx]}")
+    expected_client_users+=("${client_users[$idx]}")
+  fi
+done
+expected_client_names_csv="$(IFS=,; echo "${expected_client_names[*]}")"
+expected_client_users_csv="$(IFS=,; echo "${expected_client_users[*]}")"
 config_path="${work_dir}/config.yaml"
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 socket_path="/tmp/${run_id}.sock"
@@ -1525,13 +1595,24 @@ if [[ "${login_mode}" == "authkey" ]]; then
       preauth_args=(
         "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
         --user "${user_id}" \
-        --reusable \
-        --expiration 1h
+        --expiration "${preauth_expiration}"
       )
+      if ((preauth_reusable_flag)); then
+        preauth_args+=(--reusable)
+      fi
+      if ((preauth_ephemeral_flag)); then
+        preauth_args+=(--ephemeral)
+      fi
       if [[ -n "${preauth_tags_values[$idx]}" ]]; then
         preauth_args+=(--tags "${preauth_tags_values[$idx]}")
       fi
       "${preauth_args[@]}" >"${work_dir}/preauth-${idx}.json"
+      if ((preauth_expired_flag)); then
+        authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/preauth-${idx}.json")"
+        "${headscale_bin}" -c "${config_path}" -o json preauthkeys expire \
+          --id "${authkey_id}" \
+          >"${work_dir}/preauth-${idx}-expired.json"
+      fi
       authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth-${idx}.json")"
       authkeys+=("${authkey}")
     done
@@ -1541,13 +1622,24 @@ if [[ "${login_mode}" == "authkey" ]]; then
     preauth_args=(
       "${headscale_bin}" -c "${config_path}" -o json preauthkeys create
       --user "${user_id}" \
-      --reusable \
-      --expiration 1h
+      --expiration "${preauth_expiration}"
     )
+    if ((preauth_reusable_flag)); then
+      preauth_args+=(--reusable)
+    fi
+    if ((preauth_ephemeral_flag)); then
+      preauth_args+=(--ephemeral)
+    fi
     if [[ -n "${preauth_tags}" ]]; then
       preauth_args+=(--tags "${preauth_tags}")
     fi
     "${preauth_args[@]}" >"${work_dir}/preauth.json"
+    if ((preauth_expired_flag)); then
+      authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/preauth.json")"
+      "${headscale_bin}" -c "${config_path}" -o json preauthkeys expire \
+        --id "${authkey_id}" \
+        >"${work_dir}/preauth-expired.json"
+    fi
     authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
     for _client_name in "${client_names[@]}"; do
       authkeys+=("${authkey}")
@@ -1662,6 +1754,16 @@ for idx in "${!client_names[@]}"; do
   else
     run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       up_status="$?"
+  fi
+  if ((authkey_failure_flags[$idx])); then
+    if tailscale_logged_in "${client_name}"; then
+      echo "expected auth-key login to fail for ${client_name}, but it reached a logged-in netmap" >&2
+      docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.unexpected-tailscale-status.json" 2>/dev/null || true
+      exit 1
+    fi
+    echo "auth-key login failed as expected for ${client_name}"
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json" 2>/dev/null || true
+    continue
   fi
   if ((up_status != 0)); then
     echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"

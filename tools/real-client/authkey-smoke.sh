@@ -10,6 +10,10 @@ timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
+preauth_reusable="${REAL_CLIENT_PREAUTH_REUSABLE:-true}"
+preauth_ephemeral="${REAL_CLIENT_PREAUTH_EPHEMERAL:-false}"
+preauth_expired="${REAL_CLIENT_PREAUTH_EXPIRED:-false}"
+expected_authkey_failure_indexes="${REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES:-}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_routes_by_client="${REAL_CLIENT_ADVERTISE_ROUTES_BY_CLIENT:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
@@ -226,6 +230,46 @@ case "${expected_register_failure}" in
 esac
 if ((expect_register_failure)) && [[ "${login_mode}" != "web" ]]; then
   echo "REAL_CLIENT_EXPECT_REGISTER_FAILURE is only supported with REAL_CLIENT_LOGIN_MODE=web" >&2
+  exit 2
+fi
+case "${preauth_reusable}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_reusable_json=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_reusable_json=false
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_REUSABLE must be true or false, got ${preauth_reusable}" >&2
+    exit 2
+    ;;
+esac
+case "${preauth_ephemeral}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_ephemeral_json=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_ephemeral_json=false
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EPHEMERAL must be true or false, got ${preauth_ephemeral}" >&2
+    exit 2
+    ;;
+esac
+case "${preauth_expired}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_expired_json=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_expired_json=false
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EXPIRED must be true or false, got ${preauth_expired}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${expected_authkey_failure_indexes}" && "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES is only supported with REAL_CLIENT_LOGIN_MODE=authkey" >&2
   exit 2
 fi
 if [[ -n "${expected_primary_sticky_route}" ]]; then
@@ -547,8 +591,33 @@ else
     client_users+=("alice")
   done
 fi
-expected_client_names_csv="$(IFS=,; echo "${client_names[*]}")"
-expected_client_users_csv="$(IFS=,; echo "${client_users[*]}")"
+
+authkey_failure_flags=()
+for ((idx = 0; idx < client_count; idx++)); do
+  authkey_failure_flags+=(0)
+done
+if [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  IFS=',' read -r -a authkey_failure_indexes <<<"${expected_authkey_failure_indexes}"
+  for authkey_failure_index in "${authkey_failure_indexes[@]}"; do
+    if ! [[ "${authkey_failure_index}" =~ ^[0-9]+$ ]] ||
+      ((authkey_failure_index < 1 || authkey_failure_index > client_count)); then
+      echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES values must be 1..${client_count}, got ${authkey_failure_index}" >&2
+      exit 2
+    fi
+    authkey_failure_flags[$((authkey_failure_index - 1))]=1
+  done
+fi
+
+expected_client_names=()
+expected_client_users=()
+for idx in "${!client_names[@]}"; do
+  if ((authkey_failure_flags[$idx] == 0)); then
+    expected_client_names+=("${client_names[$idx]}")
+    expected_client_users+=("${client_users[$idx]}")
+  fi
+done
+expected_client_names_csv="$(IFS=,; echo "${expected_client_names[*]}")"
+expected_client_users_csv="$(IFS=,; echo "${expected_client_users[*]}")"
 
 cleanup() {
   for client_name in "${client_names[@]}"; do
@@ -1212,8 +1281,14 @@ if [[ "${login_mode}" == "authkey" ]]; then
       preauth_body="$(
         ruby -rjson -e '
           tags = ARGV.fetch(1).split(",").reject(&:empty?)
-          puts JSON.generate({user: ARGV.fetch(0), reusable: true, tags: tags})
-        ' "${client_users[$idx]}" "${preauth_tags_values[$idx]}"
+          puts JSON.generate({
+            user: ARGV.fetch(0),
+            reusable: ARGV.fetch(2) == "true",
+            ephemeral: ARGV.fetch(3) == "true",
+            expired: ARGV.fetch(4) == "true",
+            tags: tags,
+          })
+        ' "${client_users[$idx]}" "${preauth_tags_values[$idx]}" "${preauth_reusable_json}" "${preauth_ephemeral_json}" "${preauth_expired_json}"
       )"
       preauth_json="$(
         curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
@@ -1228,8 +1303,14 @@ if [[ "${login_mode}" == "authkey" ]]; then
     preauth_body="$(
       ruby -rjson -e '
         tags = ARGV.fetch(0).split(",").reject(&:empty?)
-        puts JSON.generate({user: "alice", reusable: true, tags: tags})
-      ' "${preauth_tags}"
+        puts JSON.generate({
+          user: "alice",
+          reusable: ARGV.fetch(1) == "true",
+          ephemeral: ARGV.fetch(2) == "true",
+          expired: ARGV.fetch(3) == "true",
+          tags: tags,
+        })
+      ' "${preauth_tags}" "${preauth_reusable_json}" "${preauth_ephemeral_json}" "${preauth_expired_json}"
     )"
     preauth_json="$(
       curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
@@ -1345,6 +1426,16 @@ for idx in "${!client_names[@]}"; do
   else
     run_with_timeout "tailscale up ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       up_status="$?"
+  fi
+  if ((authkey_failure_flags[$idx])); then
+    if tailscale_logged_in "${client_name}"; then
+      echo "expected auth-key login to fail for ${client_name}, but it reached a logged-in netmap" >&2
+      docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.unexpected-tailscale-status.json" 2>/dev/null || true
+      exit 1
+    fi
+    echo "auth-key login failed as expected for ${client_name}"
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json" 2>/dev/null || true
+    continue
   fi
   if ((up_status != 0)); then
     echo "tailscale up ${client_name} returned ${up_status}; verifying logged-in netmap"

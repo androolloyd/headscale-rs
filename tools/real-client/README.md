@@ -77,6 +77,8 @@ upstream commit from `headscale-go-current.sh`.
 | Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
+| Registration | `authkey-nonreusable` | `authkey-nonreusable-smoke.sh` | `authkey-nonreusable-headscale-go-smoke.sh` | One-time auth-key rejects second stock-client registration |
+| Registration | `authkey-expired` | `authkey-expired-smoke.sh` | `authkey-expired-headscale-go-smoke.sh` | Expired auth-key rejects stock-client registration |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
@@ -85,7 +87,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix and DNS extra record projection |
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
 | Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge records |
-| Database | `postgres-dns-hot-reload` | `postgres-dns-hot-reload-smoke.sh` | `postgres-dns-hot-reload-headscale-go-smoke.sh` | Production Postgres DNS `extra_records` hot reload |
+| Database | `postgres-dns-hot-reload` | `postgres-dns-hot-reload-smoke.sh` | `postgres-dns-hot-reload-headscale-go-smoke.sh` | Production Postgres DNS `extra_records` hot reload plus client resolver lookup |
 | Database | `postgres-magicdns-ipv6-only` | `postgres-magicdns-ipv6-only-smoke.sh` | `postgres-magicdns-ipv6-only-headscale-go-smoke.sh` | Production Postgres MagicDNS with IPv6-only prefix-family allocation |
 | Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
@@ -157,7 +159,7 @@ upstream commit from `headscale-go-current.sh`.
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
 | DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap |
 | DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records |
-| DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap |
+| DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap and resolver |
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
@@ -184,6 +186,7 @@ upstream commit from `headscale-go-current.sh`.
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-via-multiprefix-reload` | `route-via-multiprefix-reload-smoke.sh` | `route-via-multiprefix-reload-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` policy reload steering |
 | Routes | `route-via-multiprefix-restart` | `route-via-multiprefix-restart-smoke.sh` | `route-via-multiprefix-restart-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` restart persistence |
+| Routes | `route-via-multiprefix-reload-restart` | `route-via-multiprefix-reload-restart-smoke.sh` | `route-via-multiprefix-reload-restart-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` policy reload survives production restart |
 | Routes | `route-health` | `route-health-smoke.sh` | `route-health-headscale-go-smoke.sh` | Current-head route-health failover and sticky recovery |
 | Routes | `route-health-reload` | `route-health-reload-smoke.sh` | `route-health-reload-headscale-go-smoke.sh` | Current-head route-health policy reload expands HA failover |
 | Routes | `route-health-reload-restart` | `route-health-reload-restart-smoke.sh` | `route-health-reload-restart-headscale-go-smoke.sh` | Current-head route-health policy reload expansion survives production restart |
@@ -284,6 +287,11 @@ Useful knobs:
 - `REAL_CLIENT_CLIENT_USERS` can assign comma-separated per-client users. By
   default every client registers as `alice`; when set in auth-key mode, each
   client gets a user-specific key.
+- `REAL_CLIENT_PREAUTH_REUSABLE`, `REAL_CLIENT_PREAUTH_EPHEMERAL`, and
+  `REAL_CLIENT_PREAUTH_EXPIRED` control the minted auth-key lifecycle.
+- `REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES` marks 1-based stock clients that
+  must fail auth-key login; use it with `REAL_CLIENT_EXPECT_MACHINE_COUNT` for
+  negative lifecycle rows.
 
 The matching headscale-go v0.29.0-beta.2 smoke is:
 
@@ -302,6 +310,8 @@ Additional knobs:
 - `HEADSCALE_GO_VERSION` defaults to the release in
   `tools/real-client/headscale-go-baseline.sh`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
+- `REAL_CLIENT_PREAUTH_EXPIRATION` controls the upstream CLI `--expiration`
+  duration when creating the key.
 
 ## Web Registration Smoke
 
@@ -510,8 +520,9 @@ tools/real-client/extra-records-headscale-go-smoke.sh
 
 The DNS hot-reload variant starts the production server with
 `dns.extra_records_path`, logs in a stock client, edits the JSON records file,
-and asserts that the client-observed netmap switches from the original A
-record to the updated AAAA record without restarting the server:
+and asserts that both the client-observed netmap and `tailscale debug resolve`
+switch from the original A record to the updated AAAA record without restarting
+the server:
 
 ```sh
 tools/real-client/dns-hot-reload-smoke.sh
@@ -633,7 +644,7 @@ stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
 MagicDNS fallback names, the `postgres-dns-edge` variant asserts split DNS
 routes, fallback resolvers, and AAAA/CNAME records, the
 `postgres-dns-hot-reload` variant asserts production `extra_records_path`
-file reloads, and the
+file reloads in both the stock-client netmap and resolver, and the
 `postgres-magicdns-ipv6-only` variant asserts IPv6-only MagicDNS allocation.
 The `postgres-prefix-family-dual-stack`, `postgres-prefix-family-ipv4-only`,
 and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family

@@ -1314,6 +1314,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - OIDC registration callbacks and confirmation POSTs now classify auth request
   kind and reject SSH-check auth IDs as wrong-kind registration sessions instead
   of reporting expired/missing registration state.
+- OIDC pending registration confirmations now stage on the shared auth request
+  entry for the wire, SQLite, and Postgres registration handlers, so CSRF/user
+  confirmation state follows the same auth-request TTL/LRU lifecycle as
+  headscale-go. The runtime-local confirmation cache remains only as a fallback
+  for handlers that do not implement the shared-auth storage hook.
 - The grpc-gateway e2e suite now checks the checked-in swagger route/method set
   against mounted routes and pins `/api/v1/tailnet` as intentionally outside the
   upstream grpc-gateway surface.

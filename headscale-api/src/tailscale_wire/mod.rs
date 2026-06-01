@@ -1401,6 +1401,7 @@ pub struct RegistrationCache {
 struct RegistrationEntry {
     record: Option<MachineRecord>,
     ssh_binding: Option<SshCheckBinding>,
+    oidc_confirmation: Mutex<Option<crate::oidc::OidcPendingRegistrationConfirmation>>,
     expires_at: Instant,
     last_used: AtomicU64,
     outcome: Mutex<Option<RegistrationOutcome>>,
@@ -1525,6 +1526,43 @@ impl RegistrationCache {
             .record
             .is_some()
             .then_some(AuthRequestKind::Registration)
+    }
+
+    pub fn store_oidc_confirmation(
+        &self,
+        registration_id: &str,
+        pending: crate::oidc::OidcPendingRegistrationConfirmation,
+    ) -> bool {
+        if pending.registration_id != registration_id {
+            return false;
+        }
+        let Some(entry) = self.get_entry(registration_id) else {
+            return false;
+        };
+        if entry.record.is_none() {
+            return false;
+        }
+        entry.store_oidc_confirmation(pending);
+        true
+    }
+
+    pub fn oidc_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        let entry = self.get_entry(registration_id)?;
+        if entry.record.is_none() {
+            return None;
+        }
+        entry.oidc_confirmation()
+    }
+
+    pub fn remove_oidc_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        let entry = self.get_entry(registration_id)?;
+        entry.remove_oidc_confirmation()
     }
 
     pub fn remove(&self, registration_id: &str) -> Option<MachineRecord> {
@@ -1804,6 +1842,7 @@ impl RegistrationEntry {
         Self {
             record: Some(record),
             ssh_binding: None,
+            oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
@@ -1815,6 +1854,7 @@ impl RegistrationEntry {
         Self {
             record: None,
             ssh_binding: Some(binding),
+            oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
@@ -1832,6 +1872,18 @@ impl RegistrationEntry {
 
     fn outcome(&self) -> Option<RegistrationOutcome> {
         self.outcome.lock().clone()
+    }
+
+    fn store_oidc_confirmation(&self, pending: crate::oidc::OidcPendingRegistrationConfirmation) {
+        *self.oidc_confirmation.lock() = Some(pending);
+    }
+
+    fn oidc_confirmation(&self) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.oidc_confirmation.lock().clone()
+    }
+
+    fn remove_oidc_confirmation(&self) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.oidc_confirmation.lock().take()
     }
 
     fn complete(&self, record: MachineRecord) {
@@ -4889,6 +4941,23 @@ mod registry_tests {
         }
     }
 
+    fn oidc_pending_confirmation(
+        registration_id: &str,
+        csrf: &str,
+    ) -> crate::oidc::OidcPendingRegistrationConfirmation {
+        crate::oidc::OidcPendingRegistrationConfirmation {
+            registration_id: registration_id.to_string(),
+            user: oidc_test_user(),
+            node_expiry: None,
+            csrf: csrf.to_string(),
+            device: crate::oidc::OidcRegistrationConfirmInfo {
+                hostname: "oidc-client".into(),
+                os: "linux".into(),
+                machine_key: "[abcdef]".into(),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn public_ping_response_head_route_is_successful() {
         let state = test_state();
@@ -5258,6 +5327,39 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn registration_cache_oidc_confirmation_shares_auth_entry_lifecycle() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_millis(15),
+            Duration::from_millis(30),
+            1,
+        );
+
+        let evicted_id = "v".repeat(24);
+        cache.insert(evicted_id.clone(), mk_record(40));
+        assert!(cache.store_oidc_confirmation(
+            &evicted_id,
+            oidc_pending_confirmation(&evicted_id, "csrf-evicted"),
+        ));
+        assert_eq!(
+            cache.oidc_confirmation(&evicted_id).unwrap().csrf,
+            "csrf-evicted"
+        );
+
+        let replacement_id = "w".repeat(24);
+        cache.insert(replacement_id.clone(), mk_record(41));
+        assert!(cache.get(&evicted_id).is_none());
+        assert!(cache.oidc_confirmation(&evicted_id).is_none());
+
+        assert!(cache.store_oidc_confirmation(
+            &replacement_id,
+            oidc_pending_confirmation(&replacement_id, "csrf-expiring"),
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cache.oidc_confirmation(&replacement_id).is_none());
+        assert!(cache.get(&replacement_id).is_none());
+    }
+
+    #[tokio::test]
     async fn registration_cache_rejection_keeps_entry_until_expiry() {
         let cache =
             RegistrationCache::with_tuning(Duration::from_millis(200), Duration::from_millis(400));
@@ -5555,6 +5657,47 @@ mod registry_tests {
             Some(crate::oidc::OidcAuthRequestKind::SshCheck)
         );
         assert_eq!(handler.oidc_auth_request_kind("missing"), None);
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_stores_confirmation_on_auth_request() {
+        let state = test_state();
+        let registration_id = "y".repeat(24);
+        state
+            .registration_cache
+            .insert(registration_id.clone(), mk_record(27));
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        let pending = oidc_pending_confirmation(&registration_id, "csrf-live");
+
+        assert!(handler.store_oidc_registration_confirmation(pending.clone()));
+        assert_eq!(
+            state
+                .registration_cache
+                .oidc_confirmation(&registration_id)
+                .unwrap(),
+            pending
+        );
+        assert_eq!(
+            handler
+                .oidc_pending_registration_confirmation(&registration_id)
+                .unwrap()
+                .csrf,
+            "csrf-live"
+        );
+        assert_eq!(
+            handler
+                .remove_oidc_registration_confirmation(&registration_id)
+                .unwrap()
+                .csrf,
+            "csrf-live"
+        );
+        assert!(
+            handler
+                .oidc_pending_registration_confirmation(&registration_id)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -8172,6 +8315,34 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
     ) -> Option<crate::oidc::OidcRegistrationConfirmInfo> {
         let record = self.state.registration_cache.get(registration_id)?;
         Some(oidc_registration_confirm_info_from_record(&record))
+    }
+
+    fn store_oidc_registration_confirmation(
+        &self,
+        pending: crate::oidc::OidcPendingRegistrationConfirmation,
+    ) -> bool {
+        let registration_id = pending.registration_id.clone();
+        self.state
+            .registration_cache
+            .store_oidc_confirmation(&registration_id, pending)
+    }
+
+    fn oidc_pending_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.state
+            .registration_cache
+            .oidc_confirmation(registration_id)
+    }
+
+    fn remove_oidc_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.state
+            .registration_cache
+            .remove_oidc_confirmation(registration_id)
     }
 }
 

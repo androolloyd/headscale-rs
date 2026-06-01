@@ -459,6 +459,11 @@ wrong-kind SSH-check auth IDs as bad registration sessions. The grpc-gateway
 suite now pins advertised swagger route/method drift, and direct gRPC tests pin
 exact node/tag/auth-request error messages.
 
+Recent coverage note (2026-06-01): OIDC pending registration confirmations now
+stage on the shared auth request entry for the wire, SQLite, and Postgres
+registration handlers, so confirmation CSRF/user/device state follows the same
+TTL/LRU lifecycle as the auth request instead of an independent runtime cache.
+
 Recent coverage note (2026-06-01): paired `authkey-relogin-same-user`
 stock-client rows now cover logout followed by fresh auth-key relogin as the
 same user, asserting the existing node identity keeps its Tailscale IPs after

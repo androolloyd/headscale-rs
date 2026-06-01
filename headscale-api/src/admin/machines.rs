@@ -1620,6 +1620,30 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             machine_key: short_oidc_machine_key(&record.machine_key_hex),
         })
     }
+
+    fn store_oidc_registration_confirmation(
+        &self,
+        pending: crate::oidc::OidcPendingRegistrationConfirmation,
+    ) -> bool {
+        let registration_id = pending.registration_id.clone();
+        self.registration_cache
+            .store_oidc_confirmation(&registration_id, pending)
+    }
+
+    fn oidc_pending_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.registration_cache.oidc_confirmation(registration_id)
+    }
+
+    fn remove_oidc_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.registration_cache
+            .remove_oidc_confirmation(registration_id)
+    }
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -1754,6 +1778,30 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
             os: record.os,
             machine_key: short_oidc_machine_key(&record.machine_key_hex),
         })
+    }
+
+    fn store_oidc_registration_confirmation(
+        &self,
+        pending: crate::oidc::OidcPendingRegistrationConfirmation,
+    ) -> bool {
+        let registration_id = pending.registration_id.clone();
+        self.registration_cache
+            .store_oidc_confirmation(&registration_id, pending)
+    }
+
+    fn oidc_pending_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.registration_cache.oidc_confirmation(registration_id)
+    }
+
+    fn remove_oidc_registration_confirmation(
+        &self,
+        registration_id: &str,
+    ) -> Option<crate::oidc::OidcPendingRegistrationConfirmation> {
+        self.registration_cache
+            .remove_oidc_confirmation(registration_id)
     }
 }
 

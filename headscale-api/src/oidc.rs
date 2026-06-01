@@ -190,7 +190,10 @@ impl OidcAuthRuntime {
         &self,
         registration_id: &str,
     ) -> Option<OidcPendingRegistrationConfirmation> {
-        self.confirmations.get(registration_id)
+        self.registration_handler
+            .as_ref()
+            .and_then(|handler| handler.oidc_pending_registration_confirmation(registration_id))
+            .or_else(|| self.confirmations.get(registration_id))
     }
 
     fn begin_registration(&self, registration_id: &str) -> Result<OidcAuthStart, OidcRuntimeError> {
@@ -910,6 +913,27 @@ pub trait OidcRegistrationHandler: Send + Sync {
     ) -> Option<OidcRegistrationConfirmInfo> {
         None
     }
+
+    fn store_oidc_registration_confirmation(
+        &self,
+        _pending: OidcPendingRegistrationConfirmation,
+    ) -> bool {
+        false
+    }
+
+    fn oidc_pending_registration_confirmation(
+        &self,
+        _registration_id: &str,
+    ) -> Option<OidcPendingRegistrationConfirmation> {
+        None
+    }
+
+    fn remove_oidc_registration_confirmation(
+        &self,
+        _registration_id: &str,
+    ) -> Option<OidcPendingRegistrationConfirmation> {
+        None
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -1126,7 +1150,10 @@ pub async fn handle_register_confirm_with_request_security(
         );
     };
 
-    let Some(pending) = runtime.confirmations.get(&registration_id) else {
+    let Some(pending) = registration_handler
+        .oidc_pending_registration_confirmation(&registration_id)
+        .or_else(|| runtime.confirmations.get(&registration_id))
+    else {
         let err = match registration_handler.oidc_auth_request_kind(&registration_id) {
             Some(OidcAuthRequestKind::Registration) => {
                 OidcRuntimeError::RegistrationNotOidcAuthorized
@@ -1149,6 +1176,7 @@ pub async fn handle_register_confirm_with_request_security(
         .await
     {
         Ok(result) => {
+            registration_handler.remove_oidc_registration_confirmation(&registration_id);
             runtime.confirmations.remove(&registration_id);
             let mut response = oidc_registration_success_response(&pending.user, result.new_node);
             clear_register_confirm_cookie(response.headers_mut(), &auth_id, secure_cookies);
@@ -1281,7 +1309,9 @@ pub async fn handle_callback_with_request_security(
                     csrf,
                     device,
                 };
-                runtime.confirmations.insert(pending.clone());
+                if !registration_handler.store_oidc_registration_confirmation(pending.clone()) {
+                    runtime.confirmations.insert(pending.clone());
+                }
                 return oidc_registration_confirm_response(&pending, secure_cookies);
             }
 
@@ -2094,6 +2124,7 @@ mod tests {
     struct MockOidcRegistrationHandler {
         calls: RwLock<Vec<OidcRegistrationCall>>,
         auth_calls: RwLock<Vec<OidcAuthCall>>,
+        confirmations: RwLock<BTreeMap<String, OidcPendingRegistrationConfirmation>>,
         fail_expired: bool,
         auth_kind: Option<OidcAuthRequestKind>,
     }
@@ -2177,6 +2208,30 @@ mod tests {
                 os: "linux".into(),
                 machine_key: "[abcdef]".into(),
             })
+        }
+
+        fn store_oidc_registration_confirmation(
+            &self,
+            pending: OidcPendingRegistrationConfirmation,
+        ) -> bool {
+            self.confirmations
+                .write()
+                .insert(pending.registration_id.clone(), pending);
+            true
+        }
+
+        fn oidc_pending_registration_confirmation(
+            &self,
+            registration_id: &str,
+        ) -> Option<OidcPendingRegistrationConfirmation> {
+            self.confirmations.read().get(registration_id).cloned()
+        }
+
+        fn remove_oidc_registration_confirmation(
+            &self,
+            registration_id: &str,
+        ) -> Option<OidcPendingRegistrationConfirmation> {
+            self.confirmations.write().remove(registration_id)
         }
     }
 
@@ -3174,10 +3229,14 @@ mod tests {
         assert!(body.contains("oidc-client"));
         assert!(body.contains("[abcdef]"));
         assert!(registrations.calls.read().is_empty());
+        assert!(
+            runtime.pending_confirmation(&"r".repeat(24)).is_some(),
+            "callback should stage pending confirmation on the auth request"
+        );
 
         let csrf = csrf_from_confirm_body(&body);
         let confirm = handle_register_confirm(
-            runtime,
+            runtime.clone(),
             format!("hskey-authreq-{}", "r".repeat(24)),
             confirm_headers(&cookie_header),
             Bytes::from(format!("{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}")),
@@ -3200,6 +3259,11 @@ mod tests {
         assert_eq!(
             calls[0].2,
             Some(Utc.timestamp_opt(4_102_444_800, 0).unwrap())
+        );
+        drop(calls);
+        assert!(
+            runtime.pending_confirmation(&"r".repeat(24)).is_none(),
+            "successful confirmation should consume the staged auth-request confirmation"
         );
     }
 

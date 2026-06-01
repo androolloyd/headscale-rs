@@ -810,8 +810,10 @@ pub(crate) fn allow_all_packet_filter() -> Vec<FilterRule> {
                 first: 0,
                 last: 65535,
             },
+            ..NetPortRange::default()
         }],
         ip_proto: Vec::new(),
+        ..FilterRule::default()
     }]
 }
 

@@ -1321,12 +1321,33 @@ pub struct FilterRule {
     /// Source IPs / CIDRs / `*`. Upstream tag is `SrcIPs`.
     #[serde(rename = "SrcIPs", default)]
     pub src_ips: Vec<String>,
+    /// Deprecated upstream CIDR mask companion for `SrcIPs`.
+    #[serde(default, rename = "SrcBits", skip_serializing_if = "Vec::is_empty")]
+    pub src_bits: Vec<i32>,
     /// Per-destination port range entries.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dst_ports: Vec<NetPortRange>,
     /// IP protocol restrictions. Empty ⇒ all protocols allowed.
     #[serde(default, rename = "IPProto", skip_serializing_if = "Vec::is_empty")]
     pub ip_proto: Vec<i32>,
+    /// Application capability grants. Mutually exclusive with `DstPorts`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cap_grant: Vec<CapGrant>,
+}
+
+/// `tailcfg.CapGrant`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CapGrant {
+    /// Destination prefixes this capability grant matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dsts: Vec<String>,
+    /// Deprecated capability list. Upstream element type is `PeerCapability`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
+    /// Modern capability map (`tailcfg.PeerCapMap`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cap_map: BTreeMap<String, Vec<Value>>,
 }
 
 /// `tailcfg.NetPortRange`.
@@ -1335,6 +1356,9 @@ pub struct FilterRule {
 pub struct NetPortRange {
     #[serde(rename = "IP")]
     pub ip: String,
+    /// Deprecated upstream CIDR mask for `IP`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bits: Option<i32>,
     pub ports: PortRange,
 }
 

@@ -68,8 +68,10 @@ pub fn allow_all_filter_rules() -> Vec<FilterRule> {
                 first: 0,
                 last: 65535,
             },
+            ..NetPortRange::default()
         }],
         ip_proto: Vec::new(),
+        ..FilterRule::default()
     }]
 }
 
@@ -122,6 +124,7 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
                     dst_ports.push(NetPortRange {
                         ip: dst_port_ip_string(ip),
                         ports: r.clone(),
+                        ..NetPortRange::default()
                     });
                 }
             }
@@ -132,6 +135,7 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
                     src_ips: src_ips.clone(),
                     dst_ports,
                     ip_proto,
+                    ..FilterRule::default()
                 },
             );
         }
@@ -216,6 +220,7 @@ fn append_filter_rules(
                 dst_ports.push(NetPortRange {
                     ip: dst_port_ip_string(ip),
                     ports: range.clone(),
+                    ..NetPortRange::default()
                 });
             }
         }
@@ -223,6 +228,7 @@ fn append_filter_rules(
             src_ips: src_ips.to_vec(),
             dst_ports,
             ip_proto,
+            ..FilterRule::default()
         };
         normalize_filter_rule(&mut rule);
         append_coalesced_filter_rule(out, rule);

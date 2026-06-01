@@ -14,12 +14,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use headscale_api::tailscale_wire::MachineRecord;
 use headscale_api::tailscale_wire::wire::{
-    ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams, DerpMap,
-    DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig, DnsResolver,
-    FilterRule, HostInfo, HostInfoLocation, HostInfoService, MapNode, MapRequest, MapResponse,
-    NetInfo, NetPortRange, PeerChange, PingRequest, PortRange, RegisterAuth, RegisterRequest,
-    RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy, SshPrincipal, SshRule,
-    TkaInfo, TpmInfo, UserProfile, stable_id_from_key, strip_key_prefix,
+    CapGrant, ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams,
+    DerpMap, DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig,
+    DnsResolver, FilterRule, HostInfo, HostInfoLocation, HostInfoService, MapNode, MapRequest,
+    MapResponse, NetInfo, NetPortRange, PeerChange, PingRequest, PortRange, RegisterAuth,
+    RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy, SshPrincipal,
+    SshRule, TkaInfo, TpmInfo, UserProfile, stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -701,8 +701,10 @@ fn map_response_packet_filter_populated_when_nonempty() {
                     first: 0,
                     last: 65535,
                 },
+                ..NetPortRange::default()
             }],
             ip_proto: vec![],
+            ..FilterRule::default()
         }],
         ssh_policy: None,
         ..MapResponse::default()
@@ -836,8 +838,10 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
                     first: 22,
                     last: 22,
                 },
+                ..NetPortRange::default()
             }],
             ip_proto: vec![6],
+            ..FilterRule::default()
         }]),
     );
     packet_filters.insert("old".to_string(), None);
@@ -1191,11 +1195,98 @@ fn filter_rule_with_ip_proto_emits_field() {
                 first: 22,
                 last: 22,
             },
+            ..NetPortRange::default()
         }],
         ip_proto: vec![6, 17],
+        ..FilterRule::default()
     };
     let v = serde_json::to_value(&f).unwrap();
     assert_eq!(v["IPProto"], serde_json::json!([6, 17]));
+    assert!(v.get("SrcBits").is_none());
+    assert!(v.get("CapGrant").is_none());
+    assert!(v["DstPorts"][0].get("Bits").is_none());
+}
+
+#[test]
+fn filter_rule_src_bits_and_cap_grant_round_trip() {
+    let mut cap_map = BTreeMap::new();
+    cap_map.insert(
+        "https://example.com/cap/admin".into(),
+        vec![serde_json::json!({ "role": "admin" })],
+    );
+
+    let f = FilterRule {
+        src_ips: vec!["100.64.0.1".into()],
+        src_bits: vec![32],
+        cap_grant: vec![CapGrant {
+            dsts: vec!["100.64.0.0/10".into()],
+            caps: vec!["https://tailscale.com/cap/file-send".into()],
+            cap_map,
+        }],
+        ..FilterRule::default()
+    };
+
+    let v = serde_json::to_value(&f).unwrap();
+    assert_eq!(v["SrcBits"], serde_json::json!([32]));
+    assert!(v.get("Srcbits").is_none());
+    assert!(v.get("DstPorts").is_none());
+    assert!(v.get("Capgrant").is_none());
+
+    let grant = &v["CapGrant"][0];
+    assert_eq!(grant["Dsts"], serde_json::json!(["100.64.0.0/10"]));
+    assert_eq!(
+        grant["Caps"],
+        serde_json::json!(["https://tailscale.com/cap/file-send"])
+    );
+    assert_eq!(
+        grant["CapMap"]["https://example.com/cap/admin"][0],
+        serde_json::json!({ "role": "admin" })
+    );
+
+    let back: FilterRule = serde_json::from_value(v).unwrap();
+    assert_eq!(back.src_ips, vec!["100.64.0.1"]);
+    assert_eq!(back.src_bits, vec![32]);
+    assert!(back.dst_ports.is_empty());
+    assert_eq!(back.cap_grant.len(), 1);
+    assert_eq!(back.cap_grant[0].dsts, vec!["100.64.0.0/10"]);
+    assert_eq!(
+        back.cap_grant[0].caps,
+        vec!["https://tailscale.com/cap/file-send"]
+    );
+    assert_eq!(
+        back.cap_grant[0].cap_map["https://example.com/cap/admin"][0],
+        serde_json::json!({ "role": "admin" })
+    );
+}
+
+#[test]
+fn net_port_range_deprecated_bits_round_trip() {
+    let n = NetPortRange {
+        ip: "100.64.0.1".into(),
+        bits: Some(32),
+        ports: PortRange {
+            first: 443,
+            last: 443,
+        },
+    };
+
+    let v = serde_json::to_value(&n).unwrap();
+    assert_eq!(v["IP"], "100.64.0.1");
+    assert_eq!(v["Bits"], 32);
+    assert!(v.get("Ip").is_none());
+
+    let back: NetPortRange = serde_json::from_value(v).unwrap();
+    assert_eq!(back.bits, Some(32));
+    assert_eq!(back.ports.first, 443);
+    assert_eq!(back.ports.last, 443);
+
+    let without_bits = NetPortRange {
+        ip: "100.64.0.1/32".into(),
+        ports: PortRange { first: 0, last: 0 },
+        ..NetPortRange::default()
+    };
+    let v = serde_json::to_value(&without_bits).unwrap();
+    assert!(v.get("Bits").is_none());
 }
 
 #[test]

@@ -3870,6 +3870,7 @@ database:
             nameservers: vec!["1.1.1.1".to_string()],
             restricted_nameservers: split,
             search_domains: vec!["corp.example.org".to_string()],
+            cert_domains: vec!["Node.Tail.Example.Org.".to_string()],
             extra_records: vec![DnsRecord {
                 name: "ops.tail.example.org".to_string(),
                 record_type: "A".to_string(),
@@ -3942,7 +3943,7 @@ database:
             dns.routes["corp.example.org"][0].addr,
             "10.0.0.53".to_string()
         );
-        assert!(dns.cert_domains.is_empty());
+        assert_eq!(dns.cert_domains, ["node.tail.example.org".to_string()]);
         assert_eq!(dns.extra_records.len(), 1);
         assert!(
             dns.extra_records
@@ -4686,6 +4687,7 @@ database:
                 magic_dns: true,
                 base_domain: "tail.example".to_string(),
                 nameservers: vec!["1.1.1.1".to_string()],
+                cert_domains: vec!["Node.Tail.Example.".to_string()],
                 ..DnsConfigSpec::default()
             })
             .unwrap(),
@@ -4763,6 +4765,18 @@ database:
         assert_eq!(snapshot.acme_email, "ops@example.com");
         assert!(snapshot.dns_config.magic_dns);
         assert_eq!(snapshot.dns_config.base_domain, "tail.example");
+        assert_eq!(
+            snapshot.tailcfg_dns_config["CertDomains"],
+            serde_json::json!(["node.tail.example"])
+        );
+        assert!(
+            snapshot.tailcfg_dns_config["CertDomains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|domain| domain.as_str() != Some("headscale.example")),
+            "TLS/HTTPS hostnames must not be synthesized into DNSConfig.CertDomains"
+        );
         assert_eq!(
             snapshot.node.expiry,
             i64::try_from(Duration::from_secs(90 * 24 * 60 * 60).as_nanos()).unwrap()

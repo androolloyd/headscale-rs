@@ -382,6 +382,10 @@ between the no-restart `postgres-route-health`/`postgres-route-health-reload`
 rows and the existing restart-only all-unhealthy rows, bringing the Postgres
 stock-client matrix to sixty-three rows.
 
+Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
+neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and
+message, with grpc-gateway HTTP/status JSON coverage for the same edge.
+
 ## Next Implementation Order
 
 1. Finish the remaining Postgres runtime dependency chain: broaden production

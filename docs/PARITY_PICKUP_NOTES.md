@@ -1009,3 +1009,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   both HA route candidates become unhealthy, closing the plain Postgres
   symmetry gap between `postgres-route-health-reload` and the restart-only
   all-unhealthy rows.
+
+## 2026-06-01 gRPC preauth missing-owner parity slice
+
+- `CreatePreAuthKey` now matches upstream when the request supplies neither a
+  user nor ACL tags: gRPC returns `Unknown` with
+  `auth-key must be either tagged or owned by user`.
+- The grpc-gateway e2e matrix covers the corresponding HTTP 500/status JSON
+  shape for `POST /api/v1/preauthkey` with an empty body.

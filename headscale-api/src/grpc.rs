@@ -866,6 +866,11 @@ pub mod upstream {
             for tag in &body.acl_tags {
                 validate_tag(tag)?;
             }
+            if body.user == 0 && body.acl_tags.is_empty() {
+                return Err(Status::unknown(
+                    "auth-key must be either tagged or owned by user",
+                ));
+            }
             let user = if body.user == 0 {
                 String::new()
             } else {
@@ -5294,6 +5299,22 @@ mod upstream_tests {
     #[tokio::test]
     async fn upstream_preauth_grpc_validates_user_id_and_tags() {
         let service = admin_service().await;
+
+        let err = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: 0,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(
+            err.message(),
+            "auth-key must be either tagged or owned by user"
+        );
 
         let err = service
             .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {

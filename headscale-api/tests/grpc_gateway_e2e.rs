@@ -1458,6 +1458,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_message: "user not found",
         },
         Case {
+            name: "create preauth key missing owner or tags",
+            method: Method::POST,
+            uri: "/api/v1/preauthkey",
+            body: "{}",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "auth-key must be either tagged or owned by user",
+        },
+        Case {
             name: "create preauth key invalid tag",
             method: Method::POST,
             uri: "/api/v1/preauthkey",

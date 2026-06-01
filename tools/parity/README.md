@@ -20,6 +20,9 @@ Scenario files for the pinned differential gate live in
 policy object. The checked-in scenarios use headscale-go's native ACL syntax,
 where policy files omit `version`, `proto` is per ACL rule, and ports are
 embedded in `dst` entries such as `100.64.0.2/32:22`.
+Current policy-v2 surfaces such as `grants` and `nodeAttrs` should be covered
+here when the pinned headscale-go baseline and Rust implementation agree; stage
+known divergences under `tools/parity/current-head/` until they can be promoted.
 
 Scenarios may also include:
 

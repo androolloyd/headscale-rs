@@ -1311,6 +1311,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inner_router_control_routes_keep_upstream_method_boundaries() {
+        let (state, _dir) = fixture_state();
+        let cases = [
+            ("POST", "/machine/whoami"),
+            ("GET", "/machine/set-dns"),
+            ("POST", "/machine/set-device-attr"),
+            ("GET", "/machine/audit-log"),
+            ("GET", "/machine/id-token"),
+            ("GET", "/machine/feature/query"),
+            ("GET", "/machine/update-health"),
+            ("GET", "/machine/c2n"),
+        ];
+
+        for (method, uri) in cases {
+            let app = inner_router(state.clone());
+            let resp = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}"
+            );
+            let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert!(
+                body.is_empty(),
+                "{method} {uri} must not hit the 501 placeholder handler"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn inner_router_keeps_webclient_unimplemented_as_404() {
         let (state, _dir) = fixture_state();
         let resp = inner_router(state)

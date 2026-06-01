@@ -1,0 +1,204 @@
+{
+  "name": "policy-v2-nodeattrs-grants-ssh-route-profile",
+  "policy": {
+    "groups": {
+      "group:devs": [
+        "alice@example.com",
+        "bob@example.net"
+      ]
+    },
+    "tagOwners": {
+      "tag:router": [
+        "ops@example.com"
+      ],
+      "tag:server": [
+        "ops@example.com"
+      ]
+    },
+    "hosts": {
+      "office": "10.88.0.0/16"
+    },
+    "nodeAttrs": [
+      {
+        "target": [
+          "autogroup:member"
+        ],
+        "attr": [
+          "randomize-client-port"
+        ]
+      },
+      {
+        "target": [
+          "tag:router"
+        ],
+        "attr": [
+          "disable-captive-portal-detection",
+          "randomize-client-port"
+        ]
+      }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "10.88.0.0/16": [
+          "tag:router"
+        ]
+      }
+    },
+    "grants": [
+      {
+        "src": [
+          "group:devs"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "ip": [
+          "tcp:443"
+        ]
+      },
+      {
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "office"
+        ],
+        "ip": [
+          "tcp:22",
+          "udp:53"
+        ],
+        "via": [
+          "tag:router"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": [
+          "group:devs"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "localpart:*@example.com",
+          "root"
+        ],
+        "acceptEnv": [
+          "GIT_*"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "email": "bob@example.net"
+    },
+    {
+      "id": 3,
+      "name": "ops",
+      "email": "ops@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-dual",
+      "ipv4": "100.64.0.11",
+      "ipv6": "fd7a:115c:a1e0::11"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "bob-v6-only",
+      "ipv4": "",
+      "ipv6": "fd7a:115c:a1e0::12"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "router-dual",
+      "ipv4": "100.64.0.13",
+      "ipv6": "fd7a:115c:a1e0::13",
+      "tags": [
+        "tag:router"
+      ],
+      "routes": [
+        "10.88.4.0/24"
+      ],
+      "approved_routes": [
+        "10.88.4.0/24"
+      ]
+    },
+    {
+      "id": 4,
+      "user_id": 3,
+      "hostname": "server-v6-only",
+      "ipv4": "",
+      "ipv6": "fd7a:115c:a1e0::14",
+      "tags": [
+        "tag:server"
+      ]
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "server-v6-only-filter",
+      "node_id": 4
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "alice-dual-peers",
+      "node_id": 1
+    },
+    {
+      "name": "bob-v6-only-peers",
+      "node_id": 2
+    },
+    {
+      "name": "router-dual-peers",
+      "node_id": 3
+    },
+    {
+      "name": "server-v6-only-peers",
+      "node_id": 4
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "tagged-router-autoapproves-office-subnet",
+      "node_id": 3,
+      "announced_routes": [
+        "10.88.4.0/24"
+      ]
+    }
+  ],
+  "via_route_checks": [
+    {
+      "name": "alice-office-route-via-router",
+      "viewer_id": 1,
+      "peer_id": 3
+    },
+    {
+      "name": "bob-does-not-inherit-alice-via-route",
+      "viewer_id": 2,
+      "peer_id": 3
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "server-v6-only",
+      "node_id": 4
+    }
+  ]
+}

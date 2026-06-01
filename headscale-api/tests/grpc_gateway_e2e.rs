@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{Method, Request, header},
+    http::{HeaderValue, Method, Request, header},
     response::Response,
 };
 use headscale_api::admin::{
@@ -164,6 +164,21 @@ fn req_raw_auth(
         builder = builder.header(header::AUTHORIZATION, authorization);
     }
     builder
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.into())
+        .unwrap()
+}
+
+fn req_raw_auth_value(
+    method: Method,
+    uri: &str,
+    authorization: HeaderValue,
+    body: impl Into<Body>,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, authorization)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.into())
         .unwrap()
@@ -384,6 +399,23 @@ async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
         assert_eq!(resp.status(), 401, "{}", case.name);
         assert_plain_unauthorized(resp).await;
     }
+}
+
+#[tokio::test]
+async fn grpc_gateway_opaque_authorization_header_is_plain_unauthorized() {
+    let (app, _token) = fixture().await;
+
+    let resp = app
+        .oneshot(req_raw_auth_value(
+            Method::POST,
+            "/api/v1/user",
+            HeaderValue::from_bytes(b"Bearer \xfa").expect("opaque HTTP header value"),
+            Body::from("{"),
+        ))
+        .await
+        .unwrap();
+
+    assert_plain_unauthorized(resp).await;
 }
 
 #[tokio::test]
@@ -1453,6 +1485,24 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_message: "must provide id or prefix",
         },
         Case {
+            name: "expire api key missing id",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            body: r#"{"id":"999"}"#,
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "api key not found",
+        },
+        Case {
+            name: "expire api key missing prefix",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            body: r#"{"prefix":"hskey-api-abcdefghijkl-***"}"#,
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "api key not found",
+        },
+        Case {
             name: "delete api key conflicting selectors",
             method: Method::DELETE,
             uri: "/api/v1/apikey/prefix?id=1",
@@ -1460,6 +1510,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_http_status: 400,
             expected_grpc_code: 3,
             expected_message: "provide either id or prefix, not both",
+        },
+        Case {
+            name: "delete api key missing prefix",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/hskey-api-abcdefghijkl-***",
+            body: "",
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "api key not found",
         },
         Case {
             name: "get missing node",

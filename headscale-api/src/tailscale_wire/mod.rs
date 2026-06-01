@@ -4161,6 +4161,43 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn public_ping_response_only_accepts_head_callbacks() {
+        let state = test_state();
+        let (ping_id, response) = state.register_ping(42);
+        let app = router(state.clone());
+
+        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method.clone())
+                        .uri(format!("/machine/ping-response?id={ping_id}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                "{method} should not complete public ping callbacks"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert!(body.is_empty(), "{method}");
+        }
+
+        assert_eq!(state.pings.pending_len(), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), response)
+                .await
+                .is_err(),
+            "non-HEAD requests must leave the callback waiter pending"
+        );
+    }
+
+    #[tokio::test]
     async fn registration_cache_completion_notifies_waiting_followups() {
         let cache = Arc::new(RegistrationCache::with_tuning(
             Duration::from_secs(60),
@@ -4293,6 +4330,18 @@ mod registry_tests {
                 axum::http::Method::PATCH,
                 "/machine/set-device-attr".to_string(),
             ),
+            (axum::http::Method::POST, "/machine/audit-log".to_string()),
+            (axum::http::Method::POST, "/machine/id-token".to_string()),
+            (
+                axum::http::Method::POST,
+                "/machine/feature/query".to_string(),
+            ),
+            (
+                axum::http::Method::POST,
+                "/machine/update-health".to_string(),
+            ),
+            (axum::http::Method::POST, "/machine/c2n".to_string()),
+            (axum::http::Method::GET, "/machine/webclient".to_string()),
             (axum::http::Method::POST, "/machine".to_string()),
         ] {
             let resp = app

@@ -813,3 +813,21 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   when `--config`/`-c` appears before `--help`, and completion-shell extra
   positionals now report the nested Cobra command path, for example
   `headscale completion bash`.
+- Follow-up current-head comparison found the same utility help preemption for
+  inherited `-o`/`--output` and `--force` flags, plus `mockoidc`'s narrower
+  help/unknown-global-flag behavior. The process tests now lock those edges
+  against the audited upstream Cobra output.
+
+## 2026-06-01 Fourth-wave parity coverage
+
+- Added direct gRPC bearer-auth edge coverage for no-space and lowercase bearer
+  prefixes plus grpc-gateway opaque authorization and API-key not-found status
+  JSON cases.
+- Added Noise `/machine/*` endpoint tests that keep current inner-only routes
+  public-404, enforce `HEAD`-only public ping callbacks, and lock wrong-method
+  inner control routes to 405.
+- Added `policy-v2-nodeattrs-grants-ssh-route-profile` to the default pinned
+  differential suite for combined `nodeAttrs`, `grants`, route-via,
+  localpart SSH, profile email, and dual-stack/IPv6-only policy behavior.
+- Added paired non-Postgres `route-health-all-unhealthy-reload-restart`
+  real-client rows over the existing restart harness.

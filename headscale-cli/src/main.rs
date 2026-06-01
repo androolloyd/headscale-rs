@@ -781,6 +781,7 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
             Some(UPSTREAM_DUMP_CONFIG_HELP)
         }
         ["mockoidc", "-h" | "--help"] | ["help", "mockoidc"] => Some(UPSTREAM_MOCKOIDC_HELP),
+        ["mockoidc", tail @ ..] if mockoidc_help_tail(tail) => Some(UPSTREAM_MOCKOIDC_HELP),
         ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
             Some(UPSTREAM_COMPLETION_HELP)
         }
@@ -1044,12 +1045,12 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
 
     let command_is_unknown = match parts.as_slice() {
         ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => true,
-        ["health" | "configtest", tail @ ..]
+        ["health" | "configtest" | "dumpConfig", tail @ ..]
             if !tail.is_empty() && !tail_is_help_or_global_config(tail) =>
         {
             true
         }
-        ["dumpConfig" | "mockoidc", tail @ ..] if !tail.is_empty() && !tail_is_help(tail) => true,
+        ["mockoidc", tail @ ..] if !tail.is_empty() && !tail_is_help(tail) => true,
         [
             "completion",
             "bash" | "fish" | "powershell" | "zsh",
@@ -1121,11 +1122,13 @@ fn upstream_unknown_utility_flag(parts: &[&str]) -> Option<String> {
         ["version", tail @ ..] if !tail.is_empty() && !version_tail_is_supported(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::Version)
         }
-        [
-            "health" | "configtest" | "dumpConfig" | "mockoidc",
-            tail @ ..,
-        ] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
+        ["health" | "configtest" | "dumpConfig", tail @ ..]
+            if !tail.is_empty() && !tail_is_help_or_global_config(tail) =>
+        {
             first_unknown_flag(tail, UtilityFlagScope::GlobalConfig)
+        }
+        ["mockoidc", tail @ ..] if !tail.is_empty() && !tail_is_help(tail) => {
+            first_unknown_flag(tail, UtilityFlagScope::HelpOnly)
         }
         ["serve", tail @ ..] if !tail.is_empty() && !tail_is_help_or_global_config(tail) => {
             first_unknown_flag(tail, UtilityFlagScope::Serve)
@@ -1160,6 +1163,7 @@ enum UtilityFlagScope {
     GlobalConfig,
     CompletionCommand,
     CompletionShell,
+    HelpOnly,
 }
 
 fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> {
@@ -1168,7 +1172,12 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
         let arg = tail[i];
         match (scope, arg) {
             (_, "-h" | "--help")
-            | (UtilityFlagScope::Serve | UtilityFlagScope::GenerateGroup, "--force")
+            | (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                "--force",
+            )
             | (UtilityFlagScope::CompletionShell, "--" | "--no-descriptions") => {
                 i += 1;
                 continue;
@@ -1176,7 +1185,8 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
             (
                 UtilityFlagScope::Version
                 | UtilityFlagScope::Serve
-                | UtilityFlagScope::GenerateGroup,
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
                 "-o" | "--output",
             ) if i + 1 < tail.len() => {
                 i += 2;
@@ -1185,7 +1195,8 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
             (
                 UtilityFlagScope::Version
                 | UtilityFlagScope::Serve
-                | UtilityFlagScope::GenerateGroup,
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
                 value,
             ) if value.starts_with("--output=") => {
                 i += 1;
@@ -1194,7 +1205,8 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
             (
                 UtilityFlagScope::Version
                 | UtilityFlagScope::Serve
-                | UtilityFlagScope::GenerateGroup,
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
                 value,
             ) if value.starts_with("-o") && value.len() > 2 => {
                 i += 1;
@@ -1276,15 +1288,35 @@ fn utility_help_tail(tail: &[&str], scope: UtilityFlagScope) -> bool {
         && first_unknown_flag(tail, scope).is_none()
 }
 
+fn mockoidc_help_tail(tail: &[&str]) -> bool {
+    utility_help_tail(tail, UtilityFlagScope::HelpOnly)
+}
+
 fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
+    if tail.is_empty() {
+        return false;
+    }
     if tail_is_help(tail) {
         return true;
     }
-    match tail {
-        ["--config" | "-c", _] => true,
-        [value] if value.starts_with("--config=") => true,
-        _ => false,
+
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "--force" => i += 1,
+            "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            _ => return false,
+        }
     }
+    true
 }
 
 fn completion_tail_is_supported(tail: &[&str]) -> bool {
@@ -2949,11 +2981,23 @@ mod tests {
             Some(UPSTREAM_HEALTH_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["health", "-o", "json", "--help"]),
+            Some(UPSTREAM_HEALTH_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["configtest", "-c", "missing.yaml", "--help"]),
             Some(UPSTREAM_CONFIGTEST_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["configtest", "--output=json", "--help"]),
+            Some(UPSTREAM_CONFIGTEST_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["dumpConfig", "--config=missing.yaml", "--help"]),
+            Some(UPSTREAM_DUMP_CONFIG_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["dumpConfig", "--force", "--help"]),
             Some(UPSTREAM_DUMP_CONFIG_HELP)
         );
         assert_eq!(
@@ -3010,6 +3054,14 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["mockoidc", "--help"]),
             Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["mockoidc", "ignored", "--help"]),
+            Some(UPSTREAM_MOCKOIDC_HELP)
+        );
+        assert_eq!(
+            upstream_exact_error(&["mockoidc", "--config", "missing.yaml", "--help"]),
+            Some("Error: unknown flag: --config\n".into())
         );
         assert_eq!(
             upstream_exact_help(&["help", "mockoidc"]),

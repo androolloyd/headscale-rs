@@ -861,6 +861,184 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-nodeattrs-grants-ssh-route-profile",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.11",
+          "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+        ],
+        "DstPorts": [
+          {
+            "IP": "fd7a:115c:a1e0::14",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-v6-only-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+            ],
+            "DstPorts": [
+              {
+                "IP": "fd7a:115c:a1e0::14",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-dual-peers",
+        "peers": [
+          3,
+          4
+        ]
+      },
+      {
+        "name": "bob-v6-only-peers",
+        "peers": [
+          4
+        ]
+      },
+      {
+        "name": "router-dual-peers",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "server-v6-only-peers",
+        "peers": [
+          1,
+          2
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "tagged-router-autoapproves-office-subnet",
+        "approved_routes": [
+          "10.88.4.0/24"
+        ],
+        "changed": true
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "alice-office-route-via-router",
+        "include": [
+          "10.88.4.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "bob-does-not-inherit-alice-via-route",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-v6-only",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "GIT_*"
+            ]
+          },
+          {
+            "principals": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "ssh_users": {
+              "alice": "alice"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "GIT_*"
+            ]
+          },
+          {
+            "principals": [
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "GIT_*"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-validation-unknown-ipsets",
     "filter": [
 

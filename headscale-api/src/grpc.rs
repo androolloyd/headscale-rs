@@ -2829,6 +2829,16 @@ mod upstream_tests {
                 r#"missing "Bearer " prefix in "Authorization" header"#,
             ),
             (
+                "bearer prefix without required space",
+                Some("Bearer".parse().unwrap()),
+                r#"missing "Bearer " prefix in "Authorization" header"#,
+            ),
+            (
+                "lowercase bearer prefix",
+                Some("bearer invalid".parse().unwrap()),
+                r#"missing "Bearer " prefix in "Authorization" header"#,
+            ),
+            (
                 "empty bearer token",
                 Some("Bearer ".parse().unwrap()),
                 "invalid token",

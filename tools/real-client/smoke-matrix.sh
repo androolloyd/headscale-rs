@@ -185,6 +185,7 @@ smoke_ids=(
   route-health-all-unhealthy
   route-health-all-unhealthy-reload
   route-health-all-unhealthy-restart
+  route-health-all-unhealthy-reload-restart
   route-health-mixed-exit
   route-health-mixed-exit-reload
   route-health-mixed-exit-restart
@@ -292,6 +293,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -447,6 +449,7 @@ smoke_rust_scripts=(
   tools/real-client/route-health-all-unhealthy-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-smoke.sh
   tools/real-client/route-health-all-unhealthy-restart-smoke.sh
+  tools/real-client/route-health-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/route-health-mixed-exit-smoke.sh
   tools/real-client/route-health-mixed-exit-reload-smoke.sh
   tools/real-client/route-health-mixed-exit-restart-smoke.sh
@@ -578,6 +581,7 @@ smoke_go_scripts=(
   tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-restart-headscale-go-smoke.sh
+  tools/real-client/route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-reload-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-restart-headscale-go-smoke.sh
@@ -709,6 +713,7 @@ smoke_assertions=(
   "current-head route-health all-unavailable last-known-primary retention"
   "current-head route-health policy reload preserves all-unavailable last-known-primary retention"
   "current-head route-health production restart preserves all-unavailable last-known-primary retention"
+  "current-head route-health policy reload plus production restart preserves all-unavailable last-known-primary retention"
   "current-head route-health ignores exit-only routes during HA failover"
   "current-head route-health policy reload preserves exit-node separation during HA failover"
   "current-head route-health mixed exit-node separation survives server restart"

@@ -1391,6 +1391,11 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
         include_str!("snapshots/utility_unknown_shorthand_flag.stderr"),
     );
     assert_stderr_snapshot(
+        &["mockoidc", "--config", "missing.yaml", "--help"],
+        1,
+        "Error: unknown flag: --config\n",
+    );
+    assert_stderr_snapshot(
         &["completion", "--bad"],
         1,
         include_str!("snapshots/utility_version_unknown_flag.stderr"),
@@ -2430,6 +2435,10 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/health_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["health", "-o", "json", "--help"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["version", "--help"],
         include_str!("snapshots/version_help.stdout"),
     );
@@ -2442,11 +2451,19 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/configtest_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["configtest", "--output=json", "--help"],
+        include_str!("snapshots/configtest_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["dumpConfig", "--help"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_snapshot(
         &["dumpConfig", "--config=missing.yaml", "--help"],
+        include_str!("snapshots/dump_config_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["dumpConfig", "--force", "--help"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -2475,6 +2492,10 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_snapshot(
         &["mockoidc", "--help"],
+        include_str!("snapshots/mockoidc_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["mockoidc", "ignored", "--help"],
         include_str!("snapshots/mockoidc_help.stdout"),
     );
     assert_stdout_snapshot(

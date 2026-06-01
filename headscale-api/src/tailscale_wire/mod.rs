@@ -2080,6 +2080,8 @@ struct NodeStoreWriteQueue {
 
 type NodeStoreBoolUpdateFn =
     Box<dyn FnOnce(&mut HashMap<String, MachineRecord>) -> NodeStoreBoolUpdateOutcome + Send>;
+type NodeStoreManyUpdateFn =
+    Box<dyn FnOnce(&mut HashMap<String, MachineRecord>) -> NodeStoreManyUpdateOutcome + Send>;
 
 #[derive(Debug)]
 struct NodeStoreBoolUpdateOutcome {
@@ -2127,6 +2129,31 @@ impl NodeStoreBoolUpdateOutcome {
     }
 }
 
+#[derive(Debug)]
+struct NodeStoreManyUpdateOutcome {
+    applied: usize,
+    publish_snapshot: bool,
+    change: Option<PendingMapChange>,
+    clear_unhealthy_route_states: Vec<u64>,
+    missing_node_keys: Vec<String>,
+    affected_node_keys: Vec<String>,
+    affected_node_ids: Vec<u64>,
+}
+
+impl NodeStoreManyUpdateOutcome {
+    fn unchanged() -> Self {
+        Self {
+            applied: 0,
+            publish_snapshot: false,
+            change: None,
+            clear_unhealthy_route_states: Vec::new(),
+            missing_node_keys: Vec::new(),
+            affected_node_keys: Vec::new(),
+            affected_node_ids: Vec::new(),
+        }
+    }
+}
+
 enum NodeStoreWriteWork {
     Upsert {
         node_key_hex: String,
@@ -2141,6 +2168,11 @@ enum NodeStoreWriteWork {
         operation: &'static str,
         update: NodeStoreBoolUpdateFn,
         result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
+    },
+    UpdateMany {
+        operation: &'static str,
+        update: NodeStoreManyUpdateFn,
+        result_tx: std_mpsc::Sender<NodeStoreManyUpdateOutcome>,
     },
     Rekey {
         old_node_key_hex: String,
@@ -2161,6 +2193,11 @@ enum NodeStoreWriteCompletion {
         operation: &'static str,
         result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
         outcome: NodeStoreBoolUpdateOutcome,
+    },
+    UpdateMany {
+        operation: &'static str,
+        result_tx: std_mpsc::Sender<NodeStoreManyUpdateOutcome>,
+        outcome: NodeStoreManyUpdateOutcome,
     },
     Unit {
         operation: &'static str,
@@ -2557,6 +2594,7 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(
                 NodeStoreWriteWork::Delete { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::UpdateMany { .. }
                 | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
@@ -2601,6 +2639,7 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::UpdateMany { .. }
                 | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
@@ -2649,6 +2688,7 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::Delete { .. }
+                | NodeStoreWriteWork::UpdateMany { .. }
                 | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
@@ -2697,6 +2737,86 @@ impl MachineRegistry {
         };
         if let Some(node_id) = outcome.clear_unhealthy_route_state {
             self.primary_routes.write().clear_unhealthy(node_id);
+        }
+        outcome
+    }
+
+    fn enqueue_nodestore_many_update(
+        &self,
+        queue: &NodeStoreWriteQueue,
+        operation: &'static str,
+        update: NodeStoreManyUpdateFn,
+    ) -> NodeStoreManyUpdateOutcome {
+        let (result_tx, result_rx) = std_mpsc::channel();
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_add(1, Ordering::SeqCst);
+        let result = match queue.tx.send(NodeStoreWriteWork::UpdateMany {
+            operation,
+            update,
+            result_tx,
+        }) {
+            Ok(()) => result_rx
+                .recv()
+                .unwrap_or_else(|_| NodeStoreManyUpdateOutcome::unchanged()),
+            Err(std_mpsc::SendError(NodeStoreWriteWork::UpdateMany {
+                operation, update, ..
+            })) => self.apply_nodestore_many_update_direct(operation, update),
+            Err(std_mpsc::SendError(
+                NodeStoreWriteWork::Upsert { .. }
+                | NodeStoreWriteWork::Delete { .. }
+                | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::Rekey { .. },
+            )) => unreachable!(),
+        };
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    fn apply_nodestore_many_update_direct(
+        &self,
+        operation: &'static str,
+        update: NodeStoreManyUpdateFn,
+    ) -> NodeStoreManyUpdateOutcome {
+        let start = Instant::now();
+        let outcome = {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            let outcome = update(&mut next);
+            if outcome.publish_snapshot {
+                *g = Arc::new(next);
+            }
+            outcome
+        };
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation(operation, elapsed);
+        if outcome.publish_snapshot {
+            self.record_nodestore_batch(1, elapsed);
+        }
+        if let Some(change) = outcome.change.clone() {
+            self.wake_waiters_with(change);
+        }
+        outcome
+    }
+
+    fn apply_nodestore_many_update(
+        &self,
+        operation: &'static str,
+        update: NodeStoreManyUpdateFn,
+    ) -> NodeStoreManyUpdateOutcome {
+        let queue = self.nodestore_write_queue.read().clone();
+        let outcome = if let Some(queue) = queue.as_ref() {
+            self.enqueue_nodestore_many_update(queue, operation, update)
+        } else {
+            self.apply_nodestore_many_update_direct(operation, update)
+        };
+        if !outcome.clear_unhealthy_route_states.is_empty() {
+            let mut routes = self.primary_routes.write();
+            for node_id in &outcome.clear_unhealthy_route_states {
+                routes.clear_unhealthy(*node_id);
+            }
         }
         outcome
     }
@@ -2751,7 +2871,8 @@ impl MachineRegistry {
             Err(std_mpsc::SendError(
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::Delete { .. }
-                | NodeStoreWriteWork::UpdateBool { .. },
+                | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::UpdateMany { .. },
             )) => unreachable!(),
         }
         self.metrics
@@ -2836,6 +2957,19 @@ impl MachineRegistry {
                             outcome,
                         });
                     }
+                    NodeStoreWriteWork::UpdateMany {
+                        operation,
+                        update,
+                        result_tx,
+                    } => {
+                        let outcome = update(&mut next);
+                        publish_snapshot |= outcome.publish_snapshot;
+                        completions.push(NodeStoreWriteCompletion::UpdateMany {
+                            operation,
+                            result_tx,
+                            outcome,
+                        });
+                    }
                     NodeStoreWriteWork::Rekey {
                         old_node_key_hex,
                         new_node_key_hex,
@@ -2866,6 +3000,7 @@ impl MachineRegistry {
             let operation = match completion {
                 NodeStoreWriteCompletion::Bool { operation, .. }
                 | NodeStoreWriteCompletion::UpdateBool { operation, .. }
+                | NodeStoreWriteCompletion::UpdateMany { operation, .. }
                 | NodeStoreWriteCompletion::Unit { operation, .. } => operation,
             };
             self.record_nodestore_operation(operation, elapsed);
@@ -2879,6 +3014,14 @@ impl MachineRegistry {
                     let _ = result_tx.send(result);
                 }
                 NodeStoreWriteCompletion::UpdateBool {
+                    result_tx, outcome, ..
+                } => {
+                    if let Some(change) = outcome.change.clone() {
+                        self.wake_waiters_with(change);
+                    }
+                    let _ = result_tx.send(outcome);
+                }
+                NodeStoreWriteCompletion::UpdateMany {
                     result_tx, outcome, ..
                 } => {
                     if let Some(change) = outcome.change.clone() {
@@ -3413,19 +3556,30 @@ impl MachineRegistry {
             return;
         }
 
-        self.primary_routes.write().clear_unhealthy(node_id);
         let now = Utc::now();
-        self.update_with_operation_and_change(
+        self.primary_routes.write().clear_unhealthy(node_id);
+        self.apply_nodestore_bool_update(
             "update",
-            PendingMapChange::broadcast_peer(MapChangeReason::NodeOffline, node_id),
-            |map| {
+            Box::new(move |map| {
+                let mut found = false;
                 if let Some((_node_key, rec)) = map
                     .iter_mut()
                     .find(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
                 {
                     rec.last_seen = now;
+                    found = true;
                 }
-            },
+
+                NodeStoreBoolUpdateOutcome {
+                    applied: true,
+                    publish_snapshot: found,
+                    change: Some(PendingMapChange::broadcast_peer(
+                        MapChangeReason::NodeOffline,
+                        node_id,
+                    )),
+                    clear_unhealthy_route_state: None,
+                }
+            }),
         );
     }
 
@@ -3851,18 +4005,6 @@ impl MachineRegistry {
         )
     }
 
-    fn update_with_operation_and_change<R, F>(
-        &self,
-        operation: &str,
-        change: PendingMapChange,
-        f: F,
-    ) -> R
-    where
-        F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
-    {
-        self.update_with_operation_and_wake(operation, Some(change), f)
-    }
-
     fn update_with_operation_and_optional_change<R, F>(&self, operation: &str, f: F) -> R
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> (R, Option<PendingMapChange>),
@@ -4117,6 +4259,68 @@ impl MachineRegistry {
         .applied
     }
 
+    /// Replace approved routes on multiple machines as one atomic NodeStore
+    /// writer item. This mirrors headscale-go `NodeStore.UpdateNodes` for
+    /// policy auto-approval fan-out: callers see either the old snapshot or the
+    /// fully updated route set, never an intermediate per-node approval.
+    pub fn set_approved_routes_many(
+        &self,
+        updates: Vec<(String, Vec<String>)>,
+    ) -> (usize, Vec<String>) {
+        if updates.is_empty() {
+            return (0, Vec::new());
+        }
+
+        let outcome = self.apply_nodestore_many_update(
+            "update_multi",
+            Box::new(move |map| {
+                let missing_node_keys = updates
+                    .iter()
+                    .filter(|(node_key_hex, _routes)| !map.contains_key(node_key_hex))
+                    .map(|(node_key_hex, _routes)| node_key_hex.clone())
+                    .collect::<Vec<_>>();
+                if !missing_node_keys.is_empty() {
+                    return NodeStoreManyUpdateOutcome {
+                        missing_node_keys,
+                        ..NodeStoreManyUpdateOutcome::unchanged()
+                    };
+                }
+
+                let mut applied = 0usize;
+                let mut clear_unhealthy_route_states = Vec::new();
+
+                for (node_key_hex, routes) in updates {
+                    let Some(rec) = map.get_mut(&node_key_hex) else {
+                        continue;
+                    };
+                    if rec.approved_routes != routes {
+                        let node_id = rec.stable_node_id_for_key(&node_key_hex);
+                        rec.approved_routes = routes;
+                        if active_primary_routes(&rec.available_routes, &rec.approved_routes)
+                            .is_empty()
+                        {
+                            clear_unhealthy_route_states.push(node_id);
+                        }
+                        applied += 1;
+                    }
+                }
+
+                NodeStoreManyUpdateOutcome {
+                    applied,
+                    publish_snapshot: applied > 0,
+                    change: (applied > 0)
+                        .then(|| PendingMapChange::global(MapChangeReason::PolicyChange)),
+                    clear_unhealthy_route_states,
+                    missing_node_keys: Vec::new(),
+                    affected_node_keys: Vec::new(),
+                    affected_node_ids: Vec::new(),
+                }
+            }),
+        );
+
+        (outcome.applied, outcome.missing_node_keys)
+    }
+
     /// Replace a machine's advertised subnet routes. Empty list clears
     /// advertised routes while preserving operator approvals.
     pub fn set_available_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
@@ -4154,62 +4358,68 @@ impl MachineRegistry {
         let deadline = now - cutoff_chrono;
         let active_connections = self.active_connections.read().clone();
         let online_states = self.online_states.read().clone();
-        let start = Instant::now();
-        let removed = {
-            let mut g = self.inner.write();
-            let to_drop: Vec<(String, u64)> = g
-                .iter()
-                .filter(|(node_key, rec)| {
-                    let node_id = rec.stable_node_id_for_key(node_key);
-                    rec.ephemeral
-                        && rec.last_seen < deadline
-                        && active_connections.get(&node_id).copied().unwrap_or(0) == 0
-                        && !online_states.get(&node_id).copied().unwrap_or(false)
-                })
-                .map(|(k, rec)| (k.clone(), rec.stable_node_id_for_key(k)))
-                .collect();
+        let outcome = self.apply_nodestore_many_update(
+            "delete_multi",
+            Box::new(move |map| {
+                let to_drop: Vec<(String, u64)> = map
+                    .iter()
+                    .filter(|(node_key, rec)| {
+                        let node_id = rec.stable_node_id_for_key(node_key);
+                        rec.ephemeral
+                            && rec.last_seen < deadline
+                            && active_connections.get(&node_id).copied().unwrap_or(0) == 0
+                            && !online_states.get(&node_id).copied().unwrap_or(false)
+                    })
+                    .map(|(k, rec)| (k.clone(), rec.stable_node_id_for_key(k)))
+                    .collect();
 
-            if to_drop.is_empty() {
-                Vec::new()
-            } else {
-                let mut next = (**g).clone();
-                for (k, _node_id) in &to_drop {
-                    next.remove(k);
+                if to_drop.is_empty() {
+                    return NodeStoreManyUpdateOutcome::unchanged();
                 }
-                *g = Arc::new(next);
-                to_drop
-            }
-        };
-        if removed.is_empty() {
+
+                for (node_key_hex, _node_id) in &to_drop {
+                    map.remove(node_key_hex);
+                }
+
+                let affected_node_keys = to_drop
+                    .iter()
+                    .map(|(node_key_hex, _node_id)| node_key_hex.clone())
+                    .collect::<Vec<_>>();
+                let affected_node_ids = to_drop
+                    .iter()
+                    .map(|(_node_key_hex, node_id)| *node_id)
+                    .collect::<Vec<_>>();
+                NodeStoreManyUpdateOutcome {
+                    applied: to_drop.len(),
+                    publish_snapshot: true,
+                    change: Some(PendingMapChange::peers_removed(affected_node_ids.clone())),
+                    clear_unhealthy_route_states: Vec::new(),
+                    missing_node_keys: Vec::new(),
+                    affected_node_keys,
+                    affected_node_ids,
+                }
+            }),
+        );
+        if outcome.applied == 0 {
             return Vec::new();
         }
 
-        let elapsed = start.elapsed();
-        self.record_nodestore_operation("update", elapsed);
-        self.record_nodestore_batch(1, elapsed);
-        self.wake_waiters_with(PendingMapChange::peers_removed(
-            removed
-                .iter()
-                .map(|(_node_key_hex, node_id)| *node_id)
-                .collect(),
-        ));
+        let removed_keys = outcome.affected_node_keys;
+        let removed_ids = outcome.affected_node_ids;
 
         let mut active = self.active_connections.write();
         let mut online = self.online_states.write();
         let mut generations = self.connection_generations.write();
         let mut disconnected_at = self.disconnected_at.write();
         let mut route_health_sessions = self.route_health_stable_sessions.write();
-        for (_node_key_hex, node_id) in &removed {
+        for node_id in &removed_ids {
             active.remove(node_id);
             online.remove(node_id);
             generations.remove(node_id);
             disconnected_at.remove(node_id);
             route_health_sessions.remove(node_id);
         }
-        removed
-            .into_iter()
-            .map(|(node_key_hex, _node_id)| node_key_hex)
-            .collect()
+        removed_keys
     }
 
     fn forget_batcher_connection_state(&self, node_id: u64) {
@@ -5725,6 +5935,190 @@ mod registry_tests {
         let batch_size = reg.nodestore_batch_size_metrics();
         assert_eq!(batch_size.count, batch_size_before.count + 1);
         assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_batches_concurrent_offline_updates() {
+        let reg = Arc::new(MachineRegistry::new());
+        let before = Utc::now() - chrono::Duration::minutes(5);
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-offline-{idx}");
+            rec.last_seen = before;
+            reg.upsert(rec.node_key_hex.clone(), rec);
+            let node_id = reg.stable_node_id_for_key(&format!("node-offline-{idx}"));
+            reg.active_connections.write().insert(node_id, 0);
+            reg.online_states.write().insert(node_id, true);
+            reg.connection_generations.write().insert(node_id, 1);
+        }
+        let first_id = reg.stable_node_id_for_key("node-offline-1");
+        let second_id = reg.stable_node_id_for_key("node-offline-2");
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || first_reg.mark_stream_offline_if_idle(first_id, 1));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first offline update did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.get("node-offline-1").unwrap().last_seen,
+            before,
+            "first offline update should wait for another item or the timeout"
+        );
+
+        reg.mark_stream_offline_if_idle(second_id, 1);
+        first
+            .join()
+            .expect("first offline update thread should finish");
+
+        assert!(reg.get("node-offline-1").unwrap().last_seen > before);
+        assert!(reg.get("node-offline-2").unwrap().last_seen > before);
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_update_many_sets_approved_routes_atomically() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-update-many-{idx}");
+            rec.available_routes = vec![format!("10.{idx}.0.0/24")];
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let (changed, missing) = reg.set_approved_routes_many(vec![
+            ("node-update-many-1".into(), vec!["10.1.0.0/24".into()]),
+            ("node-update-many-2".into(), vec!["10.2.0.0/24".into()]),
+        ]);
+
+        assert_eq!(changed, 2);
+        assert!(missing.is_empty());
+        assert_eq!(
+            reg.get("node-update-many-1").unwrap().approved_routes,
+            vec!["10.1.0.0/24"]
+        );
+        assert_eq!(
+            reg.get("node-update-many-2").unwrap().approved_routes,
+            vec!["10.2.0.0/24"]
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update_multi")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("1"), batch_size_before.bucket("1") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_update_many_missing_node_is_atomic() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(1);
+        rec.node_key_hex = "node-update-many-present".into();
+        reg.upsert(rec.node_key_hex.clone(), rec);
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+
+        let (changed, missing) = reg.set_approved_routes_many(vec![
+            (
+                "node-update-many-present".into(),
+                vec!["10.1.0.0/24".into()],
+            ),
+            (
+                "node-update-many-missing".into(),
+                vec!["10.2.0.0/24".into()],
+            ),
+        ]);
+
+        assert_eq!(changed, 0);
+        assert_eq!(missing, vec!["node-update-many-missing"]);
+        assert!(
+            reg.get("node-update-many-present")
+                .unwrap()
+                .approved_routes
+                .is_empty()
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update_multi")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+    }
+
+    #[test]
+    fn nodestore_write_batcher_gc_ephemeral_uses_delete_multi() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=3 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-gc-{idx}");
+            rec.ephemeral = true;
+            rec.last_seen = if idx == 3 {
+                Utc::now()
+            } else {
+                Utc::now() - chrono::Duration::minutes(5)
+            };
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let mut removed = reg.gc_ephemeral(Duration::from_secs(60));
+        removed.sort();
+
+        assert_eq!(removed, vec!["node-gc-1", "node-gc-2"]);
+        assert!(reg.get("node-gc-1").is_none());
+        assert!(reg.get("node-gc-2").is_none());
+        assert!(reg.get("node-gc-3").is_some());
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("delete_multi")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("1"), batch_size_before.bucket("1") + 1);
     }
 
     #[test]

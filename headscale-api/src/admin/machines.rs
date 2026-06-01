@@ -220,6 +220,20 @@ pub trait MachineAdmin: Send + Sync {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError>;
+    /// Replace approved routes on multiple machines. Implementations that can
+    /// update a live NodeStore atomically should override this; the default
+    /// preserves existing backend behaviour by applying each node in sequence.
+    async fn set_approved_routes_batch(
+        &self,
+        updates: Vec<(String, Vec<String>)>,
+    ) -> Result<usize, MachineAdminError> {
+        let mut changed = 0usize;
+        for (id, routes) in updates {
+            self.set_approved_routes(&id, routes).await?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
     /// Replace the node's advertised route list while preserving
     /// operator approvals.
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError>;
@@ -248,7 +262,7 @@ pub(crate) async fn apply_policy_auto_approvals(
     policy: &PolicyStore,
     machines: &dyn MachineAdmin,
 ) -> Result<usize, MachineAdminError> {
-    let mut changed = 0usize;
+    let mut updates = Vec::new();
     for node in machines.list().await {
         let user = (!node.user.is_empty()).then_some(node.user.as_str());
         let approved = auto_approved_routes_for_node(
@@ -266,11 +280,10 @@ pub(crate) async fn apply_policy_auto_approvals(
             ))
         })?;
         if approved != node.approved_routes {
-            machines.set_approved_routes(&node.id, approved).await?;
-            changed += 1;
+            updates.push((node.id, approved));
         }
     }
-    Ok(changed)
+    machines.set_approved_routes_batch(updates).await
 }
 
 /// Default impl: adapts [`MachineRegistry`] for the admin panel.
@@ -2669,6 +2682,28 @@ impl MachineAdmin for WireMachineAdmin {
         Ok(())
     }
 
+    async fn set_approved_routes_batch(
+        &self,
+        updates: Vec<(String, Vec<String>)>,
+    ) -> Result<usize, MachineAdminError> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        {
+            let deleted = self.deleted.read();
+            for (id, _) in &updates {
+                if deleted.contains(id.as_str()) {
+                    return Err(MachineAdminError::NotFound(id.clone()));
+                }
+            }
+        }
+        let (changed, missing) = self.registry.set_approved_routes_many(updates);
+        if let Some(id) = missing.into_iter().next() {
+            return Err(MachineAdminError::NotFound(id));
+        }
+        Ok(changed)
+    }
+
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
         if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
             return Err(MachineAdminError::NotFound(id.to_string()));
@@ -3182,6 +3217,64 @@ mod tests {
         let r = rt().block_on(a.get(&id)).unwrap();
         assert!(!r.online);
         assert!(r.expired);
+    }
+
+    #[test]
+    fn policy_auto_approvals_use_wire_update_many() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let node_key = format!("{idx:064x}");
+            let machine_key = format!("{:064x}", idx + 10);
+            let mut rec = MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_key.clone(),
+                machine_key,
+                "alice".into(),
+                format!("router-{idx}"),
+                Ipv4Addr::new(100, 64, 0, idx as u8),
+                false,
+            );
+            rec.available_routes = vec![format!("10.{idx}.0.0/24")];
+            reg.upsert(node_key, rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(1, std::time::Duration::from_secs(5));
+
+        let raw = r#"{
+          "autoApprovers": {
+            "routes": {"10.0.0.0/8": ["alice@"]}
+          }
+        }"#;
+        let policy = PolicyStore::new();
+        policy.set(parse_hujson_policy(raw).unwrap(), raw.into());
+        let admin = WireMachineAdmin::new(reg.clone());
+
+        let changed = rt()
+            .block_on(apply_policy_auto_approvals(&policy, &admin))
+            .unwrap();
+
+        assert_eq!(changed, 2);
+        assert_eq!(
+            reg.get(&format!("{:064x}", 1)).unwrap().approved_routes,
+            vec!["10.1.0.0/24"]
+        );
+        assert_eq!(
+            reg.get(&format!("{:064x}", 2)).unwrap().approved_routes,
+            vec!["10.2.0.0/24"]
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update_multi")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
     }
 
     #[test]

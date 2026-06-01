@@ -6130,6 +6130,59 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_update_delete_same_batch_emits_only_peers_removed() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&b));
+
+        let peer_id = stable_id_from_key(&b);
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let machines = state.machines.clone();
+        let b_for_update = b.clone();
+        let update = std::thread::spawn(move || machines.set_expiry(&b_for_update, Some(expiry)));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while state.machines.nodestore_queue_depth() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued expiry update did not reach the NodeStore worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(state.machines.delete(&b));
+        assert!(
+            !update.join().expect("queued expiry update should finish"),
+            "same-batch update should report false after the node is deleted"
+        );
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "worker update/delete changes must wait for the map-batch tick"
+        );
+
+        publish_test_map_batch().await;
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert_eq!(mr.peers_removed, vec![peer_id]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_policy_reload_to_empty_acl_emits_peers_removed() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

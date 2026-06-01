@@ -1436,10 +1436,11 @@ struct RegistrationEntry {
     notify: Notify,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SshCheckBinding {
     pub src_node_id: u64,
     pub dst_node_id: u64,
+    pub local_user: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1478,7 +1479,7 @@ pub enum AuthWaitOutcome {
 }
 
 /// Type of pending auth request currently stored for an auth ID.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum AuthRequestKind {
     Registration,
     SshCheck(SshCheckBinding),
@@ -1542,12 +1543,13 @@ impl RegistrationCache {
     }
 
     pub fn ssh_binding(&self, auth_id: &str) -> Option<SshCheckBinding> {
-        self.get_entry(auth_id).and_then(|entry| entry.ssh_binding)
+        self.get_entry(auth_id)
+            .and_then(|entry| entry.ssh_binding.clone())
     }
 
     pub fn auth_request_kind(&self, auth_id: &str) -> Option<AuthRequestKind> {
         let entry = self.get_entry(auth_id)?;
-        if let Some(binding) = entry.ssh_binding {
+        if let Some(binding) = entry.ssh_binding.clone() {
             return Some(AuthRequestKind::SshCheck(binding));
         }
         entry
@@ -1728,12 +1730,12 @@ impl RegistrationCache {
 
     pub fn last_ssh_auth(
         &self,
-        binding: SshCheckBinding,
+        binding: &SshCheckBinding,
         policy_updated_at: Option<i64>,
     ) -> Option<Instant> {
         self.last_ssh_auth
             .read()
-            .get(&binding)
+            .get(binding)
             .filter(|record| record.policy_updated_at == policy_updated_at)
             .map(|record| record.at)
     }
@@ -5406,8 +5408,9 @@ mod registry_tests {
         let binding = SshCheckBinding {
             src_node_id: 101,
             dst_node_id: 202,
+            local_user: "root".into(),
         };
-        cache.insert_ssh_check(approve_id.clone(), binding);
+        cache.insert_ssh_check(approve_id.clone(), binding.clone());
 
         let approve_waiter = {
             let cache = cache.clone();
@@ -5431,7 +5434,7 @@ mod registry_tests {
         ));
 
         let reject_id = "t".repeat(24);
-        cache.insert_ssh_check(reject_id.clone(), binding);
+        cache.insert_ssh_check(reject_id.clone(), binding.clone());
         assert!(cache.reject(&reject_id, "auth request rejected"));
         match cache.wait_for_registration(&reject_id).await {
             RegistrationWaitOutcome::Rejected(reason) => {
@@ -5804,6 +5807,7 @@ mod registry_tests {
             SshCheckBinding {
                 src_node_id: 1,
                 dst_node_id: 2,
+                local_user: "root".into(),
             },
         );
         let handler = WireOidcRegistrationHandler { state };
@@ -5877,6 +5881,7 @@ mod registry_tests {
         let binding = SshCheckBinding {
             src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
             dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+            local_user: "root".into(),
         };
         state
             .registration_cache
@@ -5918,6 +5923,7 @@ mod registry_tests {
             SshCheckBinding {
                 src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
                 dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+                local_user: "root".into(),
             },
         );
 
@@ -5947,6 +5953,7 @@ mod registry_tests {
             SshCheckBinding {
                 src_node_id: src.stable_node_id_for_key(&src.node_key_hex),
                 dst_node_id: dst.stable_node_id_for_key(&dst.node_key_hex),
+                local_user: "root".into(),
             },
         );
 

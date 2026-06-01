@@ -4538,6 +4538,7 @@ mod tests {
             SshCheckBinding {
                 src_node_id: source.node_id,
                 dst_node_id: source.node_id,
+                local_user: "root".into(),
             },
         );
         let waiter = {
@@ -4585,6 +4586,7 @@ mod tests {
             SshCheckBinding {
                 src_node_id: source.node_id,
                 dst_node_id: source.node_id,
+                local_user: "root".into(),
             },
         );
         let handler = PersistentOidcRegistrationHandler::new(
@@ -4623,6 +4625,7 @@ mod tests {
             SshCheckBinding {
                 src_node_id: source.node_id,
                 dst_node_id: source.node_id,
+                local_user: "root".into(),
             },
         );
         let handler = PersistentOidcRegistrationHandler::new(

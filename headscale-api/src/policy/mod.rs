@@ -245,9 +245,12 @@ impl PolicyStore {
         nodes: &[SshPolicyNode],
         src_node_id: u64,
         dst_node_id: u64,
+        local_user: &str,
     ) -> Option<std::time::Duration> {
         match self.inner.state.read().doc.as_ref() {
-            Some(doc) => ssh::ssh_check_period_for(doc, nodes, src_node_id, dst_node_id),
+            Some(doc) => {
+                ssh::ssh_check_period_for(doc, nodes, src_node_id, dst_node_id, local_user)
+            }
             None => None,
         }
     }

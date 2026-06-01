@@ -503,7 +503,7 @@ fn resolve_principal(
             "internet" => headscale_api_acl::internet_filter_cidrs(),
             "member" => nodes
                 .iter()
-                .filter(|node| node.tags.is_empty())
+                .filter(|node| is_untagged_user_owned(node))
                 .flat_map(node_addr_prefixes)
                 .collect(),
             "tagged" => nodes
@@ -603,11 +603,19 @@ fn same_user_untagged_nodes<'a>(
     nodes: &'a [PacketFilterNode],
     node: &PacketFilterNode,
 ) -> Vec<&'a PacketFilterNode> {
+    let Some(user) = node.user.as_deref().filter(|user| !user.is_empty()) else {
+        return Vec::new();
+    };
+
     nodes
         .iter()
-        .filter(|candidate| candidate.tags.is_empty())
-        .filter(|candidate| candidate.user == node.user)
+        .filter(|candidate| is_untagged_user_owned(candidate))
+        .filter(|candidate| candidate.user.as_deref() == Some(user))
         .collect()
+}
+
+fn is_untagged_user_owned(node: &PacketFilterNode) -> bool {
+    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
 }
 
 fn nodes_matching_prefixes(nodes: &[&PacketFilterNode], prefixes: &[String]) -> Vec<String> {
@@ -1496,6 +1504,58 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].src_ips, vec!["100.64.0.1"]);
         assert_eq!(rs[1].src_ips, vec!["100.64.0.3"]);
+    }
+
+    #[test]
+    fn userless_nodes_do_not_match_member_or_self_packet_filters() {
+        let d = doc(
+            vec![
+                PolicyRule {
+                    action: PolicyAction::Accept,
+                    src: vec!["autogroup:member".into()],
+                    dst: vec!["autogroup:member".into()],
+                    ports: vec!["tcp/22".into()],
+                },
+                PolicyRule {
+                    action: PolicyAction::Accept,
+                    src: vec!["autogroup:member".into()],
+                    dst: vec!["autogroup:self".into()],
+                    ports: vec!["tcp/443".into()],
+                },
+            ],
+            BTreeMap::new(),
+        );
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user: None,
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+        ];
+
+        let alice_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
+        assert_eq!(alice_rules.len(), 1);
+        assert_eq!(alice_rules[0].src_ips, vec!["100.64.0.1"]);
+        assert_eq!(
+            alice_rules[0]
+                .dst_ports
+                .iter()
+                .map(|dst| (dst.ip.as_str(), dst.ports.first, dst.ports.last))
+                .collect::<Vec<_>>(),
+            vec![("100.64.0.1", 22, 22), ("100.64.0.1", 443, 443)]
+        );
+
+        let userless_rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert!(userless_rules.is_empty());
     }
 
     #[test]

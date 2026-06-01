@@ -52,6 +52,7 @@
 //! canonical/internal field names used by OctraVPN (`rules`,
 //! `tag_owners`, `node_attrs`, ...).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -154,10 +155,10 @@ impl<'de> Deserialize<'de> for AclRule {
             if let Some((alias, port_spec)) =
                 split_upstream_dst_ports(&raw_dst).map_err(serde::de::Error::custom)?
             {
-                validate_proto_port_compat(upstream_proto, port_spec)
+                validate_proto_port_compat(upstream_proto, &port_spec)
                     .map_err(serde::de::Error::custom)?;
-                dst.push(alias.to_string());
-                ports.extend(normalize_port_spec(upstream_proto, port_spec));
+                dst.push(alias);
+                ports.extend(normalize_port_spec(upstream_proto, &port_spec));
             } else {
                 dst.push(raw_dst);
             }
@@ -876,14 +877,15 @@ fn validate_go_acl_destinations(
         };
         let (alias, port_spec) =
             split_go_destination_and_port(destination).map_err(PolicyParseError::Schema)?;
-        validate_upstream_port_spec(port_spec).map_err(PolicyParseError::Schema)?;
-        validate_go_acl_alias_syntax(alias).map_err(PolicyParseError::Schema)?;
+        validate_upstream_port_spec(&port_spec).map_err(PolicyParseError::Schema)?;
+        validate_go_acl_alias_syntax(&alias).map_err(PolicyParseError::Schema)?;
     }
 
     Ok(())
 }
 
-fn split_go_destination_and_port(input: &str) -> Result<(&str, &str), String> {
+fn split_go_destination_and_port(input: &str) -> Result<(String, String), String> {
+    let input = normalize_bracketed_ipv6_destination(input)?;
     let Some((destination, port)) = input.rsplit_once(':') else {
         return Err(r#"hostport must contain a colon (":")"#.to_string());
     };
@@ -893,7 +895,33 @@ fn split_go_destination_and_port(input: &str) -> Result<(&str, &str), String> {
     if port.is_empty() {
         return Err("input cannot end with a colon character".to_string());
     }
-    Ok((destination, port))
+    Ok((destination.to_string(), port.to_string()))
+}
+
+fn normalize_bracketed_ipv6_destination(input: &str) -> Result<Cow<'_, str>, String> {
+    const ERR_BRACKETS_NOT_IPV6: &str = "square brackets are only valid around IPv6 addresses";
+
+    if !input.starts_with('[') {
+        return Ok(Cow::Borrowed(input));
+    }
+
+    let Some(close_bracket) = input.find(']') else {
+        return Err(ERR_BRACKETS_NOT_IPV6.to_string());
+    };
+    let host = &input[1..close_bracket];
+    let addr = host
+        .parse::<IpAddr>()
+        .map_err(|_| format!("{ERR_BRACKETS_NOT_IPV6}: {host:?}"))?;
+    if !addr.is_ipv6() {
+        return Err(format!("{ERR_BRACKETS_NOT_IPV6}: {host:?}"));
+    }
+
+    let rest = &input[close_bracket + 1..];
+    if rest.is_empty() || !matches!(rest.as_bytes()[0], b':' | b'/') {
+        return Err(format!("{ERR_BRACKETS_NOT_IPV6}: {input:?}"));
+    }
+
+    Ok(Cow::Owned(format!("{host}{rest}")))
 }
 
 fn validate_go_acl_alias_syntax(alias: &str) -> Result<(), String> {
@@ -1252,6 +1280,8 @@ fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<Stri
 fn validate_policy_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> {
     let (alias, port) = split_upstream_dst_ports(dst)?
         .ok_or_else(|| "tests destination must include one explicit port".to_string())?;
+    let alias = alias.as_str();
+    let port = port.as_str();
     if alias == "autogroup:internet" {
         return Err("autogroup:internet is not allowed as a tests destination".to_string());
     }
@@ -2485,7 +2515,13 @@ fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
     net.contains(&parsed)
 }
 
-fn split_upstream_dst_ports(dst: &str) -> Result<Option<(&str, &str)>, String> {
+fn split_upstream_dst_ports(dst: &str) -> Result<Option<(String, String)>, String> {
+    if dst.starts_with('[') {
+        let (alias, port_spec) = split_go_destination_and_port(dst)?;
+        validate_upstream_port_spec(&port_spec)?;
+        return Ok(Some((alias, port_spec)));
+    }
+
     let Some((alias, port_spec)) = dst.rsplit_once(':') else {
         return Ok(None);
     };
@@ -2493,7 +2529,7 @@ fn split_upstream_dst_ports(dst: &str) -> Result<Option<(&str, &str)>, String> {
         return Ok(None);
     }
     validate_upstream_port_spec(port_spec)?;
-    Ok(Some((alias, port_spec)))
+    Ok(Some((alias.to_string(), port_spec.to_string())))
 }
 
 fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
@@ -2881,6 +2917,33 @@ mod tests {
     }
 
     #[test]
+    fn hujson_accepts_headscale_go_bracketed_ipv6_acl_destinations() {
+        let raw = r#"{
+            "acls": [
+                {
+                    "action":"accept",
+                    "proto":"tcp",
+                    "src":["alice@"],
+                    "dst":[
+                        "[fd7a:115c:a1e0::87e1]:80,443",
+                        "[fd7a:115c:a1e0::2905]/64:22",
+                        "[::1]:80-90"
+                    ]
+                }
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(
+            doc.rules[0].dst,
+            vec!["fd7a:115c:a1e0::87e1", "fd7a:115c:a1e0::2905/64", "::1"]
+        );
+        assert_eq!(
+            doc.rules[0].ports,
+            vec!["tcp/80", "tcp/443", "tcp/22", "tcp/80-90"]
+        );
+    }
+
+    #[test]
     fn hujson_accepts_upstream_policy_tests_and_ssh_tests() {
         let raw = r#"{
             "tagOwners": {"tag:server": ["alice@"]},
@@ -2975,6 +3038,28 @@ mod tests {
         }"#;
         let err = parse_hujson_policy(raw).unwrap_err();
         assert!(format!("{err}").contains("Invalid alias"));
+    }
+
+    #[test]
+    fn hujson_rejects_bracketed_non_ipv6_acl_destinations_like_headscale_go() {
+        for dst in [
+            "[192.168.1.1]:80",
+            "[my-hostname]:80",
+            "[fd7a:115c:a1e0::2/128]:22",
+        ] {
+            let raw = format!(
+                r#"{{
+                    "acls": [
+                        {{"action":"accept","src":["*"],"dst":["{dst}"]}}
+                    ]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).unwrap_err();
+            assert!(
+                format!("{err}").contains("square brackets are only valid around IPv6 addresses"),
+                "{dst} should reject bracketed non-IPv6 alias, got {err}"
+            );
+        }
     }
 
     #[test]

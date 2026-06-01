@@ -72,8 +72,16 @@ wait_for() {
   local cmd="$2"
   local deadline=$((SECONDS + timeout_secs))
   until eval "${cmd}"; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      wait "${server_pid}" >/dev/null 2>&1 || true
+      server_pid=""
+      echo "headscale-rs server exited while waiting for ${label}" >&2
+      dump_server_logs "server exited before ${label}"
+      return 1
+    fi
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for ${label}" >&2
+      dump_server_logs "timed out waiting for ${label}"
       return 1
     fi
     sleep 1
@@ -86,9 +94,50 @@ headscale_cmd() {
 }
 
 dump_debug() {
+  dump_server_logs "debug snapshot"
   headscale_cmd -o json nodes list 2>&1 || true
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2 || true
+}
+
+dump_server_logs() {
+  local reason="$1"
+  local path
+  if [[ -n "${local_control_url}" ]]; then
+    server_health_probe >/dev/null 2>&1 || true
+  fi
+  if [[ -s "${config_path}" ]]; then
+    server_grpc_health_probe >/dev/null 2>&1 || true
+  fi
+  echo "::group::headscale-rs server debug (${reason})"
+  for path in \
+    "${work_dir}/headscale-rs.stderr" \
+    "${work_dir}/headscale-rs.stdout" \
+    "${work_dir}/headscale-rs-health.stderr" \
+    "${work_dir}/headscale-rs-health.stdout" \
+    "${work_dir}/headscale-rs-grpc-health.stderr" \
+    "${work_dir}/headscale-rs-grpc-health.stdout" \
+    "${work_dir}/headscale-rs-version.txt"; do
+    if [[ -s "${path}" ]]; then
+      echo "--- ${path} ---" >&2
+      tail -200 "${path}" >&2 || true
+    fi
+  done
+  echo "--- socket ${socket_path} ---" >&2
+  ls -l "${socket_path}" >&2 || true
+  echo "::endgroup::"
+}
+
+server_health_probe() {
+  curl -fsS "${local_control_url}/health" \
+    >"${work_dir}/headscale-rs-health.stdout" \
+    2>"${work_dir}/headscale-rs-health.stderr"
+}
+
+server_grpc_health_probe() {
+  headscale_cmd health \
+    >"${work_dir}/headscale-rs-grpc-health.stdout" \
+    2>"${work_dir}/headscale-rs-grpc-health.stderr"
 }
 
 write_records() {
@@ -148,16 +197,19 @@ start_server() {
   else
     cargo build --quiet -p headscale-cli --bin headscale
   fi
+  "${headscale_bin}" version >"${work_dir}/headscale-rs-version.txt" 2>&1 || true
   echo "::endgroup::"
 
   echo "::group::start headscale-rs server"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stdout"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stderr"
   "${headscale_bin}" --config "${config_path}" serve \
-    >"${work_dir}/headscale-rs.stdout" \
-    2>"${work_dir}/headscale-rs.stderr" &
+    >>"${work_dir}/headscale-rs.stdout" \
+    2>>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"
-  wait_for "headscale-rs health" "curl -fsS '${local_control_url}/health' >/dev/null"
+  wait_for "headscale-rs health" "server_health_probe"
   wait_for "headscale-rs TLS certificate" "test -s '${tls_cert_path}'"
-  wait_for "headscale-rs gRPC" "headscale_cmd health >/dev/null 2>&1"
+  wait_for "headscale-rs gRPC" "server_grpc_health_probe"
   echo "headscale-rs control=${local_control_url}"
   echo "headscale-rs login=${control_url}"
   echo "::endgroup::"

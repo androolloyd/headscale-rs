@@ -66,6 +66,7 @@ tls_cert_path=""
 tls_key_path=""
 health_curl_opts="-fsS"
 headscale_bin=""
+active_server_label=""
 
 cleanup() {
   docker rm -f "${client_name}" >/dev/null 2>&1 || true
@@ -93,8 +94,16 @@ wait_for() {
   local cmd="$2"
   local deadline=$((SECONDS + timeout_secs))
   until eval "${cmd}"; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      wait "${server_pid}" >/dev/null 2>&1 || true
+      server_pid=""
+      echo "${target} server exited while waiting for ${label}" >&2
+      dump_server_logs "server exited before ${label}"
+      return 1
+    fi
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for ${label}" >&2
+      dump_server_logs "timed out waiting for ${label}"
       return 1
     fi
     sleep 1
@@ -102,8 +111,41 @@ wait_for() {
 }
 
 dump_client_debug() {
+  dump_server_logs "client debug snapshot"
   docker exec "${client_name}" tailscale status 2>&1 || true
   docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
+}
+
+dump_server_logs() {
+  local reason="$1"
+  local prefix="${active_server_label:-${target}}"
+  local path
+  if [[ -n "${local_control_url}" ]]; then
+    server_health_probe >/dev/null 2>&1 || true
+  fi
+  if [[ -s "${config_path}" ]]; then
+    server_grpc_health_probe >/dev/null 2>&1 || true
+  fi
+  echo "::group::${target} server debug (${reason})"
+  for path in \
+    "${work_dir}/${prefix}.stderr" \
+    "${work_dir}/${prefix}.stdout" \
+    "${work_dir}/${prefix}-health.stderr" \
+    "${work_dir}/${prefix}-health.stdout" \
+    "${work_dir}/${prefix}-grpc-health.stderr" \
+    "${work_dir}/${prefix}-grpc-health.stdout" \
+    "${work_dir}/headscale-rs-version.txt" \
+    "${work_dir}/headscale-go-version.txt" \
+    "${work_dir}/openssl.stderr" \
+    "${work_dir}/openssl.stdout"; do
+    if [[ -s "${path}" ]]; then
+      echo "--- ${path} ---" >&2
+      tail -200 "${path}" >&2 || true
+    fi
+  done
+  echo "--- socket ${socket_path} ---" >&2
+  ls -l "${socket_path}" >&2 || true
+  echo "::endgroup::"
 }
 
 install_or_build_headscale() {
@@ -112,6 +154,7 @@ install_or_build_headscale() {
       echo "::group::build headscale-rs CLI"
       cargo build --quiet -p headscale-cli --bin headscale
       headscale_bin="${repo_root}/target/debug/headscale"
+      "${headscale_bin}" version >"${work_dir}/headscale-rs-version.txt" 2>&1 || true
       echo "::endgroup::"
       ;;
     headscale-go)
@@ -274,30 +317,47 @@ headscale_cmd() {
   esac
 }
 
+server_health_probe() {
+  local prefix="${active_server_label:-${target}}"
+  curl ${health_curl_opts} "${local_control_url}/health" \
+    >"${work_dir}/${prefix}-health.stdout" \
+    2>"${work_dir}/${prefix}-health.stderr"
+}
+
+server_grpc_health_probe() {
+  local prefix="${active_server_label:-${target}}"
+  headscale_cmd health \
+    >"${work_dir}/${prefix}-grpc-health.stdout" \
+    2>"${work_dir}/${prefix}-grpc-health.stderr"
+}
+
 start_server() {
   local family="$1"
+  active_server_label="${target}-${family}"
   write_config "${family}"
   rm -f "${socket_path}"
   echo "::group::start ${target} server (${family})"
+  printf '\n--- %s start %s ---\n' "${target} ${family}" "$(date -u +%FT%TZ)" >>"${work_dir}/${active_server_label}.stdout"
+  printf '\n--- %s start %s ---\n' "${target} ${family}" "$(date -u +%FT%TZ)" >>"${work_dir}/${active_server_label}.stderr"
   case "${target}" in
     rust)
       mkdir -p "${work_dir}/state"
       "${headscale_bin}" --config "${config_path}" serve \
-        >"${work_dir}/${target}-${family}.stdout" \
-        2>"${work_dir}/${target}-${family}.stderr" &
+        >>"${work_dir}/${active_server_label}.stdout" \
+        2>>"${work_dir}/${active_server_label}.stderr" &
       ;;
     headscale-go)
       "${headscale_bin}" -c "${config_path}" serve \
-        >"${work_dir}/${target}-${family}.stdout" \
-        2>"${work_dir}/${target}-${family}.stderr" &
+        >>"${work_dir}/${active_server_label}.stdout" \
+        2>>"${work_dir}/${active_server_label}.stderr" &
       ;;
   esac
   server_pid="$!"
-  wait_for "${target} health (${family})" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for "${target} health (${family})" "server_health_probe"
   if [[ "${target}" == "rust" ]]; then
     wait_for "${target} TLS certificate (${family})" "test -s '${tls_cert_path}'"
   fi
-  wait_for "${target} gRPC (${family})" "headscale_cmd health >/dev/null 2>&1"
+  wait_for "${target} gRPC (${family})" "server_grpc_health_probe"
   echo "${target} control=${local_control_url}"
   echo "${target} login=${control_url}"
   echo "::endgroup::"

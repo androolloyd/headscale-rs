@@ -283,8 +283,23 @@ wait_for() {
   local cmd="$2"
   local deadline=$((SECONDS + timeout_secs))
   until eval "${cmd}"; do
+    if [[ -n "${mock_oidc_pid}" ]] && ! kill -0 "${mock_oidc_pid}" >/dev/null 2>&1; then
+      wait "${mock_oidc_pid}" >/dev/null 2>&1 || true
+      mock_oidc_pid=""
+      echo "mock OIDC exited while waiting for ${label}" >&2
+      dump_startup_logs "mock OIDC exited before ${label}"
+      return 1
+    fi
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      wait "${server_pid}" >/dev/null 2>&1 || true
+      server_pid=""
+      echo "${target} server exited while waiting for ${label}" >&2
+      dump_startup_logs "server exited before ${label}"
+      return 1
+    fi
     if ((SECONDS >= deadline)); then
       echo "timed out waiting for ${label}" >&2
+      dump_startup_logs "timed out waiting for ${label}"
       return 1
     fi
     sleep 1
@@ -305,6 +320,47 @@ wait_pid_with_timeout() {
     sleep 1
   done
   wait "${pid}"
+}
+
+dump_startup_logs() {
+  local reason="$1"
+  local path
+  if [[ -n "${local_health_url}" ]]; then
+    server_health_probe >/dev/null 2>&1 || true
+  fi
+  if [[ -s "${config_path}" ]]; then
+    server_grpc_health_probe >/dev/null 2>&1 || true
+  fi
+  echo "::group::OIDC SSH startup debug (${reason})"
+  for path in \
+    "${work_dir}/mockoidc.stderr" \
+    "${work_dir}/mockoidc.stdout" \
+    "${work_dir}/mockoidc-discovery.stderr" \
+    "${work_dir}/mockoidc-discovery.stdout" \
+    "${work_dir}/headscale-rs.stderr" \
+    "${work_dir}/headscale-rs.stdout" \
+    "${work_dir}/headscale-rs-health.stderr" \
+    "${work_dir}/headscale-rs-health.stdout" \
+    "${work_dir}/headscale-rs-grpc-health.stderr" \
+    "${work_dir}/headscale-rs-grpc-health.stdout" \
+    "${work_dir}/headscale-rs-version.txt" \
+    "${work_dir}/headscale-go.stderr" \
+    "${work_dir}/headscale-go.stdout" \
+    "${work_dir}/headscale-go-health.stderr" \
+    "${work_dir}/headscale-go-health.stdout" \
+    "${work_dir}/headscale-go-grpc-health.stderr" \
+    "${work_dir}/headscale-go-grpc-health.stdout" \
+    "${work_dir}/headscale-go-version.txt" \
+    "${work_dir}/openssl.stderr" \
+    "${work_dir}/openssl.stdout"; do
+    if [[ -s "${path}" ]]; then
+      echo "--- ${path} ---" >&2
+      tail -200 "${path}" >&2 || true
+    fi
+  done
+  echo "--- sockets ---" >&2
+  ls -l "${headscale_rs_socket_path}" "${headscale_go_socket_path}" 2>/dev/null >&2 || true
+  echo "::endgroup::"
 }
 
 html_input_value() {
@@ -361,6 +417,34 @@ install_headscale_go() {
   GOBIN="${work_dir}/bin" go install "github.com/juanfont/headscale/cmd/headscale@${headscale_go_version}"
 }
 
+server_log_prefix() {
+  case "${target}" in
+    rust) echo "headscale-rs" ;;
+    headscale-go) echo "headscale-go" ;;
+  esac
+}
+
+server_health_probe() {
+  local prefix
+  prefix="$(server_log_prefix)"
+  case "${target}" in
+    rust) curl -fsS "${local_health_url}" >"${work_dir}/${prefix}-health.stdout" 2>"${work_dir}/${prefix}-health.stderr" ;;
+    headscale-go) curl -kfsS "${local_health_url}" >"${work_dir}/${prefix}-health.stdout" 2>"${work_dir}/${prefix}-health.stderr" ;;
+  esac
+}
+
+server_grpc_health_probe() {
+  local prefix
+  prefix="$(server_log_prefix)"
+  headscale_cmd health >"${work_dir}/${prefix}-grpc-health.stdout" 2>"${work_dir}/${prefix}-grpc-health.stderr"
+}
+
+mock_oidc_discovery_probe() {
+  curl -fsS "http://127.0.0.1:${oidc_port}/oidc/.well-known/openid-configuration" \
+    >"${work_dir}/mockoidc-discovery.stdout" \
+    2>"${work_dir}/mockoidc-discovery.stderr"
+}
+
 start_mock_oidc() {
   oidc_port="$(free_port)"
   local users_json
@@ -414,7 +498,7 @@ start_mock_oidc() {
     2>"${work_dir}/mockoidc.stderr" &
   mock_oidc_pid="$!"
   wait_for "mock OIDC discovery" \
-    "curl -fsS 'http://127.0.0.1:${oidc_port}/oidc/.well-known/openid-configuration' >/dev/null"
+    "mock_oidc_discovery_probe"
   echo "mock_oidc=http://127.0.0.1:${oidc_port}/oidc"
   echo "::endgroup::"
 }
@@ -442,6 +526,7 @@ start_rust_server() {
   else
     cargo build --quiet -p headscale-cli --bin headscale
   fi
+  target/debug/headscale version >"${work_dir}/headscale-rs-version.txt" 2>&1 || true
   echo "::endgroup::"
 
   cat >"${config_path}" <<EOF
@@ -510,13 +595,15 @@ EOF
   esac
 
   echo "::group::start headscale-rs OIDC SSH server"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stdout"
+  printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stderr"
   target/debug/headscale --config "${config_path}" serve \
-    >"${work_dir}/headscale-rs.stdout" \
-    2>"${work_dir}/headscale-rs.stderr" &
+    >>"${work_dir}/headscale-rs.stdout" \
+    2>>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"
-  wait_for "headscale-rs health" "curl -fsS '${local_health_url}' >/dev/null"
+  wait_for "headscale-rs health" "server_health_probe"
   wait_for "headscale-rs TLS certificate" "test -s '${tls_cert_path}'"
-  wait_for "headscale-rs gRPC" "headscale_cmd health >/dev/null 2>&1"
+  wait_for "headscale-rs gRPC" "server_grpc_health_probe"
   echo "headscale-rs login=${control_url}"
   echo "::endgroup::"
 }
@@ -655,12 +742,14 @@ EOF
   write_headscale_go_database_config >>"${config_path}"
 
   echo "::group::start headscale-go OIDC SSH server"
+  printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stdout"
+  printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stderr"
   "${headscale_bin}" -c "${config_path}" serve \
-    >"${work_dir}/headscale-go.stdout" \
-    2>"${work_dir}/headscale-go.stderr" &
+    >>"${work_dir}/headscale-go.stdout" \
+    2>>"${work_dir}/headscale-go.stderr" &
   server_pid="$!"
-  wait_for "headscale-go health" "curl -kfsS '${local_health_url}' >/dev/null"
-  wait_for "headscale-go gRPC" "headscale_cmd health >/dev/null 2>&1"
+  wait_for "headscale-go health" "server_health_probe"
+  wait_for "headscale-go gRPC" "server_grpc_health_probe"
   echo "headscale-go login=${control_url}"
   echo "::endgroup::"
 }

@@ -1532,13 +1532,14 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
         if let Some(registry) = &self.wire_registry {
             if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                registry.replace_node_key(
+                registry.replace_node_key_auth_completion(
                     old_node_key_hex,
                     wire_record.node_key_hex.clone(),
                     wire_record.clone(),
                 );
             } else {
-                registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+                registry
+                    .upsert_auth_completion(wire_record.node_key_hex.clone(), wire_record.clone());
             }
         }
         if self
@@ -1691,13 +1692,14 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
             .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
         if let Some(registry) = &self.wire_registry {
             if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                registry.replace_node_key(
+                registry.replace_node_key_auth_completion(
                     old_node_key_hex,
                     wire_record.node_key_hex.clone(),
                     wire_record.clone(),
                 );
             } else {
-                registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+                registry
+                    .upsert_auth_completion(wire_record.node_key_hex.clone(), wire_record.clone());
             }
         }
         if self

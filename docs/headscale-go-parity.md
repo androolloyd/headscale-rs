@@ -464,6 +464,13 @@ stage on the shared auth request entry for the wire, SQLite, and Postgres
 registration handlers, so confirmation CSRF/user/device state follows the same
 TTL/LRU lifecycle as the auth request instead of an independent runtime cache.
 
+Recent coverage note (2026-06-01): auth-key, web/CLI `RegisterNode` /
+`AuthRegister`, and OIDC registration completion now use auth-specific
+live-registry map-change reasons. Same-key updates and rekeys emit
+upstream-style `node added` unless owner/tag/IP/active approved-route identity
+changes require a global `policy change`; SSH-check approval remains
+verdict-only and explicitly map-change-free.
+
 Recent coverage note (2026-06-01): paired `authkey-relogin-same-user`
 stock-client rows now cover logout followed by fresh auth-key relogin as the
 same user, asserting the existing node identity keeps its Tailscale IPs after
@@ -526,8 +533,9 @@ filter reduction. The checked golden now covers eighty-eight scenarios.
    and route-health behavior; the checked-in default/Postgres reload, restart,
    mixed-exit, all-unhealthy, and route-via symmetry rows are present, so the
    remaining work is new edge semantics rather than row mirroring.
-4. Finish config-runtime gaps: HTTP-01 and
-   TLS-ALPN now have production-listener controlled-CA process coverage.
+4. Finish config-runtime gaps: SQLite runtime connection defaults are the next
+   bounded DB slice, and HTTP-01/TLS-ALPN now have production-listener
+   controlled-CA process coverage.
 5. Broaden production-process restart smokes for web/CLI/OIDC policy and
    map churn beyond the auth-key restart-persistence, OIDC route-approval,
    web/CLI restart, and default web-registration route-approval rows.

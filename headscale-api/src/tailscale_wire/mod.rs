@@ -398,6 +398,10 @@ where
     }
 }
 
+fn same_string_set(left: &[String], right: &[String]) -> bool {
+    left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingMapChange {
     reason: MapChangeReason,
@@ -2610,6 +2614,43 @@ impl MachineRegistry {
         self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
     }
 
+    pub(crate) fn upsert_auth_completion(&self, node_key_hex: String, rec: MachineRecord) {
+        let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        let existing = self.get(&node_key_hex);
+        let reason = Self::auth_completion_map_change_reason(existing.as_ref(), &rec);
+        self.upsert_record(node_key_hex, rec);
+        self.wake_waiters_with(Self::auth_completion_pending_change(reason, node_id));
+    }
+
+    fn auth_completion_map_change_reason(
+        existing: Option<&MachineRecord>,
+        rec: &MachineRecord,
+    ) -> MapChangeReason {
+        if existing.is_some_and(|existing| Self::policy_identity_changed(existing, rec)) {
+            MapChangeReason::PolicyChange
+        } else {
+            MapChangeReason::NodeAdded
+        }
+    }
+
+    fn policy_identity_changed(before: &MachineRecord, after: &MachineRecord) -> bool {
+        before.tailscale_user_id() != after.tailscale_user_id()
+            || before.ipv4 != after.ipv4
+            || before.ipv6 != after.ipv6
+            || !same_string_set(&before.forced_tags, &after.forced_tags)
+            || active_primary_routes(&before.available_routes, &before.approved_routes)
+                != active_primary_routes(&after.available_routes, &after.approved_routes)
+    }
+
+    fn auth_completion_pending_change(reason: MapChangeReason, node_id: u64) -> PendingMapChange {
+        match reason {
+            MapChangeReason::PolicyChange => {
+                PendingMapChange::global(MapChangeReason::PolicyChange)
+            }
+            reason => PendingMapChange::origin(reason, node_id),
+        }
+    }
+
     fn upsert_record(&self, node_key_hex: String, rec: MachineRecord) -> bool {
         if let Some(queue) = self.nodestore_write_queue.read().clone() {
             return self.enqueue_nodestore_upsert(&queue, node_key_hex, rec);
@@ -3900,6 +3941,29 @@ impl MachineRegistry {
         );
     }
 
+    pub(crate) fn replace_node_key_auth_completion(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+    ) {
+        let existing = self.get(old_node_key_hex);
+        let reason = Self::auth_completion_map_change_reason(existing.as_ref(), &rec);
+        self.replace_node_key_with_reason(old_node_key_hex, new_node_key_hex, rec, reason);
+    }
+
+    pub(crate) fn replace_node_key_with_reason(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        reason: MapChangeReason,
+    ) {
+        let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
+        let change = Self::auth_completion_pending_change(reason, new_id);
+        self.replace_node_key_with_change(old_node_key_hex, new_node_key_hex, rec, Some(change));
+    }
+
     pub(crate) fn replace_node_key_quiet(
         &self,
         old_node_key_hex: &str,
@@ -4005,9 +4069,13 @@ impl MachineRegistry {
             )
         });
         if let Some(old_node_key) = replaced_node_key {
-            self.replace_node_key(&old_node_key, pending.node_key_hex.clone(), pending.clone());
+            self.replace_node_key_auth_completion(
+                &old_node_key,
+                pending.node_key_hex.clone(),
+                pending.clone(),
+            );
         } else {
-            self.upsert(pending.node_key_hex.clone(), pending.clone());
+            self.upsert_auth_completion(pending.node_key_hex.clone(), pending.clone());
         }
 
         pending
@@ -5723,6 +5791,7 @@ mod registry_tests {
         let handler = WireOidcRegistrationHandler {
             state: state.clone(),
         };
+        let history_len = state.machines.map_change_history().len();
         handler
             .complete_oidc_auth_request(&raw_auth_id, &oidc_test_user())
             .await
@@ -5731,6 +5800,11 @@ mod registry_tests {
         assert_eq!(
             state.registration_cache.wait_for_auth(&raw_auth_id).await,
             AuthWaitOutcome::Accepted
+        );
+        assert_eq!(
+            state.machines.map_change_history().len(),
+            history_len,
+            "SSH-check auth approval must not emit node map changes"
         );
     }
 
@@ -7941,6 +8015,7 @@ mod registry_tests {
         let old_ip = existing.ipv4;
         let old_created_at = existing.created_at;
         reg.upsert("old-node".to_string(), existing);
+        let history_len = reg.map_change_history().len();
 
         let mut pending = mk_record(9);
         pending.node_key_hex = "new-node".into();
@@ -7970,6 +8045,87 @@ mod registry_tests {
         assert_eq!(stored.auth_key_id, Some(7));
         assert!(stored.forced_tags.is_empty());
         assert_eq!(stored.ipv4, old_ip);
+
+        let changes = reg.map_change_history();
+        assert_eq!(changes.len(), history_len + 1);
+        assert_eq!(
+            changes[history_len].reasons,
+            vec![MapChangeReason::PolicyChange]
+        );
+        assert!(changes[history_len].content.include_policy);
+        assert!(
+            changes[history_len]
+                .content
+                .requires_runtime_peer_computation
+        );
+    }
+
+    #[test]
+    fn auth_completion_same_key_update_records_node_added_reason() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(30);
+        existing.node_key_hex = "same-node".into();
+        existing.machine_key_hex = "same-machine".into();
+        existing.user = "alice".into();
+        existing.user_id = Some(7);
+        reg.upsert(existing.node_key_hex.clone(), existing.clone());
+        let history_len = reg.map_change_history().len();
+
+        let mut updated = existing;
+        updated.hostname = "same-node-updated".into();
+        updated.host_info.hostname = updated.hostname.clone();
+        updated.last_seen = Utc::now();
+        reg.upsert_auth_completion(updated.node_key_hex.clone(), updated.clone());
+
+        let changes = reg.map_change_history();
+        assert_eq!(changes.len(), history_len + 1);
+        assert_eq!(
+            changes[history_len].reasons,
+            vec![MapChangeReason::NodeAdded]
+        );
+        assert_eq!(
+            changes[history_len].origin_node_id,
+            Some(updated.stable_node_id_for_key(&updated.node_key_hex))
+        );
+        assert!(!changes[history_len].content.include_policy);
+        assert!(
+            changes[history_len]
+                .content
+                .peers_changed
+                .contains(&updated.stable_node_id_for_key(&updated.node_key_hex))
+        );
+    }
+
+    #[test]
+    fn auth_completion_same_key_policy_identity_change_records_policy_change() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(31);
+        existing.node_key_hex = "same-node-policy".into();
+        existing.machine_key_hex = "same-machine-policy".into();
+        existing.user = "alice".into();
+        existing.user_id = Some(7);
+        existing.available_routes = vec!["10.30.0.0/24".into()];
+        existing.approved_routes = Vec::new();
+        reg.upsert(existing.node_key_hex.clone(), existing.clone());
+        let history_len = reg.map_change_history().len();
+
+        let mut updated = existing;
+        updated.approved_routes = vec!["10.30.0.0/24".into()];
+        reg.upsert_auth_completion(updated.node_key_hex.clone(), updated);
+
+        let changes = reg.map_change_history();
+        assert_eq!(changes.len(), history_len + 1);
+        assert_eq!(
+            changes[history_len].reasons,
+            vec![MapChangeReason::PolicyChange]
+        );
+        assert_eq!(changes[history_len].origin_node_id, None);
+        assert!(changes[history_len].content.include_policy);
+        assert!(
+            changes[history_len]
+                .content
+                .requires_runtime_peer_computation
+        );
     }
 
     /// `gc_ephemeral` only collects ephemeral rows where last_seen is

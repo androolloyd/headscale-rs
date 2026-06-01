@@ -700,13 +700,16 @@ pub mod upstream {
             let wire_record = machine_admin_to_wire_record_with_pending(&node, &pending);
             if let Some(registry) = &self.wire_registry {
                 if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                    registry.replace_node_key(
+                    registry.replace_node_key_auth_completion(
                         old_node_key_hex,
                         wire_record.node_key_hex.clone(),
                         wire_record.clone(),
                     );
                 } else {
-                    registry.upsert(wire_record.node_key_hex.clone(), wire_record.clone());
+                    registry.upsert_auth_completion(
+                        wire_record.node_key_hex.clone(),
+                        wire_record.clone(),
+                    );
                 }
             }
             self.registration_cache

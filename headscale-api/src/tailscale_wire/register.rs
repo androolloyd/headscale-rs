@@ -522,7 +522,7 @@ async fn register_inner(
             }
         };
         if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
-            state.machines.replace_node_key(
+            state.machines.replace_node_key_auth_completion(
                 old_node_key_hex,
                 saved.record.node_key_hex.clone(),
                 saved.record,
@@ -530,14 +530,18 @@ async fn register_inner(
         } else {
             state
                 .machines
-                .upsert(saved.record.node_key_hex.clone(), saved.record);
+                .upsert_auth_completion(saved.record.node_key_hex.clone(), saved.record);
         }
     } else if let Some((old_node_key_hex, _)) = existing_machine {
+        state.machines.replace_node_key_auth_completion(
+            &old_node_key_hex,
+            node_key_hex.clone(),
+            rec,
+        );
+    } else {
         state
             .machines
-            .replace_node_key(&old_node_key_hex, node_key_hex.clone(), rec);
-    } else {
-        state.machines.upsert(node_key_hex.clone(), rec);
+            .upsert_auth_completion(node_key_hex.clone(), rec);
     }
 
     let rec = state

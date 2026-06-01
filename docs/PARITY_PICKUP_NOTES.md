@@ -1327,3 +1327,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - DERP sidecar parity documentation now calls out that `verify_client_url` is
   the headscale-style registry admission boundary; `verify_clients` is local
   `tailscaled` verification in upstream `derper`, not a substitute.
+
+## 2026-06-01 auth completion map-change reason slice
+
+- Auth-key, web/CLI `RegisterNode`/`AuthRegister`, and OIDC registration
+  completion now use auth-specific live-registry writes: successful same-key
+  updates and rekeys emit upstream-style `node added` unless owner/tag/IP/active
+  approved-route identity changes require a global `policy change`.
+- Same-machine web/OIDC reauth that clears tags or changes route identity now
+  records `policy change` rather than a targeted self-update, matching
+  headscale-go's post-auth policy-manager promotion path.
+- OIDC SSH-check approval remains verdict-only and now has an explicit negative
+  assertion that it does not record MachineRegistry map changes.

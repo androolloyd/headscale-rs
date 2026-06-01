@@ -1277,6 +1277,7 @@ set_router_routes_and_tag() {
 assert_persisted_nodes() {
   local expected_tag="$1"
   local label="$2"
+  local forbidden_tag="${3:-}"
   local nodes_path="${work_dir}/nodes-${label}.json"
   headscale_cmd -o json nodes list >"${nodes_path}"
   ruby -rjson -e '
@@ -1284,6 +1285,7 @@ assert_persisted_nodes() {
     expected_tag = ARGV.fetch(2)
     router_name = ARGV.fetch(3)
     observer_name = ARGV.fetch(4)
+    forbidden_tag = ARGV.fetch(5)
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
 
@@ -1302,14 +1304,18 @@ assert_persisted_nodes() {
     abort("expected router available route #{route.inspect}, got #{available.inspect}") unless available.include?(route)
     abort("expected router approved route #{route.inspect}, got #{approved.inspect}") unless approved.include?(route)
     abort("expected router tag #{expected_tag.inspect}, got #{tags.inspect}") unless tags.include?(expected_tag)
+    unless forbidden_tag.empty?
+      abort("expected router tag #{forbidden_tag.inspect} to be absent after replacement, got #{tags.inspect}") if tags.include?(forbidden_tag)
+    end
 
     puts JSON.pretty_generate({
       router: router,
       observer: observer,
       route: route,
       tag: expected_tag,
+      forbidden_tag: forbidden_tag,
     })
-  ' "${nodes_path}" "${route}" "${expected_tag}" "${router_name}" "${observer_name}"
+  ' "${nodes_path}" "${route}" "${expected_tag}" "${router_name}" "${observer_name}" "${forbidden_tag}"
 }
 
 assert_route_via_persisted_nodes() {
@@ -2118,6 +2124,7 @@ peer_map_has_route_and_tag() {
   local expected_route="$3"
   local expected_tag="$4"
   local output_path="$5"
+  local forbidden_tag="${6:-}"
   local netmap_path="${output_path}.netmap"
   docker exec "${observer}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
     ruby -rjson -e '
@@ -2125,6 +2132,7 @@ peer_map_has_route_and_tag() {
       peer_name = ARGV.fetch(1)
       expected_route = ARGV.fetch(2)
       expected_tag = ARGV.fetch(3)
+      forbidden_tag = ARGV.fetch(4)
       peers = Array(netmap["Peers"] || netmap["peers"])
 
       def names_for(peer)
@@ -2156,6 +2164,9 @@ peer_map_has_route_and_tag() {
       unless tags.include?(expected_tag)
         abort("expected peer tag #{expected_tag.inspect}, got #{tags.inspect} in #{peer.inspect}")
       end
+      unless forbidden_tag.empty?
+        abort("expected peer tag #{forbidden_tag.inspect} to be absent after replacement, got #{tags.inspect} in #{peer.inspect}") if tags.include?(forbidden_tag)
+      end
       unless routes.any? { |route| route == expected_route || route.include?(expected_route) }
         abort("expected peer route #{expected_route.inspect}, got #{routes.inspect} in #{peer.inspect}")
       end
@@ -2164,17 +2175,19 @@ peer_map_has_route_and_tag() {
         peer: peer_name,
         route: expected_route,
         tag: expected_tag,
+        forbidden_tag: forbidden_tag,
         names: names_for(peer),
       })
-    ' "${netmap_path}" "${peer}" "${expected_route}" "${expected_tag}" >"${output_path}"
+    ' "${netmap_path}" "${peer}" "${expected_route}" "${expected_tag}" "${forbidden_tag}" >"${output_path}"
 }
 
 wait_for_peer_map() {
   local expected_tag="$1"
   local label="$2"
+  local forbidden_tag="${3:-}"
   local safe_label="${label//[^a-zA-Z0-9_-]/-}"
   wait_for "${label}" \
-    "peer_map_has_route_and_tag '${observer_name}' '${router_name}' '${route}' '${expected_tag}' '${work_dir}/peer-map-${safe_label}.json'" || {
+    "peer_map_has_route_and_tag '${observer_name}' '${router_name}' '${route}' '${expected_tag}' '${work_dir}/peer-map-${safe_label}.json' '${forbidden_tag}'" || {
       dump_debug
       return 1
     }
@@ -2445,13 +2458,13 @@ else
   start_server
   wait_for "router reconnected after restart" "tailscale_logged_in '${router_name}'"
   wait_for "observer reconnected after restart" "tailscale_logged_in '${observer_name}'"
-  assert_persisted_nodes "${initial_tag}" "after-restart"
-  wait_for_peer_map "${initial_tag}" "observer sees restarted route and tag"
+  assert_persisted_nodes "${initial_tag}" "after-restart" "${mutated_tag}"
+  wait_for_peer_map "${initial_tag}" "observer sees restarted route and tag" "${mutated_tag}"
   wait_for_debug_batcher_nodes "after-restart"
 
   set_router_routes_and_tag "${mutated_tag}"
-  assert_persisted_nodes "${mutated_tag}" "after-post-restart-tag-mutation"
-  wait_for_peer_map "${mutated_tag}" "observer sees post-restart tag mutation"
+  assert_persisted_nodes "${mutated_tag}" "after-post-restart-tag-mutation" "${initial_tag}"
+  wait_for_peer_map "${mutated_tag}" "observer sees post-restart tag mutation" "${initial_tag}"
   wait_for_debug_batcher_nodes "after-post-restart-tag-mutation"
 fi
 

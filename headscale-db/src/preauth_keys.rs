@@ -692,7 +692,7 @@ pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> 
 /// Missing IDs are no-op success, matching headscale-go's unchecked
 /// `RowsAffected` behavior.
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = ?")
         .bind(id)
@@ -843,7 +843,10 @@ pub async fn try_use(
     let row = get_by_token(pool, candidate)
         .await
         .map_err(|_| UseError::NotFound)?;
-    let mut tx = pool.begin().await.map_err(|_| UseError::NotFound)?;
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| UseError::NotFound)?;
 
     // Re-read under the tx so we don't race with another concurrent
     // redemption of the same single-use key.

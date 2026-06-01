@@ -1339,3 +1339,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   headscale-go's post-auth policy-manager promotion path.
 - OIDC SSH-check approval remains verdict-only and now has an explicit negative
   assertion that it does not record MachineRegistry map changes.
+
+## 2026-06-01 SQLite runtime defaults parity slice
+
+- `SqliteOpenOptions::default()` now matches upstream file-backed SQLite
+  runtime defaults for WAL, `wal_autocheckpoint=1000`, `busy_timeout=10000`,
+  `auto_vacuum=INCREMENTAL`, `synchronous=NORMAL`, and foreign-key enforcement.
+- The server path now applies those defaults even when no explicit
+  `database.sqlite` block is present, while still honoring
+  `wal_autocheckpoint: -1` as "do not set the checkpoint PRAGMA".
+- SQLite write transactions that protect admin/user/preauth/payment mutations
+  now use `BEGIN IMMEDIATE`, matching upstream's `_txlock=immediate` intent
+  without changing Postgres transaction behavior.

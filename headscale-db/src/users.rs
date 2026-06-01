@@ -344,7 +344,7 @@ pub async fn touch_by_name(pool: &SqlitePool, name: &str) -> Result<()> {
 }
 
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     let user_exists: Option<i64> =
         sqlx::query_scalar("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL")

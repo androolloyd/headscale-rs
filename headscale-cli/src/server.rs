@@ -2074,6 +2074,7 @@ fn sqlite_open_options(database: Option<&UpstreamDatabaseConfig>) -> Result<Sqli
     Ok(SqliteOpenOptions {
         write_ahead_log: Some(sqlite.write_ahead_log()),
         wal_autocheckpoint,
+        ..SqliteOpenOptions::default()
     })
 }
 
@@ -2995,6 +2996,18 @@ database:
         .await
         .unwrap();
 
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let auto_vacuum: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
             .fetch_one(db.pool())
             .await
@@ -3003,9 +3016,50 @@ database:
             .fetch_one(db.pool())
             .await
             .unwrap();
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
 
+        assert_eq!(busy_timeout, 10_000);
+        assert_eq!(auto_vacuum, 2, "INCREMENTAL");
+        assert_eq!(synchronous, 1, "NORMAL");
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert_eq!(wal_autocheckpoint, 41);
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[test]
+    fn sqlite_open_options_use_upstream_defaults_without_database_block() {
+        assert_eq!(
+            sqlite_open_options(None).unwrap(),
+            SqliteOpenOptions::default()
+        );
+    }
+
+    #[test]
+    fn configtest_accepts_upstream_sqlite_wal_default_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r"
+database:
+  type: sqlite
+  sqlite:
+    wal_autocheckpoint: -1
+",
+        )
+        .unwrap();
+        let config = crate::config::CliConfig::load(&config_path).unwrap();
+
+        let options = sqlite_open_options(config.database.as_ref()).unwrap();
+        assert_eq!(options.write_ahead_log, Some(true));
+        assert_eq!(options.wal_autocheckpoint, None);
+        assert_eq!(
+            options.busy_timeout,
+            SqliteOpenOptions::default().busy_timeout
+        );
     }
 
     #[test]

@@ -173,7 +173,7 @@ pub async fn transfer(
     amount: u64,
     description: &str,
 ) -> Result<Transaction> {
-    let mut tx_db = pool.begin().await?;
+    let mut tx_db = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     // Check available balance
     let available = get_available_balance(pool, from).await?;

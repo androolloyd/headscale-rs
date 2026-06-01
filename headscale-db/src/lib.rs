@@ -9,9 +9,12 @@
 use sqlx::SqlitePool;
 #[cfg(feature = "postgres-sqlx")]
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{
+    SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 #[cfg(feature = "postgres-sqlx")]
 pub use sqlx::{PgConnection, PgPool};
+use std::str::FromStr;
 use std::time::Duration;
 
 pub mod api_keys;
@@ -64,10 +67,76 @@ pub const DATABASE_BACKEND_MATRIX: &[DatabaseBackendSupport] = &[
     },
 ];
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteAutoVacuumMode {
+    None,
+    Full,
+    Incremental,
+}
+
+impl From<SqliteAutoVacuumMode> for SqliteAutoVacuum {
+    fn from(value: SqliteAutoVacuumMode) -> Self {
+        match value {
+            SqliteAutoVacuumMode::None => Self::None,
+            SqliteAutoVacuumMode::Full => Self::Full,
+            SqliteAutoVacuumMode::Incremental => Self::Incremental,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteSynchronousMode {
+    Off,
+    Normal,
+    Full,
+    Extra,
+}
+
+impl From<SqliteSynchronousMode> for SqliteSynchronous {
+    fn from(value: SqliteSynchronousMode) -> Self {
+        match value {
+            SqliteSynchronousMode::Off => Self::Off,
+            SqliteSynchronousMode::Normal => Self::Normal,
+            SqliteSynchronousMode::Full => Self::Full,
+            SqliteSynchronousMode::Extra => Self::Extra,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SqliteOpenOptions {
     pub write_ahead_log: Option<bool>,
     pub wal_autocheckpoint: Option<u32>,
+    pub busy_timeout: Option<Duration>,
+    pub auto_vacuum: Option<SqliteAutoVacuumMode>,
+    pub synchronous: Option<SqliteSynchronousMode>,
+    pub foreign_keys: Option<bool>,
+}
+
+impl Default for SqliteOpenOptions {
+    fn default() -> Self {
+        Self {
+            write_ahead_log: Some(true),
+            wal_autocheckpoint: Some(1000),
+            busy_timeout: Some(Duration::from_secs(10)),
+            auto_vacuum: Some(SqliteAutoVacuumMode::Incremental),
+            synchronous: Some(SqliteSynchronousMode::Normal),
+            foreign_keys: Some(true),
+        }
+    }
+}
+
+impl SqliteOpenOptions {
+    pub const fn memory() -> Self {
+        Self {
+            write_ahead_log: None,
+            wal_autocheckpoint: None,
+            busy_timeout: None,
+            auto_vacuum: None,
+            synchronous: None,
+            foreign_keys: Some(true),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +256,12 @@ impl Database {
     /// # Arguments
     /// * `url` - Database URL (e.g., "sqlite://headscale.db" or "sqlite::memory:")
     pub async fn new(url: &str) -> Result<Self> {
-        Self::new_with_sqlite_options(url, SqliteOpenOptions::default()).await
+        let options = if sqlite_url_is_memory(url) {
+            SqliteOpenOptions::memory()
+        } else {
+            SqliteOpenOptions::default()
+        };
+        Self::new_with_sqlite_options(url, options).await
     }
 
     /// Create a new SQLite database connection with runtime PRAGMA options.
@@ -207,6 +281,8 @@ impl Database {
             }
         }
 
+        let sqlite_options = sqlite_connect_options(url, options)?;
+
         // `Duration::from_mins(5)` would be more readable, but it's the
         // unstable `duration_constructors` API which trips E0658 on
         // Rust toolchains older than 1.95 (the downstream octra
@@ -216,26 +292,7 @@ impl Database {
         let pool = SqlitePoolOptions::new()
             .max_connections(10)
             .idle_timeout(Duration::from_secs(300))
-            .after_connect(move |conn, _meta| {
-                Box::pin(async move {
-                    if let Some(write_ahead_log) = options.write_ahead_log {
-                        let journal_mode = if write_ahead_log { "WAL" } else { "DELETE" };
-                        sqlx::query(&format!("PRAGMA journal_mode = {journal_mode}"))
-                            .execute(&mut *conn)
-                            .await?;
-                    }
-                    if let Some(wal_autocheckpoint) = options.wal_autocheckpoint {
-                        sqlx::query(&format!("PRAGMA wal_autocheckpoint = {wal_autocheckpoint}"))
-                            .execute(&mut *conn)
-                            .await?;
-                    }
-                    sqlx::query("PRAGMA foreign_keys = ON")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
+            .connect_with(sqlite_options)
             .await?;
 
         Ok(Self {
@@ -245,7 +302,7 @@ impl Database {
 
     /// Create a new in-memory database (useful for testing).
     pub async fn in_memory() -> Result<Self> {
-        Self::new("sqlite::memory:").await
+        Self::new_with_sqlite_options("sqlite::memory:", SqliteOpenOptions::memory()).await
     }
 
     /// Run database migrations.
@@ -275,6 +332,38 @@ impl Database {
     pub async fn close(self) {
         self.pool.close().await;
     }
+}
+
+fn sqlite_connect_options(url: &str, options: SqliteOpenOptions) -> Result<SqliteConnectOptions> {
+    let mut connect_options = SqliteConnectOptions::from_str(url)?;
+    if let Some(timeout) = options.busy_timeout {
+        connect_options = connect_options.busy_timeout(timeout);
+    }
+    if let Some(auto_vacuum) = options.auto_vacuum {
+        connect_options = connect_options.auto_vacuum(auto_vacuum.into());
+    }
+    if let Some(write_ahead_log) = options.write_ahead_log {
+        connect_options = connect_options.journal_mode(if write_ahead_log {
+            SqliteJournalMode::Wal
+        } else {
+            SqliteJournalMode::Delete
+        });
+    }
+    if let Some(foreign_keys) = options.foreign_keys {
+        connect_options = connect_options.foreign_keys(foreign_keys);
+    }
+    if let Some(synchronous) = options.synchronous {
+        connect_options = connect_options.synchronous(synchronous.into());
+    }
+    if let Some(wal_autocheckpoint) = options.wal_autocheckpoint {
+        connect_options =
+            connect_options.pragma("wal_autocheckpoint", wal_autocheckpoint.to_string());
+    }
+    Ok(connect_options)
+}
+
+fn sqlite_url_is_memory(url: &str) -> bool {
+    url == "sqlite::memory:" || url.contains("mode=memory")
 }
 
 /// Open a Postgres pool for foundation-only parity checks.
@@ -361,20 +450,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_open_options_apply_wal_and_checkpoint_pragmas() {
+    async fn sqlite_default_open_options_apply_upstream_file_pragmas() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("headscale.sqlite");
+        let path = dir.path().join("headscale-default.sqlite");
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let db = Database::new_with_sqlite_options(
-            &url,
-            SqliteOpenOptions {
-                write_ahead_log: Some(true),
-                wal_autocheckpoint: Some(37),
-            },
-        )
-        .await
-        .unwrap();
+        let db = Database::new(&url).await.unwrap();
 
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let auto_vacuum: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
             .fetch_one(db.pool())
             .await
@@ -388,6 +481,61 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(busy_timeout, 10_000);
+        assert_eq!(auto_vacuum, 2, "INCREMENTAL");
+        assert_eq!(synchronous, 1, "NORMAL");
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(wal_autocheckpoint, 1000);
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_open_options_apply_connection_pragmas() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let db = Database::new_with_sqlite_options(
+            &url,
+            SqliteOpenOptions {
+                write_ahead_log: Some(true),
+                wal_autocheckpoint: Some(37),
+                busy_timeout: Some(Duration::from_millis(1234)),
+                auto_vacuum: Some(SqliteAutoVacuumMode::Full),
+                synchronous: Some(SqliteSynchronousMode::Full),
+                foreign_keys: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let auto_vacuum: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let wal_autocheckpoint: i64 = sqlx::query_scalar("PRAGMA wal_autocheckpoint")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(busy_timeout, 1234);
+        assert_eq!(auto_vacuum, 1, "FULL");
+        assert_eq!(synchronous, 2, "FULL");
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert_eq!(wal_autocheckpoint, 37);
         assert_eq!(foreign_keys, 1);

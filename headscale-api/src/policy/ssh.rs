@@ -810,6 +810,97 @@ mod tests {
     }
 
     #[test]
+    fn recording_policy_fields_are_rejected_like_headscale_go() {
+        for (field, value) in [
+            ("recorders", r#"["100.64.0.10:1234"]"#),
+            (
+                "onRecordingFailure",
+                r#"{"RejectSessionWithMessage":"recording required"}"#,
+            ),
+        ] {
+            let raw = format!(
+                r#"{{
+                  "tagOwners": {{"tag:server": ["alice@"]}},
+                  "ssh": [{{
+                    "action": "accept",
+                    "src": ["alice@"],
+                    "dst": ["tag:server"],
+                    "users": ["root"],
+                    "{field}": {value}
+                  }}]
+                }}"#
+            );
+            let err = parse_hujson_policy(&raw).expect_err(field);
+            let msg = err.to_string();
+
+            assert!(
+                msg.contains("unknown field") && msg.contains(field),
+                "{field} should be rejected as an unsupported SSH policy field, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_ssh_actions_do_not_synthesize_recorders_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:server": ["alice@"]},
+              "ssh": [
+                {
+                  "action": "accept",
+                  "src": ["alice@"],
+                  "dst": ["tag:server"],
+                  "users": ["root"]
+                },
+                {
+                  "action": "check",
+                  "src": ["alice@"],
+                  "dst": ["tag:server"],
+                  "users": ["deploy"]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice".into()),
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:server".into()],
+            },
+        ];
+        let pol =
+            compile_ssh_policy_with_base_url(&doc, &nodes, 2, "https://headscale.example").unwrap();
+
+        assert_eq!(pol.rules.len(), 2);
+        assert!(
+            pol.rules
+                .iter()
+                .all(|rule| rule.action.recorders.is_empty())
+        );
+        assert!(
+            pol.rules
+                .iter()
+                .all(|rule| rule.action.on_recording_failure.is_none())
+        );
+
+        let check = &pol.rules[0].action;
+        assert!(!check.accept);
+        assert!(check.hold_and_delegate.contains("/machine/ssh/action/"));
+
+        let accept = &pol.rules[1].action;
+        assert!(accept.accept);
+        assert!(accept.hold_and_delegate.is_empty());
+    }
+
+    #[test]
     fn fractional_check_period_uses_go_duration_grammar() {
         let doc = parse_hujson_policy(
             r#"{

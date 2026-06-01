@@ -958,3 +958,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   router tests prove the default health shape is preserved and the no-health
   option can be merged with a host health route without losing `/version`,
   `/key`, or `/machine/ping-response`.
+
+## 2026-06-01 Extra-records whitespace parity slice
+
+- File-backed DNS `extra_records` parsing now matches headscale-go's
+  zero-byte-only special case: an empty file maps to no records, while a
+  whitespace-only file is invalid JSON and leaves the previous hot-reload
+  record set in place.
+- Focused DNS tests cover startup parsing, hot-reload preservation for
+  zero-byte and whitespace-only edits, and existing extra-record e2e behavior.

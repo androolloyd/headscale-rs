@@ -1233,15 +1233,16 @@ pub fn normalise_hostname(input: &str) -> String {
 /// Parse an extra-records JSON file. The file is a top-level array of
 /// `{name, type, value}` records — same shape upstream
 /// `juanfont/headscale` accepts. Empty file ⇒ empty record list for
-/// startup validation; hot reload treats empty reads as transient and
-/// keeps the previous record set.
+/// startup validation; hot reload treats zero-byte reads as transient
+/// and keeps the previous record set. Whitespace-only files are not
+/// special-cased; they fail JSON parsing like upstream Go.
 ///
 /// The file format intentionally accepts both `type` (canonical) and
 /// `Type` (PascalCase) as the type-field key, because operators tend
 /// to copy paste from tailcfg dumps which use PascalCase. We match by
 /// custom deserialisation through the `ExtraRecordsFile` wrapper.
 pub fn parse_extra_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, serde_json::Error> {
-    if bytes.iter().all(u8::is_ascii_whitespace) {
+    if bytes.is_empty() {
         return Ok(Vec::new());
     }
     // Accept both lowercase and PascalCase keys via the same
@@ -1348,7 +1349,7 @@ async fn load_and_apply(
     };
     let meta = tokio::fs::metadata(path).await.ok()?;
     let mtime = meta.modified().ok()?;
-    if !apply_empty && bytes.iter().all(u8::is_ascii_whitespace) {
+    if !apply_empty && bytes.is_empty() {
         tracing::warn!(
             ?path,
             "extra-records reload read empty file; keeping previous set"
@@ -1887,9 +1888,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_extra_records_empty_and_whitespace_ok() {
+    fn parse_extra_records_empty_file_ok_but_whitespace_errors() {
         assert!(parse_extra_records(b"").unwrap().is_empty());
-        assert!(parse_extra_records(b"  \n\t ").unwrap().is_empty());
+        assert!(parse_extra_records(b"  \n\t ").is_err());
         assert!(parse_extra_records(b"[]").unwrap().is_empty());
     }
 
@@ -2162,7 +2163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extra_records_reload_empty_file_keeps_previous_but_json_empty_clears() {
+    async fn extra_records_reload_empty_file_keeps_previous_whitespace_errors_json_empty_clears() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extra-records.json");
         let store = DnsStore::from_spec(magic_spec());
@@ -2177,10 +2178,19 @@ mod tests {
             .expect("initial load");
         assert_eq!(store.extra_records().len(), 1);
 
-        std::fs::write(&path, b"  \n\t ").unwrap();
+        std::fs::write(&path, b"").unwrap();
         let empty_reload = load_and_apply(&store, &path, false, initial.fingerprint)
             .await
             .expect("empty reload advances mtime");
+        assert_eq!(store.extra_records().len(), 1);
+
+        std::fs::write(&path, b"  \n\t ").unwrap();
+        let whitespace_reload =
+            load_and_apply(&store, &path, false, empty_reload.fingerprint).await;
+        assert!(
+            whitespace_reload.is_none(),
+            "whitespace-only reload must fail JSON parsing like headscale-go"
+        );
         assert_eq!(store.extra_records().len(), 1);
 
         std::fs::write(&path, b"[]").unwrap();

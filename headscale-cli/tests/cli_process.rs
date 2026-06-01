@@ -49,6 +49,22 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_DNS_SEARCH_DOMAINS",
     "HEADSCALE_DNS_EXTRA_RECORDS",
     "HEADSCALE_DNS_EXTRA_RECORDS_PATH",
+    "HEADSCALE_DERP_SERVER_ENABLED",
+    "HEADSCALE_DERP_SERVER_REGION_ID",
+    "HEADSCALE_DERP_SERVER_REGION_CODE",
+    "HEADSCALE_DERP_SERVER_REGION_NAME",
+    "HEADSCALE_DERP_SERVER_VERIFY_CLIENTS",
+    "HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR",
+    "HEADSCALE_DERP_SERVER_PRIVATE_KEY_PATH",
+    "HEADSCALE_DERP_SERVER_IPV4",
+    "HEADSCALE_DERP_SERVER_IPV6",
+    "HEADSCALE_DERP_SERVER_AUTOMATICALLY_ADD_EMBEDDED_DERP_REGION",
+    "HEADSCALE_DERP_URLS",
+    "HEADSCALE_DERP_PATHS",
+    "HEADSCALE_DERP_AUTO_UPDATE_ENABLED",
+    "HEADSCALE_DERP_UPDATE_FREQUENCY",
+    "HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT",
+    "HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT",
     "HEADSCALE_POLICY_MODE",
     "HEADSCALE_POLICY_PATH",
     "HEADSCALE_SERVER_URL",
@@ -2327,6 +2343,91 @@ policy:
             ("HEADSCALE_DNS_OVERRIDE_LOCAL_DNS", "true"),
             ("HEADSCALE_DNS_NAMESERVERS_GLOBAL", "1.1.1.1"),
         ],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_rejects_env_derp_disabled_embedded_region_without_paths() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_DERP_SERVER_ENABLED", "true"),
+            (
+                "HEADSCALE_DERP_SERVER_AUTOMATICALLY_ADD_EMBEDDED_DERP_REGION",
+                "false",
+            ),
+        ],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_invalid_derp.stderr"),
+        "configtest invalid DERP from env",
+    );
+}
+
+#[test]
+fn configtest_rejects_env_ephemeral_node_inactivity_timeout() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT", "65s")],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        "Error: Fatal config error: node.ephemeral.inactivity_timeout (65s) is set too low, must be more than 65s\n",
+        "configtest invalid deprecated ephemeral timeout from env",
+    );
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT", "66s")],
     );
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));

@@ -1418,3 +1418,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   a file-provided `dns.override_local_dns=false` and trigger the upstream
   missing-global-nameserver fatal, while
   `HEADSCALE_DNS_NAMESERVERS_GLOBAL=1.1.1.1` satisfies that same validation.
+
+## 2026-06-01 DERP and ephemeral env override parity slice
+
+- `CliConfig::load` and default config discovery now apply current-upstream
+  Viper-style DERP env overrides for `HEADSCALE_DERP_SERVER_*`,
+  `HEADSCALE_DERP_URLS`, `HEADSCALE_DERP_PATHS`,
+  `HEADSCALE_DERP_AUTO_UPDATE_ENABLED`, and
+  `HEADSCALE_DERP_UPDATE_FREQUENCY`.
+- Env-derived upstream `derp.server` settings project into Rust's
+  `server.embedded_derp` after all env overlays, including
+  `HEADSCALE_SERVER_URL`, so embedded-region host/port and private-key path use
+  the final loaded config.
+- Node ephemeral inactivity env overrides now cover both current
+  `HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT` and deprecated
+  `HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT`, with process tests for the
+  upstream 65-second fatal boundary.

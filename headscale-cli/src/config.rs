@@ -517,17 +517,27 @@ impl CliConfig {
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let mut config = Self::parse(&contents, ConfigFormat::from_path(path))?;
-        if let Some(parent) = path.parent() {
+        let config_dir = path.parent().map(Path::to_path_buf);
+        if let Some(parent) = config_dir.as_deref() {
             config.resolve_config_relative_paths(parent);
         }
         config.normalize_upstream_aliases();
+        let should_refresh_derp_projection = config.embedded_derp_matches_upstream_projection();
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
+        config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
+        if let Some(parent) = config_dir.as_deref() {
+            config.resolve_config_relative_paths(parent);
+        }
+        if should_refresh_derp_projection {
+            config.reset_embedded_derp_projection();
+        }
+        config.normalize_upstream_aliases();
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -561,9 +571,11 @@ impl CliConfig {
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
+        config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
+        config.normalize_upstream_aliases();
         config.resolve_oidc_client_secret()?;
         Ok(config)
     }
@@ -621,10 +633,28 @@ impl CliConfig {
         V: AsRef<str>,
     {
         for (key, value) in vars {
-            if key.as_ref() == "HEADSCALE_NODE_EXPIRY" {
-                let expiry = parse_duration_secs_str(value.as_ref())
-                    .map_err(|err| anyhow::anyhow!("invalid {}: {err}", key.as_ref()))?;
-                self.node.get_or_insert_with(NodeConfig::default).expiry = Some(expiry);
+            let key = key.as_ref();
+            let value = value.as_ref();
+            match key {
+                "HEADSCALE_NODE_EXPIRY" => {
+                    let expiry = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.node.get_or_insert_with(NodeConfig::default).expiry = Some(expiry);
+                }
+                "HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT" => {
+                    let timeout = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.node
+                        .get_or_insert_with(NodeConfig::default)
+                        .ephemeral
+                        .inactivity_timeout = Some(timeout);
+                }
+                "HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT" => {
+                    let timeout = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.ephemeral_node_inactivity_timeout = Some(timeout);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -700,6 +730,116 @@ impl CliConfig {
             bail!(
                 "fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive"
             );
+        }
+
+        Ok(())
+    }
+
+    fn apply_derp_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_DERP_SERVER_ENABLED" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .enabled =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DERP_SERVER_REGION_ID" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .region_id = value
+                        .parse::<u16>()
+                        .with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DERP_SERVER_REGION_CODE" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .region_code = value.to_string();
+                }
+                "HEADSCALE_DERP_SERVER_REGION_NAME" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .region_name = value.to_string();
+                }
+                "HEADSCALE_DERP_SERVER_VERIFY_CLIENTS" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .verify_clients =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .stun_listen_addr =
+                        Some(value.parse().with_context(|| format!("invalid {key}"))?);
+                }
+                "HEADSCALE_DERP_SERVER_PRIVATE_KEY_PATH" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .private_key_path = PathBuf::from(value);
+                }
+                "HEADSCALE_DERP_SERVER_IPV4" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .ipv4 = Some(value.to_string());
+                }
+                "HEADSCALE_DERP_SERVER_IPV6" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .ipv6 = Some(value.to_string());
+                }
+                "HEADSCALE_DERP_SERVER_AUTOMATICALLY_ADD_EMBEDDED_DERP_REGION" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .server
+                        .automatically_add_embedded_derp_region =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DERP_URLS" => {
+                    self.derp.get_or_insert_with(DerpConfig::default).urls =
+                        parse_env_string_slice(value);
+                }
+                "HEADSCALE_DERP_PATHS" => {
+                    self.derp.get_or_insert_with(DerpConfig::default).paths =
+                        parse_env_string_slice(value)
+                            .into_iter()
+                            .map(PathBuf::from)
+                            .collect();
+                }
+                "HEADSCALE_DERP_AUTO_UPDATE_ENABLED" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .auto_update_enabled =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DERP_UPDATE_FREQUENCY" => {
+                    self.derp
+                        .get_or_insert_with(DerpConfig::default)
+                        .update_frequency = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -829,6 +969,42 @@ impl CliConfig {
         self.oidc
             .resolve_client_secret()
             .context("failed to resolve OIDC client secret")
+    }
+
+    fn embedded_derp_matches_upstream_projection(&self) -> bool {
+        let Some(server) = &self.server else {
+            return false;
+        };
+        let Some(derp) = &self.derp else {
+            return false;
+        };
+        if !derp.server.enabled || !server.embedded_derp.enabled {
+            return false;
+        }
+
+        let (host_name, derp_port) = server
+            .server_url
+            .as_deref()
+            .and_then(host_port_from_url)
+            .unwrap_or_default();
+
+        server.embedded_derp.region_id == derp.server.region_id
+            && server.embedded_derp.region_code == derp.server.region_code
+            && server.embedded_derp.region_name == derp.server.region_name
+            && server.embedded_derp.stun_addr == derp.server.stun_listen_addr
+            && server.embedded_derp.stun_only
+            && server.embedded_derp.verify_clients == derp.server.verify_clients
+            && server.embedded_derp.derper_config_path == derp.server.private_key_path
+            && server.embedded_derp.ipv4 == derp.server.ipv4.clone().unwrap_or_default()
+            && server.embedded_derp.ipv6 == derp.server.ipv6.clone().unwrap_or_default()
+            && server.embedded_derp.host_name == host_name
+            && server.embedded_derp.derp_port == derp_port
+    }
+
+    fn reset_embedded_derp_projection(&mut self) {
+        if let Some(server) = &mut self.server {
+            server.embedded_derp = EmbeddedDerpConfig::default();
+        }
     }
 
     fn normalize_upstream_aliases(&mut self) {
@@ -2316,6 +2492,48 @@ expiry = 0
     }
 
     #[test]
+    fn applies_headscale_ephemeral_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_node_env_overrides_from([("HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT", "5m")])
+            .unwrap();
+        config.normalize_upstream_aliases();
+
+        assert_eq!(
+            config
+                .server
+                .as_ref()
+                .unwrap()
+                .ephemeral_node_inactivity_timeout_secs,
+            300
+        );
+
+        config
+            .apply_node_env_overrides_from([("HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT", "6m")])
+            .unwrap();
+        config.normalize_upstream_aliases();
+
+        assert_eq!(
+            config
+                .server
+                .as_ref()
+                .unwrap()
+                .ephemeral_node_inactivity_timeout_secs,
+            360
+        );
+
+        let err = config
+            .apply_node_env_overrides_from([(
+                "HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT",
+                "1500ms",
+            )])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT"));
+    }
+
+    #[test]
     fn applies_headscale_dns_env_overrides_to_cli_config() {
         let mut config = CliConfig::default();
 
@@ -2395,6 +2613,128 @@ expiry = 0
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_DNS_NAMESERVERS_SPLIT"));
+    }
+
+    #[test]
+    fn applies_headscale_derp_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_derp_env_overrides_from([
+                ("HEADSCALE_DERP_SERVER_ENABLED", "true"),
+                ("HEADSCALE_DERP_SERVER_REGION_ID", "901"),
+                ("HEADSCALE_DERP_SERVER_REGION_CODE", "env"),
+                ("HEADSCALE_DERP_SERVER_REGION_NAME", "Env DERP"),
+                ("HEADSCALE_DERP_SERVER_VERIFY_CLIENTS", "false"),
+                ("HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR", "127.0.0.1:3479"),
+                (
+                    "HEADSCALE_DERP_SERVER_PRIVATE_KEY_PATH",
+                    "/tmp/headscale-env-derp.key",
+                ),
+                ("HEADSCALE_DERP_SERVER_IPV4", "198.51.100.25"),
+                ("HEADSCALE_DERP_SERVER_IPV6", "2001:db8::25"),
+                (
+                    "HEADSCALE_DERP_SERVER_AUTOMATICALLY_ADD_EMBEDDED_DERP_REGION",
+                    "false",
+                ),
+                (
+                    "HEADSCALE_DERP_URLS",
+                    "https://derp.example/map.json https://derp2.example/map.json",
+                ),
+                (
+                    "HEADSCALE_DERP_PATHS",
+                    "/etc/headscale/derp.yaml /etc/headscale/private-derp.yaml",
+                ),
+                ("HEADSCALE_DERP_AUTO_UPDATE_ENABLED", "true"),
+                ("HEADSCALE_DERP_UPDATE_FREQUENCY", "45m"),
+            ])
+            .unwrap();
+        config
+            .apply_server_transport_env_overrides_from([(
+                "HEADSCALE_SERVER_URL",
+                "https://env-headscale.example:8443",
+            )])
+            .unwrap();
+        config.normalize_upstream_aliases();
+
+        let derp = config.derp.as_ref().unwrap();
+        assert!(derp.server.enabled);
+        assert_eq!(derp.server.region_id, 901);
+        assert_eq!(derp.server.region_code, "env");
+        assert_eq!(derp.server.region_name, "Env DERP");
+        assert!(!derp.server.verify_clients);
+        assert_eq!(
+            derp.server.stun_listen_addr,
+            Some("127.0.0.1:3479".parse().unwrap())
+        );
+        assert_eq!(
+            derp.server.private_key_path,
+            PathBuf::from("/tmp/headscale-env-derp.key")
+        );
+        assert_eq!(derp.server.ipv4.as_deref(), Some("198.51.100.25"));
+        assert_eq!(derp.server.ipv6.as_deref(), Some("2001:db8::25"));
+        assert!(!derp.server.automatically_add_embedded_derp_region);
+        assert_eq!(
+            derp.urls,
+            [
+                "https://derp.example/map.json".to_string(),
+                "https://derp2.example/map.json".to_string()
+            ]
+        );
+        assert_eq!(
+            derp.paths,
+            [
+                PathBuf::from("/etc/headscale/derp.yaml"),
+                PathBuf::from("/etc/headscale/private-derp.yaml")
+            ]
+        );
+        assert!(derp.auto_update_enabled);
+        assert_eq!(derp.update_frequency, 2_700);
+
+        let embedded = &config.server.as_ref().unwrap().embedded_derp;
+        assert!(embedded.enabled);
+        assert_eq!(embedded.host_name, "env-headscale.example");
+        assert_eq!(embedded.derp_port, 8443);
+        assert_eq!(embedded.region_id, 901);
+        assert_eq!(embedded.region_code, "env");
+        assert_eq!(embedded.region_name, "Env DERP");
+        assert_eq!(embedded.stun_addr, Some("127.0.0.1:3479".parse().unwrap()));
+        assert!(embedded.stun_only);
+        assert!(!embedded.verify_clients);
+        assert_eq!(
+            embedded.derper_config_path,
+            PathBuf::from("/tmp/headscale-env-derp.key")
+        );
+        assert_eq!(embedded.ipv4, "198.51.100.25");
+        assert_eq!(embedded.ipv6, "2001:db8::25");
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_derp_env_overrides() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_derp_env_overrides_from([("HEADSCALE_DERP_SERVER_ENABLED", "maybe")])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_SERVER_ENABLED"));
+
+        let err = config
+            .apply_derp_env_overrides_from([("HEADSCALE_DERP_SERVER_REGION_ID", "70000")])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_SERVER_REGION_ID"));
+
+        let err = config
+            .apply_derp_env_overrides_from([(
+                "HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR",
+                "not-a-socket",
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_SERVER_STUN_LISTEN_ADDR"));
+
+        let err = config
+            .apply_derp_env_overrides_from([("HEADSCALE_DERP_UPDATE_FREQUENCY", "1500ms")])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_UPDATE_FREQUENCY"));
     }
 
     #[test]

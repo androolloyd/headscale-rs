@@ -1125,3 +1125,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   projects it through `RuntimeConfigSnapshot.taildrop.enabled`.
 - Added paired `taildrop-capmap` Rust/headscale-go rows that disable Taildrop
   and assert the stock-client self `CapMap` omits the file-sharing capability.
+
+## 2026-06-01 NodeStore put worker batching slice
+
+- Added an optional `MachineRegistry` NodeStore write worker for put/upsert
+  paths. Production `headscale server` now installs it using
+  `tuning.node_store_batch_size` and `tuning.node_store_batch_timeout`.
+- Concurrent upserts now block until the worker commits their batch, clone and
+  publish the COW registry snapshot once for the batch, and record
+  `headscale_nodestore_batch_size` with the batch length.
+- `headscale_nodestore_queue_depth` now reports the live write-worker queue
+  depth instead of a hard-coded zero. Remaining NodeStore worker parity covers
+  update/delete/set-name batch entries and broader reason/churn coverage.

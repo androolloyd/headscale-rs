@@ -1848,7 +1848,7 @@ fn metrics_text(state: &WireState) -> String {
         &mut out,
         "headscale_nodestore_queue_depth",
         "Current depth of NodeStore write queue",
-        0,
+        state.machines.nodestore_queue_depth(),
     );
 
     out

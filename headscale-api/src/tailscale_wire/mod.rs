@@ -34,8 +34,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    mpsc as std_mpsc,
 };
+use std::thread;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -1968,6 +1970,9 @@ pub struct MachineRegistry {
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
     ephemeral_gc: RwLock<Option<Arc<EphemeralNodeGc>>>,
+    /// Optional headscale-go-style write worker for NodeStore put paths.
+    nodestore_write_queue: RwLock<Option<NodeStoreWriteQueue>>,
+    nodestore_write_queue_next_id: AtomicU64,
     /// Prometheus-compatible counters for the Tailscale wire surface.
     metrics: WireMetrics,
 }
@@ -1987,6 +1992,7 @@ struct WireMetrics {
     nodestore_batch_duration: RwLock<HistogramMetric>,
     nodestore_snapshot_build_duration: RwLock<HistogramMetric>,
     nodestore_peers_calculation_duration: RwLock<HistogramMetric>,
+    nodestore_queue_depth: AtomicUsize,
 }
 
 pub(crate) const PROMETHEUS_DEFAULT_BUCKETS: &[(f64, &str)] = &[
@@ -2059,14 +2065,111 @@ impl Default for MachineRegistry {
             map_batch_event_tx: Arc::new(map_batch_event_tx),
             map_batcher_enabled: AtomicBool::new(false),
             ephemeral_gc: RwLock::new(None),
+            nodestore_write_queue: RwLock::new(None),
+            nodestore_write_queue_next_id: AtomicU64::new(1),
             metrics: WireMetrics::default(),
         }
+    }
+}
+
+#[derive(Clone)]
+struct NodeStoreWriteQueue {
+    id: u64,
+    tx: std_mpsc::Sender<NodeStoreWriteWork>,
+}
+
+struct NodeStoreWriteWork {
+    node_key_hex: String,
+    rec: MachineRecord,
+    result_tx: std_mpsc::Sender<bool>,
+}
+
+/// Owns the optional NodeStore write worker installed on a [`MachineRegistry`].
+///
+/// Dropping the handle removes the registry sender, closes this handle's sender,
+/// and joins the worker after any caller-owned sender clones finish. This keeps
+/// test and production shutdown deterministic without making readers block.
+pub struct NodeStoreWriteBatcherHandle {
+    id: u64,
+    machines: Weak<MachineRegistry>,
+    tx: Option<std_mpsc::Sender<NodeStoreWriteWork>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for NodeStoreWriteBatcherHandle {
+    fn drop(&mut self) {
+        if let Some(machines) = self.machines.upgrade() {
+            let mut queue = machines.nodestore_write_queue.write();
+            if queue.as_ref().is_some_and(|current| current.id == self.id) {
+                queue.take();
+            }
+        }
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_nodestore_write_worker(
+    machines: &Arc<MachineRegistry>,
+    rx: &std_mpsc::Receiver<NodeStoreWriteWork>,
+    batch_size: usize,
+    batch_timeout: Duration,
+) {
+    let batch_size = batch_size.max(1);
+    let batch_timeout = batch_timeout.max(Duration::from_millis(1));
+
+    while let Ok(first) = rx.recv() {
+        let mut batch = Vec::with_capacity(batch_size);
+        batch.push(first);
+        while batch.len() < batch_size {
+            match rx.recv_timeout(batch_timeout) {
+                Ok(work) => batch.push(work),
+                Err(
+                    std_mpsc::RecvTimeoutError::Timeout | std_mpsc::RecvTimeoutError::Disconnected,
+                ) => break,
+            }
+        }
+        machines.apply_nodestore_upsert_batch(batch);
     }
 }
 
 impl MachineRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable headscale-go-style NodeStore write batching for put/upsert paths.
+    ///
+    /// Callers still block until their write has been committed; the worker
+    /// batches concurrent writes so a burst clones and publishes the COW
+    /// snapshot once instead of once per caller.
+    pub fn configure_nodestore_write_batcher(
+        self: &Arc<Self>,
+        batch_size: usize,
+        batch_timeout: Duration,
+    ) -> NodeStoreWriteBatcherHandle {
+        let id = self
+            .nodestore_write_queue_next_id
+            .fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std_mpsc::channel();
+        self.nodestore_write_queue
+            .write()
+            .replace(NodeStoreWriteQueue { id, tx: tx.clone() });
+
+        let machines = Arc::clone(self);
+        let worker = thread::Builder::new()
+            .name("headscale-nodestore-write-batcher".to_string())
+            .spawn(move || run_nodestore_write_worker(&machines, &rx, batch_size, batch_timeout))
+            .expect("spawn NodeStore write batcher");
+
+        NodeStoreWriteBatcherHandle {
+            id,
+            machines: Arc::downgrade(self),
+            tx: Some(tx),
+            worker: Some(worker),
+        }
     }
 
     /// Enable upstream-shaped ephemeral node garbage collection for
@@ -2337,6 +2440,43 @@ impl MachineRegistry {
     }
 
     fn upsert_record(&self, node_key_hex: String, rec: MachineRecord) -> bool {
+        if let Some(queue) = self.nodestore_write_queue.read().clone() {
+            return self.enqueue_nodestore_upsert(&queue, node_key_hex, rec);
+        }
+        self.apply_nodestore_upsert_direct(node_key_hex, rec)
+    }
+
+    fn enqueue_nodestore_upsert(
+        &self,
+        queue: &NodeStoreWriteQueue,
+        node_key_hex: String,
+        rec: MachineRecord,
+    ) -> bool {
+        let fallback_node_key_hex = node_key_hex.clone();
+        let fallback_rec = rec.clone();
+        let (result_tx, result_rx) = std_mpsc::channel();
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_add(1, Ordering::SeqCst);
+        let result = match queue.tx.send(NodeStoreWriteWork {
+            node_key_hex,
+            rec,
+            result_tx,
+        }) {
+            Ok(()) => result_rx.recv().unwrap_or_else(|_| {
+                self.apply_nodestore_upsert_direct(fallback_node_key_hex, fallback_rec)
+            }),
+            Err(std_mpsc::SendError(work)) => {
+                self.apply_nodestore_upsert_direct(work.node_key_hex, work.rec)
+            }
+        };
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    fn apply_nodestore_upsert_direct(&self, node_key_hex: String, rec: MachineRecord) -> bool {
         let existed;
         let start = Instant::now();
         {
@@ -2350,6 +2490,34 @@ impl MachineRegistry {
         self.record_nodestore_operation("put", elapsed);
         self.record_nodestore_batch(1, elapsed);
         existed
+    }
+
+    fn apply_nodestore_upsert_batch(&self, batch: Vec<NodeStoreWriteWork>) {
+        if batch.is_empty() {
+            return;
+        }
+
+        let start = Instant::now();
+        let mut completions = Vec::with_capacity(batch.len());
+        {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            for work in batch {
+                let existed = next.contains_key(&work.node_key_hex);
+                next.insert(work.node_key_hex, work.rec);
+                completions.push((work.result_tx, existed));
+            }
+            *g = Arc::new(next);
+        }
+
+        let elapsed = start.elapsed();
+        for _ in 0..completions.len() {
+            self.record_nodestore_operation("put", elapsed);
+        }
+        self.record_nodestore_batch(completions.len(), elapsed);
+        for (tx, existed) in completions {
+            let _ = tx.send(existed);
+        }
     }
 
     pub(crate) fn wake_node_change(&self, reason: MapChangeReason, node_id: u64) {
@@ -3039,6 +3207,10 @@ impl MachineRegistry {
             .nodestore_peers_calculation_duration
             .read()
             .clone()
+    }
+
+    pub(crate) fn nodestore_queue_depth(&self) -> usize {
+        self.metrics.nodestore_queue_depth.load(Ordering::SeqCst)
     }
 
     /// Look up a single machine by its hex-encoded node key.
@@ -4885,6 +5057,52 @@ mod registry_tests {
         }
         assert_eq!(snap.len(), 8, "old snapshot must not see new writes");
         assert_eq!(reg.snapshot().len(), 108);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_batches_concurrent_upserts() {
+        let reg = Arc::new(MachineRegistry::new());
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || {
+            let mut rec = mk_record(1);
+            rec.node_key_hex = "node-batched-1".into();
+            first_reg.upsert(rec.node_key_hex.clone(), rec);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first upsert did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.len(),
+            0,
+            "first write should wait for another item or the timeout"
+        );
+
+        let mut second = mk_record(2);
+        second.node_key_hex = "node-batched-2".into();
+        reg.upsert(second.node_key_hex.clone(), second);
+        first.join().expect("first upsert thread should finish");
+
+        assert_eq!(reg.len(), 2);
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("put")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, 1);
+        assert_eq!(batch_size.bucket("2"), 1);
     }
 
     #[test]

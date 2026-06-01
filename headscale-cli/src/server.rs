@@ -365,6 +365,11 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         timeout = ?ephemeral_gc.inactivity_timeout(),
         "scheduled existing ephemeral nodes for garbage collection"
     );
+    let node_store_batch_size = usize::try_from(cfg.tuning.node_store_batch_size).unwrap_or(100);
+    let nodestore_write_batcher = runtime.state.machines.configure_nodestore_write_batcher(
+        node_store_batch_size,
+        Duration::from_nanos(cfg.tuning.node_store_batch_timeout),
+    );
     let node_expiry_waker =
         spawn_node_expiry_waker(runtime.state.machines.clone(), NODE_EXPIRY_UPDATE_INTERVAL);
     let map_change_batcher = spawn_map_change_batcher(
@@ -502,6 +507,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             if let Some(handle) = &derp_auto_update {
                 handle.abort();
             }
+            drop(nodestore_write_batcher);
             drop(embedded_derp_runtime);
             return Err(err);
         }
@@ -541,6 +547,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     map_change_batcher.abort();
     offline_connection_cleanup.abort();
     ephemeral_gc.abort();
+    drop(nodestore_write_batcher);
     if let Some(handle) = dns_extra_records_watcher {
         handle.abort();
     }

@@ -1517,6 +1517,7 @@ async fn map_inner(
                                         auto_update_enabled,
                                         disable_log_tail,
                                         compression,
+                                        Some(&last_peer_state),
                                         "full",
                                         &mapresponse_debug,
                                         MapResponseDebugType::Change,
@@ -1629,6 +1630,7 @@ async fn map_inner(
                                 auto_update_enabled,
                                 disable_log_tail,
                                 compression,
+                                Some(&last_peer_state),
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
@@ -1662,6 +1664,7 @@ async fn map_inner(
                                 auto_update_enabled,
                                 disable_log_tail,
                                 compression,
+                                Some(&last_peer_state),
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
@@ -1875,6 +1878,7 @@ fn rebuild_map_batch_chunk(
                 auto_update_enabled,
                 disable_log_tail,
                 compression,
+                Some(last_peer_state),
                 map_batch_response_type(changes),
                 mapresponse_debug,
                 MapResponseDebugType::Change,
@@ -2140,6 +2144,7 @@ fn rebuild_map_chunk(
     auto_update_enabled: bool,
     disable_log_tail: bool,
     compression: MapFrameCompression,
+    previous_peer_state: Option<&BTreeMap<u64, MapNode>>,
     response_type: &str,
     mapresponse_debug: &MapResponseDebugStore,
     debug_type: MapResponseDebugType,
@@ -2192,12 +2197,20 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
     );
+    let peers_removed = if peers.is_empty() {
+        previous_peer_state
+            .map(|state| state.keys().copied().collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
     let mr = MapResponse {
         node: Some(own_node),
         peers,
+        peers_removed,
         user_profiles,
         dns_config: Some(dns_config),
         derp_map: Some(derp_map.snapshot()),
@@ -6054,6 +6067,40 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
+        assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_full_update_to_zero_peers_emits_peers_removed() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&b));
+
+        assert!(state.machines.delete(&b));
+        state
+            .machines
+            .record_observed_map_change(MapChangeReason::FullUpdate, None, None);
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "batched full update must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
     }
 

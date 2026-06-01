@@ -1469,3 +1469,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Process coverage now asserts `init-config`, `init-config --help`, and the old
   `init-config --output` form return the current-upstream unknown-command
   error.
+
+## 2026-06-01 batched full map zero-peer removal parity slice
+
+- Streamed full-map rebuilds now receive the previous per-stream peer snapshot
+  so an empty rebuilt peer set can still report the removed stable peer IDs.
+- The production map batcher now emits `PeersRemoved` when a tick-published
+  full update removes the requester's final visible peer, instead of sending an
+  empty full chunk that leaves clients with stale peers.
+- Regression coverage pins the delayed batch behavior: the stream waits for the
+  batch tick, then emits no peer/full patch payload and a single
+  `PeersRemoved` entry for the deleted peer.

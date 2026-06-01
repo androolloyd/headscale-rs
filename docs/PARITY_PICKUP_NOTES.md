@@ -875,6 +875,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   script paths before the expensive Docker-backed stock-client matrix starts.
 - Added `--list-selected` so the real-client workflow prints the exact
   push/PR/scheduled smoke rows it is about to run instead of the full catalog.
+- Moved real-client smoke selection, validation, and selected-row listing to
+  immediately after checkout in `.github/workflows/real-client-parity.yml`, so
+  bad `PR_SMOKES` values fail before toolchain setup, dependency installation,
+  the Postgres process smoke, or Docker image pulls.
+- Added the paired `ssh-accept-env` row to `PR_SMOKES` so push/PR real-client
+  parity now gates current-head Tailscale SSH `acceptEnv` forwarding for
+  `LANG` and `LC_*` against Rust and headscale-go.
 
 ## 2026-06-01 Runtime route-approval reason slice
 

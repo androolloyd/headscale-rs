@@ -1275,3 +1275,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - `headscale_nodestore_queue_depth` now reports the live write-worker queue
   depth instead of a hard-coded zero. Remaining NodeStore worker parity is now
   broader reason/churn coverage rather than missing core writer-op shapes.
+
+## 2026-06-01 SQLite route-health mixed-exit reload+restart slice
+
+- Added paired `route-health-mixed-exit-reload-restart` Rust/headscale-go rows
+  over the existing production restart harness.
+- Added paired `route-health-mixed-exit-all-unhealthy-reload-restart`
+  Rust/headscale-go rows for the all-unhealthy mixed exit-node/subnet-router
+  case.
+- The default SQLite stock-client matrix now mirrors the Postgres mixed-exit
+  reload+restart route-health combinations, and the bounded push/PR
+  real-client smoke set includes both rows.

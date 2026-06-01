@@ -226,6 +226,145 @@ async fn postgres_foundation_accepts_supported_go_version_history() -> TestResul
 }
 
 #[tokio::test]
+async fn postgres_foundation_clears_tagged_node_user_ids_on_go_import() -> TestResult {
+    let Some(mut schema) = TempSchema::open("clear_tagged_node_user_ids").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY,
+                version TEXT NOT NULL,
+                updated_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.28.0', CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE migrations (
+                id TEXT PRIMARY KEY
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO migrations (id)
+            VALUES ('202601121700-migrate-hostinfo-request-tags')
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE users (
+                id BIGINT PRIMARY KEY,
+                created_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ,
+                deleted_at TIMESTAMPTZ,
+                name TEXT,
+                display_name TEXT,
+                email TEXT,
+                provider_identifier TEXT,
+                provider TEXT,
+                profile_pic_url TEXT
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO users
+                (id, name, display_name, email, provider, profile_pic_url, created_at, updated_at)
+            VALUES
+                (10, 'alice', 'Alice', 'alice@example.com', 'cli', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            CREATE TABLE nodes (
+                id BIGINT PRIMARY KEY,
+                machine_key TEXT,
+                node_key TEXT,
+                disco_key TEXT,
+                endpoints TEXT,
+                host_info TEXT,
+                ipv4 TEXT,
+                ipv6 TEXT,
+                hostname TEXT,
+                given_name TEXT,
+                user_id BIGINT,
+                register_method TEXT,
+                tags TEXT,
+                auth_key_id BIGINT,
+                expiry TIMESTAMPTZ,
+                last_seen TIMESTAMPTZ,
+                approved_routes TEXT,
+                created_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ,
+                deleted_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO nodes
+                (id, node_key, hostname, given_name, user_id, tags, created_at, updated_at)
+            VALUES
+                (1, 'nodekey:tagged', 'tagged', 'tagged', 10, '[\"tag:server\"]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (2, 'nodekey:untagged', 'untagged', 'untagged', 10, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (3, 'nodekey:empty-tags', 'empty-tags', 'empty-tags', 10, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (4, 'nodekey:null-tags', 'null-tags', 'null-tags', 10, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let rows: Vec<(i64, Option<i64>)> =
+            sqlx::query_as("SELECT id, user_id FROM nodes ORDER BY id")
+                .fetch_all(&mut schema.conn)
+                .await?;
+        assert_eq!(
+            rows,
+            vec![(1, None), (2, Some(10)), (3, Some(10)), (4, Some(10))]
+        );
+
+        let version: String =
+            sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
+                .fetch_one(&mut schema.conn)
+                .await?;
+        assert_eq!(version, HEADSCALE_GO_CURRENT_VERSION);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_policy_primitives_append_read_and_ignore_deleted_rows() -> TestResult {
     let Some(mut schema) = TempSchema::open("policies").await? else {
         return Ok(());

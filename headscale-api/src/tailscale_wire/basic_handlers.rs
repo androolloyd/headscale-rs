@@ -392,12 +392,15 @@ pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
     let payload = debug_vars_payload(&state);
 
     match serde_json::to_string_pretty(&payload) {
-        Ok(body) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-            body,
-        )
-            .into_response(),
+        Ok(mut body) => {
+            body.push('\n');
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                body,
+            )
+                .into_response()
+        }
         Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     }
 }
@@ -465,7 +468,7 @@ fn go_expvar_memstats_placeholder() -> serde_json::Value {
         "NumGC": 0_u32,
         "NumForcedGC": 0_u32,
         "GCCPUFraction": 0.0_f64,
-        "EnableGC": false,
+        "EnableGC": true,
         "DebugGC": false,
         "BySize": by_size,
     })
@@ -549,8 +552,11 @@ pub async fn handle_debug_statsviz_index() -> Response {
 pub async fn handle_debug_statsviz_ws() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        "websocket runtime metrics stream is not available in this Rust build\n",
+        [
+            (header::CONTENT_TYPE.as_str(), "text/plain; charset=utf-8"),
+            ("sec-websocket-version", "13"),
+        ],
+        "Bad Request\n",
     )
         .into_response()
 }
@@ -3880,6 +3886,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_access_rejects_private_peer_for_regular_debug_like_tsweb() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(request_with_peer(
+                "/debug/overview",
+                "192.168.1.10:54321".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"debug access denied\n");
+    }
+
+    #[tokio::test]
+    async fn debug_access_allows_private_peer_for_statsviz_like_headscale_go_wrapper() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(request_with_peer(
+                "/debug/statsviz/",
+                "192.168.1.10:54321".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("<title>Statsviz</title>"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn debug_access_allows_private_statsviz_with_x_forwarded_for_like_headscale_go_wrapper() {
+        let (state, _dir) = fixture_state();
+        let mut req = request_with_peer("/debug/statsviz/ws", "10.0.0.10:54321".parse().unwrap());
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+
+        let resp = router(state).oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("13")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"Bad Request\n");
+    }
+
+    #[tokio::test]
     async fn debug_access_keeps_metrics_scrapeable_from_public_peers() {
         let (state, _dir) = fixture_state();
 
@@ -3948,10 +4009,13 @@ mod tests {
             Some("application/json; charset=utf-8")
         );
         let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert!(body.ends_with(b"\n"), "{body:?}");
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(parsed["cmdline"].is_array(), "{parsed}");
         assert!(parsed["memstats"]["Alloc"].is_u64(), "{parsed}");
         assert!(parsed["memstats"]["HeapAlloc"].is_u64(), "{parsed}");
+        assert_eq!(parsed["memstats"]["EnableGC"], true);
+        assert_eq!(parsed["memstats"]["DebugGC"], false);
         assert_eq!(
             parsed["memstats"]["PauseNs"].as_array().map(Vec::len),
             Some(GO_MEMSTATS_PAUSE_SLOTS),
@@ -4100,6 +4164,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ws.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            ws.headers()
+                .get("sec-websocket-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("13")
+        );
+        let body = to_bytes(ws.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"Bad Request\n");
     }
 
     #[tokio::test]

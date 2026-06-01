@@ -6775,7 +6775,8 @@ pub fn metrics_debug_router(state: WireState) -> Router {
 }
 
 async fn debug_access_control(req: Request, next: Next) -> AxumResponse {
-    if is_debug_path(req.uri().path()) && !allow_debug_access(&req) {
+    let path = req.uri().path();
+    if is_debug_path(path) && !allow_debug_access_for_path(&req, path) {
         return (
             StatusCode::FORBIDDEN,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -6791,17 +6792,19 @@ fn is_debug_path(path: &str) -> bool {
     path == "/debug" || path.starts_with("/debug/")
 }
 
-fn allow_debug_access(req: &Request) -> bool {
+fn allow_debug_access_for_path(req: &Request, path: &str) -> bool {
     if allow_debug_access_with_key(req) {
         return true;
     }
+
+    let allow_private_statsviz = is_statsviz_path(path);
 
     if req
         .headers()
         .get("x-forwarded-for")
         .is_some_and(|value| !value.as_bytes().is_empty())
     {
-        return false;
+        return allow_private_statsviz && debug_peer_private_ip(req);
     }
 
     let peer_ip = debug_peer_ip(req);
@@ -6816,6 +6819,15 @@ fn allow_debug_access(req: &Request) -> bool {
         || ip.is_loopback()
         || std::env::var(TS_ALLOW_DEBUG_IP_ENV).is_ok_and(|allowed| allowed == ip.to_string())
         || debug_trusted_cidrs_contains(ip)
+        || (allow_private_statsviz && is_private_debug_ip(ip))
+}
+
+fn is_statsviz_path(path: &str) -> bool {
+    path == "/debug/statsviz" || path == "/debug/statsviz/" || path.starts_with("/debug/statsviz/")
+}
+
+fn debug_peer_private_ip(req: &Request) -> bool {
+    debug_peer_ip(req).is_some_and(is_private_debug_ip)
 }
 
 fn allow_debug_access_with_key(req: &Request) -> bool {
@@ -6861,6 +6873,13 @@ fn is_tailscale_ip(ip: IpAddr) -> bool {
             let segments = ip.segments();
             segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
         }
+    }
+}
+
+fn is_private_debug_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private(),
+        IpAddr::V6(ip) => ip.is_unique_local(),
     }
 }
 

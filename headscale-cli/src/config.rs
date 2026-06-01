@@ -529,6 +529,7 @@ impl CliConfig {
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
+        config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -574,6 +575,7 @@ impl CliConfig {
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
+        config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -899,6 +901,49 @@ impl CliConfig {
         }
 
         Ok(())
+    }
+
+    fn apply_tls_acme_env_overrides_from<I, K, V>(&mut self, vars: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_ACME_URL" => {
+                    self.acme_url = Some(value.to_string());
+                }
+                "HEADSCALE_ACME_EMAIL" => {
+                    self.acme_email = Some(value.to_string());
+                }
+                "HEADSCALE_TLS_LETSENCRYPT_HOSTNAME" => {
+                    self.tls_letsencrypt_hostname = Some(value.to_string());
+                }
+                "HEADSCALE_TLS_LETSENCRYPT_CACHE_DIR" => {
+                    self.tls_letsencrypt_cache_dir = Some(PathBuf::from(value));
+                }
+                "HEADSCALE_TLS_LETSENCRYPT_LISTEN" => {
+                    self.tls_letsencrypt_listen = Some(value.to_string());
+                }
+                "HEADSCALE_TLS_LETSENCRYPT_CHALLENGE_TYPE" => {
+                    self.tls_letsencrypt_challenge_type = Some(value.to_string());
+                }
+                "HEADSCALE_TLS_CERT_PATH" => {
+                    self.tls_cert_path = Some(PathBuf::from(value));
+                }
+                "HEADSCALE_TLS_KEY_PATH" => {
+                    self.tls_key_path = Some(PathBuf::from(value));
+                }
+                _ => {}
+            }
+        }
     }
 
     fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -2812,6 +2857,55 @@ expiry = 0
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("invalid HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT"));
+    }
+
+    #[test]
+    fn applies_headscale_tls_acme_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config.apply_tls_acme_env_overrides_from([
+            ("HEADSCALE_ACME_URL", "https://acme.example/directory"),
+            ("HEADSCALE_ACME_EMAIL", "ops@example.com"),
+            ("HEADSCALE_TLS_LETSENCRYPT_HOSTNAME", "headscale.example"),
+            (
+                "HEADSCALE_TLS_LETSENCRYPT_CACHE_DIR",
+                "/var/lib/headscale/acme",
+            ),
+            ("HEADSCALE_TLS_LETSENCRYPT_LISTEN", "127.0.0.1:8080"),
+            ("HEADSCALE_TLS_LETSENCRYPT_CHALLENGE_TYPE", "TLS-ALPN-01"),
+            ("HEADSCALE_TLS_CERT_PATH", "/etc/headscale/cert.pem"),
+            ("HEADSCALE_TLS_KEY_PATH", "/etc/headscale/key.pem"),
+        ]);
+
+        assert_eq!(
+            config.acme_url.as_deref(),
+            Some("https://acme.example/directory")
+        );
+        assert_eq!(config.acme_email.as_deref(), Some("ops@example.com"));
+        assert_eq!(
+            config.tls_letsencrypt_hostname.as_deref(),
+            Some("headscale.example")
+        );
+        assert_eq!(
+            config.tls_letsencrypt_cache_dir.as_deref(),
+            Some(Path::new("/var/lib/headscale/acme"))
+        );
+        assert_eq!(
+            config.tls_letsencrypt_listen.as_deref(),
+            Some("127.0.0.1:8080")
+        );
+        assert_eq!(
+            config.tls_letsencrypt_challenge_type.as_deref(),
+            Some("TLS-ALPN-01")
+        );
+        assert_eq!(
+            config.tls_cert_path.as_deref(),
+            Some(Path::new("/etc/headscale/cert.pem"))
+        );
+        assert_eq!(
+            config.tls_key_path.as_deref(),
+            Some(Path::new("/etc/headscale/key.pem"))
+        );
     }
 
     #[test]

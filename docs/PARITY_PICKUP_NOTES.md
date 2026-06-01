@@ -1491,3 +1491,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - `generate private-key -- <args>` now treats `--` as Cobra's end-of-options
   sentinel and ignores the remaining positional arguments, including values
   that look like flags or help requests.
+
+## 2026-06-01 TLS and ACME env override parity slice
+
+- `CliConfig::load` and default config discovery now apply upstream Viper-style
+  TLS/ACME env overrides for `HEADSCALE_ACME_*` and
+  `HEADSCALE_TLS_*` top-level settings.
+- Covered env fields include ACME directory/email, Let's Encrypt hostname,
+  cache dir, listen address, challenge type, and manual TLS cert/key paths.
+- Process coverage proves an env-provided unsupported
+  `tls_letsencrypt_challenge_type` fails the same `configtest` validation as a
+  file-provided value.

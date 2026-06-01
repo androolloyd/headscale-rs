@@ -67,6 +67,14 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT",
     "HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE",
     "HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT",
+    "HEADSCALE_ACME_URL",
+    "HEADSCALE_ACME_EMAIL",
+    "HEADSCALE_TLS_LETSENCRYPT_HOSTNAME",
+    "HEADSCALE_TLS_LETSENCRYPT_CACHE_DIR",
+    "HEADSCALE_TLS_LETSENCRYPT_LISTEN",
+    "HEADSCALE_TLS_LETSENCRYPT_CHALLENGE_TYPE",
+    "HEADSCALE_TLS_CERT_PATH",
+    "HEADSCALE_TLS_KEY_PATH",
     "HEADSCALE_POLICY_MODE",
     "HEADSCALE_POLICY_PATH",
     "HEADSCALE_SERVER_URL",
@@ -2555,6 +2563,40 @@ policy:
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
     assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_rejects_env_invalid_tls_letsencrypt_challenge_type() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_TLS_LETSENCRYPT_CHALLENGE_TYPE", "DNS-01")],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        "Error: Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01\n",
+        "configtest invalid TLS ACME challenge type from env",
+    );
 }
 
 #[test]

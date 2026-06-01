@@ -920,4 +920,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-sqlx` build selection, and direct Postgres node-address assertion.
 - Added paired `postgres-prefix-family-v4-to-dual-backfill` Rust/headscale-go
   wrappers and wired them into the real-client matrix and PR smoke set; the
-  Postgres stock-client matrix now covers fifty-nine rows.
+  initial Postgres stock-client matrix covered fifty-nine rows.
+- Added paired `postgres-prefix-family-dual-stack-to-ipv4-only-backfill` and
+  `postgres-prefix-family-dual-stack-to-ipv6-only-backfill` Rust/headscale-go
+  wrappers over the same backend-aware harness and wired them into the
+  real-client matrix and PR smoke set. The Postgres stock-client matrix now
+  covers sixty-one rows, including configured family-removal backfill parity
+  after production restart plus `nodes backfillips`.

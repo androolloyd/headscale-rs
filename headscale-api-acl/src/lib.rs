@@ -646,7 +646,7 @@ fn normalize_go_policy_field(
     value: serde_json::Value,
 ) -> Result<serde_json::Value, PolicyParseError> {
     match field {
-        "acls" => normalize_go_policy_array_objects(value, "acls", go_acl_field_name, true),
+        "acls" => normalize_go_acl_array(value),
         "grants" => normalize_go_policy_array_objects(value, "grants", go_grant_field_name, false),
         "nodeAttrs" => {
             normalize_go_policy_array_objects(value, "nodeAttrs", go_node_attr_field_name, false)
@@ -666,6 +666,39 @@ fn normalize_go_policy_field(
         }
         _ => Ok(value),
     }
+}
+
+fn normalize_go_acl_array(value: serde_json::Value) -> Result<serde_json::Value, PolicyParseError> {
+    let entries = match value {
+        serde_json::Value::Array(entries) => entries,
+        other => return Ok(other),
+    };
+
+    let mut normalized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = normalize_go_policy_object_fields(entry, "acls", go_acl_field_name, true)?;
+        let serde_json::Value::Object(object) = entry else {
+            normalized.push(entry);
+            continue;
+        };
+        let Some(serde_json::Value::Array(destinations)) = object.get("dst") else {
+            normalized.push(serde_json::Value::Object(object));
+            continue;
+        };
+        if destinations.len() <= 1 {
+            normalized.push(serde_json::Value::Object(object));
+            continue;
+        }
+        for destination in destinations {
+            let mut split = object.clone();
+            split.insert(
+                "dst".to_string(),
+                serde_json::Value::Array(vec![destination.clone()]),
+            );
+            normalized.push(serde_json::Value::Object(split));
+        }
+    }
+    Ok(serde_json::Value::Array(normalized))
 }
 
 fn normalize_go_policy_array_objects(
@@ -2934,12 +2967,29 @@ mod tests {
         }"#;
         let doc = parse_hujson_policy(raw).unwrap();
         assert_eq!(
-            doc.rules[0].dst,
-            vec!["fd7a:115c:a1e0::87e1", "fd7a:115c:a1e0::2905/64", "::1"]
+            doc.rules
+                .iter()
+                .map(|rule| (rule.dst.clone(), rule.ports.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    vec!["fd7a:115c:a1e0::87e1".to_string()],
+                    vec!["tcp/80".to_string(), "tcp/443".to_string()]
+                ),
+                (
+                    vec!["fd7a:115c:a1e0::2905/64".to_string()],
+                    vec!["tcp/22".to_string()]
+                ),
+                (vec!["::1".to_string()], vec!["tcp/80-90".to_string()])
+            ]
         );
         assert_eq!(
-            doc.rules[0].ports,
-            vec!["tcp/80", "tcp/443", "tcp/22", "tcp/80-90"]
+            doc.decide(
+                "100.64.0.1",
+                "fd7a:115c:a1e0::87e1",
+                PortRef::new("tcp", 22)
+            ),
+            AclAction::Deny
         );
     }
 

@@ -454,6 +454,45 @@
   },
   {
     "engine": "headscale",
+    "name": "literal-prefix-bracketed-ipv6",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.115.94.0-100.127.255.255",
+          "100.64.0.0-100.115.91.255",
+          "fd7a:115c:a1e0::/48"
+        ],
+        "DstPorts": [
+          {
+            "IP": "fd7a:115c:a1e0::/64",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::87e1",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::87e1",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "literal-prefix-icmp-wildcard",
     "filter": [
       {

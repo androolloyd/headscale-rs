@@ -1,0 +1,16 @@
+{
+  "name": "literal-prefix-bracketed-ipv6",
+  "policy": {
+    "acls": [
+      {
+        "action": "accept",
+        "proto": "tcp",
+        "src": ["*"],
+        "dst": [
+          "[fd7a:115c:a1e0::87e1]:80,443",
+          "[fd7a:115c:a1e0::2905]/64:22"
+        ]
+      }
+    ]
+  }
+}

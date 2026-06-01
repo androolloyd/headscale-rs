@@ -1297,7 +1297,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   policy mode starts with a no-SSH policy file, mutates that policy file, and
   restarts before approving the SSH check; added paired
   `ssh-oidc-policy-restart` Rust/headscale-go rows for that default path.
+- Added paired `web-register-route-approve` Rust/headscale-go rows over the
+  same stock-client online/LastSeen harness as the Postgres row, closing the
+  last default-vs-Postgres matrix symmetry gap.
 - The default SQLite stock-client matrix now matches the existing Postgres
   coverage for same-tag route-via restart, OIDC SSH checkPeriod cache, and OIDC
-  SSH policy mutation across restart; the bounded push/PR real-client smoke set
-  includes all three rows.
+  SSH policy mutation across restart; it also mirrors the web-registration
+  route-approval row. The bounded push/PR real-client smoke set includes all of
+  those rows.

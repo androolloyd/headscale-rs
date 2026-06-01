@@ -175,6 +175,7 @@ smoke_ids=(
   web-register
   web-register-tags
   web-register-unowned-tag
+  web-register-route-approve
   oidc
   ssh-oidc-check
   ssh-cli-check
@@ -341,6 +342,7 @@ smoke_areas=(
   database
   database
   database
+  registration
   registration
   registration
   registration
@@ -515,6 +517,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-smoke.sh
   tools/real-client/web-register-tags-smoke.sh
   tools/real-client/web-register-unowned-tag-smoke.sh
+  tools/real-client/web-register-route-approve-smoke.sh
   tools/real-client/oidc-smoke.sh
   tools/real-client/ssh-oidc-check-smoke.sh
   tools/real-client/ssh-cli-check-smoke.sh
@@ -685,6 +688,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-headscale-go-smoke.sh
   tools/real-client/web-register-tags-headscale-go-smoke.sh
   tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
+  tools/real-client/web-register-route-approve-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/ssh-cli-check-headscale-go-smoke.sh
@@ -855,6 +859,7 @@ smoke_assertions=(
   "no-auth pending registration and CLI approval"
   "web registration with owned requested tag"
   "web registration rejects unowned requested tag"
+  "web registration with route advertisement/approval"
   "OIDC callback, node row, and user profile"
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
   "CLI-approved Tailscale SSH check approval"

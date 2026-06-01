@@ -5090,6 +5090,31 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_api_key_grpc_missing_id_errors_before_mutation() {
+        let service = admin_service().await;
+
+        let err = service
+            .expire_api_key(Request::new(ExpireApiKeyRequest {
+                prefix: String::new(),
+                id: 999,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "api key not found");
+
+        let err = service
+            .delete_api_key(Request::new(DeleteApiKeyRequest {
+                prefix: String::new(),
+                id: 999,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "api key not found");
+    }
+
+    #[tokio::test]
     async fn upstream_preauth_grpc_create_list_expire_delete() {
         let service = admin_service().await;
 

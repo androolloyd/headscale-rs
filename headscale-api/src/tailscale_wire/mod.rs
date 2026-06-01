@@ -1541,25 +1541,19 @@ impl RegistrationCache {
     }
 
     pub fn approve_without_node(&self, registration_id: &str) -> bool {
-        let entry = self.inner.read().get(registration_id).cloned();
-        match entry {
-            Some(entry) => {
-                entry.approve_without_node();
-                true
-            }
-            None => false,
-        }
+        let Some(entry) = self.get_entry(registration_id) else {
+            return false;
+        };
+        entry.approve_without_node();
+        true
     }
 
     pub fn reject(&self, registration_id: &str, reason: impl Into<String>) -> bool {
-        let entry = self.inner.read().get(registration_id).cloned();
-        match entry {
-            Some(entry) => {
-                entry.reject(reason.into());
-                true
-            }
-            None => false,
-        }
+        let Some(entry) = self.get_entry(registration_id) else {
+            return false;
+        };
+        entry.reject(reason.into());
+        true
     }
 
     pub async fn wait_for_registration(&self, registration_id: &str) -> RegistrationWaitOutcome {

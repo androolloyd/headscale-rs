@@ -2002,6 +2002,7 @@ mod upstream_tests {
     use std::fs;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::body::to_bytes;
     use chrono::Utc;
@@ -3528,6 +3529,65 @@ mod upstream_tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("auth ID has invalid prefix"));
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_grpc_approve_and_reject_ignore_expired_cache_entries() {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let registration_cache = Arc::new(RegistrationCache::with_tuning(
+            Duration::ZERO,
+            Duration::from_secs(60),
+        ));
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            PolicyStore::new(),
+            Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new()))),
+        )
+        .with_registration_cache(registration_cache.clone());
+
+        let approve_id = "e".repeat(24);
+        registration_cache.insert(
+            approve_id.clone(),
+            fixture_machine("approve-expired", "", "approve-expired"),
+        );
+        let err = service
+            .auth_approve(Request::new(AuthApproveRequest {
+                auth_id: format!("hskey-authreq-{approve_id}"),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(
+            err.message()
+                .contains("no pending auth session for auth_id")
+        );
+        assert!(registration_cache.is_empty());
+
+        let reject_id = "f".repeat(24);
+        registration_cache.insert(
+            reject_id.clone(),
+            fixture_machine("reject-expired", "", "reject-expired"),
+        );
+        let err = service
+            .auth_reject(Request::new(AuthRejectRequest {
+                auth_id: format!("hskey-authreq-{reject_id}"),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert!(
+            err.message()
+                .contains("no pending auth session for auth_id")
+        );
+        assert!(registration_cache.is_empty());
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
 //! * `POST /api/v1/preauthkeys` ⇒ creates a row + returns the
 //!   plaintext token (mirror of the Go upstream's
 //!   `hscontrol/grpcv1.go::CreatePreAuthKey` body shape).
-//! * `GET /api/v1/preauthkeys` ⇒ lists all rows (newest first).
+//! * `GET /api/v1/preauthkeys` ⇒ lists all rows (oldest first).
 //! * `POST /api/v1/preauthkeys/<prefix>/expire` ⇒ marks the row as
 //!   expired (parity with Go `ExpirePreAuthKey`).
 //! * `PersistentPreauthAdmin::try_use` ⇒ atomic single-use redemption
@@ -296,7 +296,7 @@ async fn expire_unknown_prefix_returns_404() {
 }
 
 #[tokio::test]
-async fn list_returns_newest_first() {
+async fn list_returns_oldest_first_like_headscale_go() {
     let (app, _store) = fixture().await;
     for u in ["alice", "bob", "carol"] {
         let body = format!(
@@ -307,16 +307,13 @@ async fn list_returns_newest_first() {
             .oneshot(req_post("/api/v1/preauthkeys", &body))
             .await
             .unwrap();
-        // Force a fresh second tick so created_at can differ. Even
-        // without that, the ORDER BY tie-breaks on id DESC, so the
-        // newest insert lands first.
     }
     let resp = app.oneshot(req_get("/api/v1/preauthkeys")).await.unwrap();
     let list = body_json(resp).await;
     let arr = list.as_array().unwrap();
     assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0]["user"], "carol");
-    assert_eq!(arr[2]["user"], "alice");
+    assert_eq!(arr[0]["user"], "alice");
+    assert_eq!(arr[2]["user"], "carol");
 }
 
 #[tokio::test]

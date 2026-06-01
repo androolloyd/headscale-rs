@@ -371,7 +371,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   runtime register/hydrate smoke plus live-Pg OIDC rekey/projection/hydration
   smoke exist; the first production Pg `serve` process smoke covers public
   health plus local gRPC health/user/preauth/API-key/policy/node CLI paths, and
-  paired env-gated Pg auth-key, online/LastSeen, web-registration, route-approval, exit-node
+  paired env-gated Pg auth-key, one-time auth-key rejection, expired auth-key
+  rejection, online/LastSeen, web-registration, route-approval, exit-node
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health all-unhealthy, route-health restart, route-health
@@ -386,7 +387,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all sixty-nine Pg rows, including
+  all seventy-one Pg rows, including
+  `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -860,6 +862,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   rejection and expired-key rejection, wired into the real-client matrix and
   push/PR smoke set.
 
+## 2026-06-01 Postgres auth-key lifecycle smoke slice
+
+- Added paired `postgres-authkey-nonreusable` and `postgres-authkey-expired`
+  Rust/headscale-go rows over the production Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` can now mint non-reusable or
+  immediately expired preauth keys, mark selected 1-based clients as expected
+  auth-key failures, and assert the resulting persisted machine count.
+- The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to seventy-one rows.
+
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 
 - Strengthened the paired `dns-hot-reload` Rust/headscale-go production smokes
@@ -1110,7 +1122,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `autogroup:self` same-user isolation through stock Tailscale clients, closing
   the remaining Postgres ACL smoke symmetry gap after `postgres-acl-allow`.
 - The real-client matrix and PR smoke set now include the rows; the Postgres
-  stock-client matrix covers sixty-nine rows.
+  stock-client matrix covered sixty-nine rows before the later auth-key
+  lifecycle additions.
 
 ## 2026-06-01 auth-key same-user relogin smoke slice
 

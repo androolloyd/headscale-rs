@@ -22,6 +22,10 @@ server_start_retries="${REAL_CLIENT_SERVER_START_RETRIES:-3}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
+preauth_reusable="${REAL_CLIENT_PREAUTH_REUSABLE:-true}"
+preauth_expired="${REAL_CLIENT_PREAUTH_EXPIRED:-false}"
+expected_authkey_failure_indexes="${REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES:-}"
+expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
@@ -78,13 +82,45 @@ case "${login_mode}" in
     exit 2
     ;;
 esac
+case "${preauth_reusable}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_reusable_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_reusable_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_REUSABLE must be true or false, got ${preauth_reusable}" >&2
+    exit 2
+    ;;
+esac
+case "${preauth_expired}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    preauth_expired_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    preauth_expired_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EXPIRED must be true or false, got ${preauth_expired}" >&2
+    exit 2
+    ;;
+esac
 
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
   exit 2
 fi
+if [[ -n "${expected_machine_count}" ]] && ! [[ "${expected_machine_count}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_MACHINE_COUNT must be a non-negative integer, got ${expected_machine_count}" >&2
+  exit 2
+fi
 if ! [[ "${server_start_retries}" =~ ^[0-9]+$ ]] || ((server_start_retries < 1)); then
   echo "REAL_CLIENT_SERVER_START_RETRIES must be a positive integer, got ${server_start_retries}" >&2
+  exit 2
+fi
+if [[ -n "${expected_authkey_failure_indexes}" && "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES is only supported with REAL_CLIENT_LOGIN_MODE=authkey" >&2
   exit 2
 fi
 
@@ -286,6 +322,21 @@ if [[ -n "${expected_peer_counts}" ]]; then
       echo "REAL_CLIENT_EXPECT_PEER_COUNTS must contain non-negative integers, got ${expected_peer_counts}" >&2
       exit 2
     fi
+  done
+fi
+authkey_failure_flags=()
+for ((idx = 0; idx < client_count; idx++)); do
+  authkey_failure_flags+=(0)
+done
+if [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  IFS=',' read -r -a authkey_failure_indexes <<<"${expected_authkey_failure_indexes}"
+  for authkey_failure_index in "${authkey_failure_indexes[@]}"; do
+    if ! [[ "${authkey_failure_index}" =~ ^[0-9]+$ ]] ||
+      ((authkey_failure_index < 1 || authkey_failure_index > client_count)); then
+      echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES values must be 1..${client_count}, got ${authkey_failure_index}" >&2
+      exit 2
+    fi
+    authkey_failure_flags[$((authkey_failure_index - 1))]=1
   done
 fi
 
@@ -574,6 +625,21 @@ write_registration_id() {
     exit 1 unless match
     File.write(ARGV.fetch(0), match[1])
   ' "${output_path}" <<<"${status_json}"
+}
+
+client_logged_in() {
+  local check_client_name="$1"
+  local status_path="$2"
+  docker exec "${check_client_name}" tailscale status --json >"${status_path}" 2>/dev/null &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      ips = Array(status["TailscaleIPs"])
+      ok = status["HaveNodeKey"] &&
+        status["AuthURL"].to_s.empty? &&
+        (status["Self"] || {})["InNetworkMap"] &&
+        !ips.empty?
+      exit(ok ? 0 : 1)
+    ' "${status_path}"
 }
 
 dump_debug() {
@@ -1041,7 +1107,6 @@ create_user_and_key() {
         preauth_args=(
           -o json preauthkeys create
           --user "${user_id}"
-          --reusable
           --expiration 1h
         )
         ;;
@@ -1049,15 +1114,23 @@ create_user_and_key() {
         preauth_args=(
           -o json preauthkeys create
           --user "${user_id}"
-          --reusable
           --expiration 1h
         )
         ;;
     esac
+    if ((preauth_reusable_flag)); then
+      preauth_args+=(--reusable)
+    fi
     if [[ -n "${preauth_tags}" ]]; then
       preauth_args+=(--tags "${preauth_tags}")
     fi
     headscale_cmd "${preauth_args[@]}" >"${work_dir}/preauth.json"
+    if ((preauth_expired_flag)); then
+      local authkey_id
+      authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/preauth.json")"
+      headscale_cmd -o json preauthkeys expire --id "${authkey_id}" \
+        >"${work_dir}/preauth-expired.json"
+    fi
     authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
     echo "minted ${authkey%%-*}-..."
     echo "::endgroup::"
@@ -1085,6 +1158,7 @@ start_client() {
 }
 
 login_client() {
+  local expect_login_failure="${1:-0}"
   echo "::group::tailscale up"
   up_args=(
     tailscale up
@@ -1169,8 +1243,20 @@ login_client() {
   if ((up_status != 0)); then
     echo "tailscale up returned ${up_status}; verifying logged-in netmap"
   fi
+  if ((expect_login_failure)); then
+    if client_logged_in "${client_name}" "${work_dir}/${client_name}.unexpected-login-status.json"; then
+      echo "expected auth-key login failure for ${client_name}, but it logged in" >&2
+      echo "::endgroup::"
+      return 1
+    fi
+    docker exec "${client_name}" tailscale status --json \
+      >"${work_dir}/${client_name}.expected-authkey-failure-status.json" 2>/dev/null || true
+    echo "auth-key login failed as expected for ${client_name}"
+    echo "::endgroup::"
+    return 0
+  fi
   wait_for "logged-in client netmap" \
-    "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && !ips.empty?; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.status.json'"
+    "client_logged_in '${client_name}' '${work_dir}/${client_name}.status.json'"
   echo "::endgroup::"
 }
 
@@ -1723,6 +1809,27 @@ wait_for_no_nodes_after_expected_registration_failure() {
   }
 }
 
+assert_node_count_file() {
+  local path="$1"
+  local expected="$2"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    expected = Integer(ARGV.fetch(1))
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    abort("expected #{expected} nodes, got #{nodes.length}: #{nodes.inspect}") unless nodes.length == expected
+    puts JSON.pretty_generate({nodes: nodes.length})
+  ' "${path}" "${expected}"
+}
+
+wait_for_expected_node_count_if_requested() {
+  [[ -n "${expected_machine_count}" ]] || return 0
+  local path="${work_dir}/nodes-expected-count.json"
+  wait_for "expected node count ${expected_machine_count}" "headscale_cmd -o json nodes list >'${path}' && assert_node_count_file '${path}' '${expected_machine_count}'" || {
+    dump_debug
+    return 1
+  }
+}
+
 approve_routes_if_requested() {
   [[ -n "${advertise_routes}" || -n "${approve_routes}" ]] || return 0
   wait_for_node_routes "${expected_available_routes}" "" "advertised routes"
@@ -1843,11 +1950,21 @@ if [[ "${target}" == "headscale-go" ]]; then
 fi
 start_server_with_retries
 create_user_and_key
-for client_name in "${client_names[@]}"; do
+successful_client_names=()
+for idx in "${!client_names[@]}"; do
+  client_name="${client_names[$idx]}"
   start_client
-  login_client
+  login_client "${authkey_failure_flags[$idx]}"
+  if ((authkey_failure_flags[$idx] == 0)); then
+    successful_client_names+=("${client_name}")
+  fi
 done
-client_name="${client_names[0]}"
+wait_for_expected_node_count_if_requested
+if ((${#successful_client_names[@]} == 0)); then
+  echo "${target} rejected auth-key login real-client smoke passed"
+  exit 0
+fi
+client_name="${successful_client_names[0]}"
 if ((expect_register_failure)); then
   if ((registration_failed_as_expected == 0)); then
     echo "expected web registration failure path was not observed" >&2

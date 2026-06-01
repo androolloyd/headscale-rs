@@ -83,6 +83,8 @@ upstream commit from `headscale-go-current.sh`.
 | Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Tailcfg | `taildrop-capmap` | `taildrop-capmap-smoke.sh` | `taildrop-capmap-headscale-go-smoke.sh` | Disabled Taildrop removes file-sharing from stock-client self CapMap |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
+| Database | `postgres-authkey-nonreusable` | `postgres-authkey-nonreusable-smoke.sh` | `postgres-authkey-nonreusable-headscale-go-smoke.sh` | Production Postgres one-time auth-key rejects second stock-client registration |
+| Database | `postgres-authkey-expired` | `postgres-authkey-expired-smoke.sh` | `postgres-authkey-expired-headscale-go-smoke.sh` | Production Postgres expired auth-key rejects stock-client registration |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
@@ -677,6 +679,10 @@ and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family
 allocation through the same path:
 
 ```sh
+tools/real-client/postgres-authkey-nonreusable-smoke.sh
+tools/real-client/postgres-authkey-nonreusable-headscale-go-smoke.sh
+tools/real-client/postgres-authkey-expired-smoke.sh
+tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
 tools/real-client/postgres-online-lastseen-smoke.sh
 tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-smoke.sh

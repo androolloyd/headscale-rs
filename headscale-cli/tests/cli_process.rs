@@ -1731,6 +1731,30 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
 }
 
 #[test]
+fn residual_current_upstream_parser_edges_match_stderr_snapshots() {
+    assert_stderr_snapshot(
+        &["completion", "bash", "--", "bad"],
+        1,
+        include_str!("snapshots/utility_completion_bash_dashdash_unknown_command.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "bad", "--no-descriptions"],
+        1,
+        include_str!("snapshots/utility_completion_unknown_shell_no_descriptions.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "bash", "--no-descriptions", "--bad"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "private-key", "--force", "--bad"],
+        1,
+        include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
+    );
+}
+
+#[test]
 fn completion_no_descriptions_strips_zsh_help_text() {
     let output = headscale_clean(&["completion", "zsh"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

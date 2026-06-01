@@ -65,10 +65,10 @@ use super::routes::{
     active_exit_routes, auto_approved_routes_for_node, normalize_advertised_routes,
 };
 use super::wire::{
-    DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
-    PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX, is_auto_derived_given_name,
-    is_supported_capability_version, stable_id_from_key, strip_key_prefix,
-    unsupported_client_error,
+    DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetInfo,
+    NetPortRange, PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX,
+    is_auto_derived_given_name, is_supported_capability_version, stable_id_from_key,
+    strip_key_prefix, unsupported_client_error,
 };
 use super::{
     MachineRecord, MapChange, MapChangeReason, MapResponseDebugStore, MapResponseDebugType,
@@ -105,6 +105,36 @@ fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInf
         }
     }
     serde_json::from_value(merged).unwrap_or_else(|_| requested.clone())
+}
+
+fn hostinfo_preferred_derp(hostinfo: &HostInfo) -> i32 {
+    hostinfo
+        .net_info
+        .as_ref()
+        .map_or(0, |net_info| net_info.preferred_derp)
+}
+
+fn clear_preferred_derp_for_compare(hostinfo: &mut HostInfo) {
+    if let Some(net_info) = hostinfo.net_info.as_mut() {
+        net_info.preferred_derp = 0;
+        if *net_info == NetInfo::default() {
+            hostinfo.net_info = None;
+        }
+    }
+}
+
+fn hostinfo_change_is_only_preferred_derp(previous: &HostInfo, current: &HostInfo) -> bool {
+    let previous_derp = hostinfo_preferred_derp(previous);
+    let current_derp = hostinfo_preferred_derp(current);
+    if current_derp == 0 || previous_derp == current_derp {
+        return false;
+    }
+
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    clear_preferred_derp_for_compare(&mut previous);
+    clear_preferred_derp_for_compare(&mut current);
+    previous == current
 }
 
 const MAP_COMPRESSION_ZSTD: &str = "zstd";
@@ -1047,6 +1077,8 @@ async fn map_inner(
             }
         };
         if previous_hostinfo != hostinfo {
+            let only_preferred_derp_changed =
+                hostinfo_change_is_only_preferred_derp(&previous_hostinfo, &hostinfo);
             let raw_hostname = hostinfo.hostname.clone();
             own.replace_host_info(hostinfo);
             if auto_derived_name && !raw_hostname.is_empty() {
@@ -1056,7 +1088,11 @@ async fn map_inner(
                         .resolve_auto_given_name(&node_key_hex, &raw_hostname, None);
             }
             record_changed = true;
-            record_change_reason = MapChangeReason::FullSelfUpdate;
+            record_change_reason = if only_preferred_derp_changed {
+                MapChangeReason::EndpointDerpUpdate
+            } else {
+                MapChangeReason::FullSelfUpdate
+            };
         }
         if own.approved_routes != approved_routes {
             own.approved_routes = approved_routes;
@@ -7208,6 +7244,89 @@ mod tests {
         assert!(mr.peers_removed.is_empty());
         assert_eq!(mr.peers_changed_patch.len(), 1);
         let patch = &mr.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.derp_region, 7);
+        assert!(patch.disco_key.is_none());
+        assert!(patch.online.is_none());
+        assert!(patch.last_seen.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_derp_update_uses_endpoint_derp_patch_reason() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let mut peer_a = MachineRecord::new_at(
+            chrono::Utc::now(),
+            a.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "peer-a".into(),
+            Ipv4Addr::new(100, 64, 0, 10),
+            false,
+        );
+        peer_a.home_derp = 1;
+        state.machines.upsert(a.clone(), peer_a);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app.clone(), &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].home_derp, 1);
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let update_req = serde_json::json!({
+            "Version": 113,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "NetInfo": {
+                    "PreferredDERP": 7
+                }
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let raw = to_bytes(update_resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(raw.is_empty());
+
+        let changes = state.machines.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("DERP map request records a map change");
+        assert_eq!(change.reason_labels(), vec!["endpoint/DERP update"]);
+        assert_eq!(change.change_type(), "patch");
+        assert_eq!(change.content.peer_patches, vec![stable_id_from_key(&a)]);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "batched DERP updates must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_changed_patch.len(), 1);
+        let patch = &delta.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
         assert!(patch.endpoints.is_empty());
         assert_eq!(patch.derp_region, 7);

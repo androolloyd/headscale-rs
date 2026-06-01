@@ -927,3 +927,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   real-client matrix and PR smoke set. The Postgres stock-client matrix now
   covers sixty-one rows, including configured family-removal backfill parity
   after production restart plus `nodes backfillips`.
+
+## 2026-06-01 CLI and DERP patch churn slice
+
+- Added current-upstream parser-edge stderr snapshots for residual utility
+  command cases: `completion bash -- bad`, `completion bad --no-descriptions`,
+  `completion bash --no-descriptions --bad`, and
+  `generate private-key --force --bad`.
+- Hostinfo updates that only move `NetInfo.PreferredDERP` now record
+  `endpoint/DERP update` and emit a batched peer patch instead of a full
+  self-update. The focused streaming test pins the reason, patch type, batch
+  timing, and `PeerChange.DERPRegion` projection.

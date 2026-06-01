@@ -1062,12 +1062,26 @@ async fn map_inner(
             record_change_reason = MapChangeReason::RouteUpdate;
         }
     }
+    // headscale-go updates node state before Connect, but dispatches
+    // map changes only after the stream is connected. With a durable
+    // registration store there is an await between those steps, so
+    // Stream:true updates must not wake peers with an offline route
+    // snapshot while persistence is still in flight.
+    let mut deferred_stream_change = None;
     if record_changed {
-        state.machines.upsert_with_reason(
-            node_key_hex.clone(),
-            own.clone(),
-            Some(record_change_reason),
-        );
+        let node_id = own.stable_node_id_for_key(&node_key_hex);
+        if req.stream {
+            state
+                .machines
+                .upsert_quiet(node_key_hex.clone(), own.clone());
+            deferred_stream_change = Some((record_change_reason, node_id));
+        } else {
+            state.machines.upsert_with_reason(
+                node_key_hex.clone(),
+                own.clone(),
+                Some(record_change_reason),
+            );
+        }
     }
     if let Some(store) = &state.registration_store {
         let current = if record_changed {
@@ -1094,16 +1108,36 @@ async fn map_inner(
             }
         };
         if record_changed {
+            let saved_node_id = saved
+                .record
+                .stable_node_id_for_key(&saved.record.node_key_hex);
             if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
-                state.machines.replace_node_key(
-                    old_node_key_hex,
-                    saved.record.node_key_hex.clone(),
-                    saved.record,
-                );
+                if req.stream {
+                    state.machines.replace_node_key_quiet(
+                        old_node_key_hex,
+                        saved.record.node_key_hex.clone(),
+                        saved.record,
+                    );
+                } else {
+                    state.machines.replace_node_key(
+                        old_node_key_hex,
+                        saved.record.node_key_hex.clone(),
+                        saved.record,
+                    );
+                }
             } else {
-                state
-                    .machines
-                    .upsert(saved.record.node_key_hex.clone(), saved.record);
+                if req.stream {
+                    state
+                        .machines
+                        .upsert_quiet(saved.record.node_key_hex.clone(), saved.record);
+                } else {
+                    state
+                        .machines
+                        .upsert(saved.record.node_key_hex.clone(), saved.record);
+                }
+            }
+            if req.stream {
+                deferred_stream_change = Some((record_change_reason, saved_node_id));
             }
         }
     }
@@ -1146,6 +1180,9 @@ async fn map_inner(
     let stream_connection_guard = req.stream.then(|| {
         super::MachineRegistry::track_stream_connection(state.machines.clone(), self_node_id)
     });
+    if let Some((reason, node_id)) = deferred_stream_change {
+        state.machines.wake_node_change(reason, node_id);
+    }
 
     // Build the response.
     let snapshot = state.machines.snapshot();
@@ -2159,7 +2196,8 @@ async fn wait_for_change(notify: Arc<tokio::sync::Notify>) {
 mod tests {
     use super::*;
     use crate::tailscale_wire::{
-        DerpMapStore, MachineRecord, MachineRegistry, MapResponseDebugStore, WireState,
+        DerpMapStore, MachineRecord, MachineRegistrationStore, MachineRegistry,
+        MapResponseDebugStore, PersistedMachineRegistration, WireState,
         noise::{NoisePeerMachineKey, ServerNoiseKey, inner_router as machine_router},
         register::{
             CAPABILITY_ADMIN, CAPABILITY_DEFAULT_AUTO_UPDATE, CAPABILITY_FILE_SHARING,
@@ -2212,6 +2250,43 @@ mod tests {
             mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, dir)
+    }
+
+    struct BlockingRuntimeSyncStore {
+        entered: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MachineRegistrationStore for BlockingRuntimeSyncStore {
+        async fn create_or_update_auth_key_registration(
+            &self,
+            record: MachineRecord,
+            _policy: &crate::policy::PolicyStore,
+            _auth_key_id: Option<i64>,
+        ) -> Result<PersistedMachineRegistration, String> {
+            Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: None,
+            })
+        }
+
+        async fn sync_runtime_machine_state(
+            &self,
+            record: MachineRecord,
+            _policy: &crate::policy::PolicyStore,
+        ) -> Result<PersistedMachineRegistration, String> {
+            if let Some(tx) = self.entered.lock().await.take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release.lock().await.take() {
+                let _ = rx.await;
+            }
+            Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: None,
+            })
+        }
     }
 
     fn insert_peer(state: &WireState, node_hex: &str, host: &str, last_octet: u8) {
@@ -6262,6 +6337,120 @@ mod tests {
             peer.allowed_ips.iter().any(|allowed| allowed == route),
             "observer should see route-derived AllowedIPs from the router's initial stream request"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_true_route_update_waits_until_connect_after_persistence() {
+        let (mut state, _dir) = fixture();
+        let policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.41.0.0/16:*"]}
+            ],
+            "autoApprovers": {
+                "routes": {"10.41.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "e1".repeat(32);
+        let router_key = "e2".repeat(32);
+        let route = "10.41.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            policy_record(&router_key, "router", 11, "router", Vec::new()),
+        );
+
+        let app = router(state.clone());
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+        let alice_first = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            alice_first.peers.is_empty(),
+            "router is hidden until its initial stream request advertises an allowed route"
+        );
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        state.registration_store = Some(Arc::new(BlockingRuntimeSyncStore {
+            entered: tokio::sync::Mutex::new(Some(entered_tx)),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        }));
+        let app_with_store = router(state.clone());
+
+        let router_task = tokio::spawn({
+            let app = app_with_store.clone();
+            let router_key = router_key.clone();
+            async move {
+                let router_req = serde_json::json!({
+                    "Stream": true,
+                    "Version": 113,
+                    "Compress": "zstd",
+                    "Hostinfo": {
+                        "RoutableIPs": [route]
+                    },
+                });
+                let resp = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/machine/nodekey:{router_key}/map"))
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::to_vec(&router_req).unwrap(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                resp.into_body()
+            }
+        });
+
+        entered_rx.await.expect("runtime persistence started");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                next_zstd_map_response(&mut alice_body),
+            )
+            .await
+            .is_err(),
+            "streaming route updates must not notify peers before the router is connected"
+        );
+
+        release_tx.send(()).expect("release runtime persistence");
+        let mut router_body = router_task.await.expect("router stream opens");
+        let router_first = next_zstd_map_response(&mut router_body).await;
+        let router_self = router_first.node.as_ref().expect("router self node");
+        assert!(
+            router_self
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == route)
+        );
+
+        let alice_delta = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_zstd_map_response(&mut alice_body),
+        )
+        .await
+        .expect("observer route-aware peer delta");
+        let peer = alice_delta
+            .peers_changed
+            .iter()
+            .find(|peer| peer.id == stable_id_from_key(&router_key))
+            .expect("router peer delta present after connect");
+        assert!(
+            peer.allowed_ips.iter().any(|allowed| allowed == route),
+            "observer should only see the route update once the router is online"
+        );
+        assert_eq!(peer.online, Some(true));
     }
 
     #[tokio::test(start_paused = true)]

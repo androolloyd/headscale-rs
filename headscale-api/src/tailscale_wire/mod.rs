@@ -2293,6 +2293,10 @@ impl MachineRegistry {
         self.upsert_with_reason(node_key_hex, rec, None);
     }
 
+    pub(crate) fn upsert_quiet(&self, node_key_hex: String, rec: MachineRecord) {
+        self.upsert_record(node_key_hex, rec);
+    }
+
     pub(crate) fn upsert_with_reason(
         &self,
         node_key_hex: String,
@@ -2300,6 +2304,16 @@ impl MachineRegistry {
         reason: Option<MapChangeReason>,
     ) {
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        let existed = self.upsert_record(node_key_hex, rec);
+        let reason = reason.unwrap_or(if existed {
+            MapChangeReason::NodeUpdated
+        } else {
+            MapChangeReason::NodeAdded
+        });
+        self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
+    }
+
+    fn upsert_record(&self, node_key_hex: String, rec: MachineRecord) -> bool {
         let existed;
         let start = Instant::now();
         {
@@ -2312,11 +2326,10 @@ impl MachineRegistry {
         let elapsed = start.elapsed();
         self.record_nodestore_operation("put", elapsed);
         self.record_nodestore_batch(1, elapsed);
-        let reason = reason.unwrap_or(if existed {
-            MapChangeReason::NodeUpdated
-        } else {
-            MapChangeReason::NodeAdded
-        });
+        existed
+    }
+
+    pub(crate) fn wake_node_change(&self, reason: MapChangeReason, node_id: u64) {
         self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
     }
 
@@ -3099,19 +3112,42 @@ impl MachineRegistry {
         new_node_key_hex: String,
         rec: MachineRecord,
     ) {
+        let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
+        self.replace_node_key_with_change(
+            old_node_key_hex,
+            new_node_key_hex,
+            rec,
+            Some(PendingMapChange::target(
+                MapChangeReason::FullSelfUpdate,
+                new_id,
+            )),
+        );
+    }
+
+    pub(crate) fn replace_node_key_quiet(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+    ) {
+        self.replace_node_key_with_change(old_node_key_hex, new_node_key_hex, rec, None);
+    }
+
+    fn replace_node_key_with_change(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        change: Option<PendingMapChange>,
+    ) {
         let key_changed = old_node_key_hex != new_node_key_hex;
         let old_id = self.stable_node_id_for_key(old_node_key_hex);
-        let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
-        self.update_with_operation_and_change(
-            "replace_key",
-            PendingMapChange::target(MapChangeReason::FullSelfUpdate, new_id),
-            |map| {
-                if key_changed {
-                    map.remove(old_node_key_hex);
-                }
-                map.insert(new_node_key_hex, rec);
-            },
-        );
+        self.update_with_operation_and_wake("replace_key", change, |map| {
+            if key_changed {
+                map.remove(old_node_key_hex);
+            }
+            map.insert(new_node_key_hex, rec);
+        });
         if key_changed {
             self.forget_batcher_connection_state(old_id);
             if let Some(gc) = self.ephemeral_gc() {

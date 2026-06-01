@@ -529,11 +529,18 @@ async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
             .id,
             created.row.id
         );
+        let second = api_keys::create_postgres_for_test_on_connection(
+            &mut schema.conn,
+            api_keys::CreateParams { expiration: None },
+        )
+        .await?;
         assert_eq!(
             api_keys::list_postgres_on_connection(&mut schema.conn)
                 .await?
-                .len(),
-            1
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![created.row.id, second.row.id]
         );
 
         api_keys::expire_postgres_by_prefix_on_connection(
@@ -553,6 +560,11 @@ async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
         api_keys::destroy_postgres_by_prefix_on_connection(
             &mut schema.conn,
             &created.row.display_prefix(),
+        )
+        .await?;
+        api_keys::destroy_postgres_by_prefix_on_connection(
+            &mut schema.conn,
+            &second.row.display_prefix(),
         )
         .await?;
         assert!(

@@ -215,7 +215,7 @@ pub async fn get_by_prefix(pool: &SqlitePool, display_prefix: &str) -> Result<Ap
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKeyRow>> {
-    let query = api_key_select("ORDER BY created_at DESC, id DESC");
+    let query = api_key_select("ORDER BY id ASC");
     sqlx::query_as::<_, ApiKeyRow>(&query)
         .fetch_all(pool)
         .await
@@ -384,7 +384,7 @@ pub async fn list_postgres(pool: &PgPool) -> Result<Vec<ApiKeyRow>> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<ApiKeyRow>> {
-    let query = postgres_api_key_select("ORDER BY created_at DESC, id DESC");
+    let query = postgres_api_key_select("ORDER BY id ASC");
     sqlx::query_as::<_, ApiKeyRow>(&query)
         .fetch_all(&mut *conn)
         .await
@@ -710,6 +710,23 @@ mod tests {
             .await
             .unwrap();
         assert!(list(db.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_orders_by_id_ascending_like_headscale_go() {
+        let db = fresh_db().await;
+        let first = create_for_test(db.pool(), CreateParams { expiration: None })
+            .await
+            .unwrap();
+        let second = create_for_test(db.pool(), CreateParams { expiration: None })
+            .await
+            .unwrap();
+
+        let rows = list(db.pool()).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first.row.id, second.row.id]
+        );
     }
 
     #[tokio::test]

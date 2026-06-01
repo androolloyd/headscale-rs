@@ -103,6 +103,14 @@ async fn postgres_preauth_key_primitives_match_sqlite_contract() -> TestResult {
         assert_eq!(
             preauth_keys::list_all_postgres_on_connection(&mut schema.conn)
                 .await?
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![created.row.id, userless.row.id]
+        );
+        assert_eq!(
+            preauth_keys::list_all_postgres_on_connection(&mut schema.conn)
+                .await?
                 .len(),
             2
         );
@@ -154,6 +162,14 @@ async fn postgres_preauth_key_primitives_match_sqlite_contract() -> TestResult {
             },
         )
         .await?;
+        assert_eq!(
+            preauth_keys::list_postgres_by_user_on_connection(&mut schema.conn, "alice")
+                .await?
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![created.row.id, expiring.row.id]
+        );
         preauth_keys::expire_postgres_on_connection(&mut schema.conn, expiring.row.id).await?;
         assert_eq!(
             preauth_keys::try_use_postgres_on_connection(&mut schema.conn, &expiring.plaintext)

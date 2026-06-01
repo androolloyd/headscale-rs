@@ -8,7 +8,7 @@
 //!   plaintext, bcrypt-verify the secret, and return the row.
 //! * [`expire`] — set `expiration` to now, leaving the row in place.
 //! * [`destroy`] — clear assigned nodes, then delete the row outright.
-//! * [`list_by_user`] — admin listing per user (newest first).
+//! * [`list_by_user`] — admin listing per user (oldest first).
 //! * [`try_use`] — atomic single-use redemption: if `reusable=0` and
 //!   `used_at IS NULL`, flip `used_at` to now in one statement and
 //!   return the row; reject otherwise.
@@ -722,14 +722,14 @@ fn map_destroy_err(e: sqlx::Error) -> DbError {
     }
 }
 
-/// List all keys belonging to `user_id`, newest first.
+/// List all keys belonging to `user_id`, oldest first.
 pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> Result<Vec<PreauthKeyRow>> {
     let storage_user_id = match resolve_storage_user_id(pool, user_id).await {
         Ok(Some(user_id)) => user_id,
         Ok(None) | Err(DbError::Constraint(_)) => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let query = preauth_key_select("WHERE user_id = ? ORDER BY created_at DESC, id DESC");
+    let query = preauth_key_select("WHERE user_id = ? ORDER BY id ASC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
         .bind(storage_user_id)
         .fetch_all(pool)
@@ -753,7 +753,7 @@ pub async fn list_postgres_by_user_on_connection(
         Ok(None) | Err(DbError::Constraint(_)) => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let query = postgres_preauth_key_select("WHERE user_id = $1 ORDER BY created_at DESC, id DESC");
+    let query = postgres_preauth_key_select("WHERE user_id = $1 ORDER BY id ASC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
         .bind(storage_user_id)
         .fetch_all(&mut *conn)
@@ -761,11 +761,11 @@ pub async fn list_postgres_by_user_on_connection(
     Ok(rows)
 }
 
-/// List every key in the store, newest first. Used by the admin UI's
+/// List every key in the store, oldest first. Used by the admin UI's
 /// "all keys" page (which Tailscale's `headscale preauthkey list`
 /// covers via `--user` filtering on the client).
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<PreauthKeyRow>> {
-    let query = preauth_key_select("ORDER BY created_at DESC, id DESC");
+    let query = preauth_key_select("ORDER BY id ASC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
         .fetch_all(pool)
         .await?;
@@ -782,7 +782,7 @@ pub async fn list_all_postgres(pool: &PgPool) -> Result<Vec<PreauthKeyRow>> {
 pub async fn list_all_postgres_on_connection(
     conn: &mut PgConnection,
 ) -> Result<Vec<PreauthKeyRow>> {
-    let query = postgres_preauth_key_select("ORDER BY created_at DESC, id DESC");
+    let query = postgres_preauth_key_select("ORDER BY id ASC");
     let rows = sqlx::query_as::<_, PreauthKeyRow>(&query)
         .fetch_all(&mut *conn)
         .await?;
@@ -1358,31 +1358,32 @@ mod tests {
         assert_eq!(c.row.tags, "[]");
     }
 
-    /// Go: TestListPreAuthKeys — list returns multiple, newest first.
+    /// Go: TestListPreAuthKeys — list returns multiple in ID order.
     #[tokio::test]
-    async fn list_by_user_orders_newest_first() {
+    async fn list_by_user_orders_by_id_ascending() {
         let db = fresh_db().await;
         let a = create_for_test(db.pool(), alice()).await.unwrap();
-        // small sleep-equivalent: distinct created_at + id ordering
-        // doesn't need wall-clock spacing because the ORDER BY ties
-        // on `id DESC`.
         let b = create_for_test(db.pool(), alice()).await.unwrap();
         let list = list_by_user(db.pool(), "alice").await.unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].id, b.row.id, "newest first");
-        assert_eq!(list[1].id, a.row.id);
+        assert_eq!(list[0].id, a.row.id);
+        assert_eq!(list[1].id, b.row.id);
     }
 
     /// list_all returns every user's keys.
     #[tokio::test]
     async fn list_all_returns_all_users() {
         let db = fresh_db().await;
-        let _a = create_for_test(db.pool(), alice()).await.unwrap();
+        let a = create_for_test(db.pool(), alice()).await.unwrap();
         let mut bob = alice();
         bob.user_id = "bob".into();
-        let _b = create_for_test(db.pool(), bob).await.unwrap();
+        let b = create_for_test(db.pool(), bob).await.unwrap();
         let all = list_all(db.pool()).await.unwrap();
         assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![a.row.id, b.row.id]
+        );
     }
 
     /// `try_use` on an unknown token ⇒ NotFound.

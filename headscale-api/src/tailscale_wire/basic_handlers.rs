@@ -343,12 +343,7 @@ pub async fn handle_blank() -> Response {
 }
 
 pub async fn handle_debug_redirect() -> Response {
-    (
-        StatusCode::MOVED_PERMANENTLY,
-        [(header::LOCATION, "/debug/")],
-        "",
-    )
-        .into_response()
+    go_permanent_redirect("/debug/")
 }
 
 pub async fn handle_debug_index() -> Response {
@@ -365,6 +360,30 @@ pub async fn handle_debug_gc() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         "running GC...\nDone.\n",
+    )
+        .into_response()
+}
+
+fn go_permanent_redirect(location: &'static str) -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [
+            (header::LOCATION, location),
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        ],
+        format!("<a href=\"{location}\">Moved Permanently</a>.\n\n"),
+    )
+        .into_response()
+}
+
+fn go_pprof_error(status: StatusCode, message: &'static str) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE.as_str(), "text/plain; charset=utf-8"),
+            ("x-go-pprof", "1"),
+        ],
+        format!("{message}\n"),
     )
         .into_response()
 }
@@ -453,12 +472,7 @@ fn go_expvar_memstats_placeholder() -> serde_json::Value {
 }
 
 pub async fn handle_debug_pprof_redirect() -> Response {
-    (
-        StatusCode::MOVED_PERMANENTLY,
-        [(header::LOCATION, "/debug/pprof/")],
-        "",
-    )
-        .into_response()
+    go_permanent_redirect("/debug/pprof/")
 }
 
 pub async fn handle_debug_pprof_index() -> Response {
@@ -481,12 +495,7 @@ pub async fn handle_debug_pprof_cmdline() -> Response {
 
 pub async fn handle_debug_pprof_profile(Path(profile): Path<String>) -> Response {
     if !PPROF_PROFILE_NAMES.contains(&profile.as_str()) {
-        return (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("Unknown profile: {profile}\n"),
-        )
-            .into_response();
+        return go_pprof_error(StatusCode::NOT_FOUND, "Unknown profile");
     }
 
     (
@@ -525,12 +534,7 @@ pub async fn handle_debug_pprof_trace() -> Response {
 }
 
 pub async fn handle_debug_statsviz_redirect() -> Response {
-    (
-        StatusCode::MOVED_PERMANENTLY,
-        [(header::LOCATION, "/debug/statsviz/")],
-        "",
-    )
-        .into_response()
+    go_permanent_redirect("/debug/statsviz/")
 }
 
 pub async fn handle_debug_statsviz_index() -> Response {
@@ -3156,6 +3160,26 @@ mod tests {
         );
     }
 
+    async fn assert_go_servemux_redirect(resp: axum::response::Response, location: &str) {
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some(location)
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let expected = format!("<a href=\"{location}\">Moved Permanently</a>.\n\n");
+        assert_eq!(&body[..], expected.as_bytes());
+    }
+
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let server = Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap());
@@ -3761,13 +3785,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            resp.headers()
-                .get(header::LOCATION)
-                .and_then(|v| v.to_str().ok()),
-            Some("/debug/")
-        );
+        assert_go_servemux_redirect(resp, "/debug/").await;
     }
 
     #[tokio::test]
@@ -3969,14 +3987,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(redirect.status(), StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            redirect
-                .headers()
-                .get(header::LOCATION)
-                .and_then(|v| v.to_str().ok()),
-            Some("/debug/pprof/")
-        );
+        assert_go_servemux_redirect(redirect, "/debug/pprof/").await;
 
         let index = app
             .clone()
@@ -3994,6 +4005,34 @@ mod tests {
         assert!(body.contains("Types of profiles available"), "{body}");
         assert!(body.contains("goroutine"), "{body}");
         assert!(body.contains("cmdline"), "{body}");
+
+        let unknown = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/pprof/not-a-profile")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            unknown
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(
+            unknown
+                .headers()
+                .get("x-go-pprof")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let body = to_bytes(unknown.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"Unknown profile\n");
 
         let goroutine = app
             .oneshot(
@@ -4026,14 +4065,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(redirect.status(), StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            redirect
-                .headers()
-                .get(header::LOCATION)
-                .and_then(|v| v.to_str().ok()),
-            Some("/debug/statsviz/")
-        );
+        assert_go_servemux_redirect(redirect, "/debug/statsviz/").await;
 
         let index = app
             .clone()

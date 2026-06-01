@@ -3053,7 +3053,7 @@ mod tests {
     use axum::body::to_bytes;
     use chrono::Utc;
     use std::collections::{BTreeSet, HashMap};
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::ServiceExt;
@@ -3118,6 +3118,17 @@ mod tests {
             mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, dir)
+    }
+
+    fn request_with_peer(uri: &str, peer: SocketAddr) -> axum::http::Request<axum::body::Body> {
+        let mut request = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        request
     }
 
     fn record(
@@ -3732,6 +3743,80 @@ mod tests {
             );
             assert!(body.contains(description), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn debug_access_rejects_public_peer_without_key_like_tsweb() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(request_with_peer(
+                "/debug/overview",
+                "203.0.113.10:54321".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_security_headers(resp.headers());
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"debug access denied\n");
+    }
+
+    #[tokio::test]
+    async fn debug_access_allows_tailscale_peer_like_tsweb() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(request_with_peer(
+                "/debug/overview",
+                "100.64.0.10:54321".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("=== Headscale State Overview ==="), "{body}");
+    }
+
+    #[tokio::test]
+    async fn debug_access_rejects_x_forwarded_for_like_tsweb() {
+        let (state, _dir) = fixture_state();
+        let mut req = request_with_peer("/debug/overview", "127.0.0.1:54321".parse().unwrap());
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+
+        let resp = router(state).oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"debug access denied\n");
+    }
+
+    #[tokio::test]
+    async fn debug_access_keeps_metrics_scrapeable_from_public_peers() {
+        let (state, _dir) = fixture_state();
+
+        let resp = router(state)
+            .oneshot(request_with_peer(
+                "/metrics",
+                "203.0.113.10:54321".parse().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("# TYPE headscale_nodes_registered gauge"));
     }
 
     #[tokio::test]

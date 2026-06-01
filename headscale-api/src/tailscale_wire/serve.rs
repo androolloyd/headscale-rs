@@ -287,9 +287,12 @@ pub async fn serve(
     let (metrics, metrics_addr) = if let Some((metrics_listener, metrics_addr)) = metrics_listener {
         let metrics_app = metrics_debug_router(state.clone());
         let metrics = tokio::spawn(async move {
-            axum::serve(metrics_listener, metrics_app)
-                .await
-                .map_err(std::io::Error::other)
+            axum::serve(
+                metrics_listener,
+                metrics_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(std::io::Error::other)
         });
         (Some(metrics), Some(metrics_addr))
     } else {

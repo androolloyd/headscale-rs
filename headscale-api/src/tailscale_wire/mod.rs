@@ -35,7 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
@@ -46,10 +46,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::{
     Router,
-    extract::Request,
-    http::{HeaderMap, HeaderName, HeaderValue},
+    extract::{ConnectInfo, Request},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
-    response::Response as AxumResponse,
+    response::{IntoResponse, Response as AxumResponse},
     routing::{any, get, head, post},
 };
 use chrono::{DateTime, Utc};
@@ -84,6 +84,9 @@ pub const BATCHER_OFFLINE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 6
 /// Headscale-go retains disconnected batcher entries for rapid reconnects.
 pub const BATCHER_OFFLINE_CLEANUP_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 const MAP_CHANGE_HISTORY_LIMIT: usize = 128;
+const TS_ALLOW_DEBUG_IP_ENV: &str = "TS_ALLOW_DEBUG_IP";
+const TS_DEBUG_KEY_PATH_ENV: &str = "TS_DEBUG_KEY_PATH";
+const TS_DEBUG_TRUSTED_CIDRS_ENV: &str = "TS_DEBUG_TRUSTED_CIDRS";
 
 pub mod acme;
 pub mod basic_handlers;
@@ -6767,7 +6770,117 @@ pub fn metrics_debug_router(state: WireState) -> Router {
             let metrics_registry = Arc::clone(&metrics_registry);
             async move { record_http_metrics(metrics_registry, req, next).await }
         }))
+        .layer(middleware::from_fn(debug_access_control))
         .layer(middleware::from_fn(security_headers))
+}
+
+async fn debug_access_control(req: Request, next: Next) -> AxumResponse {
+    if is_debug_path(req.uri().path()) && !allow_debug_access(&req) {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "debug access denied\n",
+        )
+            .into_response();
+    }
+
+    next.run(req).await
+}
+
+fn is_debug_path(path: &str) -> bool {
+    path == "/debug" || path.starts_with("/debug/")
+}
+
+fn allow_debug_access(req: &Request) -> bool {
+    if allow_debug_access_with_key(req) {
+        return true;
+    }
+
+    if req
+        .headers()
+        .get("x-forwarded-for")
+        .is_some_and(|value| !value.as_bytes().is_empty())
+    {
+        return false;
+    }
+
+    let Some(ip) = debug_peer_ip(req) else {
+        return false;
+    };
+
+    is_tailscale_ip(ip)
+        || ip.is_loopback()
+        || std::env::var(TS_ALLOW_DEBUG_IP_ENV).is_ok_and(|allowed| allowed == ip.to_string())
+        || debug_trusted_cidrs_contains(ip)
+}
+
+fn allow_debug_access_with_key(req: &Request) -> bool {
+    if req.method() != axum::http::Method::GET {
+        return false;
+    }
+
+    let Some(debug_key) = req.uri().query().and_then(debug_key_from_query) else {
+        return false;
+    };
+    let Ok(key_path) = std::env::var(TS_DEBUG_KEY_PATH_ENV) else {
+        return false;
+    };
+    if key_path.is_empty() {
+        return false;
+    }
+
+    fs::read_to_string(key_path).is_ok_and(|contents| contents.trim() == debug_key)
+}
+
+fn debug_key_from_query(query: &str) -> Option<String> {
+    form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
+        (key == "debugkey" && !value.is_empty()).then(|| value.into_owned())
+    })
+}
+
+fn debug_peer_ip(req: &Request) -> Option<IpAddr> {
+    if let Some(connect_info) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return Some(connect_info.0.ip());
+    }
+
+    #[cfg(test)]
+    {
+        return Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+fn is_tailscale_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            let in_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+            let in_chromeos_vm_range =
+                octets[0] == 100 && octets[1] == 115 && matches!(octets[2], 92 | 93);
+            in_cgnat && !in_chromeos_vm_range
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+    }
+}
+
+fn debug_trusted_cidrs_contains(ip: IpAddr) -> bool {
+    let Ok(raw) = std::env::var(TS_DEBUG_TRUSTED_CIDRS_ENV) else {
+        return false;
+    };
+
+    raw.split(',').map(str::trim).any(|value| {
+        !value.is_empty()
+            && value
+                .parse::<ipnet::IpNet>()
+                .is_ok_and(|cidr| cidr.contains(&ip))
+    })
 }
 
 /// Apply the same browser-facing hardening headers that headscale-go attaches

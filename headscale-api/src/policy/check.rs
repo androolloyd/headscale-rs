@@ -1101,9 +1101,7 @@ mod tests {
             ),
         ] {
             let doc = parse_hujson_policy(raw).unwrap();
-            let err = check_policy_semantics(&doc, &nodes)
-                .unwrap_err()
-                .to_string();
+            let err = check_policy_semantics(&doc, &nodes).unwrap_err();
             assert!(
                 err.starts_with("test(s) failed:\n"),
                 "{name} should use upstream wrapper, got {err}"

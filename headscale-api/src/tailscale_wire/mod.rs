@@ -2078,10 +2078,16 @@ struct NodeStoreWriteQueue {
     tx: std_mpsc::Sender<NodeStoreWriteWork>,
 }
 
-struct NodeStoreWriteWork {
-    node_key_hex: String,
-    rec: MachineRecord,
-    result_tx: std_mpsc::Sender<bool>,
+enum NodeStoreWriteWork {
+    Upsert {
+        node_key_hex: String,
+        rec: Box<MachineRecord>,
+        result_tx: std_mpsc::Sender<bool>,
+    },
+    Delete {
+        node_key_hex: String,
+        result_tx: std_mpsc::Sender<bool>,
+    },
 }
 
 /// Owns the optional NodeStore write worker installed on a [`MachineRegistry`].
@@ -2458,17 +2464,18 @@ impl MachineRegistry {
         self.metrics
             .nodestore_queue_depth
             .fetch_add(1, Ordering::SeqCst);
-        let result = match queue.tx.send(NodeStoreWriteWork {
+        let result = match queue.tx.send(NodeStoreWriteWork::Upsert {
             node_key_hex,
-            rec,
+            rec: Box::new(rec),
             result_tx,
         }) {
             Ok(()) => result_rx.recv().unwrap_or_else(|_| {
                 self.apply_nodestore_upsert_direct(fallback_node_key_hex, fallback_rec)
             }),
-            Err(std_mpsc::SendError(work)) => {
-                self.apply_nodestore_upsert_direct(work.node_key_hex, work.rec)
-            }
+            Err(std_mpsc::SendError(NodeStoreWriteWork::Upsert {
+                node_key_hex, rec, ..
+            })) => self.apply_nodestore_upsert_direct(node_key_hex, *rec),
+            Err(std_mpsc::SendError(NodeStoreWriteWork::Delete { .. })) => unreachable!(),
         };
         self.metrics
             .nodestore_queue_depth
@@ -2492,6 +2499,45 @@ impl MachineRegistry {
         existed
     }
 
+    fn enqueue_nodestore_delete(&self, queue: &NodeStoreWriteQueue, node_key_hex: String) -> bool {
+        let fallback_node_key_hex = node_key_hex.clone();
+        let (result_tx, result_rx) = std_mpsc::channel();
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_add(1, Ordering::SeqCst);
+        let result = match queue.tx.send(NodeStoreWriteWork::Delete {
+            node_key_hex,
+            result_tx,
+        }) {
+            Ok(()) => result_rx
+                .recv()
+                .unwrap_or_else(|_| self.apply_nodestore_delete_direct(&fallback_node_key_hex)),
+            Err(std_mpsc::SendError(NodeStoreWriteWork::Delete { node_key_hex, .. })) => {
+                self.apply_nodestore_delete_direct(&node_key_hex)
+            }
+            Err(std_mpsc::SendError(NodeStoreWriteWork::Upsert { .. })) => unreachable!(),
+        };
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    fn apply_nodestore_delete_direct(&self, node_key_hex: &str) -> bool {
+        let start = Instant::now();
+        let removed = {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            let removed = next.remove(node_key_hex).is_some();
+            *g = Arc::new(next);
+            removed
+        };
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation("delete", elapsed);
+        self.record_nodestore_batch(1, elapsed);
+        removed
+    }
+
     fn apply_nodestore_upsert_batch(&self, batch: Vec<NodeStoreWriteWork>) {
         if batch.is_empty() {
             return;
@@ -2503,20 +2549,35 @@ impl MachineRegistry {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             for work in batch {
-                let existed = next.contains_key(&work.node_key_hex);
-                next.insert(work.node_key_hex, work.rec);
-                completions.push((work.result_tx, existed));
+                match work {
+                    NodeStoreWriteWork::Upsert {
+                        node_key_hex,
+                        rec,
+                        result_tx,
+                    } => {
+                        let existed = next.contains_key(&node_key_hex);
+                        next.insert(node_key_hex, *rec);
+                        completions.push(("put", result_tx, existed));
+                    }
+                    NodeStoreWriteWork::Delete {
+                        node_key_hex,
+                        result_tx,
+                    } => {
+                        let removed = next.remove(&node_key_hex).is_some();
+                        completions.push(("delete", result_tx, removed));
+                    }
+                }
             }
             *g = Arc::new(next);
         }
 
         let elapsed = start.elapsed();
-        for _ in 0..completions.len() {
-            self.record_nodestore_operation("put", elapsed);
+        for (operation, _, _) in &completions {
+            self.record_nodestore_operation(operation, elapsed);
         }
         self.record_nodestore_batch(completions.len(), elapsed);
-        for (tx, existed) in completions {
-            let _ = tx.send(existed);
+        for (_, tx, result) in completions {
+            let _ = tx.send(result);
         }
     }
 
@@ -3636,17 +3697,25 @@ impl MachineRegistry {
         };
 
         self.cancel_stream_connections(node_id);
-        let removed = self.update_with_operation_and_optional_change("delete", |map| {
-            if map.remove(node_key_hex).is_some() {
-                (true, Some(PendingMapChange::peers_removed(vec![node_id])))
-            } else {
-                (false, None)
-            }
-        });
+        let queue = self.nodestore_write_queue.read().clone();
+        let removed = if let Some(queue) = queue.as_ref() {
+            self.enqueue_nodestore_delete(queue, node_key_hex.to_string())
+        } else {
+            self.update_with_operation_and_optional_change("delete", |map| {
+                if map.remove(node_key_hex).is_some() {
+                    (true, Some(PendingMapChange::peers_removed(vec![node_id])))
+                } else {
+                    (false, None)
+                }
+            })
+        };
         if removed {
             self.forget_batcher_connection_state(node_id);
             if let Some(gc) = self.ephemeral_gc() {
                 gc.cancel(node_key_hex);
+            }
+            if queue.is_some() {
+                self.wake_waiters_with(PendingMapChange::peers_removed(vec![node_id]));
             }
         }
         removed
@@ -5103,6 +5172,52 @@ mod registry_tests {
         let batch_size = reg.nodestore_batch_size_metrics();
         assert_eq!(batch_size.count, 1);
         assert_eq!(batch_size.bucket("2"), 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_batches_concurrent_deletes() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-delete-{idx}");
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || first_reg.delete("node-delete-1"));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first delete did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.len(),
+            2,
+            "first delete should wait for another item or the timeout"
+        );
+
+        assert!(reg.delete("node-delete-2"));
+        assert!(first.join().expect("first delete thread should finish"));
+
+        assert_eq!(reg.len(), 0);
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("delete")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
     }
 
     #[test]

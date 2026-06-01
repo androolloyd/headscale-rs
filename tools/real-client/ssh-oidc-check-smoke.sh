@@ -510,7 +510,7 @@ EOF
   esac
 
   echo "::group::start headscale-rs OIDC SSH server"
-  target/debug/headscale --config "${config_path}" server \
+  target/debug/headscale --config "${config_path}" serve \
     >"${work_dir}/headscale-rs.stdout" \
     2>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"

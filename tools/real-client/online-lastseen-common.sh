@@ -457,6 +457,44 @@ wait_for() {
   done
 }
 
+dump_server_startup_logs() {
+  local reason="$1"
+  local path
+  echo "::group::${target} server startup debug (${reason})"
+  for path in \
+    "${work_dir}/${target}.stderr" \
+    "${work_dir}/${target}.stdout" \
+    "${work_dir}/${target}-health.stderr" \
+    "${work_dir}/${target}-metrics-debug.stderr" \
+    "${work_dir}/${target}-grpc-health.stderr" \
+    "${work_dir}/${target}-grpc-health.stdout"; do
+    if [[ -s "${path}" ]]; then
+      echo "--- ${path} ---" >&2
+      sed -n '1,220p' "${path}" >&2 || true
+    fi
+  done
+  echo "::endgroup::"
+}
+
+wait_for_server() {
+  local label="$1"
+  local cmd="$2"
+  local deadline=$((SECONDS + timeout_secs))
+  until eval "${cmd}"; do
+    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      echo "${target} server exited while waiting for ${label}" >&2
+      dump_server_startup_logs "server exited before ${label}"
+      return 1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for ${label}" >&2
+      dump_server_startup_logs "timed out waiting for ${label}"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 run_with_timeout() {
   local label="$1"
   shift
@@ -860,7 +898,7 @@ start_server() {
   case "${target}" in
     rust)
       mkdir -p "${work_dir}/state"
-      "${headscale_bin}" --config "${config_path}" server \
+      "${headscale_bin}" --config "${config_path}" serve \
         >"${work_dir}/${target}.stdout" \
         2>"${work_dir}/${target}.stderr" &
       ;;
@@ -871,14 +909,16 @@ start_server() {
       ;;
   esac
   server_pid="$!"
-  wait_for "${target} health" "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null"
+  wait_for_server "${target} health" \
+    "curl ${health_curl_opts} '${local_control_url}/health' >/dev/null 2>'${work_dir}/${target}-health.stderr'"
   if [[ "${target}" == "rust" ]]; then
-    wait_for "${target} TLS certificate" "test -s '${tls_cert_path}'"
+    wait_for_server "${target} TLS certificate" "test -s '${tls_cert_path}'"
   fi
   if ((expect_debug_ping)); then
-    wait_for "${target} metrics debug" "curl ${health_curl_opts} '$(debug_ping_url)' >/dev/null"
+    wait_for_server "${target} metrics debug" \
+      "curl ${health_curl_opts} '$(debug_ping_url)' >/dev/null 2>'${work_dir}/${target}-metrics-debug.stderr'"
   fi
-  wait_for "${target} gRPC" "headscale_health_probe" || {
+  wait_for_server "${target} gRPC" "headscale_health_probe" || {
     dump_grpc_health_debug
     return 1
   }
@@ -920,7 +960,7 @@ create_user_and_key() {
           -o json preauthkeys create
           --user "${user_id}"
           --reusable
-          --expires-in 1h
+          --expiration 1h
         )
         ;;
       headscale-go)

@@ -151,7 +151,7 @@ start_server() {
   echo "::endgroup::"
 
   echo "::group::start headscale-rs server"
-  "${headscale_bin}" --config "${config_path}" server \
+  "${headscale_bin}" --config "${config_path}" serve \
     >"${work_dir}/headscale-rs.stdout" \
     2>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"
@@ -170,7 +170,7 @@ create_user_and_key() {
   headscale_cmd -o json preauthkeys create \
     --user "${user_id}" \
     --reusable \
-    --expires-in 1h \
+    --expiration 1h \
     >"${work_dir}/preauth.json"
   authkey="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/preauth.json")"
   echo "minted ${authkey%%-*}-..."

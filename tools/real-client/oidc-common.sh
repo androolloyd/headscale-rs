@@ -400,7 +400,7 @@ EOF
   echo "::group::start headscale-rs OIDC server"
   printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stdout"
   printf '\n--- headscale-rs start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-rs.stderr"
-  target/debug/headscale --config "${config_path}" server \
+  target/debug/headscale --config "${config_path}" serve \
     >>"${work_dir}/headscale-rs.stdout" \
     2>>"${work_dir}/headscale-rs.stderr" &
   server_pid="$!"

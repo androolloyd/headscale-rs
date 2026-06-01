@@ -282,7 +282,7 @@ start_server() {
   case "${target}" in
     rust)
       mkdir -p "${work_dir}/state"
-      "${headscale_bin}" --config "${config_path}" server \
+      "${headscale_bin}" --config "${config_path}" serve \
         >"${work_dir}/${target}-${family}.stdout" \
         2>"${work_dir}/${target}-${family}.stderr" &
       ;;
@@ -318,7 +318,7 @@ create_user_and_key() {
       headscale_cmd -o json users create alice >"${work_dir}/user.json"
       local user_id
       user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/user.json")"
-      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expires-in 1h >"${work_dir}/preauth.json"
+      headscale_cmd -o json preauthkeys create --user "${user_id}" --reusable --expiration 1h >"${work_dir}/preauth.json"
       ;;
     headscale-go)
       headscale_cmd -o json users create alice >"${work_dir}/user.json"

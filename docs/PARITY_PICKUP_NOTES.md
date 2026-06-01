@@ -324,6 +324,15 @@ CLI structured-error snapshot parity was completed after `4d04612`:
 - Unknown `-o/--output` selectors now match upstream by falling back to human
   output/error formatting instead of failing local validation.
 
+API auth/error text follow-up:
+
+- Direct authenticated gRPC health coverage now table-drives missing
+  authorization metadata, opaque/non-UTF8 metadata, non-Bearer schemes, empty
+  bearer tokens, invalid bearer tokens, and valid API-key success against the
+  same upstream-style status messages.
+- Remote CLI process snapshots now include json-line connection-failure output
+  beside the existing human and JSON snapshots.
+
 Verified test targets for that slice:
 
 ```sh
@@ -796,3 +805,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   MagicDNS A/AAAA helpers remain covered by the existing API DNS tests.
 - Refreshed `tools/parity/golden/headscale-go-v0.29.0-beta.2.json` after the
   full default differential run matched Rust and pinned headscale-go.
+
+## 2026-06-01 CLI current-upstream utility audit
+
+- Tightened the CLI upstream-output shim for utility command edges: `health`,
+  `configtest`, and `dumpConfig` now return the pinned upstream help snapshots
+  when `--config`/`-c` appears before `--help`, and completion-shell extra
+  positionals now report the nested Cobra command path, for example
+  `headscale completion bash`.

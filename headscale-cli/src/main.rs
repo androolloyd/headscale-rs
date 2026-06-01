@@ -769,8 +769,17 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         }
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
+        ["health", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::GlobalConfig) => {
+            Some(UPSTREAM_HEALTH_HELP)
+        }
         ["configtest", "-h" | "--help"] | ["help", "configtest"] => Some(UPSTREAM_CONFIGTEST_HELP),
+        ["configtest", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::GlobalConfig) => {
+            Some(UPSTREAM_CONFIGTEST_HELP)
+        }
         ["dumpConfig", "-h" | "--help"] | ["help", "dumpConfig"] => Some(UPSTREAM_DUMP_CONFIG_HELP),
+        ["dumpConfig", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::GlobalConfig) => {
+            Some(UPSTREAM_DUMP_CONFIG_HELP)
+        }
         ["mockoidc", "-h" | "--help"] | ["help", "mockoidc"] => Some(UPSTREAM_MOCKOIDC_HELP),
         ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
             Some(UPSTREAM_COMPLETION_HELP)
@@ -1017,6 +1026,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
+    if let Some(error) = completion_shell_unknown_command_error(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
+    }
+
     if let Some(error) = upstream_hidden_compatibility_alias_error(parts.as_slice()) {
         return Some(format!("Error: {error}\n"));
     }
@@ -1156,7 +1169,7 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
         match (scope, arg) {
             (_, "-h" | "--help")
             | (UtilityFlagScope::Serve | UtilityFlagScope::GenerateGroup, "--force")
-            | (UtilityFlagScope::CompletionShell, "--no-descriptions") => {
+            | (UtilityFlagScope::CompletionShell, "--" | "--no-descriptions") => {
                 i += 1;
                 continue;
             }
@@ -1275,7 +1288,10 @@ fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
 }
 
 fn completion_tail_is_supported(tail: &[&str]) -> bool {
-    matches!(tail, ["--no-descriptions"]) || tail_is_help(tail)
+    tail_is_help(tail)
+        || tail
+            .iter()
+            .all(|arg| matches!(*arg, "--" | "--no-descriptions"))
 }
 
 fn version_tail_is_supported(tail: &[&str]) -> bool {
@@ -1290,6 +1306,25 @@ fn version_tail_is_supported(tail: &[&str]) -> bool {
         }
     }
     true
+}
+
+fn completion_shell_unknown_command_error(parts: &[&str]) -> Option<String> {
+    let [
+        "completion",
+        shell @ ("bash" | "fish" | "powershell" | "zsh"),
+        tail @ ..,
+    ] = parts
+    else {
+        return None;
+    };
+    if tail.is_empty() || completion_tail_is_supported(tail) {
+        return None;
+    }
+    tail.iter()
+        .find(|arg| !arg.starts_with('-'))
+        .map(|command| {
+            format!("unknown command \"{command}\" for \"headscale completion {shell}\"")
+        })
 }
 
 fn upstream_hidden_compatibility_alias_error(parts: &[&str]) -> Option<String> {
@@ -2910,6 +2945,18 @@ mod tests {
             Some(UPSTREAM_VERSION_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["health", "--config", "missing.yaml", "--help"]),
+            Some(UPSTREAM_HEALTH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["configtest", "-c", "missing.yaml", "--help"]),
+            Some(UPSTREAM_CONFIGTEST_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["dumpConfig", "--config=missing.yaml", "--help"]),
+            Some(UPSTREAM_DUMP_CONFIG_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["serve", "ignored", "--help"]),
             Some(UPSTREAM_SERVE_HELP)
         );
@@ -2941,6 +2988,10 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["server", "--help"]),
             Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into())
+        );
+        assert_eq!(
+            upstream_exact_error(&["completion", "bash", "--no-descriptions", "bad"]),
+            Some("Error: unknown command \"bad\" for \"headscale completion bash\"\n".to_string())
         );
         assert_eq!(
             upstream_exact_success_stderr(&["help", "server"]),

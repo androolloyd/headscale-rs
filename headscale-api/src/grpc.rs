@@ -2009,6 +2009,7 @@ mod upstream_tests {
     use prost::Message as _;
     use tonic::{
         Request,
+        metadata::AsciiMetadataValue,
         transport::{Endpoint, Server},
     };
     use tonic_reflection::pb::v1::{
@@ -2811,31 +2812,44 @@ mod upstream_tests {
         let _mounted = service.clone().into_service_server();
         let _auth_mounted = service.clone().into_authenticated_service_server();
 
-        let err = service
-            .health(Request::new(HealthRequest {}))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
-        assert_eq!(err.message(), "authorization token not supplied");
-
-        let mut malformed = Request::new(HealthRequest {});
-        malformed
-            .metadata_mut()
-            .insert("authorization", "Token abc".parse().unwrap());
-        let err = service.health(malformed).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
-        assert_eq!(
-            err.message(),
-            r#"missing "Bearer " prefix in "Authorization" header"#
-        );
-
-        let mut invalid = Request::new(HealthRequest {});
-        invalid
-            .metadata_mut()
-            .insert("authorization", "Bearer invalid".parse().unwrap());
-        let err = service.health(invalid).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
-        assert_eq!(err.message(), "invalid token");
+        for (name, metadata, expected_message) in [
+            (
+                "missing authorization metadata",
+                None,
+                "authorization token not supplied",
+            ),
+            (
+                "opaque authorization metadata",
+                Some(AsciiMetadataValue::try_from(&b"Bearer \xfa"[..]).unwrap()),
+                "invalid authorization metadata",
+            ),
+            (
+                "non-bearer authorization scheme",
+                Some("Token abc".parse().unwrap()),
+                r#"missing "Bearer " prefix in "Authorization" header"#,
+            ),
+            (
+                "empty bearer token",
+                Some("Bearer ".parse().unwrap()),
+                "invalid token",
+            ),
+            (
+                "invalid bearer token",
+                Some("Bearer invalid".parse().unwrap()),
+                "invalid token",
+            ),
+        ] {
+            let mut request = Request::new(HealthRequest {});
+            if let Some(metadata) = metadata {
+                request.metadata_mut().insert("authorization", metadata);
+            }
+            let err = service
+                .health(request)
+                .await
+                .expect_err(&format!("{name} unexpectedly authenticated"));
+            assert_eq!(err.code(), tonic::Code::Unauthenticated, "{name}");
+            assert_eq!(err.message(), expected_message, "{name}");
+        }
 
         let created = api_keys
             .mint(ApiKeyMintRequest { expiration: None })

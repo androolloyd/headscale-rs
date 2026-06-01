@@ -1638,7 +1638,6 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         &["configtest", "bad"][..],
         &["dumpConfig", "bad"][..],
         &["mockoidc", "bad"][..],
-        &["completion", "bash", "bad"][..],
         &["help", "version", "bad"][..],
     ] {
         let output = headscale_clean(args);
@@ -1658,6 +1657,32 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
             ),
             "stderr snapshot for {args:?}"
         );
+    }
+
+    for (args, expected) in [
+        (
+            &["completion", "bash", "bad"][..],
+            "Error: unknown command \"bad\" for \"headscale completion bash\"\n",
+        ),
+        (
+            &["completion", "bash", "--no-descriptions", "bad"][..],
+            "Error: unknown command \"bad\" for \"headscale completion bash\"\n",
+        ),
+        (
+            &["completion", "zsh", "bad"][..],
+            "Error: unknown command \"bad\" for \"headscale completion zsh\"\n",
+        ),
+    ] {
+        let output = headscale_clean(args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "unexpected status for {args:?}; stdout: {}; stderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
+        assert_eq!(stderr(&output), expected, "stderr snapshot for {args:?}");
     }
 }
 
@@ -2401,6 +2426,10 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/health_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["health", "--config", "missing.yaml", "--help"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["version", "--help"],
         include_str!("snapshots/version_help.stdout"),
     );
@@ -2409,7 +2438,15 @@ fn operator_top_level_command_help_matches_snapshots() {
         include_str!("snapshots/configtest_help.stdout"),
     );
     assert_stdout_snapshot(
+        &["configtest", "-c", "missing.yaml", "--help"],
+        include_str!("snapshots/configtest_help.stdout"),
+    );
+    assert_stdout_snapshot(
         &["dumpConfig", "--help"],
+        include_str!("snapshots/dump_config_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["dumpConfig", "--config=missing.yaml", "--help"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -2794,6 +2831,19 @@ fn implemented_admin_local_errors_match_snapshots() {
         ],
         3,
         include_str!("snapshots/grpc_remote_connection_failure_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--output=json-line",
+            "--address",
+            "http://127.0.0.1:9",
+            "--api-key",
+            "test",
+            "users",
+            "list",
+        ],
+        3,
+        include_str!("snapshots/grpc_remote_connection_failure_json_line.stderr"),
     );
 }
 

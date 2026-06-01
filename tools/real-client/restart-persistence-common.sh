@@ -14,7 +14,9 @@ case "${target}" in
 esac
 
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
-headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
+# shellcheck source=tools/real-client/headscale-go-baseline.sh
+source tools/real-client/headscale-go-baseline.sh
+headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_BASELINE_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 route="${REAL_CLIENT_RESTART_ROUTE:-10.88.0.0/24}"

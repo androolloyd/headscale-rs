@@ -626,7 +626,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   can receive PingRequest callbacks.
 - Added paired `postgres-ping-lifecycle` Rust/headscale-go rows over a
   temporary Postgres database. The row uses the current-head headscale-go audit
-  baseline because pinned v0.28.0 predates executable `/debug/ping`.
+  baseline for exact executable `/debug/ping` lifecycle coverage.
 - The real-client workflow includes the row in `PR_SMOKES`; the matrix now has
   forty-nine Postgres stock-client rows.
 
@@ -835,3 +835,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   directly against headscale-go.
 - Added paired non-Postgres `route-health-all-unhealthy-reload-restart`
   real-client rows over the existing restart harness.
+- Aligned broad real-client headscale-go wrapper defaults with the selected
+  v0.29.0-beta.2 parity baseline via
+  `tools/real-client/headscale-go-baseline.sh`; explicit
+  `HEADSCALE_GO_VERSION` overrides and current-head wrappers still win.

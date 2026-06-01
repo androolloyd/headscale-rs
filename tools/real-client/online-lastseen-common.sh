@@ -14,7 +14,9 @@ case "${target}" in
 esac
 
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
-headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
+# shellcheck source=tools/real-client/headscale-go-baseline.sh
+source tools/real-client/headscale-go-baseline.sh
+headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_BASELINE_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
 server_start_retries="${REAL_CLIENT_SERVER_START_RETRIES:-3}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"

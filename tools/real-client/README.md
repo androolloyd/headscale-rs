@@ -58,7 +58,7 @@ Use the upstream headscale-go v0.28 integration tests as the scenario inventory:
 
 Each scenario should run the same stock `tailscaled` image against:
 
-1. headscale-go v0.28.0, pinned by `tools/parity/headscale-go/go.mod`
+1. headscale-go v0.29.0-beta.2, pinned by `tools/parity/headscale-go/go.mod`
 2. this headscale-rs harness
 
 Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
@@ -70,9 +70,9 @@ headscale-rs wire surface.
 Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
 truth for the checked-in real-client matrix. Each row has a Rust harness script
 and a matching headscale-go script so parity work can compare behavior with the
-same stock `tailscaled` image. Most headscale-go rows use the pinned v0.28.0
-baseline; `ping-lifecycle` targets the current-head audit commit because v0.28.0
-predates the executable PingRequest lifecycle.
+same stock `tailscaled` image. Most headscale-go rows use the pinned
+v0.29.0-beta.2 baseline; current-head-specific rows keep using the audited
+upstream commit from `headscale-go-current.sh`.
 
 | Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
 | --- | --- | --- | --- | --- |
@@ -285,7 +285,7 @@ Useful knobs:
   default every client registers as `alice`; when set in auth-key mode, each
   client gets a user-specific key.
 
-The matching headscale-go v0.28.0 smoke is:
+The matching headscale-go v0.29.0-beta.2 smoke is:
 
 ```sh
 tools/real-client/authkey-headscale-go-smoke.sh
@@ -299,7 +299,8 @@ stock Tailscale client image, and asserts that headscale-go registered one
 
 Additional knobs:
 
-- `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
+- `HEADSCALE_GO_VERSION` defaults to the release in
+  `tools/real-client/headscale-go-baseline.sh`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 
 ## Web Registration Smoke
@@ -395,7 +396,8 @@ Useful knobs:
   `oidc-restart` and `oidc-route-approve-restart` wrappers set it.
 - `REAL_CLIENT_OIDC_ADVERTISE_ROUTES` and `REAL_CLIENT_OIDC_APPROVE_ROUTES`
   enable advertised-route persistence assertions for OIDC clients.
-- `HEADSCALE_GO_VERSION` defaults to `v0.28.0`.
+- `HEADSCALE_GO_VERSION` defaults to the release in
+  `tools/real-client/headscale-go-baseline.sh`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 - `REAL_CLIENT_OIDC_EMAIL`, `REAL_CLIENT_OIDC_USERNAME`,
   `REAL_CLIENT_OIDC_SUBJECT`, and `REAL_CLIENT_OIDC_GROUPS` control the mock
@@ -863,7 +865,8 @@ tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited
-current-head commit because pinned v0.28 does not implement `grants[].via`.
+current-head commit, which currently matches the pinned v0.29.0-beta.2
+baseline while keeping upgrade-track route behavior explicit.
 
 The route-health scenario enables HA route probes, pauses the current primary
 router container without removing route approval, and asserts that the route

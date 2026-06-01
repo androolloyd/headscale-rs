@@ -7,8 +7,8 @@ cd "${repo_root}"
 # shellcheck source=tools/real-client/headscale-go-current.sh
 source tools/real-client/headscale-go-current.sh
 
-# The pinned headscale-go v0.28.0 matrix predates /debug/ping and the
-# executable PingRequest callback lifecycle, so this row tracks audited HEAD.
+# Keep this row pinned to the audited current-head commit for exact executable
+# PingRequest callback lifecycle coverage.
 HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}" \
 REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/ping-lifecycle-headscale-go-smoke}" \
 REAL_CLIENT_EXPECT_DEBUG_PING="${REAL_CLIENT_EXPECT_DEBUG_PING:-true}" \

@@ -4,8 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
+# shellcheck source=tools/real-client/headscale-go-baseline.sh
+source tools/real-client/headscale-go-baseline.sh
+
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
-headscale_go_version="${HEADSCALE_GO_VERSION:-v0.28.0}"
+headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_BASELINE_VERSION}}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/authkey-headscale-go-smoke}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-120}"
 client_count="${REAL_CLIENT_CLIENT_COUNT:-1}"

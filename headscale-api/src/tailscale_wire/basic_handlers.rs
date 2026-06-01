@@ -69,6 +69,13 @@ const PPROF_PROFILE_NAMES: &[&str] = &[
     "mutex",
     "threadcreate",
 ];
+const GO_MEMSTATS_PAUSE_SLOTS: usize = 256;
+const GO_MEMSTATS_BYSIZE_CLASSES: [u32; 61] = [
+    0, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
+    352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792,
+    2048, 2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728,
+    10240, 10880, 12288, 13568, 14336, 16384, 18432,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
@@ -363,10 +370,25 @@ pub async fn handle_debug_gc() -> Response {
 }
 
 pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
+    let payload = debug_vars_payload(&state);
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+fn debug_vars_payload(state: &WireState) -> serde_json::Value {
     let snapshot = state.machines.snapshot();
     let dns_spec = state.dns.spec();
-    let payload = serde_json::json!({
+    serde_json::json!({
         "cmdline": env::args().collect::<Vec<_>>(),
+        "memstats": go_expvar_memstats_placeholder(),
         "rust": {
             "version": env!("CARGO_PKG_VERSION"),
             "os": env::consts::OS,
@@ -379,17 +401,55 @@ pub async fn handle_debug_vars(State(state): State<WireState>) -> Response {
             "dns_base_domain": dns_spec.base_domain,
             "derp_regions": state.derp_map.snapshot().regions.len(),
         }
-    });
+    })
+}
 
-    match serde_json::to_string_pretty(&payload) {
-        Ok(body) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-            body,
-        )
-            .into_response(),
-        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+fn go_expvar_memstats_placeholder() -> serde_json::Value {
+    let by_size = GO_MEMSTATS_BYSIZE_CLASSES
+        .iter()
+        .map(|size| {
+            serde_json::json!({
+                "Size": *size,
+                "Mallocs": 0_u64,
+                "Frees": 0_u64,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "Alloc": 0_u64,
+        "TotalAlloc": 0_u64,
+        "Sys": 0_u64,
+        "Lookups": 0_u64,
+        "Mallocs": 0_u64,
+        "Frees": 0_u64,
+        "HeapAlloc": 0_u64,
+        "HeapSys": 0_u64,
+        "HeapIdle": 0_u64,
+        "HeapInuse": 0_u64,
+        "HeapReleased": 0_u64,
+        "HeapObjects": 0_u64,
+        "StackInuse": 0_u64,
+        "StackSys": 0_u64,
+        "MSpanInuse": 0_u64,
+        "MSpanSys": 0_u64,
+        "MCacheInuse": 0_u64,
+        "MCacheSys": 0_u64,
+        "BuckHashSys": 0_u64,
+        "GCSys": 0_u64,
+        "OtherSys": 0_u64,
+        "NextGC": 0_u64,
+        "LastGC": 0_u64,
+        "PauseTotalNs": 0_u64,
+        "PauseNs": vec![0_u64; GO_MEMSTATS_PAUSE_SLOTS],
+        "PauseEnd": vec![0_u64; GO_MEMSTATS_PAUSE_SLOTS],
+        "NumGC": 0_u32,
+        "NumForcedGC": 0_u32,
+        "GCCPUFraction": 0.0_f64,
+        "EnableGC": false,
+        "DebugGC": false,
+        "BySize": by_size,
+    })
 }
 
 pub async fn handle_debug_pprof_redirect() -> Response {
@@ -3869,9 +3929,26 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/json; charset=utf-8")
         );
-        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(parsed["cmdline"].is_array(), "{parsed}");
+        assert!(parsed["memstats"]["Alloc"].is_u64(), "{parsed}");
+        assert!(parsed["memstats"]["HeapAlloc"].is_u64(), "{parsed}");
+        assert_eq!(
+            parsed["memstats"]["PauseNs"].as_array().map(Vec::len),
+            Some(GO_MEMSTATS_PAUSE_SLOTS),
+            "{parsed}"
+        );
+        assert_eq!(
+            parsed["memstats"]["PauseEnd"].as_array().map(Vec::len),
+            Some(GO_MEMSTATS_PAUSE_SLOTS),
+            "{parsed}"
+        );
+        let by_size = parsed["memstats"]["BySize"].as_array().unwrap();
+        assert_eq!(by_size.len(), GO_MEMSTATS_BYSIZE_CLASSES.len(), "{parsed}");
+        assert_eq!(by_size[1]["Size"].as_u64(), Some(8));
+        assert_eq!(by_size[1]["Mallocs"].as_u64(), Some(0));
+        assert_eq!(by_size[1]["Frees"].as_u64(), Some(0));
         assert_eq!(parsed["rust"]["os"], env::consts::OS);
         assert_eq!(parsed["rust"]["arch"], env::consts::ARCH);
         assert_eq!(parsed["headscale"]["nodes_registered"], 0);

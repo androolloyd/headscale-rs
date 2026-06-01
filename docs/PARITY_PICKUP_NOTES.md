@@ -1293,6 +1293,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   existing production restart harness.
 - Added paired `ssh-oidc-check-period-cache` Rust/headscale-go rows over the
   existing OIDC SSH check harness.
+- Generalized the OIDC SSH policy-mutation restart harness so SQLite/file
+  policy mode starts with a no-SSH policy file, mutates that policy file, and
+  restarts before approving the SSH check; added paired
+  `ssh-oidc-policy-restart` Rust/headscale-go rows for that default path.
 - The default SQLite stock-client matrix now matches the existing Postgres
-  coverage for same-tag route-via restart and OIDC SSH checkPeriod cache; the
-  bounded push/PR real-client smoke set includes both rows.
+  coverage for same-tag route-via restart, OIDC SSH checkPeriod cache, and OIDC
+  SSH policy mutation across restart; the bounded push/PR real-client smoke set
+  includes all three rows.

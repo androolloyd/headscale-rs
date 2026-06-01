@@ -89,10 +89,6 @@ if [[ "${check_result}" != "approve" && "${check_approval}" != "oidc" ]]; then
 fi
 
 if ((policy_mutation_restart_flag)); then
-  if [[ "${database_backend}" != "postgres" ]]; then
-    echo "REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART requires REAL_CLIENT_DATABASE_BACKEND=postgres" >&2
-    exit 2
-  fi
   if [[ "${check_result}" != "approve" || "${check_approval}" != "oidc" ]]; then
     echo "REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART requires OIDC-approved SSH checks" >&2
     exit 2
@@ -993,10 +989,16 @@ restart_ssh_oidc_server_and_wait() {
 mutate_database_policy_and_restart_if_requested() {
   ((policy_mutation_restart_flag)) || return 0
 
-  load_database_policy "initial no-SSH database policy" "${policy_mutation_initial_json}"
+  case "${database_backend}" in
+    sqlite) write_policy_file "${policy_mutation_initial_json}" ;;
+    postgres) load_database_policy "initial no-SSH database policy" "${policy_mutation_initial_json}" ;;
+  esac
   wait_for "pre-mutation Tailscale peer path ${client_one} to ${client_two}" \
     "tailscale_ping_succeeded '${client_one}' '${client_two}' '${work_dir}/pre-policy-mutation-ping.txt'"
-  load_database_policy "mutated OIDC SSH database policy" "${policy_mutation_final_json}"
+  case "${database_backend}" in
+    sqlite) write_policy_file "${policy_mutation_final_json}" ;;
+    postgres) load_database_policy "mutated OIDC SSH database policy" "${policy_mutation_final_json}" ;;
+  esac
   restart_ssh_oidc_server_and_wait
 }
 
@@ -1215,7 +1217,11 @@ install_headscale_go
 cat "${work_dir}/headscale-go-version.txt"
 echo "::endgroup::"
 
-write_policy_file
+if ((policy_mutation_restart_flag)); then
+  write_policy_file "${policy_mutation_initial_json}"
+else
+  write_policy_file
+fi
 start_mock_oidc
 if [[ "${target}" == "rust" ]]; then
   start_rust_server

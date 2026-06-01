@@ -1,0 +1,132 @@
+{
+  "name": "wire-dns-nextdns-nodeattrs",
+  "policy": {
+    "tagOwners": {
+      "tag:server": [
+        "ops@example.com"
+      ]
+    },
+    "acls": [],
+    "nodeAttrs": [
+      {
+        "target": [
+          "*"
+        ],
+        "attr": [
+          "drive:access"
+        ]
+      },
+      {
+        "target": [
+          "alice@example.com"
+        ],
+        "attr": [
+          "nextdns:z-profile",
+          "nextdns:a-profile"
+        ]
+      },
+      {
+        "target": [
+          "tag:server"
+        ],
+        "attr": [
+          "nextdns:server-profile",
+          "nextdns:no-device-info"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "email": "bob@example.net"
+    },
+    {
+      "id": 3,
+      "name": "ops",
+      "email": "ops@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "client-node",
+      "ipv4": "100.64.0.22",
+      "os": "linux"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "bob-node",
+      "ipv4": "100.64.0.23",
+      "os": "windows"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "server-node",
+      "ipv4": "100.64.0.33",
+      "os": "linux",
+      "tags": [
+        "tag:server"
+      ]
+    }
+  ],
+  "node_attr_checks": [
+    {
+      "name": "client-nextdns-profile-nodeattrs",
+      "node_id": 1
+    },
+    {
+      "name": "untargeted-wildcard-only-nodeattrs",
+      "node_id": 2
+    },
+    {
+      "name": "tagged-nextdns-no-device-info-nodeattrs",
+      "node_id": 3
+    }
+  ],
+  "wire": {
+    "runtime_dns_config": {
+      "magic_dns": true,
+      "base_domain": "tail.example",
+      "override_local_dns": true,
+      "nameservers": {
+        "global": [
+          "https://dns.nextdns.io/global?existing=1",
+          "https://dns.nextdns.io.attacker.example/global",
+          "https://dns.example.org/dns-query"
+        ],
+        "split": {
+          "corp.example": [
+            "https://dns.nextdns.io/split"
+          ]
+        }
+      },
+      "search_domains": [
+        "corp.example"
+      ]
+    },
+    "runtime_dns_requester_checks": [
+      {
+        "name": "client-profile-overrides-and-adds-metadata",
+        "node_id": 1
+      },
+      {
+        "name": "untargeted-nextdns-keeps-global-profile-with-metadata",
+        "node_id": 2
+      },
+      {
+        "name": "tagged-profile-suppresses-device-info",
+        "node_id": 3
+      }
+    ]
+  }
+}

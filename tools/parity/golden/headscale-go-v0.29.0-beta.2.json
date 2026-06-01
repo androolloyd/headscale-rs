@@ -2330,6 +2330,150 @@
   },
   {
     "engine": "headscale",
+    "name": "wire-dns-nextdns-nodeattrs",
+    "filter": [
+
+    ],
+    "node_attrs": [
+      {
+        "name": "client-nextdns-profile-nodeattrs",
+        "attrs": [
+          "drive:access",
+          "nextdns:a-profile",
+          "nextdns:z-profile"
+        ]
+      },
+      {
+        "name": "untargeted-wildcard-only-nodeattrs",
+        "attrs": [
+          "drive:access"
+        ]
+      },
+      {
+        "name": "tagged-nextdns-no-device-info-nodeattrs",
+        "attrs": [
+          "drive:access",
+          "nextdns:no-device-info",
+          "nextdns:server-profile"
+        ]
+      }
+    ],
+    "wire": {
+      "runtime_dns_config": {
+        "Resolvers": [
+          {
+            "Addr": "https://dns.nextdns.io/global?existing=1"
+          },
+          {
+            "Addr": "https://dns.nextdns.io.attacker.example/global"
+          },
+          {
+            "Addr": "https://dns.example.org/dns-query"
+          }
+        ],
+        "Routes": {
+          "corp.example": [
+            {
+              "Addr": "https://dns.nextdns.io/split"
+            }
+          ]
+        },
+        "Domains": [
+          "tail.example",
+          "corp.example"
+        ],
+        "Proxied": true
+      },
+      "runtime_dns_requesters": [
+        {
+          "name": "client-profile-overrides-and-adds-metadata",
+          "dns_config": {
+            "Resolvers": [
+              {
+                "Addr": "https://dns.nextdns.io/a-profile?device_ip=100.64.0.22&device_model=linux&device_name=client-node"
+              },
+              {
+                "Addr": "https://dns.nextdns.io.attacker.example/global"
+              },
+              {
+                "Addr": "https://dns.example.org/dns-query"
+              }
+            ],
+            "Routes": {
+              "corp.example": [
+                {
+                  "Addr": "https://dns.nextdns.io/a-profile?device_ip=100.64.0.22&device_model=linux&device_name=client-node"
+                }
+              ]
+            },
+            "Domains": [
+              "tail.example",
+              "corp.example"
+            ],
+            "Proxied": true
+          }
+        },
+        {
+          "name": "untargeted-nextdns-keeps-global-profile-with-metadata",
+          "dns_config": {
+            "Resolvers": [
+              {
+                "Addr": "https://dns.nextdns.io/global?device_ip=100.64.0.23&device_model=windows&device_name=bob-node&existing=1"
+              },
+              {
+                "Addr": "https://dns.nextdns.io.attacker.example/global"
+              },
+              {
+                "Addr": "https://dns.example.org/dns-query"
+              }
+            ],
+            "Routes": {
+              "corp.example": [
+                {
+                  "Addr": "https://dns.nextdns.io/split?device_ip=100.64.0.23&device_model=windows&device_name=bob-node"
+                }
+              ]
+            },
+            "Domains": [
+              "tail.example",
+              "corp.example"
+            ],
+            "Proxied": true
+          }
+        },
+        {
+          "name": "tagged-profile-suppresses-device-info",
+          "dns_config": {
+            "Resolvers": [
+              {
+                "Addr": "https://dns.nextdns.io/server-profile"
+              },
+              {
+                "Addr": "https://dns.nextdns.io.attacker.example/global"
+              },
+              {
+                "Addr": "https://dns.example.org/dns-query"
+              }
+            ],
+            "Routes": {
+              "corp.example": [
+                {
+                  "Addr": "https://dns.nextdns.io/server-profile"
+                }
+              ]
+            },
+            "Domains": [
+              "tail.example",
+              "corp.example"
+            ],
+            "Proxied": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "engine": "headscale",
     "name": "wire-dns-runtime-magic-extra-records",
     "filter": [
 

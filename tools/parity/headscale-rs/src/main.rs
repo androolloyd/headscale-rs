@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use headscale_api::{
-    dns::{DnsConfigSpec, DnsStore, MachineDnsRecord},
+    dns::{DnsConfigSpec, DnsRequester, DnsStore, MachineDnsRecord},
     policy::{
         NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, ViaRouteCandidate,
         build_peer_map_for_doc, compile_ssh_policy_with_base_url, parse_hujson_policy,
@@ -64,6 +64,10 @@ struct ScenarioNode {
     ipv4: String,
     #[serde(default)]
     ipv6: String,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    os: String,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -126,6 +130,8 @@ struct WireScenario {
     dns_config: Option<Value>,
     #[serde(default)]
     runtime_dns_config: Option<Value>,
+    #[serde(default)]
+    runtime_dns_requester_checks: Vec<RuntimeDnsRequesterCheck>,
     #[serde(default)]
     derp_map: Option<Value>,
     #[serde(default)]
@@ -235,6 +241,8 @@ struct WireOutput {
     dns_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_dns_config: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runtime_dns_requesters: Vec<RuntimeDnsRequesterOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     derp_map: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +253,18 @@ struct WireOutput {
     map_request: Option<MapRequestSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     map_response: Option<MapResponseSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeDnsRequesterCheck {
+    name: String,
+    node_id: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeDnsRequesterOut {
+    name: String,
+    dns_config: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -754,7 +774,7 @@ fn main() -> Result<()> {
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             node_attrs: run_node_attr_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
-            wire: normalize_wire(scenario.wire, &scenario.nodes)?,
+            wire: normalize_wire(scenario.wire, &scenario.nodes, &filter_nodes, &doc)?,
         });
     }
 
@@ -2113,9 +2133,63 @@ fn is_default_route(route: &str) -> Result<bool> {
     Ok(parsed.prefix_len() == 0)
 }
 
+fn run_runtime_dns_requester_checks(
+    checks: &[RuntimeDnsRequesterCheck],
+    store: &DnsStore,
+    machines: &[MachineDnsRecord],
+    nodes: &[ScenarioNode],
+    filter_nodes: &[FilterNode],
+    doc: &PolicyDoc,
+) -> Result<Vec<RuntimeDnsRequesterOut>> {
+    let mut out = Vec::with_capacity(checks.len());
+    for check in checks {
+        let scenario_node = nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "runtime dns requester check {} references unknown node {}",
+                    check.name, check.node_id
+                )
+            })?;
+        let filter_node = filter_nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "runtime dns requester check {} references unknown filter node {}",
+                    check.name, check.node_id
+                )
+            })?;
+        let view = NodeView {
+            addr: filter_node.addrs.first().map(String::as_str),
+            user: filter_node.user.as_deref(),
+            tags: &filter_node.tags,
+        };
+        let requester = DnsRequester {
+            hostname: if scenario_node.hostname.is_empty() {
+                format!("node-{}", scenario_node.id)
+            } else {
+                scenario_node.hostname.clone()
+            },
+            os: scenario_node.os.clone(),
+            primary_ip: filter_node.addrs.first().cloned(),
+            node_attrs: doc.attrs_for(&view),
+        };
+        let config = store.build_for_requester(machines, Some(&requester));
+        out.push(RuntimeDnsRequesterOut {
+            name: check.name.clone(),
+            dns_config: serde_json::to_value(config)?,
+        });
+    }
+    Ok(out)
+}
+
 fn normalize_wire(
     wire: Option<WireScenario>,
     nodes: &[ScenarioNode],
+    filter_nodes: &[FilterNode],
+    doc: &PolicyDoc,
 ) -> Result<Option<WireOutput>> {
     let Some(wire) = wire else {
         return Ok(None);
@@ -2140,8 +2214,19 @@ fn normalize_wire(
                 node_id: node.id,
             })
             .collect::<Vec<_>>();
-        let config = DnsStore::from_spec(spec).build(&machines);
+        let store = DnsStore::from_spec(spec);
+        let config = store.build(&machines);
         out.runtime_dns_config = Some(serde_json::to_value(config)?);
+        out.runtime_dns_requesters = run_runtime_dns_requester_checks(
+            &wire.runtime_dns_requester_checks,
+            &store,
+            &machines,
+            nodes,
+            filter_nodes,
+            doc,
+        )?;
+    } else if !wire.runtime_dns_requester_checks.is_empty() {
+        bail!("wire runtime_dns_requester_checks require runtime_dns_config");
     }
     if let Some(value) = wire.derp_map {
         let parsed: DerpMap = serde_json::from_value(value)?;

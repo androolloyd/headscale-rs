@@ -1027,3 +1027,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   publish before a slow stream polls again, the stream still processes the
   earlier self-targeted batch before skipping later batches that do not concern
   it. A lagged subscriber falls back to a full map response.
+
+## 2026-06-01 DNS nodeAttrs/NextDNS parity scenario
+
+- The Go/Rust parity harness now compares requester-specific runtime DNS
+  outputs, not only the static loaded DNS config. The Go helper calls
+  headscale-go's mapper DNS projection, while the Rust helper feeds matching
+  `DnsRequester` metadata through `DnsStore::build_for_requester`.
+- Added `wire-dns-nextdns-nodeattrs`, covering overlapping wildcard/user/tag
+  nodeAttrs, profile sorting, requester metadata on global and split NextDNS
+  resolvers, attacker-lookalike NextDNS host preservation, and
+  `nextdns:no-device-info`.
+- The refreshed v0.29.0-beta.2 golden now covers eighty-seven parity scenarios.

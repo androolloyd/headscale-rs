@@ -11,13 +11,18 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/juanfont/headscale/hscontrol/mapper"
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
+	_ "unsafe"
 )
+
+//go:linkname generateMapperDNSConfig github.com/juanfont/headscale/hscontrol/mapper.generateDNSConfig
+func generateMapperDNSConfig(*types.Config, types.NodeView, tailcfg.NodeCapMap) *tailcfg.DNSConfig
 
 type scenario struct {
 	Name             string            `json:"name"`
@@ -47,6 +52,7 @@ type scenarioNode struct {
 	Hostname       string   `json:"hostname"`
 	IPv4           string   `json:"ipv4"`
 	IPv6           string   `json:"ipv6,omitempty"`
+	OS             string   `json:"os,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	Routes         []string `json:"routes,omitempty"`
 	ApprovedRoutes []string `json:"approved_routes,omitempty"`
@@ -162,23 +168,35 @@ type sshActionOut struct {
 }
 
 type wireScenario struct {
-	DNSConfig        json.RawMessage `json:"dns_config,omitempty"`
-	RuntimeDNSConfig json.RawMessage `json:"runtime_dns_config,omitempty"`
-	DERPMap          json.RawMessage `json:"derp_map,omitempty"`
-	RegisterRequest  json.RawMessage `json:"register_request,omitempty"`
-	RegisterResponse json.RawMessage `json:"register_response,omitempty"`
-	MapRequest       json.RawMessage `json:"map_request,omitempty"`
-	MapResponse      json.RawMessage `json:"map_response,omitempty"`
+	DNSConfig                 json.RawMessage            `json:"dns_config,omitempty"`
+	RuntimeDNSConfig          json.RawMessage            `json:"runtime_dns_config,omitempty"`
+	RuntimeDNSRequesterChecks []runtimeDNSRequesterCheck `json:"runtime_dns_requester_checks,omitempty"`
+	DERPMap                   json.RawMessage            `json:"derp_map,omitempty"`
+	RegisterRequest           json.RawMessage            `json:"register_request,omitempty"`
+	RegisterResponse          json.RawMessage            `json:"register_response,omitempty"`
+	MapRequest                json.RawMessage            `json:"map_request,omitempty"`
+	MapResponse               json.RawMessage            `json:"map_response,omitempty"`
+}
+
+type runtimeDNSRequesterCheck struct {
+	Name   string `json:"name"`
+	NodeID uint64 `json:"node_id"`
 }
 
 type wireOutput struct {
-	DNSConfig        json.RawMessage          `json:"dns_config,omitempty"`
-	RuntimeDNSConfig json.RawMessage          `json:"runtime_dns_config,omitempty"`
-	DERPMap          json.RawMessage          `json:"derp_map,omitempty"`
-	RegisterRequest  *registerRequestSummary  `json:"register_request,omitempty"`
-	RegisterResponse *registerResponseSummary `json:"register_response,omitempty"`
-	MapRequest       *mapRequestSummary       `json:"map_request,omitempty"`
-	MapResponse      *mapResponseSummary      `json:"map_response,omitempty"`
+	DNSConfig                json.RawMessage          `json:"dns_config,omitempty"`
+	RuntimeDNSConfig         json.RawMessage          `json:"runtime_dns_config,omitempty"`
+	RuntimeDNSRequesterConfs []runtimeDNSRequesterOut `json:"runtime_dns_requesters,omitempty"`
+	DERPMap                  json.RawMessage          `json:"derp_map,omitempty"`
+	RegisterRequest          *registerRequestSummary  `json:"register_request,omitempty"`
+	RegisterResponse         *registerResponseSummary `json:"register_response,omitempty"`
+	MapRequest               *mapRequestSummary       `json:"map_request,omitempty"`
+	MapResponse              *mapResponseSummary      `json:"map_response,omitempty"`
+}
+
+type runtimeDNSRequesterOut struct {
+	Name      string          `json:"name"`
+	DNSConfig json.RawMessage `json:"dns_config"`
 }
 
 type registerRequestSummary struct {
@@ -512,7 +530,7 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
-	wire, err := normalizeWire(sc.Wire)
+	wire, err := normalizeWire(sc.Wire, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
 	}
@@ -576,8 +594,9 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 			return nil, fmt.Errorf("parse node %d approved_routes: %w", n.ID, err)
 		}
 		var hostinfo *tailcfg.Hostinfo
-		if len(routes) > 0 {
+		if len(routes) > 0 || n.OS != "" {
 			hostinfo = &tailcfg.Hostinfo{
+				OS:          n.OS,
 				RoutableIPs: routes,
 			}
 		}
@@ -869,11 +888,12 @@ func prefixStrings(prefixes []netip.Prefix) []string {
 	return out
 }
 
-func normalizeWire(in *wireScenario) (*wireOutput, error) {
+func normalizeWire(in *wireScenario, pm policy.PolicyManager, nodes types.Nodes) (*wireOutput, error) {
 	if in == nil {
 		return nil, nil
 	}
 	out := &wireOutput{}
+	var runtimeCfg *types.Config
 	if len(in.DNSConfig) > 0 {
 		var v tailcfg.DNSConfig
 		if err := json.Unmarshal(in.DNSConfig, &v); err != nil {
@@ -886,11 +906,29 @@ func normalizeWire(in *wireScenario) (*wireOutput, error) {
 		out.DNSConfig = raw
 	}
 	if len(in.RuntimeDNSConfig) > 0 {
-		raw, err := normalizeRuntimeDNSConfig(in.RuntimeDNSConfig)
+		cfg, raw, err := normalizeRuntimeDNSConfig(in.RuntimeDNSConfig)
 		if err != nil {
 			return nil, err
 		}
+		runtimeCfg = cfg
 		out.RuntimeDNSConfig = raw
+	}
+	if len(in.RuntimeDNSRequesterChecks) > 0 {
+		if len(in.RuntimeDNSConfig) == 0 {
+			return nil, fmt.Errorf("wire runtime_dns_requester_checks require runtime_dns_config")
+		}
+		if runtimeCfg == nil {
+			cfg, _, err := normalizeRuntimeDNSConfig(in.RuntimeDNSConfig)
+			if err != nil {
+				return nil, err
+			}
+			runtimeCfg = cfg
+		}
+		requesters, err := runRuntimeDNSRequesterChecks(in.RuntimeDNSRequesterChecks, runtimeCfg, pm, nodes)
+		if err != nil {
+			return nil, err
+		}
+		out.RuntimeDNSRequesterConfs = requesters
 	}
 	if len(in.DERPMap) > 0 {
 		var v tailcfg.DERPMap
@@ -938,10 +976,10 @@ func normalizeWire(in *wireScenario) (*wireOutput, error) {
 	return out, nil
 }
 
-func normalizeRuntimeDNSConfig(raw json.RawMessage) (json.RawMessage, error) {
+func normalizeRuntimeDNSConfig(raw json.RawMessage) (*types.Config, json.RawMessage, error) {
 	var dnsConfig map[string]any
 	if err := json.Unmarshal(raw, &dnsConfig); err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config: %w", err)
 	}
 
 	config := map[string]any{
@@ -961,32 +999,64 @@ func normalizeRuntimeDNSConfig(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config config marshal: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config config marshal: %w", err)
 	}
 
 	tmp, err := os.CreateTemp("", "headscale-parity-dns-*.json")
 	if err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config temp file: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config temp file: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(configJSON); err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("wire runtime_dns_config temp write: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config temp write: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config temp close: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config temp close: %w", err)
 	}
 
 	viper.Reset()
 	defer viper.Reset()
 	if err := types.LoadConfig(tmp.Name(), true); err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config load config: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config load config: %w", err)
 	}
 	cfg, err := types.LoadServerConfig()
 	if err != nil {
-		return nil, fmt.Errorf("wire runtime_dns_config server config: %w", err)
+		return nil, nil, fmt.Errorf("wire runtime_dns_config server config: %w", err)
 	}
-	return marshalRaw(cfg.TailcfgDNSConfig)
+	rawOut, err := marshalRaw(cfg.TailcfgDNSConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, rawOut, nil
+}
+
+func runRuntimeDNSRequesterChecks(
+	checks []runtimeDNSRequesterCheck,
+	cfg *types.Config,
+	pm policy.PolicyManager,
+	nodes types.Nodes,
+) ([]runtimeDNSRequesterOut, error) {
+	out := make([]runtimeDNSRequesterOut, 0, len(checks))
+	for _, check := range checks {
+		node := findNode(nodes, check.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("runtime dns requester check %q references unknown node %d", check.Name, check.NodeID)
+		}
+		if node.Hostinfo == nil {
+			node.Hostinfo = &tailcfg.Hostinfo{}
+		}
+		dnsConfig := generateMapperDNSConfig(cfg, node.View(), pm.NodeCapMap(types.NodeID(check.NodeID)))
+		raw, err := marshalRaw(dnsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("wire runtime_dns_requester %q marshal: %w", check.Name, err)
+		}
+		out = append(out, runtimeDNSRequesterOut{
+			Name:      check.Name,
+			DNSConfig: raw,
+		})
+	}
+	return out, nil
 }
 
 func marshalRaw(v any) (json.RawMessage, error) {

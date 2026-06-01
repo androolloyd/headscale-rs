@@ -391,6 +391,13 @@ per-subscriber batch event queue for tick-published map changes, preserving
 headscale-go-style ordered delivery when multiple batches publish before a
 stream polls again while retaining full-map fallback on lag.
 
+Recent coverage note (2026-06-01): the parity harness now compares
+requester-specific runtime DNS projection for NextDNS/nodeAttrs. The
+`wire-dns-nextdns-nodeattrs` scenario covers overlapping wildcard/user/tag
+nodeAttrs, NextDNS profile selection, requester metadata, split DNS resolvers,
+attacker-lookalike host preservation, and `nextdns:no-device-info`; the checked
+golden now covers eighty-seven scenarios.
+
 ## Next Implementation Order
 
 1. Finish the remaining Postgres runtime dependency chain: broaden production

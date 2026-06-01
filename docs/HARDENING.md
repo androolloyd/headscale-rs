@@ -1,11 +1,10 @@
 # Hardening and parity gates
 
-This repo has three quality gates:
+This repo has four quality gates:
 
 - Pull-request CI: formatting, clippy, tests, a 10k-input fuzz smoke run across
-  every checked-in fuzz target, headscale-go policy differential scenarios, and
-  selected paired stock-client parity smokes for changes touching the control
-  plane.
+  every checked-in fuzz target, pinned headscale-go differential scenarios, and
+  current-head Rust golden scenarios.
 - Coverage CI: `cargo llvm-cov` over the active workspace plus the excluded
   support crates, with `target/coverage/lcov.info` and a text summary uploaded
   as artifacts.

@@ -157,8 +157,10 @@ fn run_ssh_policy_test(
                 .all(|src| ssh_reachability(doc, nodes, src, dst, user).0)
             {
                 errors.push(format!(
-                    "sshTest {index}: source {:?} cannot SSH to destination {:?} as accepted user {:?}",
-                    test.src, dst.name, user
+                    "{}/{} -> {}: expected ALLOWED, got DENIED",
+                    test.src,
+                    display_ssh_test_user(user),
+                    dst.name
                 ));
             }
         }
@@ -171,8 +173,10 @@ fn run_ssh_policy_test(
                 .any(|src| ssh_reachability(doc, nodes, src, dst, user).0)
             {
                 errors.push(format!(
-                    "sshTest {index}: source {:?} can SSH to destination {:?} as denied user {:?}",
-                    test.src, dst.name, user
+                    "{}/{} -> {}: expected DENIED, got ALLOWED",
+                    test.src,
+                    display_ssh_test_user(user),
+                    dst.name
                 ));
             }
         }
@@ -180,27 +184,42 @@ fn run_ssh_policy_test(
 
     for user in &test.check {
         for dst in &dst_nodes {
-            if !srcs
-                .iter()
-                .all(|src| ssh_reachability(doc, nodes, src, dst, user).1)
-            {
-                let accept_only = srcs
-                    .iter()
-                    .all(|src| ssh_reachability(doc, nodes, src, dst, user).0);
-                let reason = if accept_only {
-                    "allowed by accept but not check"
-                } else {
-                    "not allowed by check"
-                };
+            if let Some(reason) = ssh_check_failure_reason(doc, nodes, &srcs, dst, user) {
                 errors.push(format!(
-                    "sshTest {index}: source {:?} cannot SSH-check destination {:?} as user {:?}: {reason}",
-                    test.src, dst.name, user
+                    "{}/{} -> {}: expected ALLOWED via check, got {reason}",
+                    test.src,
+                    display_ssh_test_user(user),
+                    dst.name
                 ));
             }
         }
     }
 
     errors
+}
+
+fn display_ssh_test_user(user: &str) -> &str {
+    if user.is_empty() { "\"\"" } else { user }
+}
+
+fn ssh_check_failure_reason(
+    doc: &PolicyDoc,
+    nodes: &[PolicyCheckNode],
+    srcs: &[Endpoint],
+    dst: &PolicyCheckNode,
+    user: &str,
+) -> Option<&'static str> {
+    for src in srcs {
+        let (accept, check) = ssh_reachability(doc, nodes, src, dst, user);
+        if !check {
+            return Some(if accept {
+                "ALLOWED via accept"
+            } else {
+                "DENIED"
+            });
+        }
+    }
+    None
 }
 
 fn test_allows(
@@ -958,7 +977,7 @@ mod tests {
         assert!(err.contains("alice@"));
         assert!(err.contains("prod"));
         assert!(err.contains("root"));
-        assert!(err.contains("cannot SSH to destination"));
+        assert!(err.contains("alice@/root -> prod: expected ALLOWED, got DENIED"));
     }
 
     #[test]
@@ -981,7 +1000,7 @@ mod tests {
         ];
 
         let err = check_policy_semantics(&acl_allows_tcp22_without_ssh, &nodes).unwrap_err();
-        assert!(err.contains("cannot SSH to destination"));
+        assert!(err.contains("alice@/root -> server: expected ALLOWED, got DENIED"));
 
         let acl_denies_tcp22_ssh_allows = parse_hujson_policy(
             r#"{
@@ -1003,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_tests_report_failed_accept_and_check_assertions() {
+    fn ssh_tests_report_failed_assertions_in_upstream_shape() {
         let doc = parse_hujson_policy(
             r#"{
                 "tagOwners": {"tag:server": ["alice@"]},
@@ -1011,7 +1030,7 @@ mod tests {
                     {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]}
                 ],
                 "sshTests": [
-                    {"src": "alice@", "dst": ["tag:server"], "accept": ["ubuntu"], "check": ["root"]}
+                    {"src": "alice@", "dst": ["tag:server"], "accept": ["ubuntu"], "deny": ["root"], "check": ["root"]}
                 ]
             }"#,
         )
@@ -1022,7 +1041,12 @@ mod tests {
         ];
 
         let err = check_policy_semantics(&doc, &nodes).unwrap_err();
-        assert!(err.contains("cannot SSH to destination"));
-        assert!(err.contains("allowed by accept but not check"));
+        assert!(err.contains("alice@/ubuntu -> server: expected ALLOWED, got DENIED"));
+        assert!(err.contains("alice@/root -> server: expected DENIED, got ALLOWED"));
+        assert!(
+            err.contains(
+                "alice@/root -> server: expected ALLOWED via check, got ALLOWED via accept"
+            )
+        );
     }
 }

@@ -2837,7 +2837,7 @@ assert_node_count_file() {
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     expected = Integer(ARGV.fetch(1))
-    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    nodes = payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
     abort("expected #{expected} nodes, got #{nodes.length}: #{nodes.inspect}") unless nodes.length == expected
     puts JSON.pretty_generate({nodes: nodes.length})
   ' "${path}" "${expected}"

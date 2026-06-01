@@ -1762,11 +1762,17 @@ fn normalize_grant_ip_specs(specs: &[String]) -> Vec<String> {
         }
         let (proto, ports) = trimmed
             .split_once(':')
-            .map_or(("*", trimmed), |(proto, ports)| (proto.trim(), ports.trim()));
+            .map_or(("*", trimmed), |(proto, ports)| {
+                (proto.trim(), ports.trim())
+            });
         if ports.contains(':') {
             continue;
         }
-        for port in ports.split(',').map(str::trim).filter(|port| !port.is_empty()) {
+        for port in ports
+            .split(',')
+            .map(str::trim)
+            .filter(|port| !port.is_empty())
+        {
             out.push(format!("{proto}/{port}"));
         }
     }

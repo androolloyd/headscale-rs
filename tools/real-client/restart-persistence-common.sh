@@ -186,9 +186,21 @@ if ((web_register_restart_flag && (route_via_restart_flag || route_health_restar
   echo "REAL_CLIENT_RESTART_WEB_REGISTER cannot be combined with route-via or route-health restart modes" >&2
   exit 2
 fi
+route_via_health_flag=0
 if ((route_via_restart_flag && route_health_restart_flag)); then
-  echo "REAL_CLIENT_RESTART_ROUTE_VIA and REAL_CLIENT_RESTART_ROUTE_HEALTH are mutually exclusive" >&2
-  exit 2
+  route_via_health_flag=1
+  if ((!route_via_same_tag_restart_flag || route_via_multiprefix_restart_flag || route_via_reload_restart_flag)); then
+    echo "combined route-via/route-health mode requires REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG=true without route-via reload or multiprefix modes" >&2
+    exit 2
+  fi
+  if ((route_health_reload_restart_flag || route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag)); then
+    echo "combined route-via/route-health mode cannot use route-health reload, mixed-exit, or all-unhealthy modes" >&2
+    exit 2
+  fi
+  if ((!route_via_no_restart_flag || !route_health_no_restart_flag)); then
+    echo "combined route-via/route-health mode currently requires REAL_CLIENT_ROUTE_VIA_NO_RESTART=true and REAL_CLIENT_ROUTE_HEALTH_NO_RESTART=true" >&2
+    exit 2
+  fi
 fi
 if ((route_via_no_restart_flag && ! route_via_restart_flag)); then
   echo "REAL_CLIENT_ROUTE_VIA_NO_RESTART requires a route-via mode" >&2
@@ -496,6 +508,45 @@ EOF
 write_policy() {
   if ((route_via_restart_flag)); then
     if ((route_via_same_tag_restart_flag)); then
+      if ((route_via_health_flag)); then
+        cat >"${work_dir}/policy.hujson" <<EOF
+{
+  "tagOwners": {
+    "tag:router-ha": ["router@"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "${route}": ["tag:router-ha"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["tag:router-ha"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@", "bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["alice@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-ha"]
+    },
+    {
+      "src": ["bob@"],
+      "dst": ["${route}"],
+      "ip": ["*"],
+      "via": ["tag:router-ha"]
+    }
+  ]
+}
+EOF
+        return
+      fi
       cat >"${work_dir}/policy.hujson" <<EOF
 {
   "tagOwners": {
@@ -1898,6 +1949,75 @@ assert_route_health_failover_after_restart() {
   echo "::endgroup::"
 }
 
+assert_route_via_health_peer_failover() {
+  local before_path="${work_dir}/route-via-health-before-failover.json"
+  local before_owner_path="${work_dir}/route-via-health-before-failover.owner"
+  local after_alice_path="${work_dir}/route-via-health-after-failover-alice.json"
+  local after_bob_path="${work_dir}/route-via-health-after-failover-bob.json"
+  local recovery_alice_path="${work_dir}/route-via-health-after-recovery-alice.json"
+  local recovery_bob_path="${work_dir}/route-via-health-after-recovery-bob.json"
+  local route_health_primary_name route_health_standby_name
+
+  echo "::group::assert route-via follows route-health failover"
+  wait_for "alice sees initial route-via-health owner" \
+    "route_health_peer_owner_from_netmap '${observer_name}' '${route}' '${before_path}' '${before_owner_path}'" || {
+      cat "${before_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${before_path}"
+  route_health_primary_name="$(cat "${before_owner_path}")"
+  case "${route_health_primary_name}" in
+    "${router_name}") route_health_standby_name="${router_b_name}" ;;
+    "${router_b_name}") route_health_standby_name="${router_name}" ;;
+    *)
+      echo "route-health primary ${route_health_primary_name} is not ${router_name} or ${router_b_name}" >&2
+      dump_debug
+      return 1
+      ;;
+  esac
+
+  docker pause "${route_health_primary_name}" >/dev/null
+  if ! wait_for "alice sees route-via-health failover owner" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${after_alice_path}'"; then
+    docker unpause "${route_health_primary_name}" >/dev/null 2>&1 || true
+    cat "${after_alice_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  if ! wait_for "bob sees route-via-health failover owner" \
+    "peer_netmap_route_owner_matches '${bob_name}' '${route_health_standby_name}' '${route}' '${after_bob_path}'"; then
+    docker unpause "${route_health_primary_name}" >/dev/null 2>&1 || true
+    cat "${after_bob_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${after_alice_path}"
+  cat "${after_bob_path}"
+
+  docker unpause "${route_health_primary_name}" >/dev/null
+  if ! wait_for "tailscale logged-in netmap after route-via-health recovery ${route_health_primary_name}" "tailscale_logged_in '${route_health_primary_name}'"; then
+    dump_debug
+    return 1
+  fi
+  sleep $((route_health_probe_interval_secs + route_health_probe_timeout_secs + 2))
+  wait_for "alice keeps sticky route-via-health owner after recovery" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_standby_name}' '${route}' '${recovery_alice_path}'" || {
+      cat "${recovery_alice_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  wait_for "bob keeps sticky route-via-health owner after recovery" \
+    "peer_netmap_route_owner_matches '${bob_name}' '${route_health_standby_name}' '${route}' '${recovery_bob_path}'" || {
+      cat "${recovery_bob_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${recovery_alice_path}"
+  cat "${recovery_bob_path}"
+  echo "::endgroup::"
+}
+
 assert_route_health_all_unhealthy_after_restart() {
   local before_path="${work_dir}/route-health-peer-before-all-unhealthy.json"
   local first_unhealthy_path="${work_dir}/route-health-peer-after-first-unhealthy.json"
@@ -2321,6 +2441,23 @@ if ((web_register_restart_flag)); then
     echo "expected web-registered node ID to survive restart, before=${web_node_id_before}, after=${web_node_id_after}" >&2
     exit 1
   fi
+elif ((route_via_health_flag)); then
+  create_route_via_users_and_keys
+  start_client "${router_name}"
+  start_client "${router_b_name}"
+  start_client "${observer_name}"
+  start_client "${bob_name}"
+  login_router_with_authkey "${router_name}" "${router_a_authkey}"
+  login_router_with_authkey "${router_b_name}" "${router_b_authkey}"
+  approve_router_routes "${router_name}"
+  approve_router_routes "${router_b_name}"
+  login_observer_with_web_registration "${observer_name}" alice
+  login_observer_with_web_registration "${bob_name}" bob
+  assert_route_via_persisted_nodes "initial"
+  wait_for_route_via_peer_maps "initial"
+  assert_route_via_health_peer_failover
+  echo "${target} route-via-health real-client smoke passed"
+  exit 0
 elif ((route_via_restart_flag)); then
   create_route_via_users_and_keys
   start_client "${router_name}"

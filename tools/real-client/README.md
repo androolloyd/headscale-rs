@@ -128,6 +128,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-acl-autogroup-self` | `postgres-acl-autogroup-self-smoke.sh` | `postgres-acl-autogroup-self-headscale-go-smoke.sh` | Production Postgres `autogroup:self` peer isolation |
 | Database | `postgres-route-via` | `postgres-route-via-smoke.sh` | `postgres-route-via-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` route steering |
 | Database | `postgres-route-via-same-tag` | `postgres-route-via-same-tag-smoke.sh` | `postgres-route-via-same-tag-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route steering |
+| Database | `postgres-route-via-health` | `postgres-route-via-health-smoke.sh` | `postgres-route-via-health-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route owner follows route-health failover |
 | Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
 | Database | `postgres-route-via-multiprefix` | `postgres-route-via-multiprefix-smoke.sh` | `postgres-route-via-multiprefix-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` route steering |
 | Database | `postgres-route-via-multiprefix-reload` | `postgres-route-via-multiprefix-reload-smoke.sh` | `postgres-route-via-multiprefix-reload-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload steering |
@@ -758,6 +759,8 @@ tools/real-client/postgres-route-via-smoke.sh
 tools/real-client/postgres-route-via-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-same-tag-smoke.sh
 tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-health-smoke.sh
+tools/real-client/postgres-route-via-health-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-reload-smoke.sh
 tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-multiprefix-smoke.sh

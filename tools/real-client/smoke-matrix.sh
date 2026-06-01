@@ -133,6 +133,7 @@ smoke_ids=(
   postgres-acl-autogroup-self
   postgres-route-via
   postgres-route-via-same-tag
+  postgres-route-via-health
   postgres-route-via-reload
   postgres-route-via-multiprefix
   postgres-route-via-multiprefix-reload
@@ -239,6 +240,7 @@ smoke_areas=(
   registration
   lifecycle
   lifecycle
+  database
   database
   database
   database
@@ -437,6 +439,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-acl-autogroup-self-smoke.sh
   tools/real-client/postgres-route-via-smoke.sh
   tools/real-client/postgres-route-via-same-tag-smoke.sh
+  tools/real-client/postgres-route-via-health-smoke.sh
   tools/real-client/postgres-route-via-reload-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-smoke.sh
@@ -589,6 +592,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-health-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-headscale-go-smoke.sh
@@ -741,6 +745,7 @@ smoke_assertions=(
   "production Postgres autogroup:self same-user peer isolation"
   "production Postgres current-head grants via route steering"
   "production Postgres current-head same-tag grants via route steering"
+  "production Postgres current-head same-tag grants via route owner follows route-health failover"
   "production Postgres current-head grants via policy reload steering"
   "production Postgres current-head multi-prefix grants via route steering"
   "production Postgres current-head multi-prefix grants via policy reload steering"

@@ -251,9 +251,9 @@ pub struct AutoApprovers {
 #[serde(deny_unknown_fields)]
 pub struct SshRule {
     pub action: String,
-    #[serde(deserialize_with = "deserialize_trimmed_strings")]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub src: Vec<String>,
-    #[serde(deserialize_with = "deserialize_trimmed_strings")]
+    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub dst: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub users: Vec<String>,
@@ -4035,6 +4035,41 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("invalid SSH action"));
+    }
+
+    #[test]
+    fn accepts_missing_ssh_src_or_dst_as_empty_noop_like_headscale_go() {
+        for (name, raw, want_src, want_dst) in [
+            (
+                "missing-src",
+                r#"{
+                  "tagOwners": {"tag:server": ["alice@"]},
+                  "ssh": [{
+                    "action": "accept",
+                    "dst": ["tag:server"],
+                    "users": ["root"]
+                  }]
+                }"#,
+                Vec::<String>::new(),
+                vec!["tag:server".to_string()],
+            ),
+            (
+                "missing-dst",
+                r#"{
+                  "ssh": [{
+                    "action": "accept",
+                    "src": ["autogroup:member"],
+                    "users": ["root"]
+                  }]
+                }"#,
+                vec!["autogroup:member".to_string()],
+                Vec::<String>::new(),
+            ),
+        ] {
+            let doc = parse_hujson_policy(raw).expect(name);
+            assert_eq!(doc.ssh[0].src, want_src, "{name}: src");
+            assert_eq!(doc.ssh[0].dst, want_dst, "{name}: dst");
+        }
     }
 
     #[test]

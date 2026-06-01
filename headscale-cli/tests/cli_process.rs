@@ -1662,7 +1662,6 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         &["configtest", "bad"][..],
         &["dumpConfig", "bad"][..],
         &["mockoidc", "bad"][..],
-        &["help", "version", "bad"][..],
     ] {
         let output = headscale_clean(args);
         assert_eq!(
@@ -1728,6 +1727,34 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
         assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
         assert_eq!(stderr(&output), expected, "stderr snapshot for {args:?}");
     }
+}
+
+#[test]
+fn help_topics_with_extra_arg_match_upstream_snapshots() {
+    assert_stdout_snapshot(
+        &["help", "version", "bad"],
+        include_str!("snapshots/version_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "auth", "bad"],
+        include_str!("snapshots/auth_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "auth", "register", "bad"],
+        include_str!("snapshots/auth_register_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "users", "bad"],
+        include_str!("snapshots/users_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "users", "create", "bad"],
+        include_str!("snapshots/users_create_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["help", "nodes", "bad"],
+        include_str!("snapshots/nodes_help.stdout"),
+    );
 }
 
 #[test]
@@ -2758,6 +2785,31 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
 
 #[test]
 fn implemented_admin_local_errors_match_snapshots() {
+    assert_stderr_snapshot(
+        &["auth", "register"],
+        1,
+        include_str!("snapshots/auth_register_missing_flags.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["auth", "register", "--user", "alice"],
+        1,
+        include_str!("snapshots/auth_missing_auth_id.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["auth", "approve"],
+        1,
+        include_str!("snapshots/auth_missing_auth_id.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["users", "create"],
+        1,
+        include_str!("snapshots/users_create_missing_name.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["users", "create", "--display-name", "Alice"],
+        1,
+        include_str!("snapshots/users_create_missing_name.stderr"),
+    );
     assert_stderr_snapshot(
         &["preauthkeys", "expire"],
         1,

@@ -224,6 +224,8 @@ pub enum UsersCmd {
     #[command(alias = "c", alias = "new")]
     Create {
         name: String,
+        #[arg(hide = true)]
+        extra_args: Vec<String>,
         /// Display name.
         #[arg(short = 'd', long = "display-name")]
         display_name: Option<String>,
@@ -424,18 +426,24 @@ pub enum AuthCmd {
         /// Auth ID.
         #[arg(long = "auth-id")]
         auth_id: String,
+        #[arg(hide = true)]
+        extra_args: Vec<String>,
     },
     /// Approve a pending authentication request.
     Approve {
         /// Auth ID.
         #[arg(long = "auth-id")]
         auth_id: String,
+        #[arg(hide = true)]
+        extra_args: Vec<String>,
     },
     /// Reject a pending authentication request.
     Reject {
         /// Auth ID.
         #[arg(long = "auth-id")]
         auth_id: String,
+        #[arg(hide = true)]
+        extra_args: Vec<String>,
     },
 }
 
@@ -558,6 +566,7 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
             display_name,
             email,
             picture_url,
+            ..
         } => {
             users::create_grpc(
                 &mut client,
@@ -826,11 +835,11 @@ pub async fn run_auth(conn: &ConnectArgs, cmd: &AuthCmd) -> Result<(), AdminErro
 
     let mut client = conn.build_grpc_client().await?;
     match cmd {
-        AuthCmd::Register { user, auth_id } => {
+        AuthCmd::Register { user, auth_id, .. } => {
             auth::register_grpc(&mut client, user, auth_id, fmt).await
         }
-        AuthCmd::Approve { auth_id } => auth::approve_grpc(&mut client, auth_id, fmt).await,
-        AuthCmd::Reject { auth_id } => auth::reject_grpc(&mut client, auth_id, fmt).await,
+        AuthCmd::Approve { auth_id, .. } => auth::approve_grpc(&mut client, auth_id, fmt).await,
+        AuthCmd::Reject { auth_id, .. } => auth::reject_grpc(&mut client, auth_id, fmt).await,
     }
 }
 
@@ -1348,11 +1357,17 @@ mod tests {
             ])
             .unwrap()
             .action,
-            UsersCmd::Create { name, display_name, email, picture_url }
+            UsersCmd::Create { name, display_name, email, picture_url, .. }
                 if name == "alice"
                     && display_name.as_deref() == Some("Alice Example")
                     && email.as_deref() == Some("alice@example.com")
                     && picture_url.as_deref() == Some("https://example.com/alice.png")
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from(["headscale", "create", "alice", "ignored"])
+                .unwrap()
+                .action,
+            UsersCmd::Create { name, .. } if name == "alice"
         ));
         assert!(matches!(
             UsersHarness::try_parse_from(["headscale", "list", "--identifier", "42"])
@@ -1514,23 +1529,24 @@ mod tests {
                 "alice",
                 "--auth-id",
                 "hskey-authreq-abcdefghijklmnopqrstuvwx",
+                "ignored",
             ])
             .unwrap()
             .action,
-            AuthCmd::Register { user, auth_id }
+            AuthCmd::Register { user, auth_id, .. }
                 if user == "alice" && auth_id == "hskey-authreq-abcdefghijklmnopqrstuvwx"
         ));
         assert!(matches!(
-            AuthHarness::try_parse_from(["headscale", "approve", "--auth-id", "pending-id"])
+            AuthHarness::try_parse_from(["headscale", "approve", "--auth-id", "pending-id", "ignored"])
                 .unwrap()
                 .action,
-            AuthCmd::Approve { auth_id } if auth_id == "pending-id"
+            AuthCmd::Approve { auth_id, .. } if auth_id == "pending-id"
         ));
         assert!(matches!(
             AuthHarness::try_parse_from(["headscale", "reject", "--auth-id", "pending-id"])
                 .unwrap()
                 .action,
-            AuthCmd::Reject { auth_id } if auth_id == "pending-id"
+            AuthCmd::Reject { auth_id, .. } if auth_id == "pending-id"
         ));
     }
 }

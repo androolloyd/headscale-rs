@@ -761,7 +761,11 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         parts.push(arg.as_ref().to_str()?);
     }
 
-    match parts.as_slice() {
+    upstream_known_help(parts.as_slice()).or_else(|| upstream_extra_help_topic(parts.as_slice()))
+}
+
+fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
+    match parts {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
         ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
         ["serve", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Serve) => {
@@ -972,6 +976,22 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
     }
 }
 
+fn upstream_extra_help_topic(parts: &[&str]) -> Option<&'static str> {
+    let ["help", topic @ ..] = parts else {
+        return None;
+    };
+    if topic.len() < 2 || topic.iter().any(|arg| matches!(*arg, "-h" | "--help")) {
+        return None;
+    }
+
+    for end in (2..parts.len()).rev() {
+        if let Some(help) = upstream_known_help(&parts[..end]) {
+            return Some(help);
+        }
+    }
+    None
+}
+
 fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     let mut parts = Vec::with_capacity(args.len());
     for arg in args {
@@ -1039,6 +1059,14 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
+    if let Some(error) = auth_required_flag_error(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
+    }
+
+    if users_create_missing_name_error(parts.as_slice()) {
+        return Some("Error: missing parameters\n".into());
+    }
+
     if matches!(parts.first(), Some(&"server")) {
         return Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into());
     }
@@ -1066,6 +1094,118 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             parts.join(" ")
         )
     })
+}
+
+fn auth_required_flag_error(parts: &[&str]) -> Option<String> {
+    let [
+        "auth",
+        command @ ("register" | "approve" | "reject"),
+        tail @ ..,
+    ] = parts
+    else {
+        return None;
+    };
+
+    let mut saw_auth_id = false;
+    let mut saw_user = *command != "register";
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" => return None,
+            "--auth-id" if i + 1 < tail.len() => {
+                saw_auth_id = true;
+                i += 2;
+            }
+            "--auth-id" => return None,
+            value if value.starts_with("--auth-id=") => {
+                saw_auth_id = true;
+                i += 1;
+            }
+            "--user" if *command == "register" && i + 1 < tail.len() => {
+                saw_user = true;
+                i += 2;
+            }
+            "--user" if *command == "register" => return None,
+            value if *command == "register" && value.starts_with("--user=") => {
+                saw_user = true;
+                i += 1;
+            }
+            "-u" if *command == "register" && i + 1 < tail.len() => {
+                saw_user = true;
+                i += 2;
+            }
+            value if *command == "register" && value.starts_with("-u") && value.len() > 2 => {
+                saw_user = true;
+                i += 1;
+            }
+            "--force" => i += 1,
+            "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => i += 1,
+        }
+    }
+
+    let mut missing = Vec::new();
+    if !saw_auth_id {
+        missing.push(r#""auth-id""#);
+    }
+    if !saw_user {
+        missing.push(r#""user""#);
+    }
+
+    (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))
+}
+
+fn users_create_missing_name_error(parts: &[&str]) -> bool {
+    let ["users" | "user", "create" | "c" | "new", tail @ ..] = parts else {
+        return false;
+    };
+
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" => return false,
+            "--" => return i + 1 >= tail.len(),
+            "-d" | "--display-name" | "-e" | "--email" | "-p" | "--picture-url"
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+            }
+            "-d" | "--display-name" | "-e" | "--email" | "-p" | "--picture-url" => return false,
+            value
+                if value.starts_with("--display-name=")
+                    || value.starts_with("--email=")
+                    || value.starts_with("--picture-url=")
+                    || value.starts_with("-d") && value.len() > 2
+                    || value.starts_with("-e") && value.len() > 2
+                    || value.starts_with("-p") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            "--force" => i += 1,
+            "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            value if value.starts_with('-') => return false,
+            _ => return false,
+        }
+    }
+
+    true
 }
 
 fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
@@ -2977,6 +3117,10 @@ mod tests {
             Some(UPSTREAM_VERSION_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "version", "bad"]),
+            Some(UPSTREAM_VERSION_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["health", "--config", "missing.yaml", "--help"]),
             Some(UPSTREAM_HEALTH_HELP)
         );
@@ -3036,6 +3180,22 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["completion", "bash", "--no-descriptions", "bad"]),
             Some("Error: unknown command \"bad\" for \"headscale completion bash\"\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["auth", "register"]),
+            Some("Error: required flag(s) \"auth-id\", \"user\" not set\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["auth", "register", "--user", "alice"]),
+            Some("Error: required flag(s) \"auth-id\" not set\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["auth", "approve"]),
+            Some("Error: required flag(s) \"auth-id\" not set\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["users", "create", "--display-name", "Alice"]),
+            Some("Error: missing parameters\n".to_string())
         );
         assert_eq!(
             upstream_exact_success_stderr(&["help", "server"]),
@@ -3132,6 +3292,14 @@ mod tests {
             Some(UPSTREAM_AUTH_REGISTER_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "auth", "register", "bad"]),
+            Some(UPSTREAM_AUTH_REGISTER_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "auth", "bad"]),
+            Some(UPSTREAM_AUTH_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["users", "--help"]),
             Some(UPSTREAM_USERS_HELP)
         );
@@ -3142,6 +3310,14 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["help", "users", "create"]),
             Some(UPSTREAM_USERS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "users", "create", "bad"]),
+            Some(UPSTREAM_USERS_CREATE_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "users", "bad"]),
+            Some(UPSTREAM_USERS_HELP)
         );
         assert_eq!(
             upstream_exact_help(&["user", "new", "--help"]),

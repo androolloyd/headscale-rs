@@ -5710,6 +5710,110 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_tag_update_recomputes_peer_visibility() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "tagOwners": {
+                "tag:server": ["server-owner@"],
+                "tag:db": ["server-owner@"]
+            },
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["tag:server:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "a9".repeat(32);
+        let server = "b9".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice-node", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            server.clone(),
+            policy_record(&server, "server-node", 11, "server-owner", Vec::new()),
+        );
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &alice).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert!(first.peers.is_empty());
+        assert!(
+            first
+                .user_profiles
+                .iter()
+                .all(|profile| profile.id != crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID),
+            "untagged hidden peer must not contribute the tagged-devices profile"
+        );
+
+        assert!(
+            state
+                .machines
+                .set_forced_tags(&server, vec!["tag:server".into()])
+        );
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "tag updates must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let tagged = next_zstd_map_response(&mut body).await;
+        assert!(
+            tagged.peers.is_empty(),
+            "batch-delivered tag churn should use incremental peer deltas"
+        );
+        assert!(tagged.peers_removed.is_empty());
+        let server_peer = changed_peer(&tagged, "server-node").expect("tagged peer delta");
+        assert_eq!(server_peer.id, stable_id_from_key(&server));
+        assert_eq!(
+            server_peer.user,
+            crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
+        );
+        assert!(
+            tagged
+                .user_profiles
+                .iter()
+                .any(|profile| profile.id == crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID)
+        );
+        assert!(
+            tagged.dns_config.is_some(),
+            "tag churn changes policy-visible state and should carry policy-derived DNS updates"
+        );
+
+        assert!(
+            state
+                .machines
+                .set_forced_tags(&server, vec!["tag:db".into()])
+        );
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "tag updates must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let untagged = next_zstd_map_response(&mut body).await;
+        assert!(untagged.peers.is_empty());
+        assert!(untagged.peers_changed.is_empty());
+        assert!(untagged.peers_changed_patch.is_empty());
+        assert_eq!(untagged.peers_removed, vec![stable_id_from_key(&server)]);
+        assert!(
+            untagged
+                .user_profiles
+                .iter()
+                .all(|profile| profile.id != crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID),
+            "removed tagged peer must also remove the tagged-devices profile"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_empty_acl_registry_delta_matches_headscale_go() {
         let (state, _dir) = fixture();
         let policy = r#"{"acls":[]}"#;

@@ -11,7 +11,7 @@ use rand_core::RngCore;
 use serde::Deserialize;
 
 use super::{
-    AuthWaitOutcome, MachineRecord, SshCheckBinding, WireState,
+    AuthRequestKind, AuthWaitOutcome, MachineRecord, SshCheckBinding, WireState,
     noise::{NoisePeerMachineKey, NoiseRequestCancellation},
     wire::SshAction,
 };
@@ -108,8 +108,12 @@ async fn ssh_action_followup(
     let Some(raw_auth_id) = auth_id_cache_key(auth_id) else {
         return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id");
     };
-    let Some(cached_binding) = state.registration_cache.ssh_binding(raw_auth_id) else {
-        return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id");
+    let cached_binding = match state.registration_cache.auth_request_kind(raw_auth_id) {
+        Some(AuthRequestKind::SshCheck(binding)) => binding,
+        Some(AuthRequestKind::Registration) => {
+            return ssh_error(StatusCode::BAD_REQUEST, "auth session is not for SSH check");
+        }
+        None => return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id"),
     };
     if cached_binding != binding {
         return ssh_error(
@@ -589,6 +593,41 @@ mod tests {
             .unwrap();
 
         assert_text_response(resp, StatusCode::BAD_REQUEST, b"Invalid auth_id\n").await;
+    }
+
+    #[tokio::test]
+    async fn ssh_action_rejects_registration_auth_id_like_headscale_go() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+        state.registration_cache.insert(
+            raw_auth_id.into(),
+            MachineRecord::new_at(
+                chrono::Utc::now(),
+                "3333333333333333333333333333333333333333333333333333333333333333".into(),
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                String::new(),
+                "pending-registration".into(),
+                Ipv4Addr::new(100, 64, 0, 30),
+                false,
+            ),
+        );
+
+        let resp = inner_router(state)
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-{raw_auth_id}"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_text_response(
+            resp,
+            StatusCode::BAD_REQUEST,
+            b"auth session is not for SSH check\n",
+        )
+        .await;
     }
 
     #[tokio::test]

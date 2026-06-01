@@ -123,6 +123,7 @@ pub enum MapChangeReason {
     FullUpdate,
     NodeAdded,
     NodeUpdated,
+    TagUpdate,
     PeersRemoved,
     NodeOnline,
     NodeOffline,
@@ -144,6 +145,7 @@ impl MapChangeReason {
             Self::FullUpdate => "full update",
             Self::NodeAdded => "node added",
             Self::NodeUpdated => "node updated",
+            Self::TagUpdate => "tag update",
             Self::PeersRemoved => "peers removed",
             Self::NodeOnline => "node online",
             Self::NodeOffline => "node offline",
@@ -221,7 +223,7 @@ impl MapChangeContent {
                     content.send_all_peers = true;
                 }
             }
-            MapChangeReason::PolicyChange => {
+            MapChangeReason::PolicyChange | MapChangeReason::TagUpdate => {
                 content.include_policy = true;
                 content.requires_runtime_peer_computation = true;
             }
@@ -1450,6 +1452,13 @@ pub enum AuthWaitOutcome {
     Missing,
 }
 
+/// Type of pending auth request currently stored for an auth ID.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AuthRequestKind {
+    Registration,
+    SshCheck(SshCheckBinding),
+}
+
 impl RegistrationCache {
     pub fn new() -> Self {
         Self::with_tuning_and_max_entries(
@@ -1509,6 +1518,17 @@ impl RegistrationCache {
 
     pub fn ssh_binding(&self, auth_id: &str) -> Option<SshCheckBinding> {
         self.get_entry(auth_id).and_then(|entry| entry.ssh_binding)
+    }
+
+    pub fn auth_request_kind(&self, auth_id: &str) -> Option<AuthRequestKind> {
+        let entry = self.get_entry(auth_id)?;
+        if let Some(binding) = entry.ssh_binding {
+            return Some(AuthRequestKind::SshCheck(binding));
+        }
+        entry
+            .record
+            .is_some()
+            .then_some(AuthRequestKind::Registration)
     }
 
     pub fn remove(&self, registration_id: &str) -> Option<MachineRecord> {
@@ -3443,18 +3463,23 @@ impl MachineRegistry {
         if tags.is_empty() {
             return false;
         }
-        let node_id = self.stable_node_id_for_key(node_key_hex);
-        self.update_with_operation_and_change(
-            "update",
-            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id),
-            |map| match map.get_mut(node_key_hex) {
+        let mut tags_changed = false;
+        let node_exists = self.update_with_operation_and_wake("update", None, |map| {
+            match map.get_mut(node_key_hex) {
                 Some(rec) => {
-                    rec.forced_tags = tags;
+                    if rec.forced_tags != tags {
+                        rec.forced_tags = tags;
+                        tags_changed = true;
+                    }
                     true
                 }
                 None => false,
-            },
-        )
+            }
+        });
+        if tags_changed {
+            self.wake_waiters_with(PendingMapChange::global(MapChangeReason::TagUpdate));
+        }
+        node_exists
     }
 
     /// Replace a machine's approved subnet routes. Empty list clears
@@ -5212,8 +5237,13 @@ mod registry_tests {
         assert!(!policy_change.content.include_dns);
         assert!(policy_change.content.include_policy);
 
+        let tag_change = PendingMapChange::global(MapChangeReason::TagUpdate).into_change(6);
+        assert_eq!(tag_change.reason_labels(), vec!["tag update"]);
+        assert_eq!(tag_change.change_type(), "policy");
+        assert!(tag_change.content.requires_runtime_peer_computation);
+
         let ping_change =
-            PendingMapChange::target(MapChangeReason::PingNode, node_id).into_change(6);
+            PendingMapChange::target(MapChangeReason::PingNode, node_id).into_change(7);
         assert_eq!(ping_change.change_type(), "ping");
     }
 

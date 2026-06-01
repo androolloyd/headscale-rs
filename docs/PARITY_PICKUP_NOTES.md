@@ -1128,8 +1128,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 ## 2026-06-01 NodeStore write worker batching slice
 
-- Added an optional `MachineRegistry` NodeStore write worker for put/upsert
-  delete, bool-update, and set-name paths. Production `headscale server` now
+- Added an optional `MachineRegistry` NodeStore write worker for put/upsert,
+  delete, bool-update, set-name, and rekey paths. Production `headscale server` now
   installs it using `tuning.node_store_batch_size` and
   `tuning.node_store_batch_timeout`.
 - Concurrent writes now block until the worker commits their batch, clone and
@@ -1139,4 +1139,4 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   bool updates still avoid publishing a fresh registry snapshot.
 - `headscale_nodestore_queue_depth` now reports the live write-worker queue
   depth instead of a hard-coded zero. Remaining NodeStore worker parity covers
-  multi-update/rekey batch entries and broader reason/churn coverage.
+  multi-update batch entries and broader reason/churn coverage.

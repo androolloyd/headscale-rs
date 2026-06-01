@@ -2142,6 +2142,13 @@ enum NodeStoreWriteWork {
         update: NodeStoreBoolUpdateFn,
         result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
     },
+    Rekey {
+        old_node_key_hex: String,
+        new_node_key_hex: String,
+        rec: Box<MachineRecord>,
+        change: Option<PendingMapChange>,
+        result_tx: std_mpsc::Sender<()>,
+    },
 }
 
 enum NodeStoreWriteCompletion {
@@ -2154,6 +2161,11 @@ enum NodeStoreWriteCompletion {
         operation: &'static str,
         result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
         outcome: NodeStoreBoolUpdateOutcome,
+    },
+    Unit {
+        operation: &'static str,
+        result_tx: std_mpsc::Sender<()>,
+        change: Option<PendingMapChange>,
     },
 }
 
@@ -2204,7 +2216,7 @@ fn run_nodestore_write_worker(
                 ) => break,
             }
         }
-        machines.apply_nodestore_upsert_batch(batch);
+        machines.apply_nodestore_write_batch(batch);
     }
 }
 
@@ -2213,7 +2225,7 @@ impl MachineRegistry {
         Self::default()
     }
 
-    /// Enable headscale-go-style NodeStore write batching for put/upsert paths.
+    /// Enable headscale-go-style NodeStore write batching for registry mutations.
     ///
     /// Callers still block until their write has been committed; the worker
     /// batches concurrent writes so a burst clones and publishes the COW
@@ -2543,7 +2555,9 @@ impl MachineRegistry {
                 node_key_hex, rec, ..
             })) => self.apply_nodestore_upsert_direct(node_key_hex, *rec),
             Err(std_mpsc::SendError(
-                NodeStoreWriteWork::Delete { .. } | NodeStoreWriteWork::UpdateBool { .. },
+                NodeStoreWriteWork::Delete { .. }
+                | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
         self.metrics
@@ -2585,7 +2599,9 @@ impl MachineRegistry {
                 self.apply_nodestore_delete_direct(&node_key_hex)
             }
             Err(std_mpsc::SendError(
-                NodeStoreWriteWork::Upsert { .. } | NodeStoreWriteWork::UpdateBool { .. },
+                NodeStoreWriteWork::Upsert { .. }
+                | NodeStoreWriteWork::UpdateBool { .. }
+                | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
         self.metrics
@@ -2631,7 +2647,9 @@ impl MachineRegistry {
                 operation, update, ..
             })) => self.apply_nodestore_bool_update_direct(operation, update),
             Err(std_mpsc::SendError(
-                NodeStoreWriteWork::Upsert { .. } | NodeStoreWriteWork::Delete { .. },
+                NodeStoreWriteWork::Upsert { .. }
+                | NodeStoreWriteWork::Delete { .. }
+                | NodeStoreWriteWork::Rekey { .. },
             )) => unreachable!(),
         };
         self.metrics
@@ -2683,7 +2701,90 @@ impl MachineRegistry {
         outcome
     }
 
-    fn apply_nodestore_upsert_batch(&self, batch: Vec<NodeStoreWriteWork>) {
+    fn enqueue_nodestore_rekey(
+        &self,
+        queue: &NodeStoreWriteQueue,
+        old_node_key_hex: String,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        change: Option<PendingMapChange>,
+    ) {
+        let fallback_old_node_key_hex = old_node_key_hex.clone();
+        let fallback_new_node_key_hex = new_node_key_hex.clone();
+        let fallback_rec = rec.clone();
+        let fallback_change = change.clone();
+        let (result_tx, result_rx) = std_mpsc::channel();
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_add(1, Ordering::SeqCst);
+        match queue.tx.send(NodeStoreWriteWork::Rekey {
+            old_node_key_hex,
+            new_node_key_hex,
+            rec: Box::new(rec),
+            change,
+            result_tx,
+        }) {
+            Ok(()) => {
+                if result_rx.recv().is_err() {
+                    self.apply_nodestore_rekey_direct(
+                        &fallback_old_node_key_hex,
+                        fallback_new_node_key_hex,
+                        fallback_rec,
+                        fallback_change,
+                    );
+                }
+            }
+            Err(std_mpsc::SendError(NodeStoreWriteWork::Rekey {
+                old_node_key_hex,
+                new_node_key_hex,
+                rec,
+                change,
+                ..
+            })) => {
+                self.apply_nodestore_rekey_direct(
+                    &old_node_key_hex,
+                    new_node_key_hex,
+                    *rec,
+                    change,
+                );
+            }
+            Err(std_mpsc::SendError(
+                NodeStoreWriteWork::Upsert { .. }
+                | NodeStoreWriteWork::Delete { .. }
+                | NodeStoreWriteWork::UpdateBool { .. },
+            )) => unreachable!(),
+        }
+        self.metrics
+            .nodestore_queue_depth
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn apply_nodestore_rekey_direct(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        change: Option<PendingMapChange>,
+    ) {
+        let start = Instant::now();
+        {
+            let mut g = self.inner.write();
+            let mut next = (**g).clone();
+            if old_node_key_hex != new_node_key_hex {
+                next.remove(old_node_key_hex);
+            }
+            next.insert(new_node_key_hex, rec);
+            *g = Arc::new(next);
+        }
+        let elapsed = start.elapsed();
+        self.record_nodestore_operation("replace_key", elapsed);
+        self.record_nodestore_batch(1, elapsed);
+        if let Some(change) = change {
+            self.wake_waiters_with(change);
+        }
+    }
+
+    fn apply_nodestore_write_batch(&self, batch: Vec<NodeStoreWriteWork>) {
         if batch.is_empty() {
             return;
         }
@@ -2735,6 +2836,24 @@ impl MachineRegistry {
                             outcome,
                         });
                     }
+                    NodeStoreWriteWork::Rekey {
+                        old_node_key_hex,
+                        new_node_key_hex,
+                        rec,
+                        change,
+                        result_tx,
+                    } => {
+                        if old_node_key_hex != new_node_key_hex {
+                            next.remove(&old_node_key_hex);
+                        }
+                        next.insert(new_node_key_hex, *rec);
+                        publish_snapshot = true;
+                        completions.push(NodeStoreWriteCompletion::Unit {
+                            operation: "replace_key",
+                            result_tx,
+                            change,
+                        });
+                    }
                 }
             }
             if publish_snapshot {
@@ -2746,7 +2865,8 @@ impl MachineRegistry {
         for completion in &completions {
             let operation = match completion {
                 NodeStoreWriteCompletion::Bool { operation, .. }
-                | NodeStoreWriteCompletion::UpdateBool { operation, .. } => operation,
+                | NodeStoreWriteCompletion::UpdateBool { operation, .. }
+                | NodeStoreWriteCompletion::Unit { operation, .. } => operation,
             };
             self.record_nodestore_operation(operation, elapsed);
         }
@@ -2765,6 +2885,14 @@ impl MachineRegistry {
                         self.wake_waiters_with(change);
                     }
                     let _ = result_tx.send(outcome);
+                }
+                NodeStoreWriteCompletion::Unit {
+                    result_tx, change, ..
+                } => {
+                    if let Some(change) = change {
+                        self.wake_waiters_with(change);
+                    }
+                    let _ = result_tx.send(());
                 }
             }
         }
@@ -3587,12 +3715,18 @@ impl MachineRegistry {
     ) {
         let key_changed = old_node_key_hex != new_node_key_hex;
         let old_id = self.stable_node_id_for_key(old_node_key_hex);
-        self.update_with_operation_and_wake("replace_key", change, |map| {
-            if key_changed {
-                map.remove(old_node_key_hex);
-            }
-            map.insert(new_node_key_hex, rec);
-        });
+        let queue = self.nodestore_write_queue.read().clone();
+        if let Some(queue) = queue.as_ref() {
+            self.enqueue_nodestore_rekey(
+                queue,
+                old_node_key_hex.to_string(),
+                new_node_key_hex,
+                rec,
+                change,
+            );
+        } else {
+            self.apply_nodestore_rekey_direct(old_node_key_hex, new_node_key_hex, rec, change);
+        }
         if key_changed {
             self.forget_batcher_connection_state(old_id);
             if let Some(gc) = self.ephemeral_gc() {
@@ -5536,6 +5670,61 @@ mod registry_tests {
             1
         );
         assert_eq!(reg.nodestore_batch_size_metrics().count, 2);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_batches_concurrent_rekeys() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-rekey-old-{idx}");
+            rec.machine_key_hex = format!("machine-rekey-{idx}");
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || {
+            let mut rec = first_reg.get("node-rekey-old-1").unwrap();
+            rec.node_key_hex = "node-rekey-new-1".into();
+            first_reg.replace_node_key_quiet("node-rekey-old-1", "node-rekey-new-1".into(), rec);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first rekey did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            reg.get("node-rekey-new-1").is_none(),
+            "first rekey should wait for another item or the timeout"
+        );
+
+        let mut second = reg.get("node-rekey-old-2").unwrap();
+        second.node_key_hex = "node-rekey-new-2".into();
+        reg.replace_node_key_quiet("node-rekey-old-2", "node-rekey-new-2".into(), second);
+        first.join().expect("first rekey thread should finish");
+
+        assert!(reg.get("node-rekey-old-1").is_none());
+        assert!(reg.get("node-rekey-old-2").is_none());
+        assert!(reg.get("node-rekey-new-1").is_some());
+        assert!(reg.get("node-rekey-new-2").is_some());
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("replace_key")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
     }
 
     #[test]

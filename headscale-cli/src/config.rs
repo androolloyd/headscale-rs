@@ -954,12 +954,9 @@ impl CliConfig {
             return Ok(());
         };
         let Some(database_type) = database.database_type.as_deref() else {
-            if database.sqlite.is_none() {
-                bail!(
-                    "database.type is required when database is configured; supported values are sqlite, sqlite3, postgres"
-                );
-            }
-            return Ok(());
+            bail!(
+                "database.type is required when database is configured; supported values are sqlite, sqlite3, postgres"
+            );
         };
         match database_type {
             "sqlite" | "sqlite3" => {
@@ -2780,18 +2777,26 @@ database:
 
     #[test]
     fn configtest_rejects_database_block_without_type() {
-        let source = r#"
+        for source in [
+            r#"
 server_url: "https://headscale.example"
 database:
   postgres:
     host: localhost
     port: 5432
-"#;
+"#,
+            r#"
+server_url: "https://headscale.example"
+database:
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+"#,
+        ] {
+            let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+            let err = config.validate_for_configtest().unwrap_err();
 
-        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
-
-        assert!(format!("{err:#}").contains("database.type is required"));
+            assert!(format!("{err:#}").contains("database.type is required"));
+        }
     }
 
     #[test]

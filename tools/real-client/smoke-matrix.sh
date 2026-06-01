@@ -90,6 +90,8 @@ smoke_ids=(
   postgres-authkey
   postgres-authkey-nonreusable
   postgres-authkey-expired
+  postgres-authkey-relogin-same-user
+  postgres-authkey-relogin-route-preserve
   postgres-online-lastseen
   postgres-ping-lifecycle
   postgres-magicdns
@@ -322,6 +324,8 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
   registration
   registration
   registration
@@ -406,6 +410,8 @@ smoke_rust_scripts=(
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-smoke.sh
   tools/real-client/postgres-authkey-expired-smoke.sh
+  tools/real-client/postgres-authkey-relogin-same-user-smoke.sh
+  tools/real-client/postgres-authkey-relogin-route-preserve-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
@@ -564,6 +570,8 @@ smoke_go_scripts=(
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
+  tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh
+  tools/real-client/postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
@@ -722,6 +730,8 @@ smoke_assertions=(
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres one-time auth-key rejects second stock-client registration"
   "production Postgres expired auth-key rejects stock-client registration"
+  "production Postgres auth-key logout then same-user relogin preserves node identity and IPs"
+  "production Postgres auth-key same-user relogin preserves approved route state"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"
   "production Postgres default MagicDNS suffix"

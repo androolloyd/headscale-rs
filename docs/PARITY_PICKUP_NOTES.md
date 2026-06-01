@@ -387,8 +387,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all seventy-seven Pg rows, including
+  all seventy-nine Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
+  `postgres-authkey-relogin-same-user`,
+  `postgres-authkey-relogin-route-preserve`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -910,6 +912,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   harness.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to seventy-seven rows.
+
+## 2026-06-01 Postgres auth-key relogin smoke slice
+
+- Added paired `postgres-authkey-relogin-same-user` and
+  `postgres-authkey-relogin-route-preserve` Rust/headscale-go rows over the
+  production Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now supports auth-key logout
+  followed by same-user relogin with fresh preauth keys, stable Tailscale IP
+  assertions, and before/after node ID, user, address, available-route, and
+  approved-route comparisons.
+- The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to seventy-nine rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

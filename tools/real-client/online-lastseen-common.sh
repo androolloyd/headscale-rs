@@ -37,6 +37,7 @@ expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
+authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
@@ -46,6 +47,7 @@ expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
+up_timeout="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-60s}"
 run_id="hs-online-lastseen-${target}-${database_backend}-${login_mode}-$(date +%s)-$$"
 case "${target}" in
   rust) client_target="rs" ;;
@@ -139,6 +141,26 @@ if ! [[ "${server_start_retries}" =~ ^[0-9]+$ ]] || ((server_start_retries < 1))
 fi
 if [[ -n "${expected_authkey_failure_indexes}" && "${login_mode}" != "authkey" ]]; then
   echo "REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES is only supported with REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+case "${authkey_relogin_same_user}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    authkey_relogin_same_user_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    authkey_relogin_same_user_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER must be true or false, got ${authkey_relogin_same_user}" >&2
+    exit 2
+    ;;
+esac
+if ((authkey_relogin_same_user_flag)) && [[ "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER requires REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+if ((authkey_relogin_same_user_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER cannot be combined with REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES" >&2
   exit 2
 fi
 
@@ -1474,7 +1496,7 @@ login_client() {
     tailscale up
     "--login-server=${control_url}"
     "--hostname=${client_name}"
-    --timeout=60s
+    "--timeout=${up_timeout}"
     --accept-routes=false
     "--accept-dns=${accept_dns_arg}"
   )
@@ -1580,7 +1602,7 @@ reauth_client_if_requested() {
     tailscale up
     "--login-server=${control_url}"
     "--hostname=${client_name}"
-    --timeout=60s
+    "--timeout=${up_timeout}"
     --accept-routes=false
     "--accept-dns=${accept_dns_arg}"
     --force-reauth
@@ -1626,6 +1648,141 @@ reauth_client_if_requested() {
   fi
   wait_for "logged-in client netmap after reauth" \
     "docker exec '${client_name}' tailscale status --json >'${work_dir}/${client_name}.reauth-status.json' 2>/dev/null && ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); ips=Array(s[\"TailscaleIPs\"]); ok=s[\"HaveNodeKey\"] && s[\"AuthURL\"].to_s.empty? && (s[\"Self\"]||{})[\"InNetworkMap\"] && !ips.empty?; exit(ok ? 0 : 1)' '${work_dir}/${client_name}.reauth-status.json'"
+  echo "::endgroup::"
+}
+
+tailscale_status_ips() {
+  local status_path="$1"
+  ruby -rjson -e '
+    status = JSON.parse(File.read(ARGV.fetch(0)))
+    puts Array(status["TailscaleIPs"]).sort.join(",")
+  ' "${status_path}"
+}
+
+relogin_with_authkey_if_requested() {
+  ((authkey_relogin_same_user_flag)) || return 0
+  echo "::group::auth-key logout and same-user relogin"
+  local expected_count="${expected_machine_count:-${#successful_client_names[@]}}"
+  local before_nodes_path="${work_dir}/nodes-before-relogin.json"
+  local after_nodes_path="${work_dir}/nodes-after-relogin.json"
+  local relogin_authkeys=()
+  local relogin_before_ips=()
+  local idx client_name user_id relogin_status relogin_after_ips
+  local up_args=()
+
+  headscale_cmd -o json nodes list >"${before_nodes_path}"
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
+    docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.relogin-before-status.json"
+    relogin_before_ips+=("$(tailscale_status_ips "${work_dir}/${client_name}.relogin-before-status.json")")
+    user_id="$(user_id_for_name "${client_users[$idx]}")"
+    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}")")
+  done
+
+  for idx in "${!client_names[@]}"; do
+    client_name="${client_names[$idx]}"
+    docker exec "${client_name}" tailscale logout \
+      >"${work_dir}/${client_name}.logout.stdout" \
+      2>"${work_dir}/${client_name}.logout.stderr"
+    wait_for "tailscale logged out ${client_name}" \
+      "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+
+    up_args=(
+      tailscale up
+      "--login-server=${control_url}"
+      "--hostname=${client_name}"
+      "--timeout=${up_timeout}"
+      --accept-routes=false
+      "--accept-dns=${accept_dns_arg}"
+      "--authkey=${relogin_authkeys[$idx]}"
+    )
+    if [[ -n "${advertise_routes}" ]]; then
+      up_args+=("--advertise-routes=${advertise_routes}")
+    fi
+    if ((advertise_exit_node_flag)); then
+      up_args+=(--advertise-exit-node)
+    fi
+    if ((enable_tailscale_ssh_flag)); then
+      up_args+=(--ssh)
+    fi
+
+    relogin_status=0
+    run_with_timeout "tailscale same-user relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
+      relogin_status="$?"
+    if ((relogin_status != 0)); then
+      echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
+    fi
+    if ! wait_for "tailscale logged-in netmap after same-user relogin ${client_name}" \
+      "client_logged_in '${client_name}' '${work_dir}/${client_name}.relogin-status.json'"; then
+      dump_client_debug "${client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    relogin_after_ips="$(tailscale_status_ips "${work_dir}/${client_name}.relogin-status.json")"
+    if [[ "${relogin_after_ips}" != "${relogin_before_ips[$idx]}" ]]; then
+      echo "expected stable Tailscale IPs for ${client_name}: ${relogin_before_ips[$idx]}, got ${relogin_after_ips}" >&2
+      echo "::endgroup::"
+      return 1
+    fi
+    cp "${work_dir}/${client_name}.relogin-status.json" "${work_dir}/${client_name}.status.json"
+  done
+
+  headscale_cmd -o json nodes list >"${after_nodes_path}"
+  ruby -rjson -e '
+    def nodes(path)
+      payload = JSON.parse(File.read(path))
+      payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
+    end
+
+    def node_name(node)
+      node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+    end
+
+    def user_name(node)
+      user = node["user"] || node["User"]
+      user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
+    end
+
+    def node_id(node)
+      node["id"] || node["ID"] || node["nodeId"] || node["node_id"]
+    end
+
+    before = nodes(ARGV.fetch(0))
+    after = nodes(ARGV.fetch(1))
+    expected_count = Integer(ARGV.fetch(2))
+    expected_names = ARGV.fetch(3).split(",").reject(&:empty?)
+    abort("expected #{expected_count} nodes before relogin, got #{before.length}") unless before.length == expected_count
+    abort("expected #{expected_count} nodes after relogin, got #{after.length}") unless after.length == expected_count
+
+    expected_names.each do |name|
+      old = before.find { |node| node_name(node).to_s == name }
+      new = after.find { |node| node_name(node).to_s == name }
+      abort("missing before-relogin node #{name.inspect}") unless old
+      abort("missing after-relogin node #{name.inspect}") unless new
+
+      checks = {
+        "id" => [node_id(old), node_id(new)],
+        "user" => [user_name(old), user_name(new)],
+        "ipAddresses" => [
+          Array(old["ipAddresses"] || old["ip_addresses"] || old["addresses"]).map(&:to_s).sort,
+          Array(new["ipAddresses"] || new["ip_addresses"] || new["addresses"]).map(&:to_s).sort,
+        ],
+        "availableRoutes" => [
+          Array(old["availableRoutes"] || old["available_routes"]).map(&:to_s).sort,
+          Array(new["availableRoutes"] || new["available_routes"]).map(&:to_s).sort,
+        ],
+        "approvedRoutes" => [
+          Array(old["approvedRoutes"] || old["approved_routes"]).map(&:to_s).sort,
+          Array(new["approvedRoutes"] || new["approved_routes"]).map(&:to_s).sort,
+        ],
+      }
+      checks.each do |field, values|
+        old_value, new_value = values
+        abort("relogin changed #{name} #{field}: #{old_value.inspect} -> #{new_value.inspect}") unless old_value == new_value
+      end
+    end
+    puts JSON.pretty_generate({relogin_preserved_nodes: expected_names})
+  ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}" "$(IFS=,; echo "${successful_client_names[*]}")"
   echo "::endgroup::"
 }
 
@@ -2293,6 +2450,7 @@ if ((expect_register_failure)); then
 fi
 reauth_client_if_requested
 approve_routes_if_requested
+relogin_with_authkey_if_requested
 set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap

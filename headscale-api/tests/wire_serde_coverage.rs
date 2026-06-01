@@ -17,10 +17,10 @@ use headscale_api::tailscale_wire::wire::{
     CapGrant, ClientVersion, ControlDialPlan, ControlIpCandidate, DebugConfig, DerpHomeParams,
     DerpMap, DerpRegion, DerpRegionNode, DisplayMessage, DisplayMessageAction, DnsConfig,
     DnsResolver, FilterRule, HostInfo, HostInfoLocation, HostInfoService, MapNode, MapRequest,
-    MapResponse, NetInfo, NetPortRange, Oauth2Token, PeerChange, PingRequest, PortRange,
-    RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction, SshPolicy,
-    SshPrincipal, SshRecorderFailureAction, SshRule, TkaInfo, TpmInfo, UserProfile,
-    stable_id_from_key, strip_key_prefix,
+    MapResponse, NetInfo, NetPortRange, Oauth2Token, PeerChange, PingRequest, PingResponse,
+    PortRange, RegisterAuth, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, SshAction,
+    SshEventNotifyRequest, SshPolicy, SshPrincipal, SshRecorderFailureAction, SshRecordingAttempt,
+    SshRule, TkaInfo, TpmInfo, UserProfile, stable_id_from_key, strip_key_prefix,
 };
 use serde_json::Value;
 
@@ -948,6 +948,11 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
     peer_seen_change.insert(2, true);
     let mut online_change = BTreeMap::new();
     online_change.insert(2, false);
+    let mut peer_cap_map = BTreeMap::new();
+    peer_cap_map.insert(
+        "https://tailscale.com/cap/file-sharing".to_string(),
+        vec![serde_json::json!({"enabled": true})],
+    );
 
     let r = MapResponse {
         map_session_handle: "sess-1".into(),
@@ -968,12 +973,14 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
             node_id: 2,
             derp_region: 1,
             cap: 99,
+            cap_map: peer_cap_map,
             endpoints: vec!["198.51.100.2:41641".into()],
             key: Some("nodekey:bb".into()),
             key_signature: "AQI=".into(),
             disco_key: Some("discokey:cc".into()),
             online: Some(false),
-            ..PeerChange::default()
+            last_seen: Some("2026-05-21T12:35:00Z".parse().unwrap()),
+            key_expiry: Some("2026-06-21T12:35:00Z".parse().unwrap()),
         }],
         peer_seen_change,
         online_change,
@@ -1023,6 +1030,18 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
     assert_eq!(v["PopBrowserURL"], "https://control.example/login");
     assert_eq!(v["PeersChangedPatch"][0]["NodeID"], 2);
     assert_eq!(v["PeersChangedPatch"][0]["DiscoKey"], "discokey:cc");
+    assert_eq!(
+        v["PeersChangedPatch"][0]["CapMap"]["https://tailscale.com/cap/file-sharing"][0]["enabled"],
+        true
+    );
+    assert_eq!(
+        v["PeersChangedPatch"][0]["LastSeen"],
+        "2026-05-21T12:35:00Z"
+    );
+    assert_eq!(
+        v["PeersChangedPatch"][0]["KeyExpiry"],
+        "2026-06-21T12:35:00Z"
+    );
     assert!(v["PacketFilters"]["old"].is_null());
     assert!(v["DisplayMessages"]["old-warning"].is_null());
     assert_eq!(v["TKAInfo"]["Head"], "aum-head");
@@ -1040,10 +1059,121 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
     let back: MapResponse = serde_json::from_value(v).unwrap();
     assert_eq!(back.seq, 11);
     assert_eq!(back.peers_removed, vec![3]);
+    assert!(
+        back.peers_changed_patch[0]
+            .cap_map
+            .contains_key("https://tailscale.com/cap/file-sharing")
+    );
+    assert!(back.peers_changed_patch[0].last_seen.is_some());
+    assert!(back.peers_changed_patch[0].key_expiry.is_some());
     assert_eq!(back.peer_seen_change.get(&2), Some(&true));
     assert_eq!(back.online_change.get(&2), Some(&false));
     assert!(back.packet_filters["old"].is_none());
     assert!(back.display_messages["old-warning"].is_none());
+}
+
+// ---------------------------------------------------------------------------
+// PingResponse and SSH event notify payloads
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ping_response_round_trips_tailcfg_shape() {
+    let response = PingResponse {
+        ping_type: "TSMP".into(),
+        ip: "100.64.0.10".into(),
+        node_ip: "100.64.0.2".into(),
+        node_name: "node-a".into(),
+        err: "timeout".into(),
+        latency_seconds: 0.012,
+        endpoint: "203.0.113.10:41641".into(),
+        peer_relay: "100.64.0.20:1234:vni:7".into(),
+        derp_region_id: 901,
+        derp_region_code: "sea".into(),
+        peer_api_port: 5252,
+        is_local_ip: true,
+    };
+
+    let v = serde_json::to_value(&response).unwrap();
+    assert_eq!(v["Type"], "TSMP");
+    assert_eq!(v["IP"], "100.64.0.10");
+    assert!(v.get("Ip").is_none());
+    assert_eq!(v["NodeIP"], "100.64.0.2");
+    assert!(v.get("NodeIp").is_none());
+    assert_eq!(v["NodeName"], "node-a");
+    assert_eq!(v["Err"], "timeout");
+    assert_eq!(v["LatencySeconds"], 0.012);
+    assert_eq!(v["Endpoint"], "203.0.113.10:41641");
+    assert_eq!(v["PeerRelay"], "100.64.0.20:1234:vni:7");
+    assert_eq!(v["DERPRegionID"], 901);
+    assert_eq!(v["DERPRegionCode"], "sea");
+    assert_eq!(v["PeerAPIPort"], 5252);
+    assert_eq!(v["IsLocalIP"], true);
+
+    let back: PingResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(back, response);
+}
+
+#[test]
+fn ping_response_zero_value_keeps_type_like_go() {
+    let v = serde_json::to_value(PingResponse::default()).unwrap();
+    assert_eq!(v["Type"], "");
+    assert_eq!(v.as_object().unwrap().len(), 1);
+
+    let back: PingResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(back.ping_type, "");
+    assert_eq!(back.peer_api_port, 0);
+}
+
+#[test]
+fn ssh_event_notify_request_round_trips_recording_attempts() {
+    let request = SshEventNotifyRequest {
+        event_type: 2,
+        connection_id: "ssh-connection-1".into(),
+        cap_version: 113,
+        node_key: "nodekey:0123456789abcdef".into(),
+        src_node: 42,
+        ssh_user: "ubuntu".into(),
+        local_user: "alice".into(),
+        recording_attempts: Some(vec![SshRecordingAttempt {
+            recorder: "100.64.0.50:1234".into(),
+            failure_message: "connection refused".into(),
+        }]),
+    };
+
+    let v = serde_json::to_value(&request).unwrap();
+    assert_eq!(v["EventType"], 2);
+    assert_eq!(v["ConnectionID"], "ssh-connection-1");
+    assert!(v.get("ConnectionId").is_none());
+    assert_eq!(v["CapVersion"], 113);
+    assert_eq!(v["NodeKey"], "nodekey:0123456789abcdef");
+    assert_eq!(v["SrcNode"], 42);
+    assert_eq!(v["SSHUser"], "ubuntu");
+    assert!(v.get("SshUser").is_none());
+    assert_eq!(v["LocalUser"], "alice");
+    assert_eq!(v["RecordingAttempts"][0]["Recorder"], "100.64.0.50:1234");
+    assert_eq!(
+        v["RecordingAttempts"][0]["FailureMessage"],
+        "connection refused"
+    );
+
+    let back: SshEventNotifyRequest = serde_json::from_value(v).unwrap();
+    assert_eq!(back, request);
+}
+
+#[test]
+fn ssh_event_notify_zero_value_preserves_unomitempty_go_fields() {
+    let v = serde_json::to_value(SshEventNotifyRequest::default()).unwrap();
+    assert_eq!(v["EventType"], 0);
+    assert_eq!(v["ConnectionID"], "");
+    assert_eq!(v["CapVersion"], 0);
+    assert_eq!(v["NodeKey"], "");
+    assert_eq!(v["SrcNode"], 0);
+    assert_eq!(v["SSHUser"], "");
+    assert_eq!(v["LocalUser"], "");
+    assert!(v["RecordingAttempts"].is_null());
+
+    let back: SshEventNotifyRequest = serde_json::from_value(v).unwrap();
+    assert_eq!(back.recording_attempts, None);
 }
 
 // ---------------------------------------------------------------------------

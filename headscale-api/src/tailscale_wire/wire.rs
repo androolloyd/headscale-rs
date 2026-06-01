@@ -1206,6 +1206,45 @@ pub struct PingRequest {
     pub payload: String,
 }
 
+/// `tailcfg.PingResponse`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PingResponse {
+    /// Ping type, such as `TSMP`, `disco`, `ICMP`, or `peerapi`.
+    #[serde(default, rename = "Type")]
+    pub ping_type: String,
+    #[serde(default, rename = "IP", skip_serializing_if = "String::is_empty")]
+    pub ip: String,
+    #[serde(default, rename = "NodeIP", skip_serializing_if = "String::is_empty")]
+    pub node_ip: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub err: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub latency_seconds: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub peer_relay: String,
+    #[serde(default, rename = "DERPRegionID", skip_serializing_if = "is_zero_i32")]
+    pub derp_region_id: i32,
+    #[serde(
+        default,
+        rename = "DERPRegionCode",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub derp_region_code: String,
+    #[serde(default, rename = "PeerAPIPort", skip_serializing_if = "is_zero_u16")]
+    pub peer_api_port: u16,
+    #[serde(
+        default,
+        rename = "IsLocalIP",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_local_ip: bool,
+}
+
 /// `tailcfg.PeerChange`.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
@@ -1492,6 +1531,38 @@ pub struct SshRecorderFailureAction {
         skip_serializing_if = "String::is_empty"
     )]
     pub notify_url: String,
+}
+
+/// `tailcfg.SSHEventNotifyRequest`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SshEventNotifyRequest {
+    #[serde(default)]
+    pub event_type: i32,
+    #[serde(default, rename = "ConnectionID")]
+    pub connection_id: String,
+    #[serde(default)]
+    pub cap_version: u32,
+    #[serde(default)]
+    pub node_key: String,
+    #[serde(default)]
+    pub src_node: u64,
+    #[serde(default, rename = "SSHUser")]
+    pub ssh_user: String,
+    #[serde(default)]
+    pub local_user: String,
+    #[serde(default)]
+    pub recording_attempts: Option<Vec<SshRecordingAttempt>>,
+}
+
+/// `tailcfg.SSHRecordingAttempt`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SshRecordingAttempt {
+    #[serde(default)]
+    pub recorder: String,
+    #[serde(default)]
+    pub failure_message: String,
 }
 
 /// A single node record inside a `MapResponse`.

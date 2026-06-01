@@ -1957,7 +1957,7 @@ ruby -rjson -e '
   end
 
   payload = JSON.parse(File.read(ARGV.fetch(0)))
-  nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+  nodes = payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
   abort("expected #{expected_count} registered nodes, got #{nodes.length}") unless nodes.length == expected_count
   nodes.each do |node|
     user = node["user"] || node["User"]

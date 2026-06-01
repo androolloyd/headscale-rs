@@ -860,3 +860,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `extra_records_path` netmap assertion. The row now proves the original A
   record and hot-reloaded AAAA record resolve through the client DNS path, not
   only through `tailscale debug netmap`.
+
+## 2026-06-01 Real-client CI matrix hardening
+
+- Added `tools/real-client/smoke-matrix.sh --check` to validate matrix length,
+  duplicate smoke IDs, selected smoke/target names, and Rust/headscale-go
+  script paths before the expensive Docker-backed stock-client matrix starts.
+- Added `--list-selected` so the real-client workflow prints the exact
+  push/PR/scheduled smoke rows it is about to run instead of the full catalog.

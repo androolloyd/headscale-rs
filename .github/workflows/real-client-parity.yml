@@ -111,8 +111,10 @@ jobs:
             smokes="${{ github.event.inputs.smokes || 'all' }}"
           fi
           echo "REAL_CLIENT_SMOKES=${smokes}" >> "${GITHUB_ENV}"
+      - name: Validate selected matrix
+        run: tools/real-client/smoke-matrix.sh --check
       - name: List selected matrix
-        run: tools/real-client/smoke-matrix.sh --list
+        run: tools/real-client/smoke-matrix.sh --list-selected
       - name: Run paired real-client parity matrix
         run: tools/real-client/smoke-matrix.sh
       - name: Upload real-client logs

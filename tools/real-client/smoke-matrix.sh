@@ -8,14 +8,21 @@ smoke_spec="${REAL_CLIENT_SMOKES:-authkey}"
 target_spec="${REAL_CLIENT_TARGETS:-rust headscale-go}"
 matrix_report_dir="${REAL_CLIENT_MATRIX_REPORT_DIR:-target/real-client}"
 list_only=0
+list_selected=0
+check_only=0
 arg_smokes=()
 
 usage() {
   cat <<'EOF'
-Usage: tools/real-client/smoke-matrix.sh [--list] [--rust|--headscale-go|--both] [--all] [SMOKE...]
+Usage: tools/real-client/smoke-matrix.sh [--list|--list-selected|--check] [--rust|--headscale-go|--both] [--all] [SMOKE...]
 
 Run paired stock-client smoke scripts against headscale-rs and/or pinned
 headscale-go. SMOKE values are the IDs printed by --list.
+
+Options:
+  --list           Print every known smoke row and exit.
+  --list-selected  Print only rows selected by REAL_CLIENT_SMOKES/SMOKE args and exit.
+  --check          Validate selected smoke IDs, targets, and script paths without running smokes.
 
 Environment:
   REAL_CLIENT_SMOKES    Space- or comma-separated smoke IDs, or all.
@@ -34,6 +41,13 @@ while (($# > 0)); do
   case "$1" in
     --list)
       list_only=1
+      ;;
+    --list-selected)
+      list_only=1
+      list_selected=1
+      ;;
+    --check)
+      check_only=1
       ;;
     --rust)
       target_spec="rust"
@@ -755,6 +769,41 @@ assert_matrix_lengths() {
   fi
 }
 
+assert_unique_smoke_ids() {
+  local -A seen=()
+  local smoke
+  for smoke in "${smoke_ids[@]}"; do
+    if [[ -n "${seen[${smoke}]:-}" ]]; then
+      echo "duplicate real-client smoke ID: ${smoke}" >&2
+      exit 2
+    fi
+    seen["${smoke}"]=1
+  done
+}
+
+assert_matrix_scripts_exist() {
+  local script
+  local failed=0
+  for script in "${smoke_rust_scripts[@]}" "${smoke_go_scripts[@]}"; do
+    if [[ ! -f "${script}" ]]; then
+      echo "real-client smoke script is missing: ${script}" >&2
+      failed=1
+    elif [[ ! -x "${script}" ]]; then
+      echo "real-client smoke script is not executable: ${script}" >&2
+      failed=1
+    fi
+  done
+  if ((failed != 0)); then
+    exit 2
+  fi
+}
+
+assert_matrix_integrity() {
+  assert_matrix_lengths
+  assert_unique_smoke_ids
+  assert_matrix_scripts_exist
+}
+
 split_words() {
   local value="$1"
   value="${value//,/ }"
@@ -819,10 +868,14 @@ record_matrix_result() {
 }
 
 print_matrix() {
+  local selected_only="${1:-0}"
   printf '%-28s %-14s %-52s %-62s %s\n' \
     "smoke" "area" "headscale-rs script" "headscale-go script" "assertion"
   local i
   for i in "${!smoke_ids[@]}"; do
+    if ((selected_only)); then
+      selected_smoke "${smoke_ids[$i]}" || continue
+    fi
     printf '%-28s %-14s %-52s %-62s %s\n' \
       "${smoke_ids[$i]}" \
       "${smoke_areas[$i]}" \
@@ -832,10 +885,10 @@ print_matrix() {
   done
 }
 
-assert_matrix_lengths
+assert_matrix_integrity
 
-if ((list_only)); then
-  print_matrix
+if ((list_only && ! list_selected)); then
+  print_matrix 0
   exit 0
 fi
 
@@ -868,6 +921,16 @@ for target in "${selected_targets[@]}"; do
     exit 2
   fi
 done
+
+if ((list_only)); then
+  print_matrix 1
+  exit 0
+fi
+
+if ((check_only)); then
+  echo "real-client smoke matrix check passed"
+  exit 0
+fi
 
 mkdir -p "${matrix_report_dir}"
 matrix_summary_path="${matrix_report_dir%/}/smoke-matrix-summary.tsv"

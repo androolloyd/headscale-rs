@@ -50,6 +50,7 @@ pub const BCRYPT_COST_DEFAULT: u32 = 10;
 pub const BCRYPT_COST_TEST: u32 = 4;
 
 const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const AUTH_KEY_PARSE_ERROR: &str = "failed to parse auth-key";
 const PREAUTH_KEY_COLUMNS: &str = r"
         id,
         key,
@@ -212,8 +213,10 @@ fn generate_urlsafe(len: usize) -> String {
         .collect()
 }
 
-fn is_valid_urlsafe(s: &str) -> bool {
-    s.bytes()
+fn is_valid_urlsafe_bytes(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .copied()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
@@ -534,21 +537,44 @@ enum ParsedAuthKey<'a> {
 
 fn parse_auth_key(candidate: &str) -> Result<ParsedAuthKey<'_>> {
     if candidate.is_empty() {
-        return Err(DbError::General("auth-key failed to parse".into()));
+        return Err(DbError::General(AUTH_KEY_PARSE_ERROR.into()));
     }
     if let Some(rest) = candidate.strip_prefix(TOKEN_PREFIX) {
         let expected = TOKEN_PREFIX_LEN + 1 + TOKEN_SECRET_LEN;
-        if rest.len() != expected {
-            return Err(DbError::General("auth-key failed to parse".into()));
+        if rest.len() < expected {
+            return Err(DbError::General(format!(
+                "{AUTH_KEY_PARSE_ERROR}: key too short, expected at least {expected} chars after prefix, got {}",
+                rest.len()
+            )));
         }
+        let rest = rest.as_bytes();
         let prefix = &rest[..TOKEN_PREFIX_LEN];
-        if rest.as_bytes()[TOKEN_PREFIX_LEN] != b'-' {
-            return Err(DbError::General("auth-key failed to parse".into()));
+        let separator = rest[TOKEN_PREFIX_LEN];
+        if separator != b'-' {
+            return Err(DbError::General(format!(
+                "{AUTH_KEY_PARSE_ERROR}: expected separator '-' at position {TOKEN_PREFIX_LEN}, got '{}'",
+                char::from(separator)
+            )));
         }
         let secret = &rest[TOKEN_PREFIX_LEN + 1..];
-        if !is_valid_urlsafe(prefix) || !is_valid_urlsafe(secret) {
-            return Err(DbError::General("auth-key failed to parse".into()));
+        if secret.len() != TOKEN_SECRET_LEN {
+            return Err(DbError::General(format!(
+                "{AUTH_KEY_PARSE_ERROR}: hash length mismatch, expected {TOKEN_SECRET_LEN} chars, got {}",
+                secret.len()
+            )));
         }
+        if !is_valid_urlsafe_bytes(prefix) {
+            return Err(DbError::General(format!(
+                "{AUTH_KEY_PARSE_ERROR}: prefix contains invalid characters (expected base64 URL-safe: A-Za-z0-9_-)"
+            )));
+        }
+        if !is_valid_urlsafe_bytes(secret) {
+            return Err(DbError::General(format!(
+                "{AUTH_KEY_PARSE_ERROR}: hash contains invalid characters (expected base64 URL-safe: A-Za-z0-9_-)"
+            )));
+        }
+        let prefix = std::str::from_utf8(prefix).expect("URL-safe auth key prefix is ASCII");
+        let secret = std::str::from_utf8(secret).expect("URL-safe auth key secret is ASCII");
         return Ok(ParsedAuthKey::Modern { prefix, secret });
     }
     Ok(ParsedAuthKey::Legacy { key: candidate })
@@ -1086,6 +1112,63 @@ mod tests {
         let bogus = format!("{TOKEN_PREFIX}{}-{}", "A".repeat(12), "0".repeat(64));
         let e = get_by_token(db.pool(), &bogus).await.unwrap_err();
         assert!(matches!(e, DbError::NotFound(_)));
+    }
+
+    #[test]
+    fn parse_auth_key_reports_headscale_go_error_details() {
+        fn assert_parse_error(candidate: &str, expected: &str) {
+            match parse_auth_key(candidate) {
+                Err(DbError::General(msg)) => assert_eq!(msg, expected),
+                Err(err) => panic!("expected parse error {expected:?}, got {err:?}"),
+                Ok(_) => panic!("candidate should be rejected"),
+            }
+        }
+
+        assert_parse_error("", AUTH_KEY_PARSE_ERROR);
+        assert_parse_error(
+            &format!("{TOKEN_PREFIX}short"),
+            "failed to parse auth-key: key too short, expected at least 77 chars after prefix, got 5",
+        );
+        assert_parse_error(
+            &format!(
+                "{TOKEN_PREFIX}{}{}",
+                "A".repeat(TOKEN_PREFIX_LEN),
+                "B".repeat(TOKEN_SECRET_LEN + 1)
+            ),
+            "failed to parse auth-key: expected separator '-' at position 12, got 'B'",
+        );
+        assert_parse_error(
+            &format!(
+                "{TOKEN_PREFIX}{}-{}",
+                "A".repeat(TOKEN_PREFIX_LEN),
+                "B".repeat(TOKEN_SECRET_LEN + 1)
+            ),
+            "failed to parse auth-key: hash length mismatch, expected 64 chars, got 65",
+        );
+        assert_parse_error(
+            &format!(
+                "{TOKEN_PREFIX}{}-{}",
+                "A".repeat(TOKEN_PREFIX_LEN - 1) + "!",
+                "B".repeat(TOKEN_SECRET_LEN)
+            ),
+            "failed to parse auth-key: prefix contains invalid characters (expected base64 URL-safe: A-Za-z0-9_-)",
+        );
+        assert_parse_error(
+            &format!(
+                "{TOKEN_PREFIX}{}-{}",
+                "A".repeat(TOKEN_PREFIX_LEN),
+                "B".repeat(TOKEN_SECRET_LEN - 1) + "!"
+            ),
+            "failed to parse auth-key: hash contains invalid characters (expected base64 URL-safe: A-Za-z0-9_-)",
+        );
+        assert_parse_error(
+            &format!(
+                "{TOKEN_PREFIX}{}-{}",
+                "é".to_string() + &"A".repeat(TOKEN_PREFIX_LEN - 2),
+                "B".repeat(TOKEN_SECRET_LEN)
+            ),
+            "failed to parse auth-key: prefix contains invalid characters (expected base64 URL-safe: A-Za-z0-9_-)",
+        );
     }
 
     #[tokio::test]

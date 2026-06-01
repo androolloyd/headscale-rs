@@ -50,7 +50,6 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    hash::{Hash, Hasher},
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -59,6 +58,7 @@ use std::{
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
@@ -1247,7 +1247,24 @@ pub fn parse_extra_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, serde_json::E
     // Accept both lowercase and PascalCase keys via the same
     // permissive wrapper used for config-file inline extra records.
     let loose: Vec<LooseDnsRecord> = serde_json::from_slice(bytes)?;
-    Ok(loose.into_iter().map(Into::into).collect())
+    let mut records: Vec<DnsRecord> = loose.into_iter().map(Into::into).collect();
+    dedupe_extra_records(&mut records);
+    Ok(records)
+}
+
+fn dedupe_extra_records(records: &mut Vec<DnsRecord>) {
+    // headscale-go's ExtraRecordsMan stores file-backed records in
+    // set.Set[tailcfg.DNSRecord], which collapses exact duplicates
+    // and leaves iteration order undefined. Keep Rust deterministic
+    // by retaining the first occurrence of each exact record.
+    let mut seen = HashSet::new();
+    records.retain(|record| {
+        seen.insert((
+            record.name.clone(),
+            record.record_type.clone(),
+            record.value.clone(),
+        ))
+    });
 }
 
 /// Spawn a background task that polls the extra-records file's
@@ -1269,7 +1286,7 @@ pub fn spawn_extra_records_watcher(
     let poll = interval.unwrap_or(EXTRA_RECORDS_POLL_INTERVAL);
     tokio::spawn(async move {
         let mut last_mtime: Option<SystemTime> = None;
-        let mut last_fingerprint: Option<u64> = None;
+        let mut last_fingerprint: Option<[u8; 32]> = None;
         // Best-effort: load the file once at start so the initial
         // `/map` response carries the operator's records without
         // waiting one poll-interval.
@@ -1313,14 +1330,14 @@ pub fn spawn_extra_records_watcher(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExtraRecordsLoad {
     mtime: SystemTime,
-    fingerprint: Option<u64>,
+    fingerprint: Option<[u8; 32]>,
 }
 
 async fn load_and_apply(
     store: &DnsStore,
     path: &Path,
     apply_empty: bool,
-    previous_fingerprint: Option<u64>,
+    previous_fingerprint: Option<[u8; 32]>,
 ) -> Option<ExtraRecordsLoad> {
     let bytes = match tokio::fs::read(path).await {
         Ok(b) => b,
@@ -1361,10 +1378,11 @@ async fn load_and_apply(
     }
 }
 
-fn extra_records_fingerprint(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
+fn extra_records_fingerprint(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 #[cfg(test)]
@@ -1848,6 +1866,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_extra_records_deduplicates_exact_file_records() {
+        let body = br#"[
+          {"Name":"dup.example.org","Type":"A","Value":"100.64.0.10"},
+          {"Name":"unique.example.org","Type":"AAAA","Value":"fd7a:115c:a1e0::53"},
+          {"Name":"dup.example.org","Type":"A","Value":"100.64.0.10"},
+          {"Name":"dup.example.org","Type":"AAAA","Value":"fd7a:115c:a1e0::10"}
+        ]"#;
+
+        let recs = parse_extra_records(body).expect("parses");
+
+        assert_eq!(
+            recs,
+            vec![
+                record("dup.example.org", "A", "100.64.0.10"),
+                record("unique.example.org", "AAAA", "fd7a:115c:a1e0::53"),
+                record("dup.example.org", "AAAA", "fd7a:115c:a1e0::10"),
+            ]
+        );
+    }
+
+    #[test]
     fn parse_extra_records_empty_and_whitespace_ok() {
         assert!(parse_extra_records(b"").unwrap().is_empty());
         assert!(parse_extra_records(b"  \n\t ").unwrap().is_empty());
@@ -2181,6 +2220,57 @@ mod tests {
             () = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
         waiter.abort();
+    }
+
+    #[tokio::test]
+    async fn extra_records_reload_reordered_bytes_still_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extra-records.json");
+        let store = DnsStore::from_spec(magic_spec());
+        let first = br#"[
+          {"name":"a.headscale.test","type":"A","value":"100.64.0.10"},
+          {"name":"b.headscale.test","type":"A","value":"100.64.0.11"}
+        ]"#;
+        std::fs::write(&path, first).unwrap();
+
+        let initial = load_and_apply(&store, &path, true, None)
+            .await
+            .expect("initial load");
+        assert_eq!(
+            store.extra_records().as_slice(),
+            &[
+                record("a.headscale.test", "A", "100.64.0.10"),
+                record("b.headscale.test", "A", "100.64.0.11"),
+            ]
+        );
+
+        let waiter_store = store.clone();
+        let mut waiter = tokio::spawn(async move {
+            waiter_store.wait_for_change().await;
+        });
+        tokio::task::yield_now().await;
+
+        let reordered = br#"[
+          {"name":"b.headscale.test","type":"A","value":"100.64.0.11"},
+          {"name":"a.headscale.test","type":"A","value":"100.64.0.10"}
+        ]"#;
+        std::fs::write(&path, reordered).unwrap();
+        let changed = load_and_apply(&store, &path, false, initial.fingerprint)
+            .await
+            .expect("reordered reload");
+
+        assert_ne!(changed.fingerprint, initial.fingerprint);
+        tokio::time::timeout(Duration::from_secs(2), &mut waiter)
+            .await
+            .expect("raw-byte reorder wakes waiters")
+            .expect("join ok");
+        assert_eq!(
+            store.extra_records().as_slice(),
+            &[
+                record("b.headscale.test", "A", "100.64.0.11"),
+                record("a.headscale.test", "A", "100.64.0.10"),
+            ]
+        );
     }
 
     #[test]

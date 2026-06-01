@@ -45,11 +45,10 @@ pub use admin::{
 /// the surface verbatim (see [`dispatch`]).
 ///
 /// Note: the standalone `headscale` binary's top-level `Commands` enum
-/// also includes `server` / `node` / `identity` / `status` /
-/// `init-config`. Those touch local on-disk state (config files,
-/// keypair material) and are intentionally not re-exposed here — the
-/// embedded surface is the *operator-facing* control-plane surface
-/// only.
+/// also includes `server` / `node` / `identity` / `status`. Those touch
+/// local on-disk state or legacy health probes and are intentionally not
+/// re-exposed here — the embedded surface is the *operator-facing*
+/// control-plane surface only.
 #[derive(Subcommand, Debug)]
 pub enum AdminCmd {
     /// Manage users on the admin surface.

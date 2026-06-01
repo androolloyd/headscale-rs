@@ -1602,6 +1602,18 @@ fn removed_hidden_compatibility_aliases_match_current_upstream_unknown_commands(
             &["tailnet", "status", "--help"][..],
             "Error: unknown command \"tailnet\" for \"headscale\"\n",
         ),
+        (
+            &["init-config"][..],
+            "Error: unknown command \"init-config\" for \"headscale\"\n",
+        ),
+        (
+            &["init-config", "--help"][..],
+            "Error: unknown command \"init-config\" for \"headscale\"\n",
+        ),
+        (
+            &["init-config", "--output", "headscale.toml"][..],
+            "Error: unknown command \"init-config\" for \"headscale\"\n",
+        ),
     ] {
         assert_stderr_snapshot(args, 1, expected);
     }

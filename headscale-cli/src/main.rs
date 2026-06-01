@@ -187,14 +187,6 @@ enum Commands {
         #[arg(long)]
         server: Option<String>,
     },
-
-    /// Generate example configuration file.
-    #[command(hide = true)]
-    InitConfig {
-        /// Output path for config file.
-        #[arg(short, long, default_value = "headscale.toml")]
-        output: PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -584,8 +576,6 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                 .await
                 .map_err(MainError::Other)
         }
-
-        Commands::InitConfig { output } => init_config(&output).await.map_err(MainError::Other),
     }
 }
 
@@ -1530,7 +1520,7 @@ fn upstream_hidden_compatibility_alias_error(parts: &[&str]) -> Option<String> {
     let command = *parts.first()?;
     matches!(
         command,
-        "namespace" | "namespaces" | "ns" | "machine" | "machines" | "tailnet"
+        "namespace" | "namespaces" | "ns" | "machine" | "machines" | "tailnet" | "init-config"
     )
     .then(|| format!("unknown command \"{command}\" for \"headscale\""))
 }
@@ -2799,90 +2789,6 @@ async fn check_status(server: Option<&str>) -> Result<()> {
     }
 }
 
-async fn init_config(output: &PathBuf) -> Result<()> {
-    let example_config = r#"# Headscale-rs Configuration
-# https://github.com/last-net/headscale-rs
-
-# Server mode configuration (control plane)
-[server]
-listen = "0.0.0.0:8080"
-db_path = "/var/lib/headscale/db.sqlite"
-mesh_cidr = "100.64.0.0/10"
-# mesh_cidr_v6 = "fd7a:115c:a1e0::/48"
-# Required when [oidc] is configured; used for /oidc/callback and helper URLs.
-# server_url = "https://headscale.example"
-# state_dir = "/var/lib/headscale"
-# https_listen = "0.0.0.0:443"
-# metrics_listen_addr = "127.0.0.1:9090"
-# tls_hostname = "headscale.example"
-# unix_socket = "/var/run/headscale/headscale.sock"
-# unix_socket_permission = 504
-# grpc_listen_addr = ":50443"
-# grpc_allow_insecure = false
-
-# Embedded DERP/STUN runtime. This starts a native STUN listener and can
-# supervise an upstream tailscale derper binary for DERP relay traffic.
-#[server.embedded_derp]
-#enabled = false
-#host_name = "derp.example.com"
-#region_id = 900
-#region_code = "embedded"
-#region_name = "Embedded DERP"
-#derp_port = 443
-#stun_addr = "0.0.0.0:3478"
-#stun_only = false
-#derper_binary = "/usr/local/bin/derper"
-#derper_listen_addr = "0.0.0.0:443"
-#derper_cert_mode = "letsencrypt"
-#omit_default_regions = false
-
-# DERP relay servers for NAT traversal
-[[server.derp_servers]]
-name = "us-west"
-hostname = "derp.example.com"
-region = "us-west"
-stun_enabled = true
-
-# Node mode configuration (mesh participant)
-[node]
-server = "http://localhost:8080"
-name = "my-node"
-wg_interface = "wg0"
-wg_port = 51820
-identity_file = "identity.json"
-
-# Node capabilities (what resources this node can provide)
-[node.capabilities]
-relay = false
-inference = false
-storage = false
-compute = false
-seed = false
-
-# Logging configuration
-[logging]
-level = "info"
-format = "text"  # text, json
-
-# OpenID Connect registration. When oidc.issuer is set, `headscale server`
-# starts the Tailscale wire-compatible public control surface and completes
-# OIDC callbacks through the persistent users/nodes tables.
-#[oidc]
-#issuer = "https://issuer.example"
-#client_id = "headscale"
-#client_secret = "change-me"
-"#;
-
-    std::fs::write(output, example_config)?;
-    println!("Example configuration written to: {}", output.display());
-    println!(
-        "Edit the file to match your setup, then run with --config {}",
-        output.display()
-    );
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -2905,6 +2811,7 @@ mod tests {
         assert!(Cli::try_parse_from(["headscale", "namespace", "ls"]).is_err());
         assert!(Cli::try_parse_from(["headscale", "machine", "ls"]).is_err());
         assert!(Cli::try_parse_from(["headscale", "tailnet", "status"]).is_err());
+        assert!(Cli::try_parse_from(["headscale", "init-config"]).is_err());
     }
 
     #[test]

@@ -1461,3 +1461,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT`.
 - Process coverage proves env-provided zero values trigger the same
   `configtest` fatal validation as file-provided tuning values.
+
+## 2026-06-01 hidden init-config CLI removal slice
+
+- The standalone `headscale` command no longer exposes the old hidden
+  `init-config` command or its local example-config writer.
+- Process coverage now asserts `init-config`, `init-config --help`, and the old
+  `init-config --output` form return the current-upstream unknown-command
+  error.

@@ -1002,7 +1002,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         qualify(rec.hostname.clone(), domain)
     };
     let id = rec.stable_node_id();
-    let stable_id = format!("n{id}");
+    let stable_id = id.to_string();
     // `User` mirrors upstream `tailcfg.Node.User`; tagged nodes use
     // headscale-go's synthetic TaggedDevices user instead of their
     // registering preauth-key user.
@@ -1248,6 +1248,25 @@ mod tests {
         let node = record_to_map_node(&record, "");
 
         assert_eq!(node.name, "router-a");
+    }
+
+    #[test]
+    fn record_to_map_node_uses_decimal_node_id_as_stable_id() {
+        let mut record = MachineRecord::new_at(
+            chrono::Utc::now(),
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "alice".into(),
+            "router-a".into(),
+            Ipv4Addr::new(100, 64, 0, 8),
+            false,
+        );
+        record.node_id = Some(42);
+
+        let node = record_to_map_node(&record, "octra.test");
+
+        assert_eq!(node.id, 42);
+        assert_eq!(node.stable_id, "42");
     }
 
     #[test]

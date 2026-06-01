@@ -1434,8 +1434,8 @@ pub struct MapNode {
     #[serde(rename = "ID")]
     pub id: u64,
     /// `StableNodeID` — same value-domain as `ID` but a string. We
-    /// derive it as `"n{ID}"` (matches headscale-go's
-    /// `fmt.Sprintf("n%d", id)` convention).
+    /// derive it as the decimal node ID string to match
+    /// headscale-go's `types.NodeID.StableID()` convention.
     #[serde(rename = "StableID")]
     pub stable_id: String,
     /// MagicDNS-style stable name (`<hostname>.<domain>`). Same value

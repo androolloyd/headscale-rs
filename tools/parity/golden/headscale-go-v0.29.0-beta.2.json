@@ -1231,6 +1231,49 @@
   },
   {
     "engine": "headscale",
+    "name": "ssh-action-whitespace",
+    "filter": [
+      {
+        "SrcIPs": [
+          "*"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-ssh",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "ssh-check-hold-delegate",
     "filter": [
       {
@@ -1397,6 +1440,22 @@
   },
   {
     "engine": "headscale",
+    "name": "ssh-validation-action-blank",
+    "filter": [
+
+    ],
+    "policy_error": "action must be specified"
+  },
+  {
+    "engine": "headscale",
+    "name": "ssh-validation-action-missing",
+    "filter": [
+
+    ],
+    "policy_error": "action must be specified"
+  },
+  {
+    "engine": "headscale",
     "name": "ssh-validation-group-src-user-dst",
     "filter": [
 
@@ -1433,7 +1492,7 @@
     "filter": [
 
     ],
-    "policy_error": "invalid"
+    "policy_error": "\"invalid\" is not a valid action"
   },
   {
     "engine": "headscale",

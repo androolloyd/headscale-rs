@@ -51,7 +51,7 @@ pub fn check_policy_semantics(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Res
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("policy test(s) failed:\n{}", errors.join("\n")))
+        Err(format!("test(s) failed:\n{}", errors.join("\n")))
     }
 }
 
@@ -112,22 +112,23 @@ fn run_ssh_policy_tests(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Vec<Strin
 }
 
 fn run_ssh_policy_test(
-    index: usize,
+    _index: usize,
     test: &SshPolicyTest,
     doc: &PolicyDoc,
     nodes: &[PolicyCheckNode],
 ) -> Vec<String> {
     let mut errors = Vec::new();
+    let src_label = test.src.as_str();
     let srcs = resolve_alias(doc, nodes, &test.src, None);
     if srcs.is_empty() {
         return vec![format!(
-            "sshTest {index}: source {:?} resolved to no live node addresses",
+            "{src_label}: source {:?} resolved to no IP addresses",
             test.src
         )];
     }
     if test.accept.is_empty() && test.deny.is_empty() && test.check.is_empty() {
         errors.push(format!(
-            "sshTest {index}: no accept, deny, or check assertions specified"
+            "{src_label}: no accept, deny, or check assertions specified"
         ));
     }
 
@@ -136,7 +137,7 @@ fn run_ssh_policy_test(
         let resolved = resolve_ssh_test_dst_nodes(doc, nodes, test, &srcs, dst);
         if resolved.is_empty() {
             errors.push(format!(
-                "sshTest {index}: dst alias {dst:?} resolved to no live nodes"
+                "{src_label}: dst alias {dst:?} resolved to no nodes"
             ));
             continue;
         }
@@ -1048,5 +1049,73 @@ mod tests {
                 "alice@/root -> server: expected ALLOWED via check, got ALLOWED via accept"
             )
         );
+    }
+
+    #[test]
+    fn ssh_tests_report_resolver_and_shape_failures_in_upstream_shape() {
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+            node(3, "prod", "alice", "100.64.0.3", &["tag:prod"]),
+        ];
+
+        for (name, raw, want) in [
+            (
+                "empty assertions",
+                r#"{
+                    "tagOwners": {"tag:server": ["alice@"]},
+                    "sshTests": [
+                        {"src": "alice@", "dst": ["tag:server"]}
+                    ]
+                }"#,
+                "alice@: no accept, deny, or check assertions specified",
+            ),
+            (
+                "source resolves empty",
+                r#"{
+                    "sshTests": [
+                        {"src": "ghost@", "dst": ["autogroup:member"], "accept": ["root"]}
+                    ]
+                }"#,
+                r#"ghost@: source "ghost@" resolved to no IP addresses"#,
+            ),
+            (
+                "destination resolves empty",
+                r#"{
+                    "tagOwners": {"tag:empty": ["alice@"]},
+                    "sshTests": [
+                        {"src": "alice@", "dst": ["tag:empty"], "accept": ["root"]}
+                    ]
+                }"#,
+                r#"alice@: dst alias "tag:empty" resolved to no nodes"#,
+            ),
+            (
+                "autogroup self from tag source resolves empty",
+                r#"{
+                    "tagOwners": {"tag:prod": ["alice@"]},
+                    "sshTests": [
+                        {"src": "tag:prod", "dst": ["autogroup:self"], "accept": ["root"]}
+                    ]
+                }"#,
+                r#"tag:prod: dst alias "autogroup:self" resolved to no nodes"#,
+            ),
+        ] {
+            let doc = parse_hujson_policy(raw).unwrap();
+            let err = check_policy_semantics(&doc, &nodes)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.starts_with("test(s) failed:\n"),
+                "{name} should use upstream wrapper, got {err}"
+            );
+            assert!(
+                err.contains(want),
+                "{name} should contain {want:?}, got {err}"
+            );
+            assert!(
+                !err.contains("sshTest "),
+                "{name} should not expose internal sshTest index labels, got {err}"
+            );
+        }
     }
 }

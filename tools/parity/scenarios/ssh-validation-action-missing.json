@@ -1,10 +1,9 @@
 {
-  "name": "ssh-validation-invalid-action",
-  "expect_policy_error": "\"invalid\" is not a valid action",
+  "name": "ssh-validation-action-missing",
+  "expect_policy_error": "action must be specified",
   "policy": {
     "ssh": [
       {
-        "action": " invalid ",
         "src": ["alice@"],
         "dst": ["autogroup:self"],
         "users": ["root"]

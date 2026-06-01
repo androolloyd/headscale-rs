@@ -383,8 +383,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   The production Pg stock-client harness also covers tagged preauth, post-login
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
-  `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`, and `postgres-acl-allow` rows. Push/PR
-  CI now provisions Postgres for all sixty-five Pg rows, including
+  `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
+  `postgres-acl-allow`, `postgres-acl-empty`, and
+  `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
+  all sixty-nine Pg rows, including
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -1030,6 +1032,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   between the no-restart all-unhealthy row and the restart-only
   all-unhealthy-reload row.
 
+## 2026-06-01 Postgres mixed-exit route-health reload smoke slice
+
+- Added paired `postgres-route-health-mixed-exit-reload` and
+  `postgres-route-health-mixed-exit-all-unhealthy-reload` Rust/headscale-go
+  rows over temporary Postgres databases, reusing the existing stock-client
+  policy-reload route-health harnesses without a production restart.
+- These rows prove policy reload preserves mixed exit-node separation and
+  all-unhealthy last-known subnet-primary retention on the Postgres backend,
+  closing the no-restart reload symmetry gap before the restart-only mixed-exit
+  rows.
+
 ## 2026-06-01 gRPC preauth missing-owner parity slice
 
 - `CreatePreAuthKey` now matches upstream when the request supplies neither a
@@ -1072,3 +1085,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added `policy-v2-app-cap-grants`, covering global and per-node `CapGrant`
   normalization plus cap-grant peer visibility against pinned headscale-go.
   The refreshed v0.29.0-beta.2 golden now covers eighty-eight parity scenarios.
+
+## 2026-06-01 Postgres ACL stock-client smoke slice
+
+- Added paired `postgres-acl-empty` and `postgres-acl-autogroup-self`
+  Rust/headscale-go rows over a temporary Postgres database.
+- The rows cover the empty ACL streaming visibility edge and
+  `autogroup:self` same-user isolation through stock Tailscale clients, closing
+  the remaining Postgres ACL smoke symmetry gap after `postgres-acl-allow`.
+- The real-client matrix and PR smoke set now include the rows; the Postgres
+  stock-client matrix covers sixty-nine rows.

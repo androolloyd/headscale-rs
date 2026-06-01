@@ -119,6 +119,8 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-tag-update-invalid` | `postgres-tag-update-invalid-smoke.sh` | `postgres-tag-update-invalid-headscale-go-smoke.sh` | Production Postgres invalid forced tag rejection |
 | Database | `postgres-tag-reauth-clear` | `postgres-tag-reauth-clear-smoke.sh` | `postgres-tag-reauth-clear-headscale-go-smoke.sh` | Production Postgres web reauth clears forced tags |
 | Database | `postgres-acl-allow` | `postgres-acl-allow-smoke.sh` | `postgres-acl-allow-headscale-go-smoke.sh` | Production Postgres ACL allowed peers visible |
+| Database | `postgres-acl-empty` | `postgres-acl-empty-smoke.sh` | `postgres-acl-empty-headscale-go-smoke.sh` | Production Postgres empty ACL streaming visibility edge |
+| Database | `postgres-acl-autogroup-self` | `postgres-acl-autogroup-self-smoke.sh` | `postgres-acl-autogroup-self-headscale-go-smoke.sh` | Production Postgres `autogroup:self` peer isolation |
 | Database | `postgres-route-via` | `postgres-route-via-smoke.sh` | `postgres-route-via-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` route steering |
 | Database | `postgres-route-via-same-tag` | `postgres-route-via-same-tag-smoke.sh` | `postgres-route-via-same-tag-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route steering |
 | Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
@@ -139,9 +141,11 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-route-health-all-unhealthy-restart` | `postgres-route-health-all-unhealthy-restart-smoke.sh` | `postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention survives server restart |
 | Database | `postgres-route-health-all-unhealthy-reload-restart` | `postgres-route-health-all-unhealthy-reload-restart-smoke.sh` | `postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy policy reload survives server restart |
 | Database | `postgres-route-health-mixed-exit` | `postgres-route-health-mixed-exit-smoke.sh` | `postgres-route-health-mixed-exit-headscale-go-smoke.sh` | Production Postgres route-health ignores exit-only routes during HA failover |
+| Database | `postgres-route-health-mixed-exit-reload` | `postgres-route-health-mixed-exit-reload-smoke.sh` | `postgres-route-health-mixed-exit-reload-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node policy reload failover |
 | Database | `postgres-route-health-mixed-exit-restart` | `postgres-route-health-mixed-exit-restart-smoke.sh` | `postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node separation survives server restart |
 | Database | `postgres-route-health-mixed-exit-reload-restart` | `postgres-route-health-mixed-exit-reload-restart-smoke.sh` | `postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node policy reload survives server restart |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy` | `postgres-route-health-mixed-exit-all-unhealthy-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention |
+| Database | `postgres-route-health-mixed-exit-all-unhealthy-reload` | `postgres-route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node policy reload preserves all-unhealthy retention |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy-restart` | `postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy retention survives server restart |
 | Database | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health mixed exit-node all-unhealthy policy reload survives server restart |
 | Registration | `ping-lifecycle` | `ping-lifecycle-smoke.sh` | `ping-lifecycle-headscale-go-smoke.sh` | Debug PingRequest dispatch and public HEAD callback correlation |
@@ -707,6 +711,24 @@ It uses the same mock OIDC provider and stock Tailscale client as `oidc`, skips
 cleanly when `HEADSCALE_DB_POSTGRES_TEST_URL` is not set, and asserts the OIDC
 node row, user profile/provider fields, CLI node projection, and client netmap.
 
+The Postgres ACL rows run stock clients through the production Postgres serving
+path and assert the allow, empty-policy streaming, and `autogroup:self`
+visibility cases:
+
+```sh
+tools/real-client/postgres-acl-allow-smoke.sh
+tools/real-client/postgres-acl-allow-headscale-go-smoke.sh
+tools/real-client/postgres-acl-empty-smoke.sh
+tools/real-client/postgres-acl-empty-headscale-go-smoke.sh
+tools/real-client/postgres-acl-autogroup-self-smoke.sh
+tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh
+```
+
+The `postgres-acl-autogroup-self` row creates clients as `alice`, `bob`, and
+`alice`, matching the non-Postgres ACL smoke's same-user isolation assertion.
+All Postgres ACL rows use `HEADSCALE_DB_POSTGRES_TEST_URL` and skip cleanly
+when that URL is not set.
+
 The Postgres route-edge rows reuse the restart harness with a temporary
 Postgres database to prove current-head route-via steering, policy reloads, and
 persisted route-via/route-health state across production server boundaries:
@@ -752,12 +774,16 @@ tools/real-client/postgres-route-health-all-unhealthy-reload-restart-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-reload-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-reload-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-smoke.sh
+tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh

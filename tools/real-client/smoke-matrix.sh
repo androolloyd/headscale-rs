@@ -125,6 +125,8 @@ smoke_ids=(
   postgres-tag-update-invalid
   postgres-tag-reauth-clear
   postgres-acl-allow
+  postgres-acl-empty
+  postgres-acl-autogroup-self
   postgres-route-via
   postgres-route-via-same-tag
   postgres-route-via-reload
@@ -145,9 +147,11 @@ smoke_ids=(
   postgres-route-health-all-unhealthy-restart
   postgres-route-health-all-unhealthy-reload-restart
   postgres-route-health-mixed-exit
+  postgres-route-health-mixed-exit-reload
   postgres-route-health-mixed-exit-restart
   postgres-route-health-mixed-exit-reload-restart
   postgres-route-health-mixed-exit-all-unhealthy
+  postgres-route-health-mixed-exit-all-unhealthy-reload
   postgres-route-health-mixed-exit-all-unhealthy-restart
   postgres-route-health-mixed-exit-all-unhealthy-reload-restart
   ping-lifecycle
@@ -228,6 +232,10 @@ smoke_areas=(
   registration
   registration
   registration
+  database
+  database
+  database
+  database
   database
   database
   database
@@ -411,6 +419,8 @@ smoke_rust_scripts=(
   tools/real-client/postgres-tag-update-invalid-smoke.sh
   tools/real-client/postgres-tag-reauth-clear-smoke.sh
   tools/real-client/postgres-acl-allow-smoke.sh
+  tools/real-client/postgres-acl-empty-smoke.sh
+  tools/real-client/postgres-acl-autogroup-self-smoke.sh
   tools/real-client/postgres-route-via-smoke.sh
   tools/real-client/postgres-route-via-same-tag-smoke.sh
   tools/real-client/postgres-route-via-reload-smoke.sh
@@ -431,9 +441,11 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-health-all-unhealthy-restart-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-reload-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/ping-lifecycle-smoke.sh
@@ -554,6 +566,8 @@ smoke_go_scripts=(
   tools/real-client/postgres-tag-update-invalid-headscale-go-smoke.sh
   tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh
   tools/real-client/postgres-acl-allow-headscale-go-smoke.sh
+  tools/real-client/postgres-acl-empty-headscale-go-smoke.sh
+  tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
@@ -574,9 +588,11 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-health-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/ping-lifecycle-headscale-go-smoke.sh
@@ -697,6 +713,8 @@ smoke_assertions=(
   "production Postgres invalid tag update rejection"
   "production Postgres web reauth clears forced tags"
   "production Postgres ACL allowed peers visible"
+  "production Postgres empty ACL streaming peer visibility edge"
+  "production Postgres autogroup:self same-user peer isolation"
   "production Postgres current-head grants via route steering"
   "production Postgres current-head same-tag grants via route steering"
   "production Postgres current-head grants via policy reload steering"
@@ -717,9 +735,11 @@ smoke_assertions=(
   "production Postgres route-health all-unhealthy retention survives server restart"
   "production Postgres route-health all-unhealthy policy reload survives server restart"
   "production Postgres route-health ignores exit-only routes during HA failover"
+  "production Postgres route-health mixed exit-node policy reload failover"
   "production Postgres route-health mixed exit-node separation survives server restart"
   "production Postgres route-health mixed exit-node policy reload survives server restart"
   "production Postgres route-health mixed exit-node all-unhealthy retention"
+  "production Postgres route-health mixed exit-node policy reload preserves all-unhealthy retention"
   "production Postgres route-health mixed exit-node all-unhealthy retention survives server restart"
   "production Postgres route-health mixed exit-node all-unhealthy policy reload survives server restart"
   "debug PingRequest dispatch and public HEAD callback correlation"

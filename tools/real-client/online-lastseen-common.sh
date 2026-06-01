@@ -73,6 +73,38 @@ expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
 expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
 taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
 expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
+force_derp="${REAL_CLIENT_FORCE_DERP:-false}"
+rust_embedded_derp="${REAL_CLIENT_RUST_EMBEDDED_DERP:-${HSRS_HARNESS_EMBEDDED_DERP:-false}}"
+rust_derp_region_id="${REAL_CLIENT_RUST_DERP_REGION_ID:-${REAL_CLIENT_DERP_REGION_ID:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_ID:-900}}}"
+rust_derp_region_code="${REAL_CLIENT_RUST_DERP_REGION_CODE:-${REAL_CLIENT_DERP_REGION_CODE:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_CODE:-headscale}}}"
+rust_derp_region_name="${REAL_CLIENT_RUST_DERP_REGION_NAME:-${REAL_CLIENT_DERP_REGION_NAME:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_NAME:-Headscale Embedded DERP}}}"
+rust_derp_host="${REAL_CLIENT_RUST_DERP_HOST:-${REAL_CLIENT_DERP_HOST:-${HSRS_HARNESS_EMBEDDED_DERP_HOSTNAME:-host.docker.internal}}}"
+rust_derp_port="${REAL_CLIENT_RUST_DERP_PORT:-${REAL_CLIENT_DERP_PORT:-${HSRS_HARNESS_EMBEDDED_DERP_DERP_PORT:-}}}"
+rust_derp_stun_addr="${REAL_CLIENT_RUST_DERP_STUN_ADDR:-${HSRS_HARNESS_EMBEDDED_DERP_STUN_ADDR:-}}"
+rust_derp_omit_default_regions="${REAL_CLIENT_RUST_DERP_OMIT_DEFAULT_REGIONS:-${REAL_CLIENT_DERP_OMIT_DEFAULT_REGIONS:-${HSRS_HARNESS_EMBEDDED_DERP_OMIT_DEFAULT_REGIONS:-true}}}"
+rust_derp_insecure_for_tests="${REAL_CLIENT_RUST_DERP_INSECURE_FOR_TESTS:-${REAL_CLIENT_DERP_INSECURE_FOR_TESTS:-${HSRS_HARNESS_EMBEDDED_DERP_INSECURE_FOR_TESTS:-true}}}"
+rust_derp_verify_clients="${REAL_CLIENT_RUST_DERP_VERIFY_CLIENTS:-${HSRS_HARNESS_EMBEDDED_DERP_VERIFY_CLIENTS:-true}}"
+rust_derper_binary="${REAL_CLIENT_RUST_DERPER_BINARY:-${REAL_CLIENT_DERPER_BIN:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_BINARY:-}}}"
+rust_derper_listen_addr="${REAL_CLIENT_RUST_DERPER_LISTEN_ADDR:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_LISTEN_ADDR:-}}"
+rust_derper_cert_mode="${REAL_CLIENT_RUST_DERPER_CERT_MODE:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_CERT_MODE:-manual}}"
+rust_derper_cert_dir="${REAL_CLIENT_RUST_DERPER_CERT_DIR:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_CERT_DIR:-}}"
+headscale_go_embedded_derp="${REAL_CLIENT_HEADSCALE_GO_EMBEDDED_DERP:-false}"
+headscale_go_derp_region_id="${REAL_CLIENT_HEADSCALE_GO_DERP_REGION_ID:-${REAL_CLIENT_EXPECT_DERP_REGION_ID:-900}}"
+headscale_go_derp_region_code="${REAL_CLIENT_HEADSCALE_GO_DERP_REGION_CODE:-${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-headscale}}"
+headscale_go_derp_region_name="${REAL_CLIENT_HEADSCALE_GO_DERP_REGION_NAME:-${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-Headscale Embedded DERP}}"
+headscale_go_derp_stun_addr="${REAL_CLIENT_HEADSCALE_GO_DERP_STUN_ADDR:-}"
+headscale_go_derp_verify_clients="${REAL_CLIENT_HEADSCALE_GO_DERP_VERIFY_CLIENTS:-true}"
+expected_derp_region_id="${REAL_CLIENT_EXPECT_DERP_REGION_ID:-}"
+expected_derp_region_code="${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-}"
+expected_derp_region_name="${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-}"
+expected_derp_host="${REAL_CLIENT_EXPECT_DERP_HOST:-}"
+expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-}"
+expected_derp_stun_port="${REAL_CLIENT_EXPECT_DERP_STUN_PORT:-}"
+expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-}"
+expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-}"
+expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
+assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
 ssh_user="${REAL_CLIENT_SSH_USER:-}"
@@ -273,6 +305,134 @@ case "${expected_debug_ping}" in
     exit 2
     ;;
 esac
+case "${force_derp}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    force_derp_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    force_derp_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_FORCE_DERP must be true or false, got ${force_derp}" >&2
+    exit 2
+    ;;
+esac
+case "${rust_embedded_derp}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    use_rust_embedded_derp=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    use_rust_embedded_derp=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RUST_EMBEDDED_DERP must be true or false, got ${rust_embedded_derp}" >&2
+    exit 2
+    ;;
+esac
+case "${rust_derp_omit_default_regions}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    rust_derp_omit_default_regions_bool=true
+    ;;
+  0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    rust_derp_omit_default_regions_bool=false
+    ;;
+  *)
+    echo "REAL_CLIENT_RUST_DERP_OMIT_DEFAULT_REGIONS must be true or false, got ${rust_derp_omit_default_regions}" >&2
+    exit 2
+    ;;
+esac
+case "${rust_derp_insecure_for_tests}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    rust_derp_insecure_for_tests_bool=true
+    ;;
+  0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    rust_derp_insecure_for_tests_bool=false
+    ;;
+  *)
+    echo "REAL_CLIENT_RUST_DERP_INSECURE_FOR_TESTS must be true or false, got ${rust_derp_insecure_for_tests}" >&2
+    exit 2
+    ;;
+esac
+case "${rust_derp_verify_clients}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    rust_derp_verify_clients_bool=true
+    ;;
+  0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    rust_derp_verify_clients_bool=false
+    ;;
+  *)
+    echo "REAL_CLIENT_RUST_DERP_VERIFY_CLIENTS must be true or false, got ${rust_derp_verify_clients}" >&2
+    exit 2
+    ;;
+esac
+case "${headscale_go_embedded_derp}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    use_headscale_go_embedded_derp=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    use_headscale_go_embedded_derp=0
+    ;;
+  *)
+    echo "REAL_CLIENT_HEADSCALE_GO_EMBEDDED_DERP must be true or false, got ${headscale_go_embedded_derp}" >&2
+    exit 2
+    ;;
+esac
+case "${headscale_go_derp_verify_clients}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    use_headscale_go_derp_verify_clients=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    use_headscale_go_derp_verify_clients=0
+    ;;
+  *)
+    echo "REAL_CLIENT_HEADSCALE_GO_DERP_VERIFY_CLIENTS must be true or false, got ${headscale_go_derp_verify_clients}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_derp_ping}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_derp_ping_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_derp_ping_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DERP_PING must be true or false, got ${expected_derp_ping}" >&2
+    exit 2
+    ;;
+esac
+case "${assert_derp_stun}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    assert_derp_stun_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    assert_derp_stun_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+if ((expect_derp_ping_flag)) && ((client_count < 2)); then
+  echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
+  exit 2
+fi
+if ((use_rust_embedded_derp)) && [[ -z "${rust_derp_stun_addr}" ]]; then
+  echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERP_STUN_ADDR or HSRS_HARNESS_EMBEDDED_DERP_STUN_ADDR" >&2
+  exit 2
+fi
+if ((use_rust_embedded_derp)) && [[ -z "${rust_derp_port}" ]]; then
+  echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERP_PORT or REAL_CLIENT_DERP_PORT" >&2
+  exit 2
+fi
+if ((use_rust_embedded_derp)) && [[ -z "${rust_derper_binary}" ]]; then
+  echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERPER_BINARY or REAL_CLIENT_DERPER_BIN" >&2
+  exit 2
+fi
+if ((use_rust_embedded_derp)) && [[ -z "${rust_derper_listen_addr}" ]]; then
+  echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERPER_LISTEN_ADDR" >&2
+  exit 2
+fi
 taildrop_enabled_bool=""
 if [[ -n "${taildrop_enabled}" ]]; then
   case "${taildrop_enabled}" in
@@ -630,10 +790,20 @@ assign_server_ports() {
       health_curl_opts="-fsSk"
       ;;
   esac
+  configure_derp_expectations
 }
 
 yaml_string() {
   ruby -rjson -e 'puts ARGV.fetch(0).to_json' "$1"
+}
+
+derp_port_from_addr() {
+  local addr="$1"
+  if [[ "${addr}" =~ :([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
 }
 
 parse_postgres_test_url() {
@@ -891,6 +1061,171 @@ assert_peer_visibility_if_requested() {
       puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
     end
   ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
+  echo "::endgroup::"
+}
+
+assert_stun_round_trip() {
+  local host="$1"
+  local port="$2"
+  local output_path="$3"
+  ruby -rjson -rsocket -rzlib -e '
+    host = ARGV.fetch(0)
+    port = Integer(ARGV.fetch(1))
+    txid = "derpstun1234".bytes.take(12).pack("C*")
+    software = "tailnode"
+    body = [0x8022, software.bytesize].pack("nn") + software
+    req = [0x0001, body.bytesize + 8, 0x2112a442].pack("nnN") + txid + body
+    fingerprint = (Zlib.crc32(req) ^ 0x5354554e) & 0xffffffff
+    req += [0x8028, 4, fingerprint].pack("nnN")
+    ipv6 = host.include?(":")
+    sock = UDPSocket.new(ipv6 ? Socket::AF_INET6 : Socket::AF_INET)
+    sock.bind(ipv6 ? "::1" : "127.0.0.1", 0)
+    local = sock.addr
+    sock.send(req, 0, host, port)
+    ready = IO.select([sock], nil, nil, 3)
+    abort("timed out waiting for STUN response from #{host}:#{port}") unless ready
+    data, = sock.recvfrom(1500)
+    abort("short STUN response: #{data.bytesize}") if data.bytesize < 32
+    type, len, cookie = data.byteslice(0, 8).unpack("nnN")
+    abort("unexpected STUN type 0x#{type.to_s(16)}") unless type == 0x0101
+    abort("unexpected STUN cookie 0x#{cookie.to_s(16)}") unless cookie == 0x2112a442
+    abort("transaction id mismatch") unless data.byteslice(8, 12) == txid
+    attr_type, attr_len = data.byteslice(20, 4).unpack("nn")
+    abort("expected XOR-MAPPED-ADDRESS, got 0x#{attr_type.to_s(16)}") unless attr_type == 0x0020
+    abort("truncated XOR-MAPPED-ADDRESS") if data.bytesize < 24 + attr_len
+    family = data.getbyte(25)
+    abort("unexpected XOR-MAPPED-ADDRESS length #{attr_len}") unless (family == 0x01 && attr_len == 8) || (family == 0x02 && attr_len == 20)
+    xport = data.byteslice(26, 2).unpack1("n")
+    decoded_port = xport ^ (0x2112a442 >> 16)
+    expected_port = local[1]
+    abort("expected reflected port #{expected_port}, got #{decoded_port}") unless decoded_port == expected_port
+    File.write(ARGV.fetch(2), JSON.pretty_generate({stun: "#{host}:#{port}", family: family == 0x02 ? "ipv6" : "ipv4", reflected_port: decoded_port}))
+  ' "${host}" "${port}" "${output_path}"
+}
+
+assert_derp_stun_if_requested() {
+  ((assert_derp_stun_flag)) || return 0
+  echo "::group::assert embedded DERP STUN"
+  if [[ -z "${expected_derp_stun_port}" ]]; then
+    echo "REAL_CLIENT_ASSERT_DERP_STUN requires REAL_CLIENT_EXPECT_DERP_STUN_PORT" >&2
+    echo "::endgroup::"
+    return 1
+  fi
+  wait_for "embedded DERP STUN" \
+    "assert_stun_round_trip '${derp_stun_probe_host}' '${expected_derp_stun_port}' '${work_dir}/embedded-derp-stun.json'"
+  cat "${work_dir}/embedded-derp-stun.json"
+  echo "::endgroup::"
+}
+
+assert_derp_map() {
+  local derp_client_name="$1"
+  local output_path="$2"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${derp_client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      path = ARGV.fetch(0)
+      expected_region = ARGV.fetch(1)
+      expected_code = ARGV.fetch(2)
+      expected_name = ARGV.fetch(3)
+      expected_host = ARGV.fetch(4)
+      expected_port = ARGV.fetch(5)
+      expected_stun = ARGV.fetch(6)
+      expected_insecure = ARGV.fetch(7)
+      expected_omit_default = ARGV.fetch(8)
+      netmap = JSON.parse(File.read(path))
+      derp_map = netmap.fetch("DERPMap")
+      regions = derp_map.fetch("Regions")
+      region = regions.fetch(expected_region) {
+        abort("missing DERP region #{expected_region}; got #{regions.keys.inspect}")
+      }
+      abort("expected RegionCode #{expected_code.inspect}, got #{region["RegionCode"].inspect}") unless expected_code.empty? || region["RegionCode"] == expected_code
+      abort("expected RegionName #{expected_name.inspect}, got #{region["RegionName"].inspect}") unless expected_name.empty? || region["RegionName"] == expected_name
+      node = Array(region["Nodes"]).first || abort("region #{expected_region} has no nodes")
+      abort("expected HostName #{expected_host.inspect}, got #{node["HostName"].inspect}") unless expected_host.empty? || node["HostName"] == expected_host
+      unless expected_port.empty?
+        port = node.fetch("DERPPort", 0).to_i
+        abort("expected DERPPort #{expected_port}, got #{port}") unless port == Integer(expected_port)
+      end
+      unless expected_stun.empty?
+        stun = node.fetch("STUNPort", 0).to_i
+        abort("expected STUNPort #{expected_stun}, got #{stun}") unless stun == Integer(expected_stun)
+      end
+      unless expected_insecure.empty?
+        insecure = !!node["InsecureForTests"]
+        want = %w[1 true TRUE True yes YES Yes on ON On].include?(expected_insecure)
+        abort("expected InsecureForTests #{want}, got #{insecure}") unless insecure == want
+      end
+      unless expected_omit_default.empty?
+        omit = !!derp_map["omitDefaultRegions"]
+        want = %w[1 true TRUE True yes YES Yes on ON On].include?(expected_omit_default)
+        abort("expected omitDefaultRegions #{want}, got #{omit}") unless omit == want
+      end
+      puts JSON.pretty_generate({region: region, node: node, omitDefaultRegions: !!derp_map["omitDefaultRegions"]})
+    ' "${netmap_path}" "${expected_derp_region_id}" "${expected_derp_region_code}" "${expected_derp_region_name}" "${expected_derp_host}" "${expected_derp_port}" "${expected_derp_stun_port}" "${expected_derp_insecure_for_tests}" "${expected_derp_omit_default_regions}" >"${output_path}"
+}
+
+assert_derp_map_if_requested() {
+  [[ -n "${expected_derp_region_id}" ]] || return 0
+  echo "::group::assert DERP map metadata"
+  local derp_client_name
+  for derp_client_name in "${successful_client_names[@]}"; do
+    if ! wait_for "DERP map metadata ${derp_client_name}" \
+      "assert_derp_map '${derp_client_name}' '${work_dir}/${derp_client_name}.derp-map.json'"; then
+      cat "${work_dir}/${derp_client_name}.derp-map.json.err" >&2 || true
+      dump_client_debug "${derp_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${work_dir}/${derp_client_name}.derp-map.json"
+  done
+  echo "::endgroup::"
+}
+
+tailscale_derp_ping_succeeded() {
+  local source_name="$1"
+  local target_name="$2"
+  local output_path="$3"
+  local target_ip
+  target_ip="$(
+    docker exec "${source_name}" tailscale status --json 2>/dev/null | ruby -rjson -e '
+      status = JSON.parse(STDIN.read)
+      target = ARGV.fetch(0)
+      peer = (status["Peer"] || {}).each_value.find { |p| p["HostName"] == target }
+      exit 1 unless peer
+      ips = Array(peer["TailscaleIPs"])
+      ips << peer["TailscaleIP"] if ips.empty? && peer["TailscaleIP"]
+      puts ips.first
+    ' "${target_name}"
+  )" || return 1
+  docker exec "${source_name}" tailscale ping --timeout=5s --c=1 --until-direct=false "${target_ip}" \
+    >"${output_path}" \
+    2>"${output_path}.err" || return 1
+  if [[ -n "${expected_derp_region_code}" ]]; then
+    grep -Eq "via DERP\\(${expected_derp_region_code}\\)" "${output_path}"
+  else
+    grep -Eq "via DERP\\(" "${output_path}"
+  fi
+}
+
+assert_derp_ping_if_requested() {
+  ((expect_derp_ping_flag)) || return 0
+  echo "::group::assert DERP relay path"
+  if ((${#successful_client_names[@]} < 2)); then
+    echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two successful clients" >&2
+    echo "::endgroup::"
+    return 1
+  fi
+  local source_name="${successful_client_names[0]}"
+  local target_name="${successful_client_names[1]}"
+  if ! wait_for "tailscale ping ${source_name} to ${target_name} via DERP" \
+    "tailscale_derp_ping_succeeded '${source_name}' '${target_name}' '${work_dir}/derp-ping-${source_name}-to-${target_name}.txt'"; then
+    cat "${work_dir}/derp-ping-${source_name}-to-${target_name}.err" >&2 || true
+    dump_client_debug "${source_name}"
+    dump_client_debug "${target_name}"
+    echo "::endgroup::"
+    return 1
+  fi
+  cat "${work_dir}/derp-ping-${source_name}-to-${target_name}.txt"
   echo "::endgroup::"
 }
 
@@ -1254,6 +1589,65 @@ append_dns_nameservers_config() {
   fi
 }
 
+configure_derp_expectations() {
+  if ((use_rust_embedded_derp)); then
+    expected_derp_region_id="${REAL_CLIENT_EXPECT_DERP_REGION_ID:-${rust_derp_region_id}}"
+    expected_derp_region_code="${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-${rust_derp_region_code}}"
+    expected_derp_region_name="${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-${rust_derp_region_name}}"
+    expected_derp_host="${REAL_CLIENT_EXPECT_DERP_HOST:-${rust_derp_host}}"
+    expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-${rust_derp_port}}"
+    if [[ -n "${REAL_CLIENT_EXPECT_DERP_STUN_PORT:-}" ]]; then
+      expected_derp_stun_port="${REAL_CLIENT_EXPECT_DERP_STUN_PORT}"
+    else
+      expected_derp_stun_port="$(derp_port_from_addr "${rust_derp_stun_addr}")"
+    fi
+    expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-${rust_derp_insecure_for_tests_bool}}"
+    expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-${rust_derp_omit_default_regions_bool}}"
+  fi
+
+  if ((use_headscale_go_embedded_derp)); then
+    if [[ -z "${headscale_go_derp_stun_addr}" ]]; then
+      headscale_go_derp_stun_addr="0.0.0.0:3478"
+    fi
+    expected_derp_region_id="${REAL_CLIENT_EXPECT_DERP_REGION_ID:-${headscale_go_derp_region_id}}"
+    expected_derp_region_code="${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-${headscale_go_derp_region_code}}"
+    expected_derp_region_name="${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-${headscale_go_derp_region_name}}"
+    expected_derp_host="${REAL_CLIENT_EXPECT_DERP_HOST:-host.docker.internal}"
+    expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-${http_port}}"
+    if [[ -n "${REAL_CLIENT_EXPECT_DERP_STUN_PORT:-}" ]]; then
+      expected_derp_stun_port="${REAL_CLIENT_EXPECT_DERP_STUN_PORT}"
+    else
+      expected_derp_stun_port="$(derp_port_from_addr "${headscale_go_derp_stun_addr}")"
+    fi
+  fi
+}
+
+append_rust_embedded_derp_config() {
+  ((use_rust_embedded_derp)) || return 0
+  cat >>"${config_path}" <<EOF
+  embedded_derp:
+    enabled: true
+    host_name: $(yaml_string "${rust_derp_host}")
+    derp_port: ${rust_derp_port}
+    stun_addr: $(yaml_string "${rust_derp_stun_addr}")
+    stun_only: false
+    region_id: ${rust_derp_region_id}
+    region_code: $(yaml_string "${rust_derp_region_code}")
+    region_name: $(yaml_string "${rust_derp_region_name}")
+    omit_default_regions: ${rust_derp_omit_default_regions_bool}
+    insecure_for_tests: ${rust_derp_insecure_for_tests_bool}
+    derper_binary: $(yaml_string "${rust_derper_binary}")
+    derper_listen_addr: $(yaml_string "${rust_derper_listen_addr}")
+    derper_config_path: $(yaml_string "${work_dir}/derper.key")
+    derper_cert_mode: $(yaml_string "${rust_derper_cert_mode}")
+    verify_client_url: $(yaml_string "${local_control_url}/verify")
+    verify_clients: ${rust_derp_verify_clients_bool}
+EOF
+  if [[ -n "${rust_derper_cert_dir}" ]]; then
+    printf '    derper_cert_dir: %s\n' "$(yaml_string "${rust_derper_cert_dir}")" >>"${config_path}"
+  fi
+}
+
 write_config() {
   case "${target}" in
     rust)
@@ -1272,7 +1666,9 @@ server:
   unix_socket: ${socket_path}
   unix_socket_permission: "0700"
   tls_hostname: host.docker.internal
-
+EOF
+      append_rust_embedded_derp_config
+      cat >>"${config_path}" <<EOF
 unix_socket: ${socket_path}
 unix_socket_permission: "0700"
 
@@ -1346,7 +1742,25 @@ cli:
 log:
   level: info
   format: text
-
+EOF
+      if ((use_headscale_go_embedded_derp)); then
+        cat >>"${config_path}" <<EOF
+derp:
+  server:
+    enabled: true
+    region_id: ${headscale_go_derp_region_id}
+    region_code: $(yaml_string "${headscale_go_derp_region_code}")
+    region_name: $(yaml_string "${headscale_go_derp_region_name}")
+    verify_clients: $([[ "${use_headscale_go_derp_verify_clients}" -eq 1 ]] && printf true || printf false)
+    stun_listen_addr: $(yaml_string "${headscale_go_derp_stun_addr}")
+    private_key_path: $(yaml_string "${work_dir}/derp_server_private.key")
+    automatically_add_embedded_derp_region: true
+  urls: []
+  paths: []
+  auto_update_enabled: false
+EOF
+      else
+        cat >>"${config_path}" <<EOF
 derp:
   server:
     enabled: false
@@ -1354,6 +1768,9 @@ derp:
   paths:
     - ${work_dir}/derp.yaml
   auto_update_enabled: false
+EOF
+      fi
+      cat >>"${config_path}" <<EOF
 
 tls_cert_path: ${tls_cert_path}
 tls_key_path: ${tls_key_path}
@@ -1591,8 +2008,12 @@ create_user_and_key() {
 
 start_client() {
   echo "::group::start stock tailscale client"
-  local client_entry
-  client_entry='update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
+  local client_entry tailscaled_prefix
+  tailscaled_prefix=""
+  if ((force_derp_flag)); then
+    tailscaled_prefix="TS_DEBUG_ALWAYS_USE_DERP=1 "
+  fi
+  client_entry="update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; ${tailscaled_prefix}tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity"
   if ((install_openssh_client)); then
     client_entry="apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; ${client_entry}"
   fi
@@ -2550,6 +2971,7 @@ if [[ "${target}" == "headscale-go" ]]; then
   generate_headscale_go_tls
 fi
 start_server_with_retries
+assert_derp_stun_if_requested
 create_user_and_key
 successful_client_names=()
 for idx in "${!client_names[@]}"; do
@@ -2583,6 +3005,8 @@ set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_peer_visibility_if_requested
+assert_derp_map_if_requested
+assert_derp_ping_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
 assert_debug_ping_if_requested

@@ -387,11 +387,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty-three Pg rows, including
+  all eighty-four Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-route-preserve`,
-  `postgres-taildrop-capmap`,
+  `postgres-taildrop-capmap`, `postgres-derp-private`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -407,7 +407,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`,
   `postgres-ssh-accept-env`, `postgres-ssh-localpart`,
   `postgres-ssh-profile-variants`, and the paired wrong-user, expired, and
-  cancelled OIDC SSH-check denial rows; broader Pg
+  cancelled OIDC SSH-check denial rows plus private DERP sidecar/STUN/relay
+  coverage; broader Pg
   stock-client serve smokes remain for the remaining registration/config
   surfaces
 - Broader paired route-via and route-health stock-client edge matrices beyond the covered reload/restart basics
@@ -961,6 +962,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   compatibility.
 - The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to eighty-three rows.
+
+## 2026-06-01 Postgres private DERP smoke slice
+
+- Added paired `postgres-derp-private` Rust/headscale-go rows over the
+  production Postgres stock-client harness.
+- `tools/real-client/online-lastseen-common.sh` now supports config-backed
+  embedded DERP/STUN for Rust production serve and headscale-go embedded DERP,
+  forces stock clients through DERP, and asserts STUN, DERP-map metadata, and a
+  relay-path `tailscale ping`.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to eighty-four rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

@@ -137,6 +137,7 @@ smoke_ids=(
   postgres-route-via-multiprefix-reload-restart
   postgres-route-health
   postgres-route-health-reload
+  postgres-route-health-all-unhealthy
   postgres-route-health-restart
   postgres-route-health-primary-restart
   postgres-route-health-reload-restart
@@ -225,6 +226,7 @@ smoke_areas=(
   registration
   registration
   registration
+  database
   database
   database
   database
@@ -417,6 +419,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-via-multiprefix-reload-restart-smoke.sh
   tools/real-client/postgres-route-health-smoke.sh
   tools/real-client/postgres-route-health-reload-smoke.sh
+  tools/real-client/postgres-route-health-all-unhealthy-smoke.sh
   tools/real-client/postgres-route-health-restart-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-smoke.sh
@@ -557,6 +560,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-via-multiprefix-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-reload-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
@@ -697,6 +701,7 @@ smoke_assertions=(
   "production Postgres current-head multi-prefix grants via policy reload survives server restart"
   "production Postgres current-head route-health failover"
   "production Postgres current-head route-health policy reload failover"
+  "production Postgres route-health all-unhealthy retention"
   "production Postgres current-head route-health survives server restart"
   "production Postgres route-health primary selection survives server restart"
   "production Postgres route-health policy reload survives server restart"

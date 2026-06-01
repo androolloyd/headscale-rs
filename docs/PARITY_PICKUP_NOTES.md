@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-05-31 16:23 ADT
+Updated: 2026-06-01 11:17 ADT
 
 ## Current State
 
@@ -206,7 +206,7 @@ Current multi-agent split:
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval restart,
   web-registration restart, restart-persistence, route-via restart,
   route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health, route-health reload,
-  route-health restart, route-health primary-selection restart, route-health reload+restart, route-health
+  route-health all-unhealthy, route-health restart, route-health primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, and route-health
   mixed-exit all-unhealthy restart, plus route-health mixed-exit all-unhealthy
   reload+restart smokes are now checked into the real-client
@@ -374,7 +374,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   paired env-gated Pg auth-key, online/LastSeen, web-registration, route-approval, exit-node
   route-approval, web-registration route-approval, OIDC, OIDC restart, OIDC route-approval
   restart, web-registration restart, restart-persistence, route-via restart,
-  route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health restart, route-health
+  route-via reload+restart, route-via multiprefix restart, route-via multiprefix reload+restart, route-health all-unhealthy, route-health restart, route-health
   primary-selection restart, route-health reload+restart, route-health
   all-unhealthy restart, route-health mixed-exit restart, route-health
   mixed-exit reload+restart, route-health mixed-exit all-unhealthy restart, and
@@ -384,7 +384,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   tag replacement, invalid tag-update rejection, and web reauth clearing forced
   tags through paired `postgres-tagged-preauth`, `postgres-tag-update`,
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`, and `postgres-acl-allow` rows. Push/PR
-  CI now provisions Postgres for all fifty-seven Pg rows, including
+  CI now provisions Postgres for all sixty-three Pg rows, including
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -392,7 +392,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-magicdns-ipv6-only`, `postgres-prefix-family-dual-stack`,
   `postgres-prefix-family-ipv4-only`, `postgres-prefix-family-ipv6-only`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
-  `postgres-route-advertise`, `postgres-acl-allow`, `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`,
+  `postgres-route-advertise`, `postgres-acl-allow`, `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`,
   `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
@@ -986,3 +986,26 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   preserving PreferredDERP-only moves as endpoint/DERP patches.
 - Focused streaming tests cover DERP-map refresh history, DERP patch updates,
   and batched DERP clears.
+
+## 2026-06-01 CLI residual parser drift slice
+
+- Current-upstream Cobra shims now cover `help <topic> <extra>` behavior,
+  returning the matched topic help instead of an unknown-command error for the
+  covered upstream topics.
+- Added exact stderr snapshots for residual admin parser edges:
+  `auth register` missing both required flags, `auth register --user alice`
+  missing `--auth-id`, `auth approve` missing `--auth-id`, and
+  `users create` without a name.
+
+## 2026-06-01 Postgres route-health all-unhealthy smoke slice
+
+- Upstream current HEAD remains `171fd7a3c54156965753a63639cdcafcd50c8d67`;
+  the route/SSH coverage audit still shows route-health all-unhealthy fallback
+  behavior in `integration/route_test.go` and `hscontrol/servertest`.
+- Added paired `postgres-route-health-all-unhealthy` Rust/headscale-go rows over
+  a temporary Postgres database, reusing the production route-health harness in
+  no-restart mode.
+- The row proves a stock client keeps the last-known subnet-route owner when
+  both HA route candidates become unhealthy, closing the plain Postgres
+  symmetry gap between `postgres-route-health-reload` and the restart-only
+  all-unhealthy rows.

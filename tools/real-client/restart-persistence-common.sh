@@ -34,6 +34,11 @@ route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
 route_health_no_restart="${REAL_CLIENT_ROUTE_HEALTH_NO_RESTART:-false}"
+route_primary_restart="${REAL_CLIENT_RESTART_ROUTE_PRIMARY:-false}"
+route_primary_failover="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_FAILOVER:-false}"
+route_primary_sticky="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_STICKY:-false}"
+route_primary_withdraw="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_WITHDRAW:-false}"
+route_primary_no_restart="${REAL_CLIENT_ROUTE_PRIMARY_NO_RESTART:-false}"
 web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
@@ -170,6 +175,70 @@ case "${route_health_no_restart}" in
     exit 2
     ;;
 esac
+case "${route_primary_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_primary_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_primary_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY must be true or false, got ${route_primary_restart}" >&2
+    exit 2
+    ;;
+esac
+case "${route_primary_failover}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_primary_failover_flag=1
+    route_primary_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_primary_failover_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY_FAILOVER must be true or false, got ${route_primary_failover}" >&2
+    exit 2
+    ;;
+esac
+case "${route_primary_sticky}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_primary_sticky_flag=1
+    route_primary_failover_flag=1
+    route_primary_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_primary_sticky_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY_STICKY must be true or false, got ${route_primary_sticky}" >&2
+    exit 2
+    ;;
+esac
+case "${route_primary_withdraw}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_primary_withdraw_flag=1
+    route_primary_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_primary_withdraw_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY_WITHDRAW must be true or false, got ${route_primary_withdraw}" >&2
+    exit 2
+    ;;
+esac
+case "${route_primary_no_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_primary_no_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_primary_no_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ROUTE_PRIMARY_NO_RESTART must be true or false, got ${route_primary_no_restart}" >&2
+    exit 2
+    ;;
+esac
 case "${web_register_restart}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     web_register_restart_flag=1
@@ -182,8 +251,12 @@ case "${web_register_restart}" in
     exit 2
     ;;
 esac
-if ((web_register_restart_flag && (route_via_restart_flag || route_health_restart_flag))); then
-  echo "REAL_CLIENT_RESTART_WEB_REGISTER cannot be combined with route-via or route-health restart modes" >&2
+if ((web_register_restart_flag && (route_via_restart_flag || route_health_restart_flag || route_primary_restart_flag))); then
+  echo "REAL_CLIENT_RESTART_WEB_REGISTER cannot be combined with route-via, route-health, or route-primary restart modes" >&2
+  exit 2
+fi
+if ((route_primary_restart_flag && (route_via_restart_flag || route_health_restart_flag))); then
+  echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY cannot be combined with route-via or route-health modes" >&2
   exit 2
 fi
 route_via_health_flag=0
@@ -208,6 +281,14 @@ if ((route_via_no_restart_flag && ! route_via_restart_flag)); then
 fi
 if ((route_health_no_restart_flag && ! route_health_restart_flag)); then
   echo "REAL_CLIENT_ROUTE_HEALTH_NO_RESTART requires a route-health mode" >&2
+  exit 2
+fi
+if ((route_primary_no_restart_flag && ! route_primary_restart_flag)); then
+  echo "REAL_CLIENT_ROUTE_PRIMARY_NO_RESTART requires a route-primary mode" >&2
+  exit 2
+fi
+if ((route_primary_sticky_flag && route_primary_withdraw_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_PRIMARY_STICKY cannot be combined with REAL_CLIENT_RESTART_ROUTE_PRIMARY_WITHDRAW" >&2
   exit 2
 fi
 if ((route_via_same_tag_restart_flag && route_via_multiprefix_restart_flag)); then
@@ -245,7 +326,7 @@ if ((route_via_multiprefix_restart_flag)); then
 else
   advertised_routes="${route}"
 fi
-if ((route_via_restart_flag || route_health_restart_flag)); then
+if ((route_via_restart_flag || route_health_restart_flag || route_primary_restart_flag)); then
   router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router-a}"
 else
   router_name="${REAL_CLIENT_ROUTER_NAME:-${run_id}-router}"
@@ -1297,11 +1378,18 @@ load_router_id() {
 
 approve_router_routes() {
   local hostname="$1"
+  set_node_approved_routes "${hostname}" "${advertised_routes}" "approved-routes"
+}
+
+set_node_approved_routes() {
+  local hostname="$1"
+  local routes="$2"
+  local label="$3"
   local router_id
   router_id="$(load_node_id "${hostname}")"
-  echo "::group::approve router routes ${hostname}"
-  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${advertised_routes}" \
-    >"${work_dir}/approved-routes-${router_id}.json"
+  echo "::group::set approved routes ${hostname} ${routes:-<none>}"
+  headscale_cmd -o json nodes approve-routes --identifier "${router_id}" --routes "${routes}" \
+    >"${work_dir}/${label}-${router_id}.json"
   echo "::endgroup::"
 }
 
@@ -1559,6 +1647,160 @@ wait_for_route_health_primary() {
       return 1
     }
   cat "${work_dir}/route-health-primary-${safe_label}.json"
+}
+
+wait_for_primary_route() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for "${label} primary route" \
+    "assert_route_health_persisted_nodes '${safe_label}' > '${work_dir}/primary-route-${safe_label}.json'" || {
+      dump_debug
+      return 1
+    }
+  cat "${work_dir}/primary-route-${safe_label}.json"
+}
+
+assert_primary_route_failover() {
+  local before_path="${work_dir}/primary-route-before-failover.json"
+  local after_path="${work_dir}/primary-route-after-failover.json"
+  local cleared_path="${work_dir}/primary-route-failover-cleared-name"
+  local owner_path="${work_dir}/primary-route-failover-owner-name"
+  local cleared_name
+
+  echo "::group::assert primary route failover"
+  cleared_name="$(route_health_primary_name_from_nodes "${before_path}")"
+  printf '%s\n' "${cleared_name}" >"${cleared_path}"
+  set_node_approved_routes "${cleared_name}" "" "primary-route-clear"
+  wait_for "primary route failover after unapproval" \
+    "headscale_cmd -o json nodes list >'${after_path}' && ruby -rjson -e '
+      route = ARGV.fetch(1)
+      cleared_name = ARGV.fetch(2)
+      router_names = ARGV.fetch(3).split(\",\")
+
+      def node_name(node)
+        node[\"givenName\"] || node[\"given_name\"] || node[\"name\"] || node[\"hostname\"]
+      end
+
+      def primary_routes(node)
+        Array(node[\"subnetRoutes\"] || node[\"subnet_routes\"] || node[\"primaryRoutes\"] || node[\"primary_routes\"]).map(&:to_s)
+      end
+
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch(\"nodes\")
+      cleared = nodes.find { |node| node_name(node).to_s == cleared_name } ||
+        abort(\"missing cleared primary #{cleared_name.inspect}\")
+      approved = Array(cleared[\"approvedRoutes\"] || cleared[\"approved_routes\"]).map(&:to_s)
+      abort(\"cleared primary still has approved route #{route.inspect}: #{approved.inspect}\") if approved.include?(route)
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort(\"expected one primary route owner for #{route}, got #{primary_nodes.length}\") unless primary_nodes.length == 1
+      owner = node_name(primary_nodes.fetch(0)).to_s
+      abort(\"primary owner did not change from #{cleared_name.inspect}\") if owner == cleared_name
+      abort(\"primary owner #{owner.inspect} not in routers #{router_names.inspect}\") unless router_names.include?(owner)
+      File.write(ARGV.fetch(4), \"#{owner}\\n\")
+      puts JSON.pretty_generate({cleared: cleared_name, owner: owner, route: route})
+    ' '${after_path}' '${route}' '${cleared_name}' '${router_name},${router_b_name}' '${owner_path}'" || {
+      dump_debug
+      return 1
+    }
+  cat "${after_path}"
+  echo "::endgroup::"
+}
+
+assert_primary_route_sticky_return() {
+  local cleared_path="${work_dir}/primary-route-failover-cleared-name"
+  local owner_path="${work_dir}/primary-route-failover-owner-name"
+  local after_path="${work_dir}/primary-route-after-sticky.json"
+  local cleared_name sticky_owner
+
+  echo "::group::assert primary route sticky return"
+  cleared_name="$(cat "${cleared_path}")"
+  sticky_owner="$(cat "${owner_path}")"
+  set_node_approved_routes "${cleared_name}" "${route}" "primary-route-reapprove"
+  wait_for "primary route sticky owner after old primary returns" \
+    "headscale_cmd -o json nodes list >'${after_path}' && ruby -rjson -e '
+      route = ARGV.fetch(1)
+      returned_name = ARGV.fetch(2)
+      expected_owner = ARGV.fetch(3)
+
+      def node_name(node)
+        node[\"givenName\"] || node[\"given_name\"] || node[\"name\"] || node[\"hostname\"]
+      end
+
+      def primary_routes(node)
+        Array(node[\"subnetRoutes\"] || node[\"subnet_routes\"] || node[\"primaryRoutes\"] || node[\"primary_routes\"]).map(&:to_s)
+      end
+
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch(\"nodes\")
+      returned = nodes.find { |node| node_name(node).to_s == returned_name } ||
+        abort(\"missing returned primary #{returned_name.inspect}\")
+      approved = Array(returned[\"approvedRoutes\"] || returned[\"approved_routes\"]).map(&:to_s)
+      available = Array(returned[\"availableRoutes\"] || returned[\"available_routes\"]).map(&:to_s)
+      abort(\"returned router missing approved route #{route.inspect}: #{approved.inspect}\") unless approved.include?(route)
+      abort(\"returned router missing available route #{route.inspect}: #{available.inspect}\") unless available.include?(route)
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort(\"expected one primary route owner for #{route}, got #{primary_nodes.length}\") unless primary_nodes.length == 1
+      owner = node_name(primary_nodes.fetch(0)).to_s
+      abort(\"returned router stole #{route}: #{owner.inspect}\") if owner == returned_name
+      abort(\"expected sticky owner #{expected_owner.inspect}, got #{owner.inspect}\") unless owner == expected_owner
+      puts JSON.pretty_generate({returned: returned_name, sticky_owner: owner, route: route})
+    ' '${after_path}' '${route}' '${cleared_name}' '${sticky_owner}'" || {
+      dump_debug
+      return 1
+    }
+  cat "${after_path}"
+  echo "::endgroup::"
+}
+
+assert_primary_route_withdrawal() {
+  local before_path="${work_dir}/primary-route-before-withdraw.json"
+  local after_path="${work_dir}/primary-route-after-withdraw.json"
+  local withdrawn_name withdraw_status
+
+  echo "::group::assert primary route withdrawal"
+  withdrawn_name="$(route_health_primary_name_from_nodes "${before_path}")"
+  withdraw_status=0
+  run_with_timeout "tailscale withdraw route ${withdrawn_name}" \
+    docker exec "${withdrawn_name}" tailscale set --advertise-routes= ||
+    withdraw_status="$?"
+  if ((withdraw_status != 0)); then
+    echo "tailscale route withdrawal ${withdrawn_name} returned ${withdraw_status}; verifying route state"
+  fi
+  wait_for "primary route failover after withdrawal" \
+    "headscale_cmd -o json nodes list >'${after_path}' && ruby -rjson -e '
+      route = ARGV.fetch(1)
+      withdrawn_name = ARGV.fetch(2)
+      preserve_approval = ARGV.fetch(3) == \"true\"
+      router_names = ARGV.fetch(4).split(\",\")
+
+      def node_name(node)
+        node[\"givenName\"] || node[\"given_name\"] || node[\"name\"] || node[\"hostname\"]
+      end
+
+      def primary_routes(node)
+        Array(node[\"subnetRoutes\"] || node[\"subnet_routes\"] || node[\"primaryRoutes\"] || node[\"primary_routes\"]).map(&:to_s)
+      end
+
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch(\"nodes\")
+      withdrawn = nodes.find { |node| node_name(node).to_s == withdrawn_name } ||
+        abort(\"missing withdrawn primary #{withdrawn_name.inspect}\")
+      approved = Array(withdrawn[\"approvedRoutes\"] || withdrawn[\"approved_routes\"]).map(&:to_s)
+      available = Array(withdrawn[\"availableRoutes\"] || withdrawn[\"available_routes\"]).map(&:to_s)
+      abort(\"withdrawn router still advertises #{route.inspect}: #{available.inspect}\") if available.include?(route)
+      abort(\"withdrawn router lost approved route #{route.inspect}: #{approved.inspect}\") if preserve_approval && !approved.include?(route)
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort(\"expected one primary route owner for #{route}, got #{primary_nodes.length}\") unless primary_nodes.length == 1
+      owner = node_name(primary_nodes.fetch(0)).to_s
+      abort(\"primary owner did not change from withdrawn router #{withdrawn_name.inspect}\") if owner == withdrawn_name
+      abort(\"primary owner #{owner.inspect} not in routers #{router_names.inspect}\") unless router_names.include?(owner)
+      puts JSON.pretty_generate({withdrawn: withdrawn_name, owner: owner, route: route, withdrawn_approved_routes: approved})
+    ' '${after_path}' '${route}' '${withdrawn_name}' 'true' '${router_name},${router_b_name}'" || {
+      dump_debug
+      return 1
+    }
+  cat "${after_path}"
+  echo "::endgroup::"
 }
 
 assert_route_health_approved_candidates() {
@@ -2441,6 +2683,33 @@ if ((web_register_restart_flag)); then
     echo "expected web-registered node ID to survive restart, before=${web_node_id_before}, after=${web_node_id_after}" >&2
     exit 1
   fi
+elif ((route_primary_restart_flag)); then
+  create_user_and_key
+  start_client "${router_name}"
+  start_client "${router_b_name}"
+  login_router_with_authkey "${router_name}" "${authkey}"
+  login_router_with_authkey "${router_b_name}" "${authkey}"
+  approve_router_routes "${router_name}"
+  approve_router_routes "${router_b_name}"
+  wait_for_primary_route "initial"
+  if ((route_primary_failover_flag)); then
+    assert_primary_route_failover
+  fi
+  if ((route_primary_sticky_flag)); then
+    assert_primary_route_sticky_return
+  fi
+  if ((route_primary_withdraw_flag)); then
+    assert_primary_route_withdrawal
+  fi
+  if ((route_primary_no_restart_flag)); then
+    echo "${target} primary-route real-client smoke passed"
+    exit 0
+  fi
+  stop_server
+  start_server
+  wait_for "router-a reconnected after primary-route restart" "tailscale_logged_in '${router_name}'"
+  wait_for "router-b reconnected after primary-route restart" "tailscale_logged_in '${router_b_name}'"
+  wait_for_primary_route "after-restart"
 elif ((route_via_health_flag)); then
   create_route_via_users_and_keys
   start_client "${router_name}"

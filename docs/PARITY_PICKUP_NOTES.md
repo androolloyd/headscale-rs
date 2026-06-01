@@ -387,7 +387,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all seventy-two Pg rows, including
+  all seventy-six Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
@@ -396,7 +396,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-magicdns-ipv6-only`, `postgres-prefix-family-dual-stack`,
   `postgres-prefix-family-ipv4-only`, `postgres-prefix-family-ipv6-only`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
-  `postgres-route-advertise`, `postgres-acl-allow`, `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
+  `postgres-route-advertise`, `postgres-route-primary`,
+  `postgres-route-primary-failover`, `postgres-route-primary-sticky`,
+  `postgres-route-primary-withdraw`, `postgres-acl-allow`,
+  `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
   `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`, and the paired
   wrong-user, expired, and cancelled OIDC SSH-check denial rows; broader Pg
@@ -883,6 +886,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   and keep that sticky owner after the paused router recovers.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to seventy-two rows.
+
+## 2026-06-01 Postgres primary-route smoke slice
+
+- Added paired `postgres-route-primary`, `postgres-route-primary-failover`,
+  `postgres-route-primary-sticky`, and `postgres-route-primary-withdraw`
+  Rust/headscale-go rows over the production Postgres restart harness.
+- `tools/real-client/restart-persistence-common.sh` now has a route-primary
+  mode that uses stock routers plus real `nodes approve-routes` calls to prove
+  primary selection, unapproval failover, sticky owner retention when the old
+  primary is reapproved, and advertised-route withdrawal while preserving
+  approval state.
+- The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to seventy-six rows.
 
 ## 2026-06-01 DNS hot-reload resolver smoke slice
 

@@ -110,6 +110,10 @@ smoke_ids=(
   postgres-web-register-unowned-tag
   postgres-route-advertise
   postgres-route-approve
+  postgres-route-primary
+  postgres-route-primary-failover
+  postgres-route-primary-sticky
+  postgres-route-primary-withdraw
   postgres-route-exit-node
   postgres-web-register-route-approve
   postgres-oidc
@@ -312,6 +316,10 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
+  database
+  database
   registration
   registration
   registration
@@ -416,6 +424,10 @@ smoke_rust_scripts=(
   tools/real-client/postgres-web-register-unowned-tag-smoke.sh
   tools/real-client/postgres-route-advertise-smoke.sh
   tools/real-client/postgres-route-approve-smoke.sh
+  tools/real-client/postgres-route-primary-smoke.sh
+  tools/real-client/postgres-route-primary-failover-smoke.sh
+  tools/real-client/postgres-route-primary-sticky-smoke.sh
+  tools/real-client/postgres-route-primary-withdraw-smoke.sh
   tools/real-client/postgres-route-exit-node-smoke.sh
   tools/real-client/postgres-web-register-route-approve-smoke.sh
   tools/real-client/postgres-oidc-smoke.sh
@@ -569,6 +581,10 @@ smoke_go_scripts=(
   tools/real-client/postgres-web-register-unowned-tag-headscale-go-smoke.sh
   tools/real-client/postgres-route-advertise-headscale-go-smoke.sh
   tools/real-client/postgres-route-approve-headscale-go-smoke.sh
+  tools/real-client/postgres-route-primary-headscale-go-smoke.sh
+  tools/real-client/postgres-route-primary-failover-headscale-go-smoke.sh
+  tools/real-client/postgres-route-primary-sticky-headscale-go-smoke.sh
+  tools/real-client/postgres-route-primary-withdraw-headscale-go-smoke.sh
   tools/real-client/postgres-route-exit-node-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-route-approve-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
@@ -722,6 +738,10 @@ smoke_assertions=(
   "production Postgres web registration rejects unowned requested tag"
   "production Postgres route advertisement without approval"
   "production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen"
+  "production Postgres primary route selection"
+  "production Postgres primary route failover after unapproval"
+  "production Postgres primary route sticky owner after old primary return"
+  "production Postgres primary route withdrawal preserves approval and fails over"
   "production Postgres exit-node route advertisement/approval"
   "production Postgres web registration with route advertisement/approval"
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"

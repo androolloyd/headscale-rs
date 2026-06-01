@@ -226,6 +226,26 @@ fn assert_process_stderr_snapshot(
     );
 }
 
+fn configtest_expected_stderr(validation_expected: &str) -> String {
+    let Some(rest) = validation_expected.strip_prefix("Error: ") else {
+        return validation_expected.to_string();
+    };
+    if rest.starts_with("Failed to load config:") {
+        return validation_expected.to_string();
+    }
+    format!("Error: configuration error: loading configuration: {rest}")
+}
+
+fn assert_configtest_stderr_snapshot(
+    output: &Output,
+    expected_status: i32,
+    validation_expected: &str,
+    label: &str,
+) {
+    let expected = configtest_expected_stderr(validation_expected);
+    assert_process_stderr_snapshot(output, expected_status, &expected, label);
+}
+
 fn assert_config_stderr_snapshot(
     config: &Path,
     args: &[&str],
@@ -1875,7 +1895,7 @@ dns:
         &[("HEADSCALE_GRPC_LISTEN_ADDR", "not-a-socket")],
     );
 
-    assert_process_stderr_snapshot(
+    assert_configtest_stderr_snapshot(
         &output,
         1,
         include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
@@ -1956,7 +1976,7 @@ database:
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert_process_stderr_snapshot(
+    assert_configtest_stderr_snapshot(
         &output,
         1,
         include_str!("snapshots/configtest_invalid_postgres_pool.stderr"),
@@ -1971,7 +1991,7 @@ fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert_process_stderr_snapshot(&output, 1, expected, label);
+    assert_configtest_stderr_snapshot(&output, 1, expected, label);
 }
 
 fn assert_serve_default_config_snapshot(config: &str, expected: &str, label: &str) {
@@ -2059,6 +2079,9 @@ dns:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
         include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
@@ -2080,6 +2103,9 @@ tls_cert_path: "/etc/headscale/cert.pem"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
@@ -2091,6 +2117,9 @@ metrics_listen_addr: "not-a-socket"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 grpc_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
@@ -2102,6 +2131,9 @@ grpc_listen_addr: "not-a-socket"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 derp:
   server:
     enabled: true
@@ -2241,6 +2273,9 @@ dns:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
         include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
@@ -2262,6 +2297,9 @@ tls_cert_path: "/etc/headscale/cert.pem"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
@@ -2273,6 +2311,9 @@ metrics_listen_addr: "not-a-socket"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 grpc_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
@@ -5241,7 +5282,7 @@ fn configtest_without_config_fails_server_validation() {
     let home = tempfile::tempdir().unwrap();
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert_process_stderr_snapshot(
+    assert_configtest_stderr_snapshot(
         &output,
         1,
         include_str!("snapshots/configtest_missing_server_url.stderr"),

@@ -1,2 +1,3 @@
 Error: Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol
 Fatal config error: server_url must start with https:// or http://
+Fatal config error: dns.nameservers.global must be set when dns.override_local_dns is true

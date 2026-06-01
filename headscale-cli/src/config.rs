@@ -907,16 +907,9 @@ impl CliConfig {
         self.validate_upstream_database_config()?;
         self.validate_policy_config()?;
 
-        let server = self.server.as_ref().context(
-            "server.server_url is required so clients receive absolute registration URLs",
-        )?;
-        let server_url = server
-            .server_url
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .context(
-                "server.server_url is required so clients receive absolute registration URLs",
-            )?;
+        let default_server = ServerConfig::default();
+        let server = self.server.as_ref().unwrap_or(&default_server);
+        let server_url = server.server_url.as_deref().unwrap_or("");
         self.validate_upstream_fatal_config(server, server_url)?;
         self.validate_manual_tls_paths()?;
         parse_server_url_parts(server_url)?;
@@ -1112,8 +1105,9 @@ impl CliConfig {
             ));
         }
 
-        if let Some(dns) = &self.dns
-            && dns.override_local_dns
+        let default_dns = DnsConfigSpec::default();
+        let dns = self.dns.as_ref().unwrap_or(&default_dns);
+        if dns.override_local_dns
             && dns.nameservers.is_empty()
             && dns.nameserver_resolvers.is_empty()
         {
@@ -2239,6 +2233,9 @@ node:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 trusted_proxies:
   - "127.0.0.1/32"
   - "fd7a:115c:a1e0::/48"
@@ -2552,6 +2549,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 policy:
   mode: file
   path: policy.hujson
@@ -2572,6 +2572,9 @@ policy:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 policy:
   mode: database
 "#;
@@ -2672,7 +2675,7 @@ prefixes:
     }
 
     #[test]
-    fn configtest_accepts_minimal_upstream_yaml() {
+    fn configtest_rejects_minimal_upstream_yaml_with_default_dns() {
         let source = r#"
 noise:
   private_key_path: "private_key.pem"
@@ -2680,8 +2683,9 @@ server_url: "https://derp.no"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
 
-        config.validate_for_configtest().unwrap();
+        assert!(format!("{err:#}").contains("dns.nameservers.global"));
         let server = config.server.unwrap();
         assert_eq!(server.server_url.as_deref(), Some("https://derp.no"));
         assert_eq!(server.state_dir, PathBuf::from("."));
@@ -2740,6 +2744,9 @@ dns:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 prefixes:
   v4: ""
 "#;
@@ -2794,6 +2801,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   type: sqlite
   sqlite:
@@ -2819,6 +2829,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   type: postgres
   postgres:
@@ -2885,6 +2898,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 tls_letsencrypt_hostname: "headscale.example"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#;
@@ -2904,6 +2920,9 @@ tls_cert_path: "/etc/headscale/cert.pem"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 acme_url: "https://acme.example/directory"
 acme_email: "ops@example.com"
 tls_letsencrypt_hostname: "headscale.example"
@@ -2941,6 +2960,9 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_cache_dir: "/var/lib/headscale/acme-cache"
 tls_letsencrypt_listen: ":http"
@@ -2957,6 +2979,9 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 tls_cert_path: "/etc/headscale/cert.pem"
 "#;
 
@@ -3352,6 +3377,10 @@ server_url = "https://headscale.example"
 [noise]
 private_key_path = "/var/lib/headscale/noise_private.key"
 
+[dns]
+magic_dns = false
+override_local_dns = false
+
 [server.embedded_derp]
 enabled = true
 host_name = "derp.example.com"
@@ -3564,6 +3593,10 @@ server_url = "https://headscale.example:notaport"
 [noise]
 private_key_path = "noise_private.key"
 
+[dns]
+magic_dns = false
+override_local_dns = false
+
 [derp.server]
 enabled = true
 "#;
@@ -3644,6 +3677,10 @@ server_url = "https://headscale.example"
 
 [noise]
 private_key_path = "noise_private.key"
+
+[dns]
+magic_dns = false
+override_local_dns = false
 
 [derp.server]
 enabled = true

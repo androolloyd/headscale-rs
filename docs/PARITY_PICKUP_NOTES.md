@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-01 11:17 ADT
+Updated: 2026-06-01 18:52 ADT
 
 ## Current State
 
@@ -1365,3 +1365,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused coverage includes unit tests for the loaded runtime config and a
   process-level `configtest` snapshot proving env-provided invalid
   `grpc_listen_addr` fails like the same file-provided value.
+
+## 2026-06-01 configtest default fatal parity slice
+
+- `configtest` now wraps validation failures with upstream's
+  `configuration error: loading configuration` context while keeping the shared
+  validation snapshots reusable for `serve`.
+- `validate_for_configtest` now uses upstream default `server` and `dns`
+  values when those blocks are absent, so no-config and minimal configs
+  accumulate the same missing noise key, bad/empty `server_url`, and default
+  `dns.override_local_dns=true` nameserver fatal errors as pinned
+  headscale-go.
+- Unit and process fixtures now make `dns.override_local_dns=false` explicit
+  when they are testing later validation paths such as TLS, listener parsing,
+  DERP config, Postgres config, or policy loading.

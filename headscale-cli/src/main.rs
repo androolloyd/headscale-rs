@@ -2557,7 +2557,9 @@ Global Flags:
 
 fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
-    config.validate_for_configtest()?;
+    config
+        .validate_for_configtest()
+        .context("configuration error: loading configuration")?;
     Ok(())
 }
 

@@ -4248,6 +4248,105 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn control_router_default_mounts_headscale_health_route() {
+        let app = control_router(test_state());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/health+json; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "pass");
+    }
+
+    #[tokio::test]
+    async fn control_router_options_can_omit_health_without_losing_stock_routes() {
+        let state = test_state();
+        let (ping_id, response) = state.register_ping(42);
+        let app = control_router_with_options(
+            state.clone(),
+            ControlRouterOptions::without_health_route(),
+        )
+        .merge(Router::new().route(
+            "/health",
+            get(|| async {
+                (
+                    StatusCode::ACCEPTED,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "host health\n",
+                )
+            }),
+        ));
+
+        let health = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(health.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"host health\n");
+
+        let version = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/version")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(version.status(), StatusCode::OK);
+
+        let key = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/key?v=39")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(key.status(), StatusCode::OK);
+
+        let ping = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::HEAD)
+                    .uri(format!("/machine/ping-response?id={ping_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ping.status(), StatusCode::OK);
+        let latency = response.await.expect("ping response completed");
+        assert!(latency <= std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
     async fn registration_cache_completion_notifies_waiting_followups() {
         let cache = Arc::new(RegistrationCache::with_tuning(
             Duration::from_secs(60),
@@ -6564,13 +6663,63 @@ pub fn control_router_with_oidc(state: WireState, oidc: crate::oidc::OidcAuthRun
     control_router_with_optional_oidc(state, Some(oidc))
 }
 
+/// Options for building the public control listener router.
+///
+/// Defaults mirror headscale-go's standalone listener. Embedders that already
+/// own host-level routes can opt out of individual public-control endpoints
+/// before merging the router into a larger application.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlRouterOptions {
+    /// Mount the stock headscale-go-compatible `/health` handler.
+    ///
+    /// This defaults to `true`. Set it to `false` when embedding the control
+    /// router behind an application that provides its own `/health` route.
+    pub include_health_route: bool,
+}
+
+impl Default for ControlRouterOptions {
+    fn default() -> Self {
+        Self {
+            include_health_route: true,
+        }
+    }
+}
+
+impl ControlRouterOptions {
+    /// Build options that leave `/health` available for the host application.
+    pub const fn without_health_route() -> Self {
+        Self {
+            include_health_route: false,
+        }
+    }
+}
+
+/// Build only the public control listener routes with custom mount options.
+pub fn control_router_with_options(state: WireState, options: ControlRouterOptions) -> Router {
+    control_router_with_optional_oidc_inner(state, None, true, options)
+}
+
+/// Build only the public control listener routes with OIDC and custom options.
+pub fn control_router_with_oidc_and_options(
+    state: WireState,
+    oidc: crate::oidc::OidcAuthRuntime,
+    options: ControlRouterOptions,
+) -> Router {
+    control_router_with_optional_oidc_inner(state, Some(oidc), true, options)
+}
+
 fn combined_router_with_optional_oidc(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
 ) -> Router {
     let knock_cfg = state.knock.clone();
-    let inner = control_router_with_optional_oidc_inner(state.clone(), oidc, false)
-        .merge(metrics_debug_router(state));
+    let inner = control_router_with_optional_oidc_inner(
+        state.clone(),
+        oidc,
+        false,
+        ControlRouterOptions::default(),
+    )
+    .merge(metrics_debug_router(state));
     knock::wrap_router(inner, knock_cfg)
 }
 
@@ -6710,19 +6859,19 @@ fn control_router_with_optional_oidc(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
 ) -> Router {
-    control_router_with_optional_oidc_inner(state, oidc, true)
+    control_router_with_optional_oidc_inner(state, oidc, true, ControlRouterOptions::default())
 }
 
 fn control_router_with_optional_oidc_inner(
     state: WireState,
     oidc: Option<crate::oidc::OidcAuthRuntime>,
     wrap_knock: bool,
+    options: ControlRouterOptions,
 ) -> Router {
     let knock_cfg = state.knock.clone();
     let metrics_registry = Arc::clone(&state.machines);
     let mut inner = Router::new()
         .route("/robots.txt", get(basic_handlers::handle_robots))
-        .route("/health", get(basic_handlers::handle_health))
         .route("/version", get(basic_handlers::handle_version))
         .route("/windows", get(basic_handlers::handle_windows))
         .route("/apple", get(basic_handlers::handle_apple))
@@ -6751,6 +6900,10 @@ fn control_router_with_optional_oidc_inner(
             "/machine/ping-response",
             head(basic_handlers::handle_ping_response),
         );
+
+    if options.include_health_route {
+        inner = inner.route("/health", get(basic_handlers::handle_health));
+    }
 
     inner = if let Some(oidc) = oidc {
         let oidc = oidc.with_registration_handler_if_unset(Arc::new(WireOidcRegistrationHandler {

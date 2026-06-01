@@ -947,3 +947,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   registration.
 - Focused tests cover one-shot consumption, reusable redemptions, expired-key
   rejection, and same-key lookup metadata for used/expired keys.
+
+## 2026-06-01 Embeddable control-router slice
+
+- Added `ControlRouterOptions` plus `control_router_with_options` and
+  `control_router_with_oidc_and_options` so embedders can mount the full
+  public control listener while leaving selected host-owned routes, currently
+  `/health`, outside the stock router.
+- Defaults still mount the headscale-go-compatible `/health` endpoint. Focused
+  router tests prove the default health shape is preserved and the no-health
+  option can be merged with a host health route without losing `/version`,
+  `/key`, or `/machine/ping-response`.

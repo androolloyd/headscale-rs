@@ -1402,3 +1402,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The runtime config snapshot fixture now explicitly disables DNS override,
   fixing the CI failure introduced when configtest began applying upstream DNS
   defaults to absent DNS blocks.
+
+## 2026-06-01 DNS env override parity slice
+
+- `CliConfig::load` and default config discovery now apply Viper-style
+  upstream DNS env overrides for `HEADSCALE_DNS_MAGIC_DNS`,
+  `HEADSCALE_DNS_BASE_DOMAIN`, `HEADSCALE_DNS_OVERRIDE_LOCAL_DNS`,
+  `HEADSCALE_DNS_NAMESERVERS_GLOBAL`, `HEADSCALE_DNS_NAMESERVERS_SPLIT`,
+  `HEADSCALE_DNS_SEARCH_DOMAINS`, `HEADSCALE_DNS_EXTRA_RECORDS`, and
+  `HEADSCALE_DNS_EXTRA_RECORDS_PATH`.
+- DNS string-list env values follow Viper/cast whitespace splitting, while
+  split-DNS and inline extra-record env values use the JSON shapes Viper accepts
+  for map/slice config values.
+- Process coverage proves `HEADSCALE_DNS_OVERRIDE_LOCAL_DNS=true` can override
+  a file-provided `dns.override_local_dns=false` and trigger the upstream
+  missing-global-nameserver fatal, while
+  `HEADSCALE_DNS_NAMESERVERS_GLOBAL=1.1.1.1` satisfies that same validation.

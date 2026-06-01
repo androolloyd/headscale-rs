@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use headscale_api::dns::DnsConfigSpec;
+use headscale_api::dns::{DnsConfigSpec, parse_extra_records};
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_db::DatabaseBackend;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -524,6 +524,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -559,6 +560,7 @@ impl CliConfig {
         config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
+        config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars())?;
@@ -625,6 +627,81 @@ impl CliConfig {
                 self.node.get_or_insert_with(NodeConfig::default).expiry = Some(expiry);
             }
         }
+        Ok(())
+    }
+
+    fn apply_dns_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut saw_extra_records_env = false;
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_DNS_MAGIC_DNS" => {
+                    self.dns
+                        .get_or_insert_with(DnsConfigSpec::default)
+                        .magic_dns =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DNS_BASE_DOMAIN" => {
+                    self.dns
+                        .get_or_insert_with(DnsConfigSpec::default)
+                        .base_domain = value.to_string();
+                }
+                "HEADSCALE_DNS_OVERRIDE_LOCAL_DNS" => {
+                    self.dns
+                        .get_or_insert_with(DnsConfigSpec::default)
+                        .override_local_dns =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DNS_NAMESERVERS_GLOBAL" => {
+                    let dns = self.dns.get_or_insert_with(DnsConfigSpec::default);
+                    dns.nameservers = parse_env_string_slice(value);
+                    dns.nameserver_resolvers.clear();
+                }
+                "HEADSCALE_DNS_NAMESERVERS_SPLIT" => {
+                    let dns = self.dns.get_or_insert_with(DnsConfigSpec::default);
+                    dns.restricted_nameservers = parse_env_string_map_string_slice(value)
+                        .with_context(|| format!("invalid {key}"))?;
+                    dns.restricted_resolvers.clear();
+                }
+                "HEADSCALE_DNS_SEARCH_DOMAINS" => {
+                    self.dns
+                        .get_or_insert_with(DnsConfigSpec::default)
+                        .search_domains = parse_env_string_slice(value);
+                }
+                "HEADSCALE_DNS_EXTRA_RECORDS" => {
+                    let dns = self.dns.get_or_insert_with(DnsConfigSpec::default);
+                    dns.extra_records = parse_extra_records(value.as_bytes())
+                        .with_context(|| format!("invalid {key}"))?;
+                    saw_extra_records_env = true;
+                }
+                "HEADSCALE_DNS_EXTRA_RECORDS_PATH" => {
+                    self.dns
+                        .get_or_insert_with(DnsConfigSpec::default)
+                        .extra_records_path = Some(PathBuf::from(value));
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(dns) = &self.dns
+            && dns.extra_records_path.is_some()
+            && (saw_extra_records_env || !dns.extra_records.is_empty())
+        {
+            bail!(
+                "fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive"
+            );
+        }
+
         Ok(())
     }
 
@@ -1957,6 +2034,39 @@ fn parse_env_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn parse_env_string_slice(value: &str) -> Vec<String> {
+    value.split_whitespace().map(ToString::to_string).collect()
+}
+
+fn parse_env_string_map_string_slice(
+    value: &str,
+) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    let value: serde_json::Value = serde_json::from_str(value).context("expected JSON object")?;
+    let Some(object) = value.as_object() else {
+        bail!("expected JSON object");
+    };
+
+    let mut out = std::collections::HashMap::new();
+    for (key, value) in object {
+        let values = match value {
+            serde_json::Value::Array(values) => values.iter().map(json_value_to_string).collect(),
+            other => vec![json_value_to_string(other)],
+        };
+        out.insert(key.clone(), values);
+    }
+    Ok(out)
+}
+
+fn json_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => value.to_string(),
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -2203,6 +2313,88 @@ expiry = 0
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_NODE_EXPIRY"));
+    }
+
+    #[test]
+    fn applies_headscale_dns_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_dns_env_overrides_from([
+                ("HEADSCALE_DNS_MAGIC_DNS", "false"),
+                ("HEADSCALE_DNS_BASE_DOMAIN", "tail.example.org"),
+                ("HEADSCALE_DNS_OVERRIDE_LOCAL_DNS", "true"),
+                (
+                    "HEADSCALE_DNS_NAMESERVERS_GLOBAL",
+                    "1.1.1.1 https://dns.example/dns-query",
+                ),
+                (
+                    "HEADSCALE_DNS_NAMESERVERS_SPLIT",
+                    r#"{"corp.example.org":["10.0.0.53"],"dev.example.org":"10.0.0.54"}"#,
+                ),
+                (
+                    "HEADSCALE_DNS_SEARCH_DOMAINS",
+                    "corp.example.org dev.example.org",
+                ),
+                (
+                    "HEADSCALE_DNS_EXTRA_RECORDS",
+                    r#"[{"name":"app.tail.example.org","type":"A","value":"100.64.0.50"}]"#,
+                ),
+            ])
+            .unwrap();
+
+        let dns = config.dns.as_ref().unwrap();
+        assert!(!dns.magic_dns);
+        assert_eq!(dns.base_domain, "tail.example.org");
+        assert!(dns.override_local_dns);
+        assert_eq!(
+            dns.nameservers,
+            ["1.1.1.1", "https://dns.example/dns-query"]
+        );
+        assert!(dns.nameserver_resolvers.is_empty());
+        assert_eq!(
+            dns.restricted_nameservers.get("corp.example.org").unwrap(),
+            &vec!["10.0.0.53".to_string()]
+        );
+        assert_eq!(
+            dns.restricted_nameservers.get("dev.example.org").unwrap(),
+            &vec!["10.0.0.54".to_string()]
+        );
+        assert!(dns.restricted_resolvers.is_empty());
+        assert_eq!(dns.search_domains, ["corp.example.org", "dev.example.org"]);
+        assert_eq!(dns.extra_records.len(), 1);
+        assert_eq!(dns.extra_records[0].name, "app.tail.example.org");
+        assert_eq!(dns.extra_records[0].record_type, "A");
+        assert_eq!(dns.extra_records[0].value, "100.64.0.50");
+
+        let mut config = CliConfig::default();
+        config
+            .apply_dns_env_overrides_from([(
+                "HEADSCALE_DNS_EXTRA_RECORDS_PATH",
+                "/etc/headscale/records.json",
+            )])
+            .unwrap();
+        assert_eq!(
+            config.dns.unwrap().extra_records_path.as_deref(),
+            Some(Path::new("/etc/headscale/records.json"))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_dns_env_overrides() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_dns_env_overrides_from([("HEADSCALE_DNS_MAGIC_DNS", "maybe")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DNS_MAGIC_DNS"));
+
+        let err = config
+            .apply_dns_env_overrides_from([("HEADSCALE_DNS_NAMESERVERS_SPLIT", "not-json")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_DNS_NAMESERVERS_SPLIT"));
     }
 
     #[test]

@@ -41,6 +41,14 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_CLI_API_KEY",
     "HEADSCALE_CLI_INSECURE",
     "HEADSCALE_CLI_TIMEOUT",
+    "HEADSCALE_DNS_MAGIC_DNS",
+    "HEADSCALE_DNS_BASE_DOMAIN",
+    "HEADSCALE_DNS_OVERRIDE_LOCAL_DNS",
+    "HEADSCALE_DNS_NAMESERVERS_GLOBAL",
+    "HEADSCALE_DNS_NAMESERVERS_SPLIT",
+    "HEADSCALE_DNS_SEARCH_DOMAINS",
+    "HEADSCALE_DNS_EXTRA_RECORDS",
+    "HEADSCALE_DNS_EXTRA_RECORDS_PATH",
     "HEADSCALE_POLICY_MODE",
     "HEADSCALE_POLICY_PATH",
     "HEADSCALE_SERVER_URL",
@@ -2253,6 +2261,74 @@ policy:
         home.path(),
         &[("HEADSCALE_POLICY_PATH", good_policy.to_str().unwrap())],
     );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_dns_env_override_requires_global_nameservers() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_DNS_OVERRIDE_LOCAL_DNS", "true")],
+    );
+
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        "Error: Fatal config error: dns.nameservers.global must be set when dns.override_local_dns is true\n",
+        "configtest dns env override requires global nameservers",
+    );
+}
+
+#[test]
+fn configtest_dns_env_nameservers_global_satisfies_override() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+policy:
+  mode: database
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_DNS_OVERRIDE_LOCAL_DNS", "true"),
+            ("HEADSCALE_DNS_NAMESERVERS_GLOBAL", "1.1.1.1"),
+        ],
+    );
+
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
     assert_eq!(stderr(&output), "");

@@ -96,6 +96,7 @@ smoke_ids=(
   postgres-dns-hot-reload
   postgres-magicdns-ipv6-only
   postgres-prefix-family-dual-stack
+  postgres-prefix-family-v4-to-dual-backfill
   postgres-prefix-family-ipv4-only
   postgres-prefix-family-ipv6-only
   postgres-web-register
@@ -279,6 +280,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -368,6 +370,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-dns-hot-reload-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-smoke.sh
+  tools/real-client/postgres-prefix-family-v4-to-dual-backfill-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
   tools/real-client/postgres-prefix-family-ipv6-only-smoke.sh
   tools/real-client/postgres-web-register-smoke.sh
@@ -504,6 +507,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-dns-hot-reload-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-headscale-go-smoke.sh
+  tools/real-client/postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-ipv6-only-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-headscale-go-smoke.sh
@@ -640,6 +644,7 @@ smoke_assertions=(
   "production Postgres DNS extra_records hot reload plus client resolver lookup"
   "production Postgres MagicDNS with IPv6-only prefix-family allocation"
   "production Postgres dual-stack prefix-family allocation"
+  "production Postgres IPv4-to-dual-stack backfill after prefix migration"
   "production Postgres IPv4-only prefix-family allocation"
   "production Postgres IPv6-only prefix-family allocation"
   "production Postgres web registration, stock-client netmap, and online/LastSeen"

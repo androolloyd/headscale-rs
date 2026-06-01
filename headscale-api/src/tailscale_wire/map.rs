@@ -1061,7 +1061,7 @@ async fn map_inner(
         if own.approved_routes != approved_routes {
             own.approved_routes = approved_routes;
             record_changed = true;
-            record_change_reason = MapChangeReason::RouteUpdate;
+            record_change_reason = MapChangeReason::PolicyChange;
         }
     }
     // headscale-go updates node state before Connect, but dispatches
@@ -6344,6 +6344,100 @@ mod tests {
             peer.allowed_ips.iter().any(|route| route == "10.30.1.0/24"),
             "approved advertised routes must be sent as route-derived AllowedIPs"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_map_request_auto_approval_uses_policy_reason() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.31.0.0/16:*"]}
+            ],
+            "autoApprovers": {
+                "routes": {"10.31.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "f1".repeat(32);
+        let router_key = "f2".repeat(32);
+        let route = "10.31.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            policy_record(&router_key, "router", 11, "router", Vec::new()),
+        );
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let _router_first = next_zstd_map_response(&mut router_body).await;
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+        let first_mr = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            first_mr.peers.is_empty(),
+            "router is hidden until it serves an auto-approved route"
+        );
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let update_req = serde_json::json!({
+            "Version": 113,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "RoutableIPs": [route]
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{router_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let raw = to_bytes(update_resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(raw.is_empty());
+
+        let changes = state.machines.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("auto-approval map request records a map change");
+        assert_eq!(change.reason_labels(), vec!["policy change"]);
+        assert_eq!(change.change_type(), "policy");
+        assert!(change.content.include_policy);
+        assert!(change.content.requires_runtime_peer_computation);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut alice_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "auto-approval map changes should wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut alice_body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "policy-reasoned route auto-approval should carry policy-derived DNS updates"
+        );
+        let peer = changed_peer(&delta, "router").expect("router peer delta");
+        assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
     }
 
     #[tokio::test]

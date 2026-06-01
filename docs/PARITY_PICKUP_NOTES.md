@@ -893,4 +893,31 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   primary retention on production Postgres without combining it with server
   restart.
 - Added the row to the real-client matrix and PR smoke set; the Postgres
-  stock-client matrix now covers fifty-eight rows.
+  stock-client matrix now covers fifty-nine rows.
+
+## 2026-06-01 CLI late-global-flag parity slice
+
+- Added current-upstream Cobra snapshots for skip-config utility commands that
+  reject late global flags: `version --config`, `mockoidc --output`, and
+  `completion zsh --config`.
+- The expected stderr was audited against current upstream headscale-go
+  `171fd7a`, where each exits with status 1 and an `unknown flag` error.
+
+## 2026-06-01 Map-request auto-approval reason slice
+
+- Map-time Hostinfo route auto-approval now records a `policy change` map
+  reason, matching the route-approval policy-change reason instead of treating
+  policy-driven approval as a plain route update.
+- Added a streaming batcher regression proving the auto-approval waits for the
+  batch tick, carries policy-derived DNS updates, and publishes the newly
+  allowed route in the peer delta.
+
+## 2026-06-01 Postgres prefix-family backfill slice
+
+- Made the paired `prefix-family-v4-to-dual-backfill` harness backend-aware via
+  `REAL_CLIENT_DATABASE_BACKEND=sqlite|postgres`, preserving the SQLite default
+  and adding Postgres temp-database lifecycle, config emission, Rust
+  `postgres-sqlx` build selection, and direct Postgres node-address assertion.
+- Added paired `postgres-prefix-family-v4-to-dual-backfill` Rust/headscale-go
+  wrappers and wired them into the real-client matrix and PR smoke set; the
+  Postgres stock-client matrix now covers fifty-nine rows.

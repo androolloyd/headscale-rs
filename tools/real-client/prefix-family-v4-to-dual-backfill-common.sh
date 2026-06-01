@@ -43,10 +43,22 @@ image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 source tools/real-client/headscale-go-baseline.sh
 headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_BASELINE_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
+database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/prefix-family-${migration_case}-backfill-${target}}"
 run_id="hspf-${migration_case}-${target}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
+
+case "${database_backend}" in
+  sqlite | postgres) ;;
+  *)
+    echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
+
+# shellcheck source=tools/real-client/postgres-test-db-common.sh
+source tools/real-client/postgres-test-db-common.sh
 
 case "${work_root}" in
   /*) work_dir="${work_root}/${run_id}" ;;
@@ -75,6 +87,9 @@ cleanup() {
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${database_backend}" == "postgres" ]]; then
+    real_client_drop_postgres_database || true
   fi
   rm -f "${socket_path}"
 }
@@ -154,7 +169,11 @@ install_or_build_headscale() {
   case "${target}" in
     rust)
       echo "::group::build headscale-rs CLI"
-      cargo build --quiet -p headscale-cli --bin headscale
+      if [[ "${database_backend}" == "postgres" ]]; then
+        cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+      else
+        cargo build --quiet -p headscale-cli --bin headscale
+      fi
       headscale_bin="${repo_root}/target/debug/headscale"
       "${headscale_bin}" version >"${work_dir}/headscale-rs-version.txt" 2>&1 || true
       echo "::endgroup::"
@@ -185,6 +204,26 @@ generate_headscale_go_tls() {
     >"${work_dir}/openssl.stdout" \
     2>"${work_dir}/openssl.stderr"
   echo "::endgroup::"
+}
+
+append_database_config() {
+  case "${database_backend}" in
+    sqlite)
+      if [[ "${target}" == "headscale-go" ]]; then
+        cat >>"${config_path}" <<EOF
+
+database:
+  type: sqlite
+  sqlite:
+    path: ${db_path}
+EOF
+      fi
+      ;;
+    postgres)
+      printf '\n' >>"${config_path}"
+      real_client_write_postgres_database_config >>"${config_path}"
+      ;;
+  esac
 }
 
 write_derp_map() {
@@ -234,6 +273,10 @@ EOF
       if [[ "${family}" != "ipv4-only" ]]; then
         printf '  v6: fd7a:115c:a1e0::/48\n' >>"${config_path}"
       fi
+      append_database_config
+      if [[ "${database_backend}" == "postgres" ]]; then
+        printf '\n' >>"${config_path}"
+      fi
       cat >>"${config_path}" <<EOF
 dns:
   magic_dns: false
@@ -268,12 +311,8 @@ EOF
       if [[ "${family}" != "ipv4-only" ]]; then
         printf '  v6: fd7a:115c:a1e0::/48\n' >>"${config_path}"
       fi
+      append_database_config
       cat >>"${config_path}" <<EOF
-
-database:
-  type: sqlite
-  sqlite:
-    path: ${db_path}
 
 dns:
   magic_dns: false
@@ -519,7 +558,14 @@ assert_node_state_family() {
   ' "${work_dir}/nodes-after-backfill.json" "${client_name}" "${expected_family}"
 
   local db_row
-  db_row="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+  case "${database_backend}" in
+    sqlite)
+      db_row="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+      ;;
+    postgres)
+      db_row="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -F $'\t' -c "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+      ;;
+  esac
   local db_ipv4 db_ipv6
   IFS=$'\t' read -r db_ipv4 db_ipv6 <<<"${db_row}"
   case "${expected_family}" in
@@ -539,10 +585,16 @@ assert_node_state_family() {
   echo "::endgroup::"
 }
 
+need ruby
+if [[ "${database_backend}" == "postgres" ]]; then
+  real_client_prepare_postgres_database \
+    "Postgres prefix-family ${migration_case} backfill real-client smoke" \
+    "headscale_rs_pg_prefix_family_${migration_case//[^a-zA-Z0-9]/_}_${target//[^a-zA-Z0-9]/_}"
+else
+  need sqlite3
+fi
 need curl
 need docker
-need ruby
-need sqlite3
 case "${target}" in
   rust) need cargo ;;
   headscale-go)

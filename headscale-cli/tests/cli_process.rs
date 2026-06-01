@@ -1473,6 +1473,25 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn utility_skip_config_commands_reject_late_global_flags_like_current_upstream_cobra() {
+    assert_stderr_snapshot(
+        &["version", "--config", "missing.yaml"],
+        1,
+        include_str!("snapshots/utility_version_config_flag_after_command.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["mockoidc", "--output", "json"],
+        1,
+        include_str!("snapshots/utility_mockoidc_output_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["completion", "zsh", "--config", "missing.yaml"],
+        1,
+        include_str!("snapshots/utility_completion_zsh_config_flag.stderr"),
+    );
+}
+
+#[test]
 fn server_alias_matches_current_upstream_unknown_command() {
     let expected =
         "Error: unknown command \"server\" for \"headscale\"\n\nDid you mean this?\n\tserve\n\n";

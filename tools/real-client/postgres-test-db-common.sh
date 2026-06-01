@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 postgres_admin_url=""
+postgres_runtime_url=""
 postgres_database_name=""
 postgres_host=""
 postgres_port=""
@@ -25,8 +26,11 @@ real_client_parse_postgres_test_url() {
       admin_db = "postgres" if admin_db.empty?
       admin = url.dup
       admin.path = "/#{admin_db}"
+      runtime = url.dup
+      runtime.path = "/#{database_name}"
       {
         postgres_admin_url: admin.to_s,
+        postgres_runtime_url: runtime.to_s,
         postgres_database_name: database_name,
         postgres_host: url.host.to_s,
         postgres_port: (url.port || 5432).to_s,

@@ -278,21 +278,30 @@ fn ssh_reachability(
     let mut accept = false;
     let mut check = false;
     for rule in &doc.ssh {
-        if !rule
-            .src
+        let source_endpoints = resolve_ssh_rule_sources(doc, nodes, &rule.src);
+        if !source_endpoints
             .iter()
-            .any(|token| ssh_source_matches(doc, nodes, token, src))
+            .any(|candidate| endpoint_matches_endpoint(candidate, src))
         {
             continue;
         }
-        if !rule
+
+        let destination_matches = rule
             .dst
             .iter()
-            .any(|token| ssh_destination_matches(doc, nodes, token, src, dst))
-        {
+            .any(|token| ssh_destination_matches(doc, nodes, token, src, dst));
+        let localpart_self_access =
+            ssh_localpart_self_access_matches(&rule.users, &source_endpoints, src, dst);
+        if !destination_matches && !localpart_self_access {
             continue;
         }
-        if !ssh_users_allow(&rule.users, user, src.user.as_deref()) {
+
+        let users_allow = if localpart_self_access && !dst.tags.is_empty() {
+            ssh_base_users_allow(&rule.users, user)
+        } else {
+            ssh_users_allow(&rule.users, user, src.user.as_deref())
+        };
+        if !users_allow {
             continue;
         }
 
@@ -307,15 +316,16 @@ fn ssh_reachability(
     (accept, check)
 }
 
-fn ssh_source_matches(
+fn resolve_ssh_rule_sources(
     doc: &PolicyDoc,
     nodes: &[PolicyCheckNode],
-    token: &str,
-    src: &Endpoint,
-) -> bool {
-    resolve_alias(doc, nodes, token, None)
-        .iter()
-        .any(|candidate| endpoint_matches_endpoint(candidate, src))
+    tokens: &[String],
+) -> Vec<Endpoint> {
+    let mut out = Vec::new();
+    for token in tokens {
+        out.extend(resolve_alias(doc, nodes, token, None));
+    }
+    out
 }
 
 fn ssh_destination_matches(
@@ -328,6 +338,33 @@ fn ssh_destination_matches(
     resolve_alias(doc, nodes, token, Some(src))
         .iter()
         .any(|candidate| endpoint_matches_node(candidate, dst))
+}
+
+fn ssh_localpart_self_access_matches(
+    users: &[String],
+    source_endpoints: &[Endpoint],
+    src: &Endpoint,
+    dst: &PolicyCheckNode,
+) -> bool {
+    if !users_have_canonical_localpart(users)
+        || !source_endpoints
+            .iter()
+            .any(|candidate| endpoint_matches_node(candidate, dst))
+    {
+        return false;
+    }
+
+    if dst.tags.is_empty() {
+        return source_endpoints
+            .iter()
+            .any(|candidate| endpoint_matches_endpoint(candidate, src))
+            && src.tags.is_empty()
+            && src.user.as_deref().is_some_and(|user| !user.is_empty())
+            && dst.user.as_deref().is_some_and(|user| !user.is_empty())
+            && src.user == dst.user;
+    }
+
+    endpoint_matches_node(src, dst)
 }
 
 fn ssh_users_allow(users: &[String], user: &str, src_user: Option<&str>) -> bool {
@@ -359,6 +396,31 @@ fn ssh_users_allow(users: &[String], user: &str, src_user: Option<&str>) -> bool
         return true;
     }
     false
+}
+
+fn ssh_base_users_allow(users: &[String], user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    if user == "root" {
+        return users.iter().any(|candidate| candidate == "root");
+    }
+    if users
+        .iter()
+        .any(|candidate| candidate == "autogroup:nonroot")
+    {
+        return true;
+    }
+    users
+        .iter()
+        .filter(|candidate| canonical_localpart_domain(candidate).is_none())
+        .any(|candidate| candidate == user)
+}
+
+fn users_have_canonical_localpart(users: &[String]) -> bool {
+    users
+        .iter()
+        .any(|user| canonical_localpart_domain(user).is_some())
 }
 
 fn canonical_localpart_domain(user: &str) -> Option<&str> {
@@ -778,6 +840,71 @@ mod tests {
                 &["tag:server"],
             ),
         ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_apply_localpart_self_access_for_source_targets() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@example.com"]},
+                "ssh": [
+                    {
+                        "action": "accept",
+                        "src": ["autogroup:member"],
+                        "dst": ["tag:server"],
+                        "users": ["localpart:*@example.com"]
+                    }
+                ],
+                "sshTests": [
+                    {"src": "alice@example.com", "dst": ["alice@example.com"], "accept": ["alice"], "deny": ["bob"]},
+                    {"src": "bob@example.com", "dst": ["bob@example.com"], "accept": ["bob"], "deny": ["alice"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice@example.com", "100.64.0.1", &[]),
+            node(2, "bob", "bob@example.com", "100.64.0.2", &[]),
+            node(
+                3,
+                "server",
+                "alice@example.com",
+                "100.64.0.3",
+                &["tag:server"],
+            ),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_do_not_apply_localpart_user_for_tagged_self_access() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:client": ["alice@example.com"], "tag:server": ["alice@example.com"]},
+                "ssh": [
+                    {
+                        "action": "accept",
+                        "src": ["tag:client"],
+                        "dst": ["tag:server"],
+                        "users": ["localpart:*@example.com", "deploy"]
+                    }
+                ],
+                "sshTests": [
+                    {"src": "tag:client", "dst": ["tag:client"], "accept": ["deploy"], "deny": ["alice"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![node(
+            1,
+            "client",
+            "alice@example.com",
+            "100.64.0.1",
+            &["tag:client"],
+        )];
 
         check_policy_semantics(&doc, &nodes).unwrap();
     }

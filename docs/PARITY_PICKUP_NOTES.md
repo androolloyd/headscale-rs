@@ -1434,3 +1434,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT` and deprecated
   `HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT`, with process tests for the
   upstream 65-second fatal boundary.
+
+## 2026-06-01 NodeStore same-batch update/delete parity slice
+
+- NodeStore bool-update outcomes now carry the affected stable node ID for
+  node-targeted map changes.
+- The write batcher revalidates those outcomes against the final post-batch
+  snapshot, so an update followed by a delete for the same node returns `false`
+  and suppresses the stale update wake.
+- Regression coverage asserts the update/delete batch publishes only the
+  `PeersRemoved` map change for the deleted node.

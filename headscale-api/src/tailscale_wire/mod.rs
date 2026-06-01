@@ -2140,6 +2140,7 @@ struct NodeStoreBoolUpdateOutcome {
     publish_snapshot: bool,
     change: Option<PendingMapChange>,
     clear_unhealthy_route_state: Option<u64>,
+    final_presence_node_id: Option<u64>,
 }
 
 impl NodeStoreBoolUpdateOutcome {
@@ -2149,6 +2150,7 @@ impl NodeStoreBoolUpdateOutcome {
             publish_snapshot: false,
             change: None,
             clear_unhealthy_route_state: None,
+            final_presence_node_id: None,
         }
     }
 
@@ -2158,6 +2160,7 @@ impl NodeStoreBoolUpdateOutcome {
             publish_snapshot: applied,
             change: None,
             clear_unhealthy_route_state: None,
+            final_presence_node_id: None,
         }
     }
 
@@ -2167,16 +2170,36 @@ impl NodeStoreBoolUpdateOutcome {
             publish_snapshot: true,
             change: Some(change),
             clear_unhealthy_route_state: None,
+            final_presence_node_id: None,
         }
     }
 
-    fn changed_and_clear_unhealthy(change: PendingMapChange, node_id: Option<u64>) -> Self {
+    fn changed_for_node(change: PendingMapChange, node_id: u64) -> Self {
+        Self {
+            final_presence_node_id: Some(node_id),
+            ..Self::changed(change)
+        }
+    }
+
+    fn changed_for_node_and_clear_unhealthy(
+        change: PendingMapChange,
+        node_id: u64,
+        clear_unhealthy_route_state: Option<u64>,
+    ) -> Self {
         Self {
             applied: true,
             publish_snapshot: true,
             change: Some(change),
-            clear_unhealthy_route_state: node_id,
+            clear_unhealthy_route_state,
+            final_presence_node_id: Some(node_id),
         }
+    }
+
+    fn mark_absent_after_batch(&mut self) {
+        self.applied = false;
+        self.publish_snapshot = false;
+        self.change = None;
+        self.clear_unhealthy_route_state = None;
     }
 }
 
@@ -3078,6 +3101,16 @@ impl MachineRegistry {
                     }
                 }
             }
+            for completion in &mut completions {
+                if let NodeStoreWriteCompletion::UpdateBool { outcome, .. } = completion
+                    && let Some(node_id) = outcome.final_presence_node_id
+                    && !next
+                        .iter()
+                        .any(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
+                {
+                    outcome.mark_absent_after_batch();
+                }
+            }
             if publish_snapshot {
                 *g = Arc::new(next);
             }
@@ -3666,6 +3699,7 @@ impl MachineRegistry {
                         node_id,
                     )),
                     clear_unhealthy_route_state: None,
+                    final_presence_node_id: Some(node_id),
                 }
             }),
         );
@@ -4186,10 +4220,10 @@ impl MachineRegistry {
                 Some(rec) => {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = expiry;
-                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::origin(
-                        MapChangeReason::KeyExpiry,
+                    NodeStoreBoolUpdateOutcome::changed_for_node(
+                        PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
                         node_id,
-                    ))
+                    )
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
@@ -4218,10 +4252,10 @@ impl MachineRegistry {
                     Some(rec) => {
                         let node_id = rec.stable_node_id_for_key(&node_key_hex);
                         rec.hostname = new_hostname;
-                        NodeStoreBoolUpdateOutcome::changed(PendingMapChange::target(
-                            MapChangeReason::FullSelfUpdate,
+                        NodeStoreBoolUpdateOutcome::changed_for_node(
+                            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id),
                             node_id,
-                        ))
+                        )
                     }
                     None => NodeStoreBoolUpdateOutcome::unchanged(false),
                 }
@@ -4246,10 +4280,10 @@ impl MachineRegistry {
                 Some(rec) => {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = Some(now);
-                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::origin(
-                        MapChangeReason::KeyExpiry,
+                    NodeStoreBoolUpdateOutcome::changed_for_node(
+                        PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
                         node_id,
-                    ))
+                    )
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
@@ -4337,10 +4371,12 @@ impl MachineRegistry {
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) if rec.forced_tags != tags => {
+                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.forced_tags = tags;
-                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::global(
-                        MapChangeReason::TagUpdate,
-                    ))
+                    NodeStoreBoolUpdateOutcome::changed_for_node(
+                        PendingMapChange::global(MapChangeReason::TagUpdate),
+                        node_id,
+                    )
                 }
                 Some(_) => NodeStoreBoolUpdateOutcome::unchanged(true),
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
@@ -4363,8 +4399,9 @@ impl MachineRegistry {
                     let clear_unhealthy =
                         active_primary_routes(&rec.available_routes, &rec.approved_routes)
                             .is_empty();
-                    NodeStoreBoolUpdateOutcome::changed_and_clear_unhealthy(
+                    NodeStoreBoolUpdateOutcome::changed_for_node_and_clear_unhealthy(
                         PendingMapChange::global(MapChangeReason::PolicyChange),
+                        node_id,
                         clear_unhealthy.then_some(node_id),
                     )
                 }
@@ -4446,10 +4483,10 @@ impl MachineRegistry {
                 Some(rec) => {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.available_routes = routes;
-                    NodeStoreBoolUpdateOutcome::changed(PendingMapChange::broadcast_peer(
-                        MapChangeReason::RouteUpdate,
+                    NodeStoreBoolUpdateOutcome::changed_for_node(
+                        PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
                         node_id,
-                    ))
+                    )
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
@@ -6097,6 +6134,70 @@ mod registry_tests {
         let batch_size = reg.nodestore_batch_size_metrics();
         assert_eq!(batch_size.count, batch_size_before.count + 1);
         assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_update_deleted_same_batch_returns_false() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(1);
+        rec.node_key_hex = "node-update-delete".into();
+        let node_id = rec.stable_node_id_for_key(&rec.node_key_hex);
+        reg.upsert(rec.node_key_hex.clone(), rec);
+        let history_len = reg.map_change_history().len();
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+
+        let first_reg = reg.clone();
+        let first =
+            std::thread::spawn(move || first_reg.set_expiry("node-update-delete", Some(expiry)));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first update did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            reg.get("node-update-delete").is_some(),
+            "first update should wait for another item or the timeout"
+        );
+
+        assert!(reg.delete("node-update-delete"));
+        assert!(
+            !first.join().expect("first update thread should finish"),
+            "update completion should reflect final absence after same-batch delete"
+        );
+
+        assert!(reg.get("node-update-delete").is_none());
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("delete")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_label(), "peers removed");
+        assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
+        assert!(new_changes[0].content.peer_patches.is_empty());
     }
 
     #[test]

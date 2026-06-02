@@ -6378,6 +6378,67 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_quiet_last_seen_touch_stays_quiet_through_batch_tick() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(1, Duration::from_secs(5));
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app.clone(), &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+
+        let before = state.machines.get(&a).unwrap().last_seen;
+        std::thread::sleep(Duration::from_millis(3));
+        let req_body = serde_json::json!({ "OmitPeers": true, "Version": 113 });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.get(&a).unwrap().last_seen > before);
+
+        assert_no_stream_frame(&mut body, Duration::from_millis(50)).await;
+        publish_test_map_batch().await;
+        assert_no_stream_frame(&mut body, Duration::from_millis(50)).await;
+
+        insert_peer(&state, &c, "peer-c", 12);
+        publish_test_map_batch().await;
+        let mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&c));
+        assert!(
+            mr.peers_changed
+                .iter()
+                .all(|peer| peer.id != stable_id_from_key(&a)),
+            "worker-batched timestamp-only churn must not become a delayed peer delta"
+        );
+        assert!(
+            mr.peers_changed_patch
+                .iter()
+                .all(|patch| patch.node_id != stable_id_from_key(&a)),
+            "worker-batched timestamp-only churn must not become a delayed patch delta"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_self_expiry_update_emits_self_node_key_expiry() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

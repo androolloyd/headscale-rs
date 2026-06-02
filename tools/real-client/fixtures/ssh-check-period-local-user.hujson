@@ -1,0 +1,21 @@
+{
+  "groups": {
+    "group:checkers": ["user1@"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "check",
+      "checkPeriod": "1h",
+      "src": ["group:checkers"],
+      "dst": ["autogroup:self"],
+      "users": ["root", "deploy"]
+    }
+  ]
+}

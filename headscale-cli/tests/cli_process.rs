@@ -3947,6 +3947,115 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
     result
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_user_crud").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret");
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created = http
+            .post(format!("{server_url}/api/v1/user"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({
+                "name": "alice",
+                "displayName": "Alice Smith",
+                "email": "alice@example.com",
+                "pictureUrl": "https://example.com/alice.png"
+            }))
+            .send()
+            .await?;
+        assert_eq!(created.status(), reqwest::StatusCode::OK);
+        let created = created.json::<serde_json::Value>().await?;
+        let user_id = created["user"]["id"].as_str().expect("created user id");
+        assert_eq!(user_id, "1");
+        assert_eq!(created["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(created["user"]["displayName"].as_str(), Some("Alice Smith"));
+        assert_eq!(
+            created["user"]["profilePicUrl"].as_str(),
+            Some("https://example.com/alice.png")
+        );
+        assert!(
+            created["user"]["createdAt"]
+                .as_str()
+                .is_some_and(|created_at| created_at.ends_with('Z')),
+            "created user: {created}"
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/user?name=alice"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        assert_eq!(listed["users"].as_array().expect("users").len(), 1);
+        assert_eq!(listed["users"][0]["id"].as_str(), Some(user_id));
+
+        let renamed = http
+            .post(format!("{server_url}/api/v1/user/{user_id}/rename/bob"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(renamed.status(), reqwest::StatusCode::OK);
+        let renamed = renamed.json::<serde_json::Value>().await?;
+        assert_eq!(renamed["user"]["id"].as_str(), Some(user_id));
+        assert_eq!(renamed["user"]["name"].as_str(), Some("bob"));
+
+        let deleted = http
+            .delete(format!("{server_url}/api/v1/user/{user_id}"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            deleted.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/user"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        assert_eq!(listed["users"], serde_json::json!([]));
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;

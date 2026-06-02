@@ -3637,7 +3637,7 @@ database:
             return Ok(());
         };
 
-        let result = async {
+        let result = Box::pin(async {
             headscale_db::migrate_postgres_foundation(schema.pool()).await?;
             let dir = tempfile::tempdir()?;
             let state_dir = dir.path().join("state");
@@ -3843,7 +3843,7 @@ database:
             );
 
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-        }
+        })
         .await;
 
         schema.cleanup().await?;

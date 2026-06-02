@@ -19,13 +19,13 @@ esac
 image="${TAILSCALE_IMAGE:-tailscale/tailscale:v1.94.1}"
 headscale_go_version="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}"
 timeout_secs="${REAL_CLIENT_TIMEOUT_SECS:-180}"
-ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
 attempt_timeout="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-120}"
 cancel_timeout="${REAL_CLIENT_OIDC_SSH_CANCEL_TIMEOUT_SECS:-15}"
 oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
 check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
+check_period_local_user="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER:-false}"
 policy_mutation_restart="${REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART:-false}"
 check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
 check_approval="${REAL_CLIENT_OIDC_SSH_CHECK_APPROVAL:-oidc}"
@@ -40,6 +40,28 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/ssh-oidc-check-smoke}"
 run_id="hs-ssh-oidc-${target}-${database_backend}-$(date +%s)-$$"
 client_one="${REAL_CLIENT_CLIENT_ONE:-${run_id}-one}"
 client_two="${REAL_CLIENT_CLIENT_TWO:-${run_id}-two}"
+
+case "${check_period_local_user}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    check_period_local_user_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    check_period_local_user_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER must be true or false, got ${check_period_local_user}" >&2
+    exit 2
+    ;;
+esac
+
+if ((check_period_local_user_flag)); then
+  default_ssh_user="root"
+else
+  default_ssh_user="ssh-it-user"
+fi
+ssh_user="${REAL_CLIENT_SSH_USER:-${default_ssh_user}}"
+check_period_second_ssh_user="${REAL_CLIENT_OIDC_SSH_SECOND_USER:-deploy}"
+check_period_local_user_attempt_timeout="${REAL_CLIENT_OIDC_SSH_LOCAL_USER_TIMEOUT_SECS:-${cancel_timeout}}"
 
 case "${check_period_cache}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
@@ -95,6 +117,34 @@ if ((policy_mutation_restart_flag)); then
   fi
 fi
 
+if ((check_period_local_user_flag)); then
+  if [[ "${check_result}" != "approve" ]]; then
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER requires REAL_CLIENT_OIDC_SSH_CHECK_RESULT=approve" >&2
+    exit 2
+  fi
+  if ((check_period_cache_flag == 0)); then
+    echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER requires REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE=true" >&2
+    exit 2
+  fi
+  if [[ "${check_period_second_ssh_user}" == "${ssh_user}" ]]; then
+    echo "REAL_CLIENT_OIDC_SSH_SECOND_USER must differ from REAL_CLIENT_SSH_USER" >&2
+    exit 2
+  fi
+  if [[ ! "${check_period_local_user_attempt_timeout}" =~ ^[0-9]+$ ]] || ((check_period_local_user_attempt_timeout <= 0)); then
+    echo "REAL_CLIENT_OIDC_SSH_LOCAL_USER_TIMEOUT_SECS must be a positive integer, got ${check_period_local_user_attempt_timeout}" >&2
+    exit 2
+  fi
+fi
+
+if [[ ! "${ssh_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  echo "REAL_CLIENT_SSH_USER must be a simple Linux username, got ${ssh_user}" >&2
+  exit 2
+fi
+if ((check_period_local_user_flag)) && [[ ! "${check_period_second_ssh_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  echo "REAL_CLIENT_OIDC_SSH_SECOND_USER must be a simple Linux username, got ${check_period_second_ssh_user}" >&2
+  exit 2
+fi
+
 case "${database_backend}" in
   sqlite | postgres) ;;
   *)
@@ -135,7 +185,13 @@ if [[ "${check_result}" == "wrong-user" && ! "${wrong_user_auth_status}" =~ ^[0-
   exit 2
 fi
 
-if ((check_period_cache_flag)); then
+if ((check_period_local_user_flag)); then
+  default_policy_path="tools/real-client/fixtures/ssh-check-period-local-user.hujson"
+  default_oidc_subject="user1-subject"
+  default_oidc_email="user1"
+  default_oidc_username="user1"
+  default_oidc_allowed_domains=""
+elif ((check_period_cache_flag)); then
   default_policy_path="tools/real-client/fixtures/ssh-check-period.hujson"
   default_oidc_subject="user1-subject"
   default_oidc_email="user1"
@@ -794,6 +850,11 @@ EOF
 
 start_client() {
   local client_name="$1"
+  local client_user_setup
+  client_user_setup="id '${ssh_user}' >/dev/null 2>&1 || adduser -D -h '/home/${ssh_user}' -s /bin/sh '${ssh_user}' >/tmp/adduser-${ssh_user}.log 2>&1;"
+  if ((check_period_local_user_flag)); then
+    client_user_setup="${client_user_setup} id '${check_period_second_ssh_user}' >/dev/null 2>&1 || adduser -D -h '/home/${check_period_second_ssh_user}' -s /bin/sh '${check_period_second_ssh_user}' >/tmp/adduser-${check_period_second_ssh_user}.log 2>&1;"
+  fi
   echo "::group::start stock tailscale client ${client_name}"
   docker run -d \
     --name "${client_name}" \
@@ -802,7 +863,7 @@ start_client() {
     --entrypoint /bin/sh \
     -v "${tls_cert_path}:/usr/local/share/ca-certificates/headscale-oidc.crt:ro" \
     "${image}" \
-    -ceu "apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; id '${ssh_user}' >/dev/null 2>&1 || adduser -D -h '/home/${ssh_user}' -s /bin/sh '${ssh_user}' >/tmp/adduser-${ssh_user}.log 2>&1; update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity" \
+    -ceu "apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; ${client_user_setup} update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity" \
     >/dev/null
 
   wait_for "tailscaled local socket ${client_name}" \
@@ -1003,12 +1064,17 @@ mutate_database_policy_and_restart_if_requested() {
 }
 
 extract_ssh_auth_id() {
+  extract_ssh_auth_id_from_prefix "ssh-check"
+}
+
+extract_ssh_auth_id_from_prefix() {
+  local prefix="$1"
   ruby -e '
     text = ARGV.map { |path| File.exist?(path) ? File.read(path) : "" }.join("\n")
     match = text.match(%r{/auth/(hskey-authreq-[A-Za-z0-9_-]{24})})
     exit 1 unless match
     puts match[1]
-  ' "${work_dir}/ssh-check.stdout" "${work_dir}/ssh-check.stderr"
+  ' "${work_dir}/${prefix}.stdout" "${work_dir}/${prefix}.stderr"
 }
 
 approve_ssh_check_with_oidc() {
@@ -1079,6 +1145,63 @@ run_cached_ssh_check() {
     cat "${work_dir}/ssh-check-cache.stderr" >&2 || true
     exit 1
   fi
+  echo "::endgroup::"
+}
+
+run_check_period_local_user_check() {
+  local target_addr="$1"
+  echo "::group::verify Tailscale SSH checkPeriod is scoped to local_user"
+  docker exec "${client_one}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" hostname' \
+    sh "${check_period_local_user_attempt_timeout}" "${check_period_second_ssh_user}" "${target_addr}" \
+    >"${work_dir}/ssh-check-local-user.stdout" \
+    2>"${work_dir}/ssh-check-local-user.stderr" &
+  ssh_pid="$!"
+
+  local auth_id=""
+  local deadline=$((SECONDS + check_period_local_user_attempt_timeout))
+  while [[ -z "${auth_id}" ]]; do
+    if auth_id="$(extract_ssh_auth_id_from_prefix "ssh-check-local-user" 2>/dev/null)"; then
+      break
+    fi
+    if ! kill -0 "${ssh_pid}" >/dev/null 2>&1; then
+      local ssh_status=0
+      wait "${ssh_pid}" || ssh_status="$?"
+      ssh_pid=""
+      echo "second local-user SSH attempt exited with status ${ssh_status} before emitting a fresh auth URL" >&2
+      cat "${work_dir}/ssh-check-local-user.stdout" >&2 || true
+      cat "${work_dir}/ssh-check-local-user.stderr" >&2 || true
+      exit 1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for second local-user SSH auth URL" >&2
+      kill "${ssh_pid}" >/dev/null 2>&1 || true
+      wait "${ssh_pid}" >/dev/null 2>&1 || true
+      ssh_pid=""
+      cat "${work_dir}/ssh-check-local-user.stdout" >&2 || true
+      cat "${work_dir}/ssh-check-local-user.stderr" >&2 || true
+      exit 1
+    fi
+    sleep 1
+  done
+  printf '%s\n' "${auth_id}" >"${work_dir}/ssh-check-local-user.auth-id"
+
+  local ssh_status=0
+  wait_pid_with_timeout "second local-user tailscale ssh check cancellation" "${ssh_pid}" || ssh_status="$?"
+  ssh_pid=""
+  printf '%s\n' "${ssh_status}" >"${work_dir}/ssh-check-local-user.status"
+  if ((ssh_status == 0)); then
+    echo "second local-user SSH attempt unexpectedly completed without approval" >&2
+    cat "${work_dir}/ssh-check-local-user.stdout" >&2 || true
+    cat "${work_dir}/ssh-check-local-user.stderr" >&2 || true
+    exit 1
+  fi
+  if [[ -s "${work_dir}/ssh-check-local-user.stdout" ]]; then
+    echo "expected second local-user SSH hold stdout to be empty, got:" >&2
+    cat "${work_dir}/ssh-check-local-user.stdout" >&2 || true
+    exit 1
+  fi
+  echo "second_local_user_auth_id=${auth_id}"
   echo "::endgroup::"
 }
 
@@ -1197,6 +1320,9 @@ run_ssh_check() {
   if ((check_period_cache_flag)); then
     run_cached_ssh_check "${target_addr}"
   fi
+  if ((check_period_local_user_flag)); then
+    run_check_period_local_user_check "${target_addr}"
+  fi
 }
 
 need cargo
@@ -1240,7 +1366,11 @@ fi
 run_ssh_check
 
 if ((check_period_cache_flag)); then
-  echo "${target} OIDC SSH checkPeriod cache real-client smoke passed"
+  if ((check_period_local_user_flag)); then
+    echo "${target} OIDC SSH checkPeriod local_user real-client smoke passed"
+  else
+    echo "${target} OIDC SSH checkPeriod cache real-client smoke passed"
+  fi
 elif [[ "${check_result}" == "expire" ]]; then
   echo "${target} expired OIDC SSH check denial real-client smoke passed"
 elif [[ "${check_result}" == "wrong-user" ]]; then

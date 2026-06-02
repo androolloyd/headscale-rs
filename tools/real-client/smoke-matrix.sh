@@ -127,6 +127,7 @@ smoke_ids=(
   postgres-ssh-oidc-check
   postgres-ssh-cli-check
   postgres-ssh-oidc-check-period-cache
+  postgres-ssh-oidc-check-period-local-user
   postgres-ssh-oidc-policy-restart
   postgres-ssh-oidc-check-wrong-user
   postgres-ssh-oidc-check-deny
@@ -180,6 +181,7 @@ smoke_ids=(
   ssh-oidc-check
   ssh-cli-check
   ssh-oidc-check-period-cache
+  ssh-oidc-check-period-local-user
   ssh-oidc-policy-restart
   ssh-oidc-check-wrong-user
   ssh-oidc-check-deny
@@ -342,12 +344,14 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
   registration
   registration
   registration
+  ssh
   ssh
   ssh
   ssh
@@ -469,6 +473,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-ssh-oidc-check-smoke.sh
   tools/real-client/postgres-ssh-cli-check-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh
   tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh
@@ -522,6 +527,7 @@ smoke_rust_scripts=(
   tools/real-client/ssh-oidc-check-smoke.sh
   tools/real-client/ssh-cli-check-smoke.sh
   tools/real-client/ssh-oidc-check-period-cache-smoke.sh
+  tools/real-client/ssh-oidc-check-period-local-user-smoke.sh
   tools/real-client/ssh-oidc-policy-restart-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
   tools/real-client/ssh-oidc-check-deny-smoke.sh
@@ -640,6 +646,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh
@@ -693,6 +700,7 @@ smoke_go_scripts=(
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-period-cache-headscale-go-smoke.sh
+  tools/real-client/ssh-oidc-check-period-local-user-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-policy-restart-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-deny-headscale-go-smoke.sh
@@ -811,6 +819,7 @@ smoke_assertions=(
   "production Postgres OIDC-backed Tailscale SSH check approval"
   "production Postgres CLI-approved Tailscale SSH check approval"
   "production Postgres OIDC-backed Tailscale SSH checkPeriod cache"
+  "production Postgres OIDC-backed Tailscale SSH checkPeriod is scoped to local_user"
   "production Postgres OIDC SSH database policy mutation survives server restart"
   "production Postgres wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "production Postgres expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"
@@ -864,6 +873,7 @@ smoke_assertions=(
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
   "CLI-approved Tailscale SSH check approval"
   "OIDC-backed Tailscale SSH checkPeriod cache"
+  "OIDC-backed Tailscale SSH checkPeriod is scoped to local_user"
   "OIDC SSH policy mutation survives server restart"
   "wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
   "expired OIDC-backed Tailscale SSH check denial status/stdout/stderr"

@@ -121,6 +121,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
 | Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache |
+| Database | `postgres-ssh-oidc-check-period-local-user` | `postgres-ssh-oidc-check-period-local-user-smoke.sh` | `postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` is scoped to `local_user` |
 | Database | `postgres-ssh-oidc-policy-restart` | `postgres-ssh-oidc-policy-restart-smoke.sh` | `postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh` | Production Postgres OIDC SSH policy mutation survives server restart |
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
@@ -173,6 +174,8 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
 | SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
+| SSH | `ssh-oidc-check-period-cache` | `ssh-oidc-check-period-cache-smoke.sh` | `ssh-oidc-check-period-cache-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache |
+| SSH | `ssh-oidc-check-period-local-user` | `ssh-oidc-check-period-local-user-smoke.sh` | `ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` is scoped to `local_user` |
 | SSH | `ssh-oidc-check-wrong-user` | `ssh-oidc-check-wrong-user-smoke.sh` | `ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Wrong-user OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-cancel` | `ssh-oidc-check-cancel-smoke.sh` | `ssh-oidc-check-cancel-headscale-go-smoke.sh` | Cancelled OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
@@ -1106,6 +1109,10 @@ tools/real-client/ssh-cli-check-smoke.sh
 tools/real-client/ssh-cli-check-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-check-period-local-user-smoke.sh
+tools/real-client/ssh-oidc-check-period-local-user-headscale-go-smoke.sh
+tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh
+tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh
 tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-smoke.sh
@@ -1159,6 +1166,9 @@ Useful knobs:
 - `REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE=true` reruns the approved SSH
   command inside the policy `checkPeriod` window and asserts no second auth URL
   is emitted.
+- `REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER=true` uses a two-local-user
+  `checkPeriod` policy, approves the first login user, and asserts a different
+  allowed local user on the same source/destination emits a fresh auth URL.
 - `REAL_CLIENT_OIDC_SSH_CHECK_RESULT=wrong-user` uses a third mock OIDC login
   as `mallory@example.com` by default, expects HTTP `403` from the auth flow,
   and then asserts the denied SSH output shape.

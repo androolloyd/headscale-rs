@@ -11,7 +11,7 @@
 //! Every page goes through [`shell`], which renders:
 //!
 //! ```text
-//!   <header>             OctraVPN admin / nav links / signed-in user
+//!   <header>             headscale-rs admin / nav links / signed-in user
 //!   <div class=layout>
 //!     <aside>            Sidebar with section links
 //!     <main>             Page-specific content (passed in by handler)
@@ -83,12 +83,12 @@ pub fn shell(title: &str, section: Section, signed_in: bool, inner: Markup) -> M
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " — OctraVPN admin" }
+                title { (title) " — headscale-rs admin" }
                 style { (PreEscaped(CSS)) }
             }
             body {
                 header class="topbar" {
-                    span class="brand" { "OctraVPN" }
+                    span class="brand" { "headscale-rs" }
                     nav {
                         (nav_link("Dashboard", "/admin/", Section::Dashboard))
                         (nav_link("Machines", "/admin/machines", Section::Machines))
@@ -121,7 +121,7 @@ pub fn shell(title: &str, section: Section, signed_in: bool, inner: Markup) -> M
                         (inner)
                     }
                 }
-                footer { "OctraVPN admin v0 · " a href="https://github.com/golast/octra" { "source" } }
+                footer { "headscale-rs admin v0 · " a href="https://github.com/androolloyd/headscale-rs" { "source" } }
                 script { (PreEscaped(JS)) }
             }
         }
@@ -136,12 +136,12 @@ pub fn login_page(error: Option<&str>) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "Sign in — OctraVPN admin" }
+                title { "Sign in — headscale-rs admin" }
                 style { (PreEscaped(CSS)) }
             }
             body {
                 header class="topbar" {
-                    span class="brand" { "OctraVPN" }
+                    span class="brand" { "headscale-rs" }
                     nav {}
                     span class="user" {}
                 }
@@ -187,7 +187,7 @@ pub fn dashboard(
 ) -> Markup {
     html! {
         h1 { "Dashboard" }
-        p class="subtitle" { "OctraVPN admin — quick view of the running tailnet." }
+        p class="subtitle" { "headscale-rs admin — quick view of the running tailnet." }
 
         div class="stats" {
             div class="stat" {
@@ -524,7 +524,7 @@ pub fn tailnet_page(derp_region_count: usize) -> Markup {
         div class="card" {
             h2 { "DERP" }
             p { "Relay map regions configured: " strong { (derp_region_count) } "." }
-            p class="subtitle" { "Configured via " code { "OCTRAVPN_DERP_MAP_PATH" } " at node startup. Live region editing arrives with the live tailnet view." }
+            p class="subtitle" { "Configured by DERP URLs, DERP paths, or embedded DERP settings at server startup. Live region editing arrives with the live tailnet view." }
         }
         div class="card" {
             h2 { "DNS" }

@@ -255,6 +255,6 @@ async fn admin_router_anonymous_api_rejected_with_401() {
             .unwrap()
             .to_str()
             .unwrap(),
-        r#"Bearer realm="octra-admin""#
+        r#"Bearer realm="headscale-admin""#
     );
 }

@@ -38,7 +38,7 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Cookie name carried by the browser after a successful login.
-pub const SESSION_COOKIE: &str = "octra_admin_session";
+pub const SESSION_COOKIE: &str = "headscale_admin_session";
 
 /// Default session TTL: 8 hours. Matches the spec deliverable.
 pub const SESSION_TTL_SECS: u64 = 8 * 3600;
@@ -261,7 +261,7 @@ pub(crate) fn api_unauthorized() -> Response<Body> {
     // Hint to clients that bearer auth is expected.
     r.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(r#"Bearer realm="octra-admin""#),
+        HeaderValue::from_static(r#"Bearer realm="headscale-admin""#),
     );
     r
 }

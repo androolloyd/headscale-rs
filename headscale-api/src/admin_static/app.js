@@ -1,4 +1,4 @@
-// OctraVPN admin GUI v0 — minimal interactivity.
+// headscale-rs admin GUI v0 — minimal interactivity.
 //
 // Budget: <10 KiB. No framework, no build step. Vanilla DOM only.
 // Real interactive panels (live tailnet view, HuJSON policy editor) land

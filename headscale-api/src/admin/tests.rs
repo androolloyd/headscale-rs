@@ -126,7 +126,7 @@ async fn bearer_token_unlocks_dashboard() {
     let body = body_str(resp).await;
     assert!(body.contains("Dashboard"));
     assert!(body.contains("Machines online"));
-    assert!(body.contains("OctraVPN"));
+    assert!(body.contains("headscale-rs"));
     // basic HTML5 hygiene checks
     assert!(body.starts_with("<!DOCTYPE"));
     assert!(body.contains("</html>"));

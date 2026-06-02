@@ -1106,6 +1106,13 @@ pub async fn handle_register_confirm_with_request_security(
         );
     };
 
+    if !is_form_urlencoded_content_type(&headers) {
+        return oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            OidcRuntimeError::MissingCsrfToken.to_string(),
+        );
+    }
+
     if raw.len() > REGISTER_CONFIRM_BODY_LIMIT {
         return oidc_error_response(
             StatusCode::BAD_REQUEST,
@@ -1113,10 +1120,10 @@ pub async fn handle_register_confirm_with_request_security(
         );
     }
 
-    if !is_form_urlencoded_content_type(&headers) {
+    if !is_strict_urlencoded_form(&raw) {
         return oidc_error_response(
             StatusCode::BAD_REQUEST,
-            OidcRuntimeError::MissingCsrfToken.to_string(),
+            OidcRuntimeError::InvalidForm.to_string(),
         );
     }
 
@@ -1740,6 +1747,29 @@ fn is_form_urlencoded_content_type(headers: &HeaderMap) -> bool {
             mime.trim()
                 .eq_ignore_ascii_case("application/x-www-form-urlencoded")
         })
+}
+
+fn is_strict_urlencoded_form(raw: &[u8]) -> bool {
+    if raw.contains(&b';') {
+        return false;
+    }
+
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' {
+            if index + 2 >= raw.len()
+                || !raw[index + 1].is_ascii_hexdigit()
+                || !raw[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+
+    true
 }
 
 fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
@@ -3548,6 +3578,69 @@ mod tests {
 
     #[cfg(feature = "full")]
     #[tokio::test]
+    async fn oidc_register_confirm_rejects_malformed_urlencoded_form_like_upstream() {
+        for (name, body) in [
+            ("short percent escape", "headscale_register_confirm=%"),
+            ("non-hex percent escape", "headscale_register_confirm=%zz"),
+            (
+                "semicolon separator",
+                "headscale_register_confirm=expected-csrf;other=value",
+            ),
+        ] {
+            let registrations = Arc::new(MockOidcRegistrationHandler::default());
+            let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+                .with_registration_handler(registrations.clone());
+            let registration_id = "r".repeat(24);
+            runtime
+                .confirmations
+                .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
+
+            let response = handle_register_confirm(
+                runtime.clone(),
+                format!("hskey-authreq-{registration_id}"),
+                confirm_headers("headscale_register_confirm=expected-csrf"),
+                Bytes::from(body),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(response_body(response).await, "invalid form", "{name}");
+            assert!(
+                runtime.pending_confirmation(&registration_id).is_some(),
+                "{name}: rejected POST must not clear pending confirmation"
+            );
+            assert!(registrations.calls.read().is_empty(), "{name}");
+        }
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_rejects_oversized_urlencoded_form_like_upstream() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+        runtime
+            .confirmations
+            .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
+
+        let body = format!("headscale_register_confirm={}", "x".repeat(4096));
+        let response = handle_register_confirm(
+            runtime.clone(),
+            format!("hskey-authreq-{registration_id}"),
+            confirm_headers("headscale_register_confirm=expected-csrf"),
+            Bytes::from(body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response_body(response).await, "invalid form");
+        assert!(runtime.pending_confirmation(&registration_id).is_some());
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
     async fn oidc_register_confirm_requires_urlencoded_form_content_type() {
         let registrations = Arc::new(MockOidcRegistrationHandler::default());
         let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
@@ -3572,6 +3665,36 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response_body(response).await, "missing csrf token");
+        assert!(registrations.calls.read().is_empty());
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn oidc_register_confirm_ignores_oversized_non_form_body_like_upstream() {
+        let registrations = Arc::new(MockOidcRegistrationHandler::default());
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
+            .with_registration_handler(registrations.clone());
+        let registration_id = "r".repeat(24);
+        runtime
+            .confirmations
+            .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "headscale_register_confirm=expected-csrf".parse().unwrap(),
+        );
+
+        let response = handle_register_confirm(
+            runtime.clone(),
+            format!("hskey-authreq-{registration_id}"),
+            headers,
+            Bytes::from("x".repeat(REGISTER_CONFIRM_BODY_LIMIT + 1)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response_body(response).await, "missing csrf token");
+        assert!(runtime.pending_confirmation(&registration_id).is_some());
         assert!(registrations.calls.read().is_empty());
     }
 

@@ -185,6 +185,7 @@ smoke_ids=(
   web-register-tags
   web-register-unowned-tag
   web-register-route-approve
+  web-register-route-approve-restart
   oidc
   oidc-policy-churn
   ssh-oidc-check
@@ -365,6 +366,7 @@ smoke_areas=(
   registration
   registration
   registration
+  lifecycle
   registration
   registration
   registration
@@ -549,6 +551,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-tags-smoke.sh
   tools/real-client/web-register-unowned-tag-smoke.sh
   tools/real-client/web-register-route-approve-smoke.sh
+  tools/real-client/web-register-route-approve-restart-smoke.sh
   tools/real-client/oidc-smoke.sh
   tools/real-client/oidc-policy-churn-smoke.sh
   tools/real-client/ssh-oidc-check-smoke.sh
@@ -731,6 +734,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-tags-headscale-go-smoke.sh
   tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh
   tools/real-client/web-register-route-approve-headscale-go-smoke.sh
+  tools/real-client/web-register-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/oidc-policy-churn-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
@@ -913,6 +917,7 @@ smoke_assertions=(
   "web registration with owned requested tag"
   "web registration rejects unowned requested tag"
   "web registration with route advertisement/approval"
+  "Production web/CLI registration route approval survives server restart"
   "OIDC callback, node row, and user profile"
   "OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer"
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"

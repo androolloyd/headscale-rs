@@ -179,6 +179,7 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `web-register-tags` | `web-register-tags-smoke.sh` | `web-register-tags-headscale-go-smoke.sh` | Web registration with owned requested tag |
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `web-register-route-approve` | `web-register-route-approve-smoke.sh` | `web-register-route-approve-headscale-go-smoke.sh` | Web registration with route advertisement/approval |
+| Lifecycle | `web-register-route-approve-restart` | `web-register-route-approve-restart-smoke.sh` | `web-register-route-approve-restart-headscale-go-smoke.sh` | Production web/CLI registration route approval survives server restart |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
 | Registration | `oidc-policy-churn` | `oidc-policy-churn-smoke.sh` | `oidc-policy-churn-headscale-go-smoke.sh` | OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |

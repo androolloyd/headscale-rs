@@ -1904,3 +1904,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   forms that the parser already supports: hex, binary, explicit octal,
   legacy leading-zero octal, and underscore-separated digits. The route-level
   test now matches the documented parser claim instead of only exercising hex.
+
+## 2026-06-02 web-registration route-approval restart row
+
+- Added paired default SQLite `web-register-route-approve-restart` real-client
+  wrappers by reusing the existing restart-persistence harness route-approval
+  mode. This mirrors the existing Postgres row and closes the default-vs-Pg
+  matrix symmetry gap for web/CLI registration route approval across restart.

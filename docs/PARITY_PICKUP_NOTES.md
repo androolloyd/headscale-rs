@@ -1721,3 +1721,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `strconv.ParseUint` wording for invalid numeric owner values, including
   hyphen-prefixed values that Cobra consumes as the `--user` value rather than
   treating as a later flag. Output-format wrapping follows Cobra's parse order.
+
+## 2026-06-02 gRPC auth registration error parity slice
+
+- `RegisterNode`, `DebugCreateNode`, and `AuthRegister` now preserve
+  headscale-go's raw auth-ID validation failures as gRPC `Unknown` errors.
+  Through grpc-gateway these map to HTTP 500/code 2 with the raw
+  `auth ID has invalid ...` message.
+- `AuthApprove` and `AuthReject` intentionally keep the upstream
+  `InvalidArgument` wrapper (`invalid auth_id: ...`), matching the distinct
+  status-wrapped branch in headscale-go.

@@ -1998,6 +1998,36 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_auth_register_invalid_auth_ids_match_upstream_unknown() {
+    let (app, token) = fixture().await;
+
+    for (name, body, expected_message) in [
+        (
+            "auth register bare short authId",
+            r#"{"user":"alice","authId":"short"}"#,
+            r#"auth ID has invalid prefix: expected prefix "hskey-authreq-""#,
+        ),
+        (
+            "auth register prefixed short authId",
+            r#"{"user":"alice","authId":"hskey-authreq-short"}"#,
+            "auth ID has invalid length: expected 38, got 19",
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/auth/register",
+                Some(&token),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 500, 2, expected_message, name).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     let (app, token, registry, _db) = fixture_with_wire_registry().await;
     let registration_key = "abcdefghijklmnopqrstuvwx";

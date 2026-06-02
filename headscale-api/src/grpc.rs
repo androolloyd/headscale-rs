@@ -1076,7 +1076,6 @@ pub mod upstream {
         ) -> Result<Response<AuthRegisterResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            auth_id_cache_key(&body.auth_id)?;
             let response = self
                 .register_node_body(RegisterNodeRequest {
                     user: body.user,
@@ -1809,23 +1808,27 @@ pub mod upstream {
     const REGISTRATION_ID_LENGTH: usize = 24;
     const UPSTREAM_AUTH_ID_PREFIX: &str = "hskey-authreq-";
 
-    fn auth_id_cache_key(id: &str) -> Result<String, Status> {
+    fn validate_auth_id_cache_key(id: &str) -> Result<String, String> {
         match id.strip_prefix(UPSTREAM_AUTH_ID_PREFIX) {
             Some(rest) if rest.len() == REGISTRATION_ID_LENGTH => Ok(rest.to_string()),
-            Some(rest) => Err(Status::invalid_argument(format!(
-                "invalid auth_id: auth ID has invalid length: expected {}, got {}",
+            Some(rest) => Err(format!(
+                "auth ID has invalid length: expected {}, got {}",
                 UPSTREAM_AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH,
                 UPSTREAM_AUTH_ID_PREFIX.len() + rest.len()
-            ))),
-            None => Err(Status::invalid_argument(format!(
-                "invalid auth_id: auth ID has invalid prefix: expected prefix \
-                 {UPSTREAM_AUTH_ID_PREFIX:?}"
-            ))),
+            )),
+            None => Err(format!(
+                "auth ID has invalid prefix: expected prefix {UPSTREAM_AUTH_ID_PREFIX:?}"
+            )),
         }
     }
 
+    fn auth_id_cache_key(id: &str) -> Result<String, Status> {
+        validate_auth_id_cache_key(id)
+            .map_err(|message| Status::invalid_argument(format!("invalid auth_id: {message}")))
+    }
+
     fn registration_cache_key_from_register_key(key: &str) -> Result<String, Status> {
-        auth_id_cache_key(key)
+        validate_auth_id_cache_key(key).map_err(Status::unknown)
     }
 
     fn random_key_hex() -> String {
@@ -3524,10 +3527,23 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.code(), tonic::Code::Unknown);
         assert_eq!(
             err.message(),
-            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+            "auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
+
+        let err = service
+            .auth_register(Request::new(AuthRegisterRequest {
+                user: "alice".into(),
+                auth_id: "hskey-authreq-short".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(
+            err.message(),
+            "auth ID has invalid length: expected 38, got 19"
         );
     }
 
@@ -4696,48 +4712,53 @@ mod upstream_tests {
             "cannot remove all tags from a node - tagged nodes must have at least one tag"
         );
 
-        let err = service
-            .debug_create_node(Request::new(DebugCreateNodeRequest {
-                user: "alice".into(),
-                key: "short".into(),
-                name: "debug".into(),
-                routes: Vec::new(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(
-            err.message(),
-            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
-        );
+        for (key, expected_message) in [
+            (
+                "short",
+                "auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            ),
+            (
+                "abcdefghijklmnopqrstuvwx",
+                "auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            ),
+            (
+                "hskey-authreq-short",
+                "auth ID has invalid length: expected 38, got 19",
+            ),
+        ] {
+            let err = service
+                .debug_create_node(Request::new(DebugCreateNodeRequest {
+                    user: "alice".into(),
+                    key: key.into(),
+                    name: "debug".into(),
+                    routes: Vec::new(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unknown, "{key}");
+            assert_eq!(err.message(), expected_message, "{key}");
+        }
 
-        let err = service
-            .debug_create_node(Request::new(DebugCreateNodeRequest {
-                user: "alice".into(),
-                key: "abcdefghijklmnopqrstuvwx".into(),
-                name: "debug".into(),
-                routes: Vec::new(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(
-            err.message(),
-            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
-        );
-
-        let err = service
-            .register_node(Request::new(RegisterNodeRequest {
-                user: "alice".into(),
-                key: "abcdefghijklmnopqrstuvwx".into(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(
-            err.message(),
-            "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
-        );
+        for (key, expected_message) in [
+            (
+                "abcdefghijklmnopqrstuvwx",
+                "auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            ),
+            (
+                "hskey-authreq-short",
+                "auth ID has invalid length: expected 38, got 19",
+            ),
+        ] {
+            let err = service
+                .register_node(Request::new(RegisterNodeRequest {
+                    user: "alice".into(),
+                    key: key.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unknown, "{key}");
+            assert_eq!(err.message(), expected_message, "{key}");
+        }
     }
 
     #[test]

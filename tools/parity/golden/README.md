@@ -13,3 +13,9 @@ scenario change is intentional:
 ```sh
 PARITY_UPDATE_GOLDEN=1 ./scripts/headscale_go_diff.sh
 ```
+
+For a fast metadata-only check that does not run headscale-go or Docker:
+
+```sh
+python3 scripts/check_parity_golden.py
+```

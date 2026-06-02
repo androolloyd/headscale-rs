@@ -8228,6 +8228,89 @@ mod registry_tests {
         assert!(reg.cleanup_offline_connections(Duration::ZERO).is_empty());
     }
 
+    #[test]
+    fn stream_connection_multi_connection_drop_keeps_node_online_until_last_guard() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+
+        let first = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        let history_len = reg.map_change_history().len();
+        let second = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        assert_eq!(reg.active_connections().get(&node_id), Some(&2));
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+        assert_eq!(
+            reg.map_change_history().len(),
+            history_len,
+            "headscale-go AddNode of another channel does not emit a duplicate online change"
+        );
+
+        drop(second);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+        assert!(!reg.disconnected_at.read().contains_key(&node_id));
+        assert_eq!(
+            reg.map_change_history().len(),
+            history_len,
+            "headscale-go RemoveNode reports still connected while another channel remains"
+        );
+
+        drop(first);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert!(reg.disconnected_at.read().contains_key(&node_id));
+        let changes = reg.map_change_history();
+        let final_change = changes
+            .last()
+            .expect("last connection drop records offline churn");
+        assert!(final_change.reason_labels().contains(&"node offline"));
+    }
+
+    #[test]
+    fn stream_connection_reconnect_clears_stale_offline_cleanup_state() {
+        let reg = Arc::new(MachineRegistry::new());
+        reg.upsert("nk-a".to_string(), mk_record(4));
+        let node_id = stable_id_from_key("nk-a");
+
+        let first = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        drop(first);
+        assert_eq!(reg.active_connections().get(&node_id), Some(&0));
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert!(reg.disconnected_at.read().contains_key(&node_id));
+
+        let second = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_id,
+            Duration::ZERO,
+        );
+        assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+        assert!(
+            !reg.disconnected_at.read().contains_key(&node_id),
+            "rapid reconnect must remove the old disconnect timestamp before cleanup runs"
+        );
+        assert!(
+            reg.cleanup_offline_connections(Duration::ZERO).is_empty(),
+            "cleanup must not prune a freshly reconnected session"
+        );
+        assert_eq!(reg.active_connections().get(&node_id), Some(&1));
+        assert_eq!(reg.online_states().get(&node_id), Some(&true));
+
+        drop(second);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stream_connection_offline_grace_suppresses_rapid_reconnect() {
         let reg = Arc::new(MachineRegistry::new());

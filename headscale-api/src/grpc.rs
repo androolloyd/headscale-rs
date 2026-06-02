@@ -3461,54 +3461,89 @@ mod upstream_tests {
             .await
             .expect("connect headscale grpc client");
 
-        let err = client
-            .auth_register(Request::new(AuthRegisterRequest {
-                user: "alice".into(),
-                auth_id: "short".into(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(
-            err.message(),
-            "auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
-        );
+        enum Call {
+            Register,
+            Approve,
+            Reject,
+        }
 
-        let err = client
-            .auth_approve(Request::new(AuthApproveRequest {
-                auth_id: "hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        assert_eq!(
-            err.message(),
-            "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa"
-        );
+        struct Case {
+            name: &'static str,
+            call: Call,
+            auth_id: &'static str,
+            expected_code: tonic::Code,
+            expected_message: &'static str,
+        }
 
-        let err = client
-            .auth_reject(Request::new(AuthRejectRequest {
-                auth_id: "hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            }))
-            .await
+        for case in [
+            Case {
+                name: "auth register bare short auth id",
+                call: Call::Register,
+                auth_id: "short",
+                expected_code: tonic::Code::Unknown,
+                expected_message: "auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            },
+            Case {
+                name: "auth register prefixed long auth id",
+                call: Call::Register,
+                auth_id: "hskey-authreq-abcdefghijklmnopqrstuvwxy",
+                expected_code: tonic::Code::Unknown,
+                expected_message: "auth ID has invalid length: expected 38, got 39",
+            },
+            Case {
+                name: "auth approve no pending session",
+                call: Call::Approve,
+                auth_id: "hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
+                expected_code: tonic::Code::NotFound,
+                expected_message: "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+            Case {
+                name: "auth approve bare auth id",
+                call: Call::Approve,
+                auth_id: "cccccccccccccccccccccccc",
+                expected_code: tonic::Code::InvalidArgument,
+                expected_message: "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            },
+            Case {
+                name: "auth reject no pending session",
+                call: Call::Reject,
+                auth_id: "hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb",
+                expected_code: tonic::Code::NotFound,
+                expected_message: "no pending auth session for auth_id hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            Case {
+                name: "auth reject prefixed short auth id",
+                call: Call::Reject,
+                auth_id: "hskey-authreq-short",
+                expected_code: tonic::Code::InvalidArgument,
+                expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 19",
+            },
+        ] {
+            let err = match case.call {
+                Call::Register => client
+                    .auth_register(Request::new(AuthRegisterRequest {
+                        user: "alice".into(),
+                        auth_id: case.auth_id.into(),
+                    }))
+                    .await
+                    .map(|_| ()),
+                Call::Approve => client
+                    .auth_approve(Request::new(AuthApproveRequest {
+                        auth_id: case.auth_id.into(),
+                    }))
+                    .await
+                    .map(|_| ()),
+                Call::Reject => client
+                    .auth_reject(Request::new(AuthRejectRequest {
+                        auth_id: case.auth_id.into(),
+                    }))
+                    .await
+                    .map(|_| ()),
+            }
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        assert_eq!(
-            err.message(),
-            "no pending auth session for auth_id hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb"
-        );
-
-        let err = client
-            .auth_reject(Request::new(AuthRejectRequest {
-                auth_id: "hskey-authreq-short".into(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(
-            err.message(),
-            "invalid auth_id: auth ID has invalid length: expected 38, got 19"
-        );
+            assert_eq!(err.code(), case.expected_code, "{}", case.name);
+            assert_eq!(err.message(), case.expected_message, "{}", case.name);
+        }
 
         drop(client);
         let _ = shutdown_tx.send(());

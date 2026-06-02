@@ -9702,34 +9702,32 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
 
     let bad_config_dir = tempfile::tempdir().unwrap();
     let bad_config = write_remote_grpc_config(bad_config_dir.path(), &address, "bad-token");
-    let bad_auth = wait_for_headscale_status(&bad_config, &["health"], 4).await;
-    assert_eq!(stdout(&bad_auth), "");
-    assert_eq!(
-        stderr(&bad_auth),
-        include_str!("snapshots/grpc_remote_auth_failure.stderr")
-    );
-
-    let bad_auth_json_line =
-        wait_for_headscale_status(&bad_config, &["-ojson-line", "health"], 4).await;
-    assert_eq!(stdout(&bad_auth_json_line), "");
-    assert_eq!(
-        stderr(&bad_auth_json_line),
-        include_str!("snapshots/grpc_remote_auth_failure_json_line.stderr")
-    );
-
-    let bad_auth_json = wait_for_headscale_status(&bad_config, &["-o", "json", "health"], 4).await;
-    assert_eq!(stdout(&bad_auth_json), "");
-    assert_eq!(
-        stderr(&bad_auth_json),
-        include_str!("snapshots/grpc_remote_auth_failure_json.stderr")
-    );
-
-    let bad_auth_yaml = wait_for_headscale_status(&bad_config, &["-o", "yaml", "health"], 4).await;
-    assert_eq!(stdout(&bad_auth_yaml), "");
-    assert_eq!(
-        stderr(&bad_auth_yaml),
-        include_str!("snapshots/grpc_remote_auth_failure_yaml.stderr")
-    );
+    for (label, args, expected) in [
+        (
+            "remote auth failure plain",
+            &["health"][..],
+            include_str!("snapshots/grpc_remote_auth_failure.stderr"),
+        ),
+        (
+            "remote auth failure json-line",
+            &["-ojson-line", "health"][..],
+            include_str!("snapshots/grpc_remote_auth_failure_json_line.stderr"),
+        ),
+        (
+            "remote auth failure json",
+            &["-o", "json", "health"][..],
+            include_str!("snapshots/grpc_remote_auth_failure_json.stderr"),
+        ),
+        (
+            "remote auth failure yaml",
+            &["-o", "yaml", "health"][..],
+            include_str!("snapshots/grpc_remote_auth_failure_yaml.stderr"),
+        ),
+    ] {
+        let output = wait_for_headscale_status(&bad_config, args, 4).await;
+        assert_eq!(stdout(&output), "", "{label}: stdout");
+        assert_eq!(stderr(&output), expected, "{label}: stderr");
+    }
 
     handle.abort();
     let _ = handle.await;
@@ -9741,33 +9739,32 @@ async fn live_remote_grpc_health_failure_matches_process_stderr() {
     let config_dir = tempfile::tempdir().unwrap();
     let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
 
-    let output = wait_for_headscale_status(&config, &["health"], 6).await;
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/grpc_remote_health_failure.stderr")
-    );
-
-    let output = wait_for_headscale_status(&config, &["-o", "json", "health"], 6).await;
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/grpc_remote_health_failure_json.stderr")
-    );
-
-    let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 6).await;
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/grpc_remote_health_failure_json_line.stderr")
-    );
-
-    let output = wait_for_headscale_status(&config, &["-o", "yaml", "health"], 6).await;
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/grpc_live_health_failure_yaml.stderr")
-    );
+    for (label, args, expected) in [
+        (
+            "remote health failure plain",
+            &["health"][..],
+            include_str!("snapshots/grpc_remote_health_failure.stderr"),
+        ),
+        (
+            "remote health failure json",
+            &["-o", "json", "health"][..],
+            include_str!("snapshots/grpc_remote_health_failure_json.stderr"),
+        ),
+        (
+            "remote health failure json-line",
+            &["-ojson-line", "health"][..],
+            include_str!("snapshots/grpc_remote_health_failure_json_line.stderr"),
+        ),
+        (
+            "remote health failure yaml",
+            &["-o", "yaml", "health"][..],
+            include_str!("snapshots/grpc_live_health_failure_yaml.stderr"),
+        ),
+    ] {
+        let output = wait_for_headscale_status(&config, args, 6).await;
+        assert_eq!(stdout(&output), "", "{label}: stdout");
+        assert_eq!(stderr(&output), expected, "{label}: stderr");
+    }
 
     handle.abort();
     let _ = handle.await;

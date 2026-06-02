@@ -1593,26 +1593,71 @@ async fn grpc_gateway_rejects_non_upstream_octra_api_routes() {
 }
 
 #[tokio::test]
-async fn grpc_gateway_health_surfaces_database_ping_failure() {
-    let (app, token) = fixture_with_failing_health().await;
+async fn grpc_gateway_authenticated_server_errors_are_status_json_exact() {
+    enum Fixture {
+        EmptyPolicyDb,
+        FailingHealth,
+    }
 
-    let resp = app
-        .oneshot(req(
-            Method::GET,
-            "/api/v1/health",
-            Some(&token),
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_status_json_exact(
-        resp,
-        500,
-        2,
-        "pinging database: forced offline",
-        "health database failure",
-    )
-    .await;
+    struct Case {
+        name: &'static str,
+        fixture: Fixture,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        expected_http_status: u16,
+        expected_grpc_code: i64,
+        expected_message: &'static str,
+    }
+
+    for case in [
+        Case {
+            name: "health database failure",
+            fixture: Fixture::FailingHealth,
+            method: Method::GET,
+            uri: "/api/v1/health",
+            body: "",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "pinging database: forced offline",
+        },
+        Case {
+            name: "policy missing database row",
+            fixture: Fixture::EmptyPolicyDb,
+            method: Method::GET,
+            uri: "/api/v1/policy",
+            body: "",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "loading ACL from database: acl policy not found",
+        },
+    ] {
+        let (app, token) = match case.fixture {
+            Fixture::EmptyPolicyDb => {
+                let (app, token, _db) = fixture_with_db().await;
+                (app, token)
+            }
+            Fixture::FailingHealth => fixture_with_failing_health().await,
+        };
+
+        let resp = app
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(
+            resp,
+            case.expected_http_status,
+            case.expected_grpc_code,
+            case.expected_message,
+            case.name,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -3983,29 +4028,6 @@ async fn grpc_gateway_policy_round_trips_protojson_body() {
     assert_eq!(resp.status(), 400);
     let body = body_json(resp).await;
     assert_eq!(body["code"], 3);
-}
-
-#[tokio::test]
-async fn grpc_gateway_policy_missing_database_row_is_status_json() {
-    let (app, token, _db) = fixture_with_db().await;
-
-    let resp = app
-        .oneshot(req(
-            Method::GET,
-            "/api/v1/policy",
-            Some(&token),
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_status_json_exact(
-        resp,
-        500,
-        2,
-        "loading ACL from database: acl policy not found",
-        "policy missing database row",
-    )
-    .await;
 }
 
 #[tokio::test]

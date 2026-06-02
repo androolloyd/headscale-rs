@@ -8,10 +8,10 @@
     "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
   },
   "summary": {
-    "open_p0": 6,
-    "open_p1": 5,
-    "open_p2": 4,
-    "total_open": 15
+    "open_p0": 4,
+    "open_p1": 4,
+    "open_p2": 3,
+    "total_open": 11
   },
   "open_items": [
     {
@@ -31,41 +31,6 @@
         "integration/api_auth_test.go"
       ],
       "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage for users, preauth keys, API keys, nodes, policy, routes, and auth sessions beyond the current selected stock-client matrix."
-    },
-    {
-      "id": "p0-database-upgrade-dropin",
-      "priority": "P0",
-      "lane": "Production Postgres and upgrade/drop-in behavior",
-      "status": "open",
-      "type": "implementation/evidence",
-      "owner_scope": [
-        "headscale-db/tests/headscale_go_migrations.rs",
-        "headscale-db/migrations/**"
-      ],
-      "upstream_evidence": [
-        "hscontrol/db/migrations/**",
-        "headscale release upgrade notes"
-      ],
-      "exit_criteria": "Add upgrade/drop-in compatibility tests for recent headscale-go schemas, unsupported pre-0.25 boundaries, and current v0.29 tag/preauth/node row changes."
-    },
-    {
-      "id": "p0-map-session-replacement-churn",
-      "priority": "P0",
-      "lane": "Register, map, NodeStore, and batcher churn",
-      "status": "open",
-      "type": "implementation/evidence",
-      "owner_scope": [
-        "headscale-api/src/tailscale_wire/map.rs",
-        "headscale-api/src/tailscale_wire/register.rs",
-        "headscale-api/src/tailscale_wire/mod.rs"
-      ],
-      "upstream_evidence": [
-        "hscontrol/poll.go",
-        "hscontrol/mapper/batcher_test.go",
-        "hscontrol/servertest/race_test.go",
-        "hscontrol/servertest/stress_test.go"
-      ],
-      "exit_criteria": "Mirror map-session replacement, disconnect grace, multi-connection, rapid reconnect, pending-delete, and stress/race behavior with executable tests."
     },
     {
       "id": "p0-change-merge-filter-semantics",
@@ -134,23 +99,6 @@
       "exit_criteria": "Continue route-via and route-health reload/restart/client-observed edge coverage beyond the mirrored default and Postgres rows."
     },
     {
-      "id": "p1-ssh-policy-compiler-edges",
-      "priority": "P1",
-      "lane": "SSH and SSH check flow",
-      "status": "in_progress",
-      "type": "implementation/evidence",
-      "owner_scope": [
-        "headscale-api/src/policy/**",
-        "headscale-api/tests/ssh_integration_parity.rs",
-        "tools/parity/scenarios/ssh-*.json"
-      ],
-      "upstream_evidence": [
-        "hscontrol/policy/v2/types_test.go",
-        "hscontrol/policy/v2/sshtest_test.go"
-      ],
-      "exit_criteria": "Expand compiler parity for trimming, invalid SSH users, SaaS validation, check-period rendering, and policy test failure text."
-    },
-    {
       "id": "p1-policy-v2-compat-fixtures",
       "priority": "P1",
       "lane": "Policy, ACL, tags, and CapMap",
@@ -216,23 +164,6 @@
         "cmd/headscale/cli/*.go"
       ],
       "exit_criteria": "Add remaining lower-priority CLI output/error snapshots and process-level config/output tests while keeping Octra-only commands outside parity claims."
-    },
-    {
-      "id": "p2-grpc-remote-server-error-text",
-      "priority": "P2",
-      "lane": "API auth and gRPC/gateway error text",
-      "status": "open",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "headscale-api/src/grpc.rs",
-        "headscale-api/src/grpc_gateway.rs",
-        "headscale-cli/tests/**"
-      ],
-      "upstream_evidence": [
-        "proto/headscale/v1/headscale.proto",
-        "integration/api_auth_test.go"
-      ],
-      "exit_criteria": "Add table-driven gRPC and CLI tests for remaining auth, remote/server, and direct gRPC error text."
     },
     {
       "id": "p2-dns-live-resolver-behavior",

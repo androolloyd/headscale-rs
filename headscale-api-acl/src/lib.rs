@@ -249,6 +249,7 @@ pub struct AutoApprovers {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshRule {
+    #[serde(default, deserialize_with = "deserialize_trimmed_string")]
     pub action: String,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub src: Vec<String>,
@@ -256,10 +257,28 @@ pub struct SshRule {
     pub dst: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub users: Vec<String>,
-    #[serde(default, rename = "checkPeriod", alias = "check_period")]
+    #[serde(
+        default,
+        rename = "checkPeriod",
+        alias = "check_period",
+        serialize_with = "serialize_ssh_check_period"
+    )]
     pub check_period: Option<String>,
     #[serde(default, rename = "acceptEnv", alias = "accept_env")]
     pub accept_env: Vec<String>,
+}
+
+fn serialize_ssh_check_period<S>(
+    check_period: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match check_period.as_deref() {
+        Some(period) => serializer.serialize_some(&render_ssh_check_period(period)),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// One upstream `tests` entry. These are operator assertions checked
@@ -543,7 +562,10 @@ impl AclDoc {
                 value.insert("dst".to_string(), serde_json::json!(dst));
                 value.insert("users".to_string(), serde_json::json!(users));
                 if let Some(check_period) = &s.check_period {
-                    value.insert("checkPeriod".to_string(), serde_json::json!(check_period));
+                    value.insert(
+                        "checkPeriod".to_string(),
+                        serde_json::json!(render_ssh_check_period(check_period)),
+                    );
                 }
                 if !accept_env.is_empty() {
                     value.insert("acceptEnv".to_string(), serde_json::json!(accept_env));
@@ -1263,9 +1285,8 @@ fn validate_acl_dst_alias(alias: &str, errs: &mut Vec<String>) {
 fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
     match rule.action.as_str() {
         "accept" | "check" => {}
-        other => errs.push(format!(
-            "invalid SSH action {other:?}, must be one of: accept, check"
-        )),
+        "" => errs.push("action must be specified".to_string()),
+        other => errs.push(format!("{other:?} is not a valid action")),
     }
 
     if rule.users.is_empty() {
@@ -1277,14 +1298,14 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
             match parse_duration_nanos(period) {
                 Some(nanos) if nanos < 0 => errs.push(format!(
                     "checkPeriod {} must be a positive duration",
-                    format_duration_nanos(nanos)
+                    format_go_duration_nanos(nanos)
                 )),
                 Some(nanos) if nanos <= SSH_CHECK_PERIOD_MAX_NANOS => {}
                 Some(nanos) => errs.push(format!(
                     "checkPeriod {} is above the max (168h)",
-                    format_duration_nanos(nanos)
+                    format_go_duration_nanos(nanos)
                 )),
-                None => errs.push(format!("not a valid duration string: {period:?}")),
+                None => errs.push(format!("time: invalid duration {period:?}")),
             }
         } else {
             errs.push("checkPeriod is only valid with action \"check\"".to_string());
@@ -1293,7 +1314,7 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
 
     for user in &rule.users {
         if matches!(user.as_str(), "" | "*") {
-            errs.push(format!("user {user:?} is not a valid SSH user"));
+            errs.push(format!("user {user:?} is not valid"));
         }
     }
 
@@ -1376,22 +1397,26 @@ fn validate_policy_test_destination(doc: &AclDoc, dst: &str) -> Result<(), Strin
 }
 
 fn validate_ssh_tests(doc: &AclDoc, tests: &[SshPolicyTest], errs: &mut Vec<String>) {
+    let mut test_errs = Vec::new();
     for (index, test) in tests.iter().enumerate() {
         if test.src.trim().is_empty() {
-            errs.push(format!(
+            test_errs.push(format!(
                 "sshTest {index}: SSH tests entry must have a non-empty src"
             ));
         }
         if test.dst.is_empty() {
-            errs.push(format!(
+            test_errs.push(format!(
                 "sshTest {index}: SSH tests entry must have at least one dst"
             ));
         }
         for dst in &test.dst {
             if let Err(err) = validate_ssh_test_destination(doc, dst) {
-                errs.push(format!("sshTest {index}: {err}"));
+                test_errs.push(format!("sshTest {index}: {err}"));
             }
         }
+    }
+    if !test_errs.is_empty() {
+        errs.push(format!("test(s) failed:\n{}", test_errs.join("\n")));
     }
 }
 
@@ -1779,11 +1804,99 @@ fn parse_duration_nanos(input: &str) -> Option<i64> {
     i64::try_from(total).ok()
 }
 
-fn format_duration_nanos(nanos: i64) -> String {
-    if nanos % (60 * 60 * 1_000_000_000) == 0 {
-        return format!("{}h", nanos / (60 * 60 * 1_000_000_000));
+fn render_ssh_check_period(period: &str) -> String {
+    if period == "always" {
+        return period.to_string();
     }
-    format!("{nanos}ns")
+    if parse_duration_nanos(period) == Some(0) {
+        return "0s".to_string();
+    }
+    period.to_string()
+}
+
+fn format_go_duration_nanos(nanos: i64) -> String {
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+
+    let negative = nanos < 0;
+    let mut abs = i128::from(nanos);
+    if negative {
+        abs = -abs;
+    }
+
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+
+    const NANOS_PER_MICRO: i128 = 1_000;
+    const NANOS_PER_MILLI: i128 = 1_000_000;
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    const NANOS_PER_MINUTE: i128 = 60 * NANOS_PER_SECOND;
+    const NANOS_PER_HOUR: i128 = 60 * NANOS_PER_MINUTE;
+
+    if abs < NANOS_PER_SECOND {
+        if abs < NANOS_PER_MICRO {
+            out.push_str(&abs.to_string());
+            out.push_str("ns");
+        } else if abs < NANOS_PER_MILLI {
+            push_decimal_duration_unit(&mut out, abs, NANOS_PER_MICRO, "µs", 3);
+        } else {
+            push_decimal_duration_unit(&mut out, abs, NANOS_PER_MILLI, "ms", 6);
+        }
+        return out;
+    }
+
+    let hours = abs / NANOS_PER_HOUR;
+    abs %= NANOS_PER_HOUR;
+    let minutes = abs / NANOS_PER_MINUTE;
+    abs %= NANOS_PER_MINUTE;
+    let seconds = abs / NANOS_PER_SECOND;
+    let nanos = abs % NANOS_PER_SECOND;
+
+    if hours > 0 {
+        out.push_str(&hours.to_string());
+        out.push('h');
+        out.push_str(&minutes.to_string());
+        out.push('m');
+    } else if minutes > 0 {
+        out.push_str(&minutes.to_string());
+        out.push('m');
+    }
+
+    out.push_str(&seconds.to_string());
+    if nanos != 0 {
+        let mut fraction = format!("{nanos:09}");
+        while fraction.ends_with('0') {
+            fraction.pop();
+        }
+        out.push('.');
+        out.push_str(&fraction);
+    }
+    out.push('s');
+    out
+}
+
+fn push_decimal_duration_unit(
+    out: &mut String,
+    total_nanos: i128,
+    unit_nanos: i128,
+    suffix: &str,
+    width: usize,
+) {
+    let whole = total_nanos / unit_nanos;
+    let fraction = total_nanos % unit_nanos;
+    out.push_str(&whole.to_string());
+    if fraction != 0 {
+        let mut fraction = format!("{:0width$}", fraction, width = width);
+        while fraction.ends_with('0') {
+            fraction.pop();
+        }
+        out.push('.');
+        out.push_str(&fraction);
+    }
+    out.push_str(suffix);
 }
 
 /// Strip `//` + `/* … */` comments and trailing commas. Preserves
@@ -3121,6 +3234,8 @@ mod tests {
         }"#;
         let err = parse_hujson_policy(raw).unwrap_err();
         let msg = err.to_string();
+        assert!(msg.contains("test(s) failed"));
+        assert!(msg.contains("sshTest 0"));
         assert!(msg.contains("non-empty src"));
         assert!(msg.contains("unknown tag"));
         assert!(msg.contains("disallowed element"));
@@ -4091,19 +4206,66 @@ mod tests {
 
     #[test]
     fn rejects_invalid_ssh_action_like_headscale_go() {
-        let err = parse_hujson_policy(
+        for (name, raw, want) in [
+            (
+                "missing",
+                r#"{
+                  "ssh": [{
+                    "src": ["alice@"],
+                    "dst": ["autogroup:self"],
+                    "users": ["root"]
+                  }]
+                }"#,
+                "action must be specified",
+            ),
+            (
+                "blank",
+                r#"{
+                  "ssh": [{
+                    "action": " \t\n ",
+                    "src": ["alice@"],
+                    "dst": ["autogroup:self"],
+                    "users": ["root"]
+                  }]
+                }"#,
+                "action must be specified",
+            ),
+            (
+                "invalid",
+                r#"{
+                  "ssh": [{
+                    "action": "invalid",
+                    "src": ["alice@"],
+                    "dst": ["autogroup:self"],
+                    "users": ["root"]
+                  }]
+                }"#,
+                r#""invalid" is not a valid action"#,
+            ),
+        ] {
+            let err = parse_hujson_policy(raw).expect_err(name).to_string();
+            assert!(
+                err.contains(want),
+                "{name} should contain {want:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn trims_ssh_action_like_headscale_go() {
+        let doc = parse_hujson_policy(
             r#"{
               "ssh": [{
-                "action": "invalid",
+                "action": " accept ",
                 "src": ["alice@"],
                 "dst": ["autogroup:self"],
                 "users": ["root"]
               }]
             }"#,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("invalid SSH action"));
+        .unwrap();
+
+        assert_eq!(doc.ssh[0].action, "accept");
     }
 
     #[test]
@@ -4177,9 +4339,9 @@ mod tests {
     #[test]
     fn rejects_non_go_ssh_check_period_units_like_headscale_go() {
         for (period, expected) in [
-            ("1d", "not a valid duration string"),
-            (" 1h", "not a valid duration string"),
-            ("-1h", "must be a positive duration"),
+            ("1d", r#"time: invalid duration "1d""#),
+            (" 1h", r#"time: invalid duration " 1h""#),
+            ("-1m", "checkPeriod -1m0s must be a positive duration"),
         ] {
             let raw = format!(
                 r#"{{
@@ -4206,7 +4368,7 @@ mod tests {
             r#"{
               "ssh": [{
                 "action": "check",
-                "checkPeriod": "169h",
+                "checkPeriod": "168h0m1s",
                 "src": ["alice@"],
                 "dst": ["autogroup:self"],
                 "users": ["root"]
@@ -4215,7 +4377,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("above the max (168h)"));
+        assert!(err.contains("checkPeriod 168h0m1s is above the max (168h)"));
     }
 
     #[test]
@@ -4286,6 +4448,20 @@ mod tests {
         .to_string();
         assert!(missing.contains("users must be specified"));
 
+        let empty = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": [""]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty.contains(r#"user "" is not valid"#));
+
         let wildcard = parse_hujson_policy(
             r#"{
               "ssh": [{
@@ -4298,7 +4474,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(wildcard.contains(r#"user "*" is not a valid SSH user"#));
+        assert!(wildcard.contains(r#"user "*" is not valid"#));
     }
 
     #[test]
@@ -4371,7 +4547,27 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(r#"user "" is not a valid SSH user"#));
+        assert!(err.contains(r#"user "" is not valid"#));
+    }
+
+    #[test]
+    fn renders_zero_ssh_check_period_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "0",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let rendered = serde_json::to_value(&doc.ssh[0]).unwrap();
+        assert_eq!(rendered["checkPeriod"], "0s");
+        assert_eq!(doc.canonical_value()["ssh"][0]["checkPeriod"], "0s");
     }
 
     #[test]
@@ -4533,18 +4729,28 @@ mod tests {
 
     #[test]
     fn accepts_ssh_localpart_like_user_literals_like_headscale_go() {
-        parse_hujson_policy(
+        let doc = parse_hujson_policy(
             r#"{
               "tagOwners": {"tag:server": ["alice@example.com"]},
               "ssh": [{
                 "action": "accept",
                 "src": ["autogroup:member"],
                 "dst": ["tag:server"],
-                "users": ["localpart:*@example.com", "localpart:alice@example.com", "localpart:*@"]
+                "users": ["localpart:*@example.com", "localpart:alice@example.com", "localpart:*@", "autogroup:internet"]
               }]
             }"#,
         )
         .unwrap();
+
+        assert_eq!(
+            doc.ssh[0].users,
+            vec![
+                "localpart:*@example.com",
+                "localpart:alice@example.com",
+                "localpart:*@",
+                "autogroup:internet",
+            ]
+        );
     }
 
     #[test]

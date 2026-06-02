@@ -783,6 +783,227 @@ async fn accepts_current_database_versions_with_beta2_migration_history() {
 }
 
 #[tokio::test]
+async fn migrates_current_beta2_database_versions_rows_and_preserves_go_row_semantics() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.2', '2026-05-22 00:00:00');
+
+        CREATE TABLE migrations(id text, PRIMARY KEY(id));
+        INSERT INTO migrations VALUES('202601121700-migrate-hostinfo-request-tags');
+        INSERT INTO migrations VALUES('202602201200-clear-tagged-node-user-id');
+        INSERT INTO migrations VALUES('202605221435-clear-zero-time-node-expiry');
+
+        CREATE TABLE users(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            name text,
+            display_name text,
+            email text,
+            provider_identifier text,
+            provider text,
+            profile_pic_url text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO users
+            (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
+        VALUES
+            (1, 'alice', 'Alice', 'alice@example.com', NULL, 'cli', '', '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL);
+
+        CREATE TABLE pre_auth_keys(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            key text,
+            prefix text,
+            hash blob,
+            user_id integer,
+            reusable numeric,
+            ephemeral numeric DEFAULT false,
+            used numeric DEFAULT false,
+            tags text,
+            expiration datetime,
+            created_at datetime,
+            CONSTRAINT fk_pre_auth_keys_user
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        INSERT INTO pre_auth_keys
+            (id, key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
+        VALUES
+            (1, NULL, 'TaggedPak01', '$2b$04$5RfO8BdYdKjb49aeqxhdOOojgn0AzTDfnFgGy/RrIUYj37OXUiy5S',
+             NULL, 1, 1, 0, '["tag:server"]', NULL, '2026-01-01 00:00:00'),
+            (2, NULL, 'UserPak0001', '$2b$04$rMRfI37l48AqNReGwzr4xu3b0JJDO63bSC40sLOng8XNlXTaYuBbm',
+             1, 1, 0, 0, '[]', NULL, '2026-01-01 00:00:00');
+
+        CREATE TABLE api_keys(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            prefix text,
+            hash blob,
+            expiration datetime,
+            last_seen datetime,
+            created_at datetime
+        );
+
+        CREATE TABLE nodes(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            machine_key text,
+            node_key text,
+            disco_key text,
+            endpoints text,
+            host_info text,
+            ipv4 text,
+            ipv6 text,
+            hostname text,
+            given_name varchar(63),
+            user_id integer,
+            register_method text,
+            tags text,
+            auth_key_id integer,
+            last_seen datetime,
+            expiry datetime,
+            approved_routes text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime,
+            CONSTRAINT fk_nodes_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            CONSTRAINT fk_nodes_auth_key FOREIGN KEY(auth_key_id) REFERENCES pre_auth_keys(id)
+        );
+        INSERT INTO nodes
+            (id, machine_key, node_key, disco_key, endpoints, host_info, ipv4, ipv6, hostname, given_name,
+             user_id, register_method, tags, auth_key_id, last_seen, expiry, approved_routes, created_at, updated_at, deleted_at)
+        VALUES
+            (1, 'mkey:tagged-beta2', 'nodekey:tagged-beta2', 'discokey:tagged-beta2',
+             '["1.2.3.4:41641"]',
+             '{"Hostname":"tagged-beta2","RequestTags":["tag:server"],"RoutableIPs":["10.0.0.0/24"]}',
+             '100.64.0.30', 'fd7a:115c:a1e0::30', 'tagged-beta2', 'tagged-beta2',
+             NULL, 'authkey', '["tag:server"]', 1, '2026-01-02 03:04:05', NULL,
+             '["10.0.0.0/24"]', '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL),
+            (2, 'mkey:user-beta2', 'nodekey:user-beta2', 'discokey:user-beta2',
+             '[]', '{"Hostname":"user-beta2"}',
+             '100.64.0.31', 'fd7a:115c:a1e0::31', 'user-beta2', 'user-beta2',
+             1, 'authkey', '[]', 2, '2026-01-02 03:04:05', '2030-01-01 00:00:00',
+             '[]', '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL);
+
+        CREATE TABLE policies(
+            id integer PRIMARY KEY AUTOINCREMENT,
+            data text,
+            created_at datetime,
+            updated_at datetime,
+            deleted_at datetime
+        );
+        INSERT INTO policies
+            (id, data, created_at, updated_at, deleted_at)
+        VALUES
+            (1, '{"tagOwners":{"tag:server":["alice@"]}}', '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL);
+        "#,
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current beta.2 database_versions rows");
+
+    let before = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check import compatibility");
+    assert_eq!(
+        before,
+        HeadscaleGoImportCompatibility::Versioned {
+            stored_version: "v0.29.0-beta.2".into()
+        }
+    );
+
+    db.migrate()
+        .await
+        .expect("migrate current beta.2 Go-shaped rows");
+
+    let stored_version: String =
+        sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("query stamped database_versions row");
+    assert_eq!(stored_version, HEADSCALE_GO_CURRENT_VERSION);
+
+    let tagged_preauth = preauth_keys::get_by_id(db.pool(), 1)
+        .await
+        .expect("read tagged preauth key");
+    assert_eq!(tagged_preauth.user_id, "");
+    assert_eq!(tagged_preauth.tag_list(), vec!["tag:server"]);
+    assert!(tagged_preauth.reusable);
+    assert!(tagged_preauth.ephemeral);
+
+    let user_preauth = preauth_keys::get_by_id(db.pool(), 2)
+        .await
+        .expect("read user preauth key");
+    assert_eq!(user_preauth.user_id, "1");
+    assert!(user_preauth.tag_list().is_empty());
+
+    let tagged_node = headscale_nodes::get_by_id(db.pool(), 1)
+        .await
+        .expect("read tagged node");
+    assert_eq!(tagged_node.user_id, None);
+    assert_eq!(tagged_node.auth_key_id, Some(tagged_preauth.id));
+    assert_eq!(tagged_node.tag_list(), vec!["tag:server"]);
+    assert_eq!(tagged_node.expiry, None);
+    assert_eq!(tagged_node.approved_route_list(), vec!["10.0.0.0/24"]);
+
+    let user_node = headscale_nodes::get_by_id(db.pool(), 2)
+        .await
+        .expect("read user-owned node");
+    assert_eq!(user_node.user_id, Some(1));
+    assert_eq!(user_node.auth_key_id, Some(user_preauth.id));
+    assert!(user_node.tag_list().is_empty());
+    assert_eq!(user_node.expiry, Some(1_893_456_000));
+
+    let after = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check post-migration compatibility");
+    assert_eq!(after, HeadscaleGoImportCompatibility::RustManaged);
+}
+
+#[tokio::test]
+async fn rejects_current_database_versions_go_shape_without_go_migrations_history() {
+    let (_dir, db) = file_db().await;
+    sqlx::raw_sql(
+        "
+        CREATE TABLE database_versions(
+            id integer PRIMARY KEY,
+            version text NOT NULL,
+            updated_at datetime
+        );
+        INSERT INTO database_versions (id, version, updated_at)
+            VALUES (1, 'v0.29.0-beta.2', '2026-05-22 00:00:00');
+        CREATE TABLE users(id integer PRIMARY KEY AUTOINCREMENT, name text);
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed current database_versions without migrations history");
+
+    let err = db
+        .migrate()
+        .await
+        .expect_err("current Go-shaped DB without migrations table is rejected");
+    assert!(matches!(
+        err,
+        DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+    ));
+    assert!(
+        err.to_string()
+            .contains("202605221435-clear-zero-time-node-expiry")
+    );
+    assert!(
+        !sqlite_table_exists(&db, "_sqlx_migrations").await,
+        "unsupported current Go DB should be rejected before sqlx migrations run"
+    );
+}
+
+#[tokio::test]
 async fn rejects_current_database_versions_without_tagged_node_migration_history() {
     let (_dir, db) = file_db().await;
     sqlx::raw_sql(

@@ -506,6 +506,48 @@ fn test_ssh_check_mode_check_period_cli() {
     assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
 }
 
+#[test]
+fn test_ssh_check_mode_check_period_always_and_zero_cli() {
+    let doc = doc(r#"{
+          "tagOwners": {"tag:server": ["user1@"]},
+          "ssh": [
+            {
+              "action": "check",
+              "checkPeriod": "always",
+              "src": ["user1@"],
+              "dst": ["tag:server"],
+              "users": ["ssh-it-user"]
+            },
+            {
+              "action": "check",
+              "checkPeriod": "0",
+              "src": ["user1@"],
+              "dst": ["autogroup:self"],
+              "users": ["ssh-it-user"]
+            }
+          ]
+        }"#);
+    let nodes = vec![
+        user_node(1, "user1", 1),
+        user_node(2, "user1", 2),
+        tagged_node(3, "user1", 3, "tag:server"),
+    ];
+
+    assert_eq!(
+        ssh_check_period_for(&doc, &nodes, 1, 3),
+        Some(Duration::ZERO)
+    );
+    assert_eq!(
+        ssh_check_period_for(&doc, &nodes, 1, 2),
+        Some(Duration::ZERO)
+    );
+
+    let always = serde_json::to_value(&doc.ssh[0]).unwrap();
+    let zero = serde_json::to_value(&doc.ssh[1]).unwrap();
+    assert_eq!(always["checkPeriod"], "always");
+    assert_eq!(zero["checkPeriod"], "0s");
+}
+
 #[tokio::test]
 async fn test_ssh_check_mode_negative_cli() {
     let doc = doc(r#"{

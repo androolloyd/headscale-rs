@@ -1847,3 +1847,24 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - `configtest` and `server` now print headscale-go's non-fatal TLS-ALPN ACME
   warning when `tls_letsencrypt_hostname` uses `TLS-ALPN-01` while
   `listen_addr` does not end in `:443`.
+
+## 2026-06-02 DNS CertDomains parity boundary
+
+- Current headscale-go DNS config does not expose a `cert_domains` field in
+  `hscontrol/types.DNSConfig`, and `dnsToTailcfgDNS` leaves
+  `DNSConfig.CertDomains` empty for normal configured DNS.
+- The paired `dns-hot-reload` Rust/headscale-go production smokes already pin
+  the upstream-compatible HTTPS boundary by asserting that control-plane TLS
+  hostnames are not synthesized into stock-client `DNS.CertDomains`.
+- Rust's explicit `dns.cert_domains` pass-through remains covered by focused
+  Rust runtime/unit tests and older wire golden coverage, but it is not a
+  current headscale-go configuration parity requirement.
+
+## 2026-06-02 Postgres grpc-gateway node lifecycle smoke
+
+- Added a feature-gated production `headscale serve` smoke that drives the
+  public grpc-gateway node lifecycle against a temporary Postgres database:
+  user create, API-key auth, debug node create, register, list/get, policy/tag,
+  route approval, rename, expire, backfill, and delete.
+- The smoke compiles and uses the existing local skip path when
+  `HEADSCALE_DB_POSTGRES_TEST_URL` is absent; CI provides the live Postgres URL.

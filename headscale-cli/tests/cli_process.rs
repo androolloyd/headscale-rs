@@ -4508,6 +4508,249 @@ async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult 
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_node_lifecycle").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret");
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created_user = http
+            .post(format!("{server_url}/api/v1/user"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "name": "alice" }))
+            .send()
+            .await?;
+        assert_eq!(created_user.status(), reqwest::StatusCode::OK);
+        let created_user = created_user.json::<serde_json::Value>().await?;
+        assert_eq!(created_user["user"]["name"].as_str(), Some("alice"));
+
+        let registration_key = "dddddddddddddddddddddddd";
+        let auth_id = format!("hskey-authreq-{registration_key}");
+        let debug_created = http
+            .post(format!("{server_url}/api/v1/debug/node"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "key": auth_id,
+                "name": "pg-gateway-node",
+                "routes": ["10.30.0.0/24"]
+            }))
+            .send()
+            .await?;
+        assert_eq!(debug_created.status(), reqwest::StatusCode::OK);
+        let debug_created = debug_created.json::<serde_json::Value>().await?;
+        let node_id = debug_created["node"]["id"]
+            .as_str()
+            .expect("debug node id")
+            .to_string();
+        assert!(!node_id.is_empty());
+        assert_eq!(
+            debug_created["node"]["name"].as_str(),
+            Some("pg-gateway-node")
+        );
+        assert_eq!(
+            debug_created["node"]["givenName"].as_str(),
+            Some("pg-gateway-node")
+        );
+        assert_eq!(
+            debug_created["node"]["user"]["name"].as_str(),
+            Some("alice")
+        );
+        assert!(
+            debug_created["node"]["machineKey"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("mkey:")),
+            "debug node: {debug_created}"
+        );
+        assert!(
+            debug_created["node"]["nodeKey"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("nodekey:")),
+            "debug node: {debug_created}"
+        );
+        assert_eq!(
+            debug_created["node"]["availableRoutes"],
+            serde_json::json!(["10.30.0.0/24"])
+        );
+
+        let registered = http
+            .post(format!(
+                "{server_url}/api/v1/node/register?user=alice&key={auth_id}"
+            ))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(registered.status(), reqwest::StatusCode::OK);
+        let registered = registered.json::<serde_json::Value>().await?;
+        assert_eq!(registered["node"]["id"].as_str(), Some(node_id.as_str()));
+        assert_eq!(
+            registered["node"]["registerMethod"].as_str(),
+            Some("REGISTER_METHOD_CLI")
+        );
+        assert!(
+            registered["node"]["ipAddresses"]
+                .as_array()
+                .is_some_and(|ips| {
+                    ips.iter()
+                        .any(|ip| ip.as_str().is_some_and(|ip| ip.starts_with("100.")))
+                }),
+            "registered node: {registered}"
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/node?user=alice"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        let nodes = listed["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes.len(), 1, "listed nodes: {listed}");
+        assert_eq!(nodes[0]["id"].as_str(), Some(node_id.as_str()));
+
+        let fetched = http
+            .get(format!("{server_url}/api/v1/node/{node_id}"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(fetched.status(), reqwest::StatusCode::OK);
+        let fetched = fetched.json::<serde_json::Value>().await?;
+        assert_eq!(fetched["node"]["id"].as_str(), Some(node_id.as_str()));
+
+        let policy = r#"{"tagOwners":{"tag:router":["alice@"]}}"#;
+        let updated_policy = http
+            .put(format!("{server_url}/api/v1/policy"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "policy": policy }))
+            .send()
+            .await?;
+        assert_eq!(updated_policy.status(), reqwest::StatusCode::OK);
+
+        let tagged = http
+            .post(format!("{server_url}/api/v1/node/{node_id}/tags"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "tags": ["tag:router"] }))
+            .send()
+            .await?;
+        assert_eq!(tagged.status(), reqwest::StatusCode::OK);
+        let tagged = tagged.json::<serde_json::Value>().await?;
+        assert_eq!(tagged["node"]["tags"], serde_json::json!(["tag:router"]));
+
+        let approved_routes = http
+            .post(format!("{server_url}/api/v1/node/{node_id}/approve_routes"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "routes": ["10.30.0.0/24"] }))
+            .send()
+            .await?;
+        assert_eq!(approved_routes.status(), reqwest::StatusCode::OK);
+        let approved_routes = approved_routes.json::<serde_json::Value>().await?;
+        assert_eq!(
+            approved_routes["node"]["approvedRoutes"],
+            serde_json::json!(["10.30.0.0/24"])
+        );
+        assert_eq!(
+            approved_routes["node"]["subnetRoutes"],
+            serde_json::json!(["10.30.0.0/24"])
+        );
+
+        let renamed = http
+            .post(format!(
+                "{server_url}/api/v1/node/{node_id}/rename/pg-gateway-renamed"
+            ))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(renamed.status(), reqwest::StatusCode::OK);
+        let renamed = renamed.json::<serde_json::Value>().await?;
+        assert_eq!(renamed["node"]["name"].as_str(), Some("pg-gateway-renamed"));
+        assert_eq!(
+            renamed["node"]["givenName"].as_str(),
+            Some("pg-gateway-renamed")
+        );
+
+        let expired = http
+            .post(format!("{server_url}/api/v1/node/{node_id}/expire"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(expired.status(), reqwest::StatusCode::OK);
+        let expired = expired.json::<serde_json::Value>().await?;
+        assert!(
+            expired["node"]["expiry"]
+                .as_str()
+                .is_some_and(|expiry| expiry.ends_with('Z')),
+            "expired node: {expired}"
+        );
+
+        let backfilled = http
+            .post(format!(
+                "{server_url}/api/v1/node/backfillips?confirmed=true"
+            ))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(backfilled.status(), reqwest::StatusCode::OK);
+        assert!(
+            backfilled.json::<serde_json::Value>().await?["changes"]
+                .as_array()
+                .is_some()
+        );
+
+        let deleted = http
+            .delete(format!("{server_url}/api/v1/node/{node_id}"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            deleted.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/node"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        assert_eq!(listed["nodes"], serde_json::json!([]));
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_preauth_key_lifecycle_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_preauth").await? else {
         return Ok(());

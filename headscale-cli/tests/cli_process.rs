@@ -289,6 +289,23 @@ fn assert_stdout_stderr_snapshot(args: &[&str], expected_stdout: &str, expected_
     );
 }
 
+fn assert_stdout_no_config_warning_snapshot(args: &[&str], expected: &str) {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = headscale_in(args, cwd.path(), home.path());
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        trim_line_end_spaces(&stdout(&output)),
+        trim_line_end_spaces(expected),
+        "stdout snapshot for {args:?}"
+    );
+    assert_eq!(
+        trim_line_end_spaces(&normalize_no_config_warning_timestamp(&stderr(&output))),
+        trim_line_end_spaces(include_str!("snapshots/no_config_default_warning.stderr")),
+        "stderr snapshot for {args:?}"
+    );
+}
+
 fn assert_normalized_node_stdout_snapshot(output: &Output, expected: &str, label: &str) {
     assert!(output.status.success(), "stderr: {}", stderr(output));
     assert_eq!(
@@ -322,6 +339,30 @@ fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
     assert_eq!(
         trim_line_end_spaces(&stderr(&output)),
         trim_line_end_spaces(expected),
+        "stderr snapshot for {args:?}"
+    );
+}
+
+fn assert_stderr_no_config_warning_snapshot(args: &[&str], expected_status: i32, expected: &str) {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = headscale_in(args, cwd.path(), home.path());
+    let expected = format!(
+        "{}{}",
+        include_str!("snapshots/no_config_default_warning.stderr"),
+        expected
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "unexpected status for {args:?}; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
+    assert_eq!(
+        trim_line_end_spaces(&normalize_no_config_warning_timestamp(&stderr(&output))),
+        trim_line_end_spaces(&expected),
         "stderr snapshot for {args:?}"
     );
 }
@@ -1307,7 +1348,10 @@ fn top_level_help_exposes_upstream_operator_commands() {
 fn top_level_help_matches_current_upstream_snapshot() {
     assert_stdout_snapshot(&["--help"], include_str!("snapshots/top_level_help.stdout"));
     assert_stdout_snapshot(&["-h"], include_str!("snapshots/top_level_help.stdout"));
-    assert_stdout_snapshot(&["help"], include_str!("snapshots/top_level_help.stdout"));
+    assert_stdout_no_config_warning_snapshot(
+        &["help"],
+        include_str!("snapshots/top_level_help.stdout"),
+    );
 }
 
 #[test]
@@ -1316,24 +1360,24 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["version", "-h"],
         include_str!("snapshots/version_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "version"],
         include_str!("snapshots/version_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "mockoidc"],
         include_str!("snapshots/mockoidc_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "dumpConfig"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "bash"],
         include_str!("snapshots/completion_bash_help.stdout"),
     );
     assert_stdout_snapshot(&["auth", "-h"], include_str!("snapshots/auth_help.stdout"));
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "auth", "register"],
         include_str!("snapshots/auth_register_help.stdout"),
     );
@@ -1341,11 +1385,11 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["users", "-h"],
         include_str!("snapshots/users_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "user"],
         include_str!("snapshots/users_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "users", "create"],
         include_str!("snapshots/users_create_help.stdout"),
     );
@@ -1353,7 +1397,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["user", "new", "--help"],
         include_str!("snapshots/users_create_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "users", "c"],
         include_str!("snapshots/users_create_help.stdout"),
     );
@@ -1361,7 +1405,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["users", "ls", "-h"],
         include_str!("snapshots/users_list_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "user", "show"],
         include_str!("snapshots/users_list_help.stdout"),
     );
@@ -1384,11 +1428,11 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         include_str!("snapshots/nodes_register_help.stdout"),
         include_str!("snapshots/nodes_register_help.stderr"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "nodes", "register"],
         include_str!("snapshots/nodes_register_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "nodes", "routes"],
         include_str!("snapshots/nodes_list_routes_help.stdout"),
     );
@@ -1396,7 +1440,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["nodes", "logout", "-h"],
         include_str!("snapshots/nodes_expire_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "node", "t"],
         include_str!("snapshots/nodes_tag_help.stdout"),
     );
@@ -1408,7 +1452,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["authkey", "new", "--help"],
         include_str!("snapshots/preauthkeys_create_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "pre", "rm"],
         include_str!("snapshots/preauthkeys_delete_help.stdout"),
     );
@@ -1416,7 +1460,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["api", "revoke", "-h"],
         include_str!("snapshots/apikeys_expire_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "apikey", "remove"],
         include_str!("snapshots/apikeys_delete_help.stdout"),
     );
@@ -1424,7 +1468,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["policy", "--help"],
         include_str!("snapshots/policy_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "policy", "fetch"],
         include_str!("snapshots/policy_get_help.stdout"),
     );
@@ -1432,7 +1476,7 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
         &["policy", "update", "-h"],
         include_str!("snapshots/policy_set_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "policy", "check"],
         include_str!("snapshots/policy_check_help.stdout"),
     );
@@ -2290,12 +2334,12 @@ fn serve_help_with_extra_args_matches_current_upstream_snapshot() {
 
 #[test]
 fn help_unknown_topics_match_current_upstream_snapshots() {
-    assert_stderr_snapshot(
+    assert_stderr_no_config_warning_snapshot(
         &["help", "server"],
         0,
         include_str!("snapshots/help_server_unknown_topic.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_stderr_no_config_warning_snapshot(
         &["help", "status"],
         0,
         include_str!("snapshots/help_status_unknown_topic.stderr"),
@@ -2408,27 +2452,27 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
 
 #[test]
 fn help_topics_with_extra_arg_match_upstream_snapshots() {
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "version", "bad"],
         include_str!("snapshots/version_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "auth", "bad"],
         include_str!("snapshots/auth_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "auth", "register", "bad"],
         include_str!("snapshots/auth_register_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "users", "bad"],
         include_str!("snapshots/users_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "users", "create", "bad"],
         include_str!("snapshots/users_create_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "nodes", "bad"],
         include_str!("snapshots/nodes_help.stdout"),
     );
@@ -3914,7 +3958,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["serve", "-h"],
         include_str!("snapshots/serve_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "serve"],
         include_str!("snapshots/serve_help.stdout"),
     );
@@ -3966,7 +4010,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["dumpConfig", "--force", "--help"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "dumpConfig"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
@@ -3978,7 +4022,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["gen", "--help"],
         include_str!("snapshots/generate_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "gen"],
         include_str!("snapshots/generate_help.stdout"),
     );
@@ -3998,7 +4042,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["mockoidc", "ignored", "--help"],
         include_str!("snapshots/mockoidc_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "mockoidc"],
         include_str!("snapshots/mockoidc_help.stdout"),
     );
@@ -4014,7 +4058,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["completion", "bash", "--no-descriptions", "--help"],
         include_str!("snapshots/completion_bash_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "bash"],
         include_str!("snapshots/completion_bash_help.stdout"),
     );
@@ -4022,7 +4066,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["completion", "fish", "--help"],
         include_str!("snapshots/completion_fish_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "fish"],
         include_str!("snapshots/completion_fish_help.stdout"),
     );
@@ -4030,7 +4074,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["completion", "powershell", "--help"],
         include_str!("snapshots/completion_powershell_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "powershell"],
         include_str!("snapshots/completion_powershell_help.stdout"),
     );
@@ -4042,7 +4086,7 @@ fn operator_top_level_command_help_matches_snapshots() {
         &["completion", "zsh", "--help"],
         include_str!("snapshots/completion_zsh_help.stdout"),
     );
-    assert_stdout_snapshot(
+    assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "zsh"],
         include_str!("snapshots/completion_zsh_help.stdout"),
     );

@@ -465,7 +465,9 @@ async fn spawn_process_grpc_service_with_persistent_machines() -> (
     (dir, db, socket, handle)
 }
 
-async fn spawn_process_remote_grpc_service() -> (
+async fn spawn_process_remote_grpc_service(
+    database_health_fails: bool,
+) -> (
     tempfile::TempDir,
     headscale_db::Database,
     String,
@@ -491,8 +493,12 @@ async fn spawn_process_remote_grpc_service() -> (
         Arc::new(PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users)),
         PolicyStore::new(),
         Arc::new(WireMachineAdmin::new(machines)),
-    )
-    .with_database_pool(db.pool().clone())
+    );
+    let service = if database_health_fails {
+        service.with_database_health(Arc::new(FailingDatabaseHealth))
+    } else {
+        service.with_database_pool(db.pool().clone())
+    }
     .require_api_key_auth();
 
     let material = tls::load_or_generate(
@@ -7776,7 +7782,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() {
-    let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service().await;
+    let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service(false).await;
     let config_dir = tempfile::tempdir().unwrap();
     let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
 
@@ -7835,6 +7841,44 @@ async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() 
     assert_eq!(
         stderr(&bad_auth_yaml),
         include_str!("snapshots/grpc_remote_auth_failure_yaml.stderr")
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_remote_grpc_health_failure_matches_process_stderr() {
+    let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service(true).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
+
+    let output = wait_for_headscale_status(&config, &["health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_remote_health_failure.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-o", "json", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_remote_health_failure_json.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_remote_health_failure_json_line.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-o", "yaml", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_live_health_failure_yaml.stderr")
     );
 
     handle.abort();

@@ -90,7 +90,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   the current branch; output-aware CLI error envelopes now match
   upstream `Error:`/JSON/json-line/YAML formatting plus
   `missing parameters` usage exits for selector and
-  remote transport failures including structured connection/auth envelopes,
+  remote transport failures including structured connection/auth envelopes
+  and remote health/server failure envelopes,
   live local-gRPC domain failures now have exact text/JSON/json-line/YAML
   snapshots, gRPC API-key auth now matches upstream missing-token,
   missing-`Bearer`, and invalid-token text, and current-upstream auth
@@ -657,6 +658,10 @@ Recent coverage note (2026-06-02): residual utility parser stderr coverage now
 pins current-upstream `completion --no-descriptions`, `completion bash
 --no-descriptions -- bad`, and `generate private-key --force -x` one-line
 Cobra errors without adding any Octra-only CLI behavior to the parity ledger.
+
+Recent coverage note (2026-06-02): remote gRPC health failure process snapshots
+now pin current-upstream-style human, JSON, JSON-line, and YAML server-error
+envelopes after successful TLS/API-key transport setup.
 
 Recent coverage note (2026-06-02): the `/debug/` index now mirrors tsweb's
 runtime key/value rows more closely by including `Uptime`, `Version`, and

@@ -2193,6 +2193,16 @@ fn utility_global_flags_consume_help_as_values_like_current_upstream_cobra() {
 }
 
 #[test]
+fn utility_global_bool_assignments_match_current_upstream_help_snapshots() {
+    for args in [
+        &["--force=false", "health", "--help"][..],
+        &["health", "--force=false", "--help"][..],
+    ] {
+        assert_stdout_snapshot(args, include_str!("snapshots/health_help.stdout"));
+    }
+}
+
+#[test]
 fn utility_skip_config_commands_reject_late_global_flags_like_current_upstream_cobra() {
     assert_stderr_snapshot(
         &["version", "--config", "missing.yaml"],
@@ -2406,6 +2416,11 @@ fn utility_top_level_unknown_flags_match_upstream_stderr_snapshots() {
     let unknown_flag =
         include_str!("snapshots/utility_top_level_json_flag.stderr").replace("--json", "--bad");
     assert_stderr_snapshot(&["--bad"], 1, &unknown_flag);
+    assert_stderr_snapshot(
+        &["--bad=value"],
+        1,
+        include_str!("snapshots/utility_top_level_unknown_flag_assignment.stderr"),
+    );
 
     let unknown_shorthand = include_str!("snapshots/utility_top_level_json_flag.stderr")
         .replace("unknown flag: --json", "unknown shorthand flag: 'x' in -x");
@@ -4689,6 +4704,11 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
         &["preauthkeys", "create", "--user"],
         1,
         "Error: flag needs an argument: --user\n",
+    );
+    assert_stderr_snapshot(
+        &["preauthkeys", "create", "--user="],
+        1,
+        include_str!("snapshots/preauthkeys_create_empty_user.stderr"),
     );
     assert_stderr_snapshot(
         &["preauthkeys", "create", "--user", "abc"],

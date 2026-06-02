@@ -1726,6 +1726,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_websocket_ignores_control_frames() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let ping = encode_raw_frame(FrameType::Ping.code(), b"12345678").unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Ping(b"before-login".to_vec())))
+            .await
+            .unwrap();
+        tx.send(Ok(Message::Pong(b"before-login".to_vec())))
+            .await
+            .unwrap();
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+        wait_for_sent_messages(&sent, 2).await;
+
+        tx.send(Ok(Message::Ping(b"after-login".to_vec())))
+            .await
+            .unwrap();
+        tx.send(Ok(Message::Pong(b"after-login".to_vec())))
+            .await
+            .unwrap();
+        tx.send(Ok(Message::Binary(ping))).await.unwrap();
+        wait_for_sent_messages(&sent, 3).await;
+        tx.send(Ok(Message::Close(None))).await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_ok());
+
+        let messages = sent.lock().unwrap().clone();
+        assert_eq!(messages.len(), 3);
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[0]), MAX_INFO_LEN)
+                .expect("server-key frame decodes");
+        let Frame::ServerKey { key, extra } = frame else {
+            panic!("expected server-key frame");
+        };
+        assert_eq!(key, server_public);
+        assert!(extra.is_empty());
+
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[1]), MAX_INFO_LEN)
+                .expect("server-info frame decodes");
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
+                .expect("pong frame decodes");
+        assert_eq!(frame, Frame::Pong(*b"12345678"));
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_sends_scheduled_keepalive() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(

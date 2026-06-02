@@ -382,3 +382,88 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         "ACME certificate cache should not be written before remote gRPC bind failure"
     );
 }
+
+#[test]
+fn serve_tls_alpn_ignores_http01_listen_before_public_ca_on_remote_grpc_collision() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let grpc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+
+    let db_path = cwd.path().join("db.sqlite");
+    let noise_path = cwd.path().join("noise_private.key");
+    let state_dir = cwd.path().join("state");
+    let unix_socket = cwd.path().join("headscale.sock");
+    let cache_dir = cwd.path().join("acme-cache");
+
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:443"
+metrics_listen_addr: ""
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  state_dir: {}
+  unix_socket: {}
+  grpc_listen_addr: "{grpc_addr}"
+acme_url: "https://acme-v02.api.letsencrypt.org/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_listen: "not-a-socket"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&state_dir.to_string_lossy()),
+            yaml_double_quoted(&unix_socket.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve TLS-ALPN ignored HTTP-01 listen; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let normalized_stderr = normalize_os_error_number(&stderr(&output));
+    assert!(
+        normalized_stderr.contains(&format!(
+            "Error: bind remote gRPC TCP listener {grpc_addr}: Address already in use (os error <errno>)"
+        )),
+        "stderr: {normalized_stderr}"
+    );
+    assert!(
+        !normalized_stderr.contains("tls_letsencrypt_listen")
+            && !normalized_stderr.contains("not-a-socket"),
+        "TLS-ALPN should ignore the HTTP-01 listener setting; stderr: {normalized_stderr}"
+    );
+    assert!(
+        !cache_dir.join("headscale.example").exists(),
+        "ACME certificate cache should not be written before remote gRPC bind failure"
+    );
+}

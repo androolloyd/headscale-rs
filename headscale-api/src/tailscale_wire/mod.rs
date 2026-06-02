@@ -6884,6 +6884,47 @@ mod registry_tests {
     }
 
     #[test]
+    fn nodestore_write_batcher_update_many_route_noops_stay_quiet() {
+        let reg = Arc::new(MachineRegistry::new());
+        for idx in 1..=2 {
+            let mut rec = mk_record(idx);
+            rec.node_key_hex = format!("node-update-many-noop-{idx}");
+            rec.available_routes = vec![format!("10.{idx}.0.0/24")];
+            rec.approved_routes = rec.available_routes.clone();
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+        let history_len = reg.map_change_history().len();
+        let snapshot = reg.snapshot();
+        let generation = reg.subscribe_gen();
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+
+        let (changed, missing) = reg.set_approved_routes_many(vec![
+            ("node-update-many-noop-1".into(), vec!["10.1.0.0/24".into()]),
+            ("node-update-many-noop-2".into(), vec!["10.2.0.0/24".into()]),
+        ]);
+
+        assert_eq!(changed, 0);
+        assert!(missing.is_empty());
+        assert_eq!(
+            reg.map_change_history().len(),
+            history_len,
+            "replayed policy auto-approval should not record map churn"
+        );
+        assert!(
+            reg.pending_map_changes().is_empty(),
+            "replayed policy auto-approval should not enqueue stream deltas"
+        );
+        assert!(
+            !generation.has_changed().unwrap(),
+            "replayed policy auto-approval should not wake map streams"
+        );
+        assert!(
+            Arc::ptr_eq(&snapshot, &reg.snapshot()),
+            "replayed policy auto-approval should not publish a fresh NodeStore snapshot"
+        );
+    }
+
+    #[test]
     fn nodestore_write_batcher_update_many_missing_node_is_atomic() {
         let reg = Arc::new(MachineRegistry::new());
         let mut rec = mk_record(1);

@@ -35,6 +35,7 @@ REQUIRED_PR_SMOKES = {
     "postgres-web-register-policy-churn",
     "postgres-web-register-policy-churn-restart",
     "postgres-web-register-custom-domain",
+    "postgres-oidc-policy-churn",
     "postgres-oidc-policy-churn-restart",
     "postgres-policy-rename-restart",
     "postgres-ssh-profile-subdomain-deny",
@@ -43,11 +44,7 @@ REQUIRED_PR_SMOKES = {
     "route-edge-current-upstream-audit",
     "tag-update-invalid",
 }
-POSTGRES_PR_EXEMPTIONS = {
-    # Covered by the selected restart row, which exercises the same OIDC policy
-    # churn plus persistent restart hydration.
-    "postgres-oidc-policy-churn",
-}
+POSTGRES_PR_EXEMPTIONS: set[str] = set()
 
 
 class CheckError(Exception):

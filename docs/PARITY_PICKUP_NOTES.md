@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 09:21 ADT
+Updated: 2026-06-02 09:44 ADT
 
 ## Current State
 
@@ -16,6 +16,11 @@ Updated: 2026-06-02 09:21 ADT
 
 Recent accepted slices:
 
+- Current auth/map-churn slice suppresses stale NodeStore worker rekey churn
+  when an auth-completion rekey and same-batch delete remove the final node
+  before the batch completes. Rekey-style map-change wakes now revalidate final
+  node presence, and focused `Stream:true` coverage proves observers receive
+  only the delayed `PeersRemoved` delta after the map-batcher tick.
 - Current map-churn slice suppresses stale NodeStore worker upsert churn when a
   same-batch delete removes the node before the batch completes. Upsert-style
   map-change wakes now revalidate final node presence, and focused registry plus

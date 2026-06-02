@@ -2374,6 +2374,7 @@ enum NodeStoreWriteWork {
         new_node_key_hex: String,
         rec: Box<MachineRecord>,
         changes: Vec<PendingMapChange>,
+        final_presence_node_id: Option<u64>,
         result_tx: std_mpsc::Sender<()>,
     },
 }
@@ -2398,6 +2399,7 @@ enum NodeStoreWriteCompletion {
         operation: &'static str,
         result_tx: std_mpsc::Sender<()>,
         changes: Vec<PendingMapChange>,
+        final_presence_node_id: Option<u64>,
     },
 }
 
@@ -3131,6 +3133,7 @@ impl MachineRegistry {
         new_node_key_hex: String,
         rec: MachineRecord,
         changes: Vec<PendingMapChange>,
+        final_presence_node_id: Option<u64>,
     ) {
         let fallback_old_node_key_hex = old_node_key_hex.clone();
         let fallback_new_node_key_hex = new_node_key_hex.clone();
@@ -3145,6 +3148,7 @@ impl MachineRegistry {
             new_node_key_hex,
             rec: Box::new(rec),
             changes,
+            final_presence_node_id,
             result_tx,
         }) {
             Ok(()) => {
@@ -3276,6 +3280,7 @@ impl MachineRegistry {
                         new_node_key_hex,
                         rec,
                         changes,
+                        final_presence_node_id,
                         result_tx,
                     } => {
                         if old_node_key_hex != new_node_key_hex {
@@ -3287,6 +3292,7 @@ impl MachineRegistry {
                             operation: "replace_key",
                             result_tx,
                             changes,
+                            final_presence_node_id,
                         });
                     }
                 }
@@ -3299,6 +3305,17 @@ impl MachineRegistry {
                         .any(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
                 {
                     outcome.mark_absent_after_batch();
+                }
+                if let NodeStoreWriteCompletion::Unit {
+                    changes,
+                    final_presence_node_id: Some(node_id),
+                    ..
+                } = completion
+                    && !next
+                        .iter()
+                        .any(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == *node_id)
+                {
+                    changes.clear();
                 }
                 if let NodeStoreWriteCompletion::UpdateMany { outcome, .. } = completion {
                     outcome.revalidate_final_presence_after_batch(&next);
@@ -4232,6 +4249,8 @@ impl MachineRegistry {
     ) {
         let key_changed = old_node_key_hex != new_node_key_hex;
         let old_id = self.stable_node_id_for_key(old_node_key_hex);
+        let final_presence_node_id =
+            (!changes.is_empty()).then(|| rec.stable_node_id_for_key(&new_node_key_hex));
         let queue = self.nodestore_write_queue.read().clone();
         if let Some(queue) = queue.as_ref() {
             self.enqueue_nodestore_rekey(
@@ -4240,6 +4259,7 @@ impl MachineRegistry {
                 new_node_key_hex,
                 rec,
                 changes,
+                final_presence_node_id,
             );
         } else {
             self.apply_nodestore_rekey_direct(old_node_key_hex, new_node_key_hex, rec, changes);

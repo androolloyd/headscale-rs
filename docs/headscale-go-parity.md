@@ -159,7 +159,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   deprecated `HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT`. NodeStore tuning
   env overrides now match Viper for
   `HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE` and
-  `HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT`. Database env overrides now
+  `HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT`. NodeStore worker batches now
+  suppress stale auth-completion rekey map-change reasons when a same-batch
+  delete removes the final node, leaving observers with only delayed peer
+  removal churn. Database env overrides now
   match Viper for `HEADSCALE_DATABASE_TYPE`, `HEADSCALE_DATABASE_DEBUG`,
   `HEADSCALE_DATABASE_GORM_*`, `HEADSCALE_DATABASE_SQLITE_*`, and
   `HEADSCALE_DATABASE_POSTGRES_*`.

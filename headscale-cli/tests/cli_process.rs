@@ -7727,16 +7727,51 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         6,
         include_str!("snapshots/grpc_live_apikey_not_found_json.stderr"),
     );
+    let missing_auth_id = "hskey-authreq-dddddddddddddddddddddddd";
+    for (args, expected) in [
+        (
+            vec!["auth", "approve", "--auth-id", missing_auth_id],
+            include_str!("snapshots/grpc_live_auth_missing.stderr"),
+        ),
+        (
+            vec![
+                "-o",
+                "json",
+                "auth",
+                "approve",
+                "--auth-id",
+                missing_auth_id,
+            ],
+            include_str!("snapshots/grpc_live_auth_missing_json.stderr"),
+        ),
+        (
+            vec![
+                "-ojson-line",
+                "auth",
+                "approve",
+                "--auth-id",
+                missing_auth_id,
+            ],
+            include_str!("snapshots/grpc_live_auth_missing_json_line.stderr"),
+        ),
+    ] {
+        assert_config_stderr_snapshot(&config, &args, 5, expected);
+    }
     assert_config_stderr_snapshot(
         &config,
         &[
+            "-o",
+            "yaml",
             "auth",
             "approve",
             "--auth-id",
-            "hskey-authreq-dddddddddddddddddddddddd",
+            missing_auth_id,
         ],
         5,
-        include_str!("snapshots/grpc_live_auth_missing.stderr"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/grpc_live_auth_missing_yaml.stderr")
+        ),
     );
     assert_config_stderr_snapshot(
         &config,

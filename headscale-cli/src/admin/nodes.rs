@@ -691,12 +691,20 @@ fn grpc_route_rows(nodes: &[NodeOutput]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn parse_node_id(id: &str) -> Result<u64, AdminError> {
-    id.parse::<u64>().map_err(|_| {
-        AdminError::Local(format!(
-            "upstream gRPC node commands require a numeric node identifier, got '{id}'"
-        ))
-    })
+pub(crate) fn parse_node_id(id: &str) -> Result<u64, AdminError> {
+    id.parse::<u64>()
+        .map_err(|_| AdminError::Usage(upstream_parse_uint_error(id)))
+}
+
+fn upstream_parse_uint_error(id: &str) -> String {
+    let detail = if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        "value out of range"
+    } else {
+        "invalid syntax"
+    };
+    format!(
+        "invalid argument \"{id}\" for \"-i, --identifier\" flag: strconv.ParseUint: parsing \"{id}\": {detail}"
+    )
 }
 
 fn parse_rfc3339_unix(value: &str) -> Result<i64, AdminError> {
@@ -1042,10 +1050,10 @@ mod tests {
     #[test]
     fn parse_node_id_accepts_numeric_identifier() {
         assert_eq!(parse_node_id("42").unwrap(), 42);
-        assert!(matches!(
-            parse_node_id("node-key"),
-            Err(AdminError::Local(_))
-        ));
+        assert_eq!(
+            parse_node_id("node-key").unwrap_err().to_string(),
+            "invalid argument \"node-key\" for \"-i, --identifier\" flag: strconv.ParseUint: parsing \"node-key\": invalid syntax"
+        );
     }
 
     #[test]

@@ -166,7 +166,15 @@ pub struct ConnectArgs {
     )]
     pub output: Option<String>,
     /// Disable prompts and forces the execution.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        action = clap::ArgAction::Set,
+        default_value_t = false,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true
+    )]
     pub force: bool,
     /// Database descriptor from the loaded headscale config. This is not a CLI
     /// flag; it lets `policy --bypass-grpc-and-access-database-directly` match
@@ -291,7 +299,12 @@ pub enum NodesCmd {
     #[command(name = "list-routes", alias = "routes", alias = "lsr")]
     ListRoutes {
         /// Restrict to one node ID. gRPC mode requires the numeric identifier.
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         id: Option<String>,
     },
     /// Show one node by numeric identifier. Legacy HTTP also accepts node_key hex or hostname.
@@ -317,7 +330,12 @@ pub enum NodesCmd {
         #[arg(value_name = "ID")]
         id: Option<String>,
         /// Node identifier (ID).
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         identifier: Option<String>,
         /// ISO-8601 timestamp to schedule expiry at. Defaults to "now".
         #[arg(short = 'e', long = "expiry", value_name = "RFC3339")]
@@ -332,7 +350,12 @@ pub enum NodesCmd {
         #[arg(value_name = "NEW_NAME")]
         new_name: String,
         /// Node identifier (ID).
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         identifier: Option<String>,
     },
     /// Replace the node's forced-tags list. Empty list clears the
@@ -343,7 +366,12 @@ pub enum NodesCmd {
         #[arg(value_name = "ID")]
         id: Option<String>,
         /// Node identifier (ID).
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         identifier: Option<String>,
         /// Comma-separated tag list, e.g. `tag:prod,tag:web`.
         #[arg(short = 't', long = "tags", value_delimiter = ',')]
@@ -356,7 +384,12 @@ pub enum NodesCmd {
     #[command(name = "approve-routes")]
     ApproveRoutes {
         /// Node ID. gRPC mode requires the numeric identifier.
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         id: Option<String>,
         /// Comma-separated route list. Empty list removes approvals.
         #[arg(short = 'r', long = "routes", value_delimiter = ',')]
@@ -369,7 +402,12 @@ pub enum NodesCmd {
         #[arg(value_name = "ID")]
         id: Option<String>,
         /// Node identifier (ID).
-        #[arg(short = 'i', long = "identifier", value_name = "ID")]
+        #[arg(
+            short = 'i',
+            long = "identifier",
+            value_name = "ID",
+            allow_hyphen_values = true
+        )]
         identifier: Option<String>,
     },
     /// Backfill missing node IP addresses.
@@ -740,10 +778,40 @@ fn validate_grpc_node_identifier(cmd: &NodesCmd) -> Result<(), AdminError> {
     };
 
     if missing {
-        Err(upstream_required_identifier_error())
-    } else {
-        Ok(())
+        return Err(upstream_required_identifier_error());
     }
+
+    validate_grpc_node_id_values(cmd)
+}
+
+fn validate_grpc_node_id_values(cmd: &NodesCmd) -> Result<(), AdminError> {
+    match cmd {
+        NodesCmd::ListRoutes { id: Some(id) }
+        | NodesCmd::Rename {
+            identifier: Some(id),
+            ..
+        }
+        | NodesCmd::ApproveRoutes { id: Some(id), .. } => {
+            nodes::parse_node_id(id)?;
+        }
+        NodesCmd::Expire { id, identifier, .. }
+        | NodesCmd::Tags { id, identifier, .. }
+        | NodesCmd::Delete { id, identifier } => {
+            if let (None, Some(id)) | (Some(id), None) = (id.as_ref(), identifier.as_ref()) {
+                nodes::parse_node_id(id)?;
+            }
+        }
+        NodesCmd::List { .. }
+        | NodesCmd::ListRoutes { id: None }
+        | NodesCmd::Show { .. }
+        | NodesCmd::Register { .. }
+        | NodesCmd::BackfillIps { .. }
+        | NodesCmd::Rename {
+            identifier: None, ..
+        }
+        | NodesCmd::ApproveRoutes { id: None, .. } => {}
+    }
+    Ok(())
 }
 
 fn upstream_required_identifier_error() -> AdminError {

@@ -3113,6 +3113,22 @@ fn implemented_admin_command_help_matches_snapshots() {
 }
 
 #[test]
+fn unknown_admin_group_children_match_upstream_parent_help() {
+    assert_stdout_snapshot(
+        &["users", "bogus"],
+        include_str!("snapshots/users_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["auth", "bogus"],
+        include_str!("snapshots/auth_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["policy", "bogus"],
+        include_str!("snapshots/policy_help.stdout"),
+    );
+}
+
+#[test]
 fn operator_top_level_command_help_matches_snapshots() {
     assert_stdout_snapshot(
         &["serve", "--help"],
@@ -3128,6 +3144,14 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_snapshot(
         &["health", "--help"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["--force=false", "health", "--help"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_snapshot(
+        &["health", "--force=false", "--help"],
         include_str!("snapshots/health_help.stdout"),
     );
     assert_stdout_snapshot(
@@ -3609,6 +3633,33 @@ fn grpc_node_identifier_usage_errors_happen_before_connection() {
     ] {
         assert_config_stderr_snapshot(&config, args, 1, expected);
     }
+
+    assert_config_stderr_snapshot(
+        &config,
+        &["nodes", "list-routes", "--identifier", "abc"],
+        1,
+        "Error: invalid argument \"abc\" for \"-i, --identifier\" flag: strconv.ParseUint: parsing \"abc\": invalid syntax\n",
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["nodes", "list-routes", "--identifier", "-1"],
+        1,
+        "Error: invalid argument \"-1\" for \"-i, --identifier\" flag: strconv.ParseUint: parsing \"-1\": invalid syntax\n",
+    );
+}
+
+#[test]
+fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
+    assert_stderr_snapshot(
+        &["userz"],
+        1,
+        "Error: unknown command \"userz\" for \"headscale\"\n\nDid you mean this?\n\tusers\n\n",
+    );
+    assert_stderr_snapshot(
+        &["nodes", "list", "--user"],
+        1,
+        "Error: flag needs an argument: --user\n",
+    );
 }
 
 #[test]

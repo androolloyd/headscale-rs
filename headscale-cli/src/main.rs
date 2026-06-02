@@ -748,7 +748,14 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
         parts.push(arg.as_ref().to_str()?);
     }
 
-    upstream_known_help(parts.as_slice()).or_else(|| upstream_extra_help_topic(parts.as_slice()))
+    upstream_known_help(parts.as_slice())
+        .or_else(|| {
+            let command_parts = upstream_exact_command_parts(parts.as_slice());
+            (command_parts != parts.as_slice())
+                .then(|| upstream_known_help(command_parts))
+                .flatten()
+        })
+        .or_else(|| upstream_extra_help_topic(parts.as_slice()))
 }
 
 fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
@@ -812,6 +819,7 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             Some(UPSTREAM_DEBUG_CREATE_NODE_HELP)
         }
         ["auth", "-h" | "--help"] | ["help", "auth"] => Some(UPSTREAM_AUTH_HELP),
+        ["auth", subcommand] if unknown_auth_subcommand(subcommand) => Some(UPSTREAM_AUTH_HELP),
         ["auth", "register", "-h" | "--help"] | ["help", "auth", "register"] => {
             Some(UPSTREAM_AUTH_REGISTER_HELP)
         }
@@ -822,6 +830,9 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             Some(UPSTREAM_AUTH_REJECT_HELP)
         }
         ["users" | "user", "-h" | "--help"] | ["help", "users" | "user"] => {
+            Some(UPSTREAM_USERS_HELP)
+        }
+        ["users" | "user", subcommand] if unknown_users_subcommand(subcommand) => {
             Some(UPSTREAM_USERS_HELP)
         }
         ["users" | "user", "create" | "c" | "new", "-h" | "--help"]
@@ -952,6 +963,9 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             "delete" | "remove" | "del",
         ] => Some(UPSTREAM_APIKEYS_DELETE_HELP),
         ["policy", "-h" | "--help"] | ["help", "policy"] => Some(UPSTREAM_POLICY_HELP),
+        ["policy", subcommand] if unknown_policy_subcommand(subcommand) => {
+            Some(UPSTREAM_POLICY_HELP)
+        }
         ["policy", "get" | "show" | "view" | "fetch", "-h" | "--help"]
         | ["help", "policy", "get" | "show" | "view" | "fetch"] => Some(UPSTREAM_POLICY_GET_HELP),
         ["policy", "set" | "put" | "update", "-h" | "--help"]
@@ -1005,6 +1019,35 @@ fn upstream_exact_help_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static st
     }
 }
 
+fn unknown_auth_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-') && !matches!(subcommand, "register" | "approve" | "reject")
+}
+
+fn unknown_users_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-')
+        && !matches!(
+            subcommand,
+            "create"
+                | "c"
+                | "new"
+                | "list"
+                | "ls"
+                | "show"
+                | "rename"
+                | "mv"
+                | "destroy"
+                | "delete"
+        )
+}
+
+fn unknown_policy_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-')
+        && !matches!(
+            subcommand,
+            "get" | "show" | "view" | "fetch" | "set" | "put" | "update" | "check"
+        )
+}
+
 fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     let mut parts = Vec::with_capacity(args.len());
     for arg in args {
@@ -1043,6 +1086,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
+    if let Some(error) = upstream_top_level_unknown_command_error(parts.as_slice()) {
+        return Some(format!("Error: {error}\n"));
+    }
+
     if let Some(error) = debug_create_node_namespace_flag_error(parts.as_slice()) {
         return Some(format!("Error: {error}\n"));
     }
@@ -1057,6 +1104,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             output_format,
             "missing parameters",
         ));
+    }
+
+    if let Some(error) = nodes_list_missing_user_error(command_parts) {
+        return Some(format!("Error: {error}\n"));
     }
 
     if matches!(parts.first(), Some(&"server")) {
@@ -1100,6 +1151,7 @@ fn upstream_exact_command_parts<'a>(parts: &'a [&'a str]) -> &'a [&'a str] {
                 i += 2;
             }
             "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
             value
                 if value.starts_with("--config=")
                     || value.starts_with("--output=")
@@ -1162,6 +1214,7 @@ fn auth_required_flag_error(parts: &[&str]) -> Option<String> {
                 i += 1;
             }
             "--force" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
             "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
             value
                 if value.starts_with("--config=")
@@ -1214,6 +1267,7 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
                 i += 1;
             }
             "--force" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
             "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
             value
                 if value.starts_with("--config=")
@@ -1231,6 +1285,49 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
     true
 }
 
+fn nodes_list_missing_user_error(parts: &[&str]) -> Option<String> {
+    let ["nodes" | "node", "list" | "ls" | "show", tail @ ..] = parts else {
+        return None;
+    };
+
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "--" => return None,
+            "-u" | "--user" if i + 1 < tail.len() => i += 2,
+            "-u" | "--user" => return Some(cobra_missing_flag_value_error(tail[i])),
+            value if value.starts_with("--user=") || value.starts_with("-u") && value.len() > 2 => {
+                i += 1;
+            }
+            "-h" | "--help" | "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
+            "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
+            | "--api-key" | "--unix-socket" | "--log-level"
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+            }
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("--server=")
+                    || value.starts_with("--token=")
+                    || value.starts_with("--address=")
+                    || value.starts_with("--api-key=")
+                    || value.starts_with("--unix-socket=")
+                    || value.starts_with("--log-level=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    None
+}
+
 fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
     let mut i = 0;
     while i < parts.len() {
@@ -1243,6 +1340,7 @@ fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
             "-h" | "--help" | "--force" | "--insecure" => {
                 i += 1;
             }
+            value if is_global_bool_assignment(value) => i += 1,
             "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
             | "--api-key" | "--unix-socket" | "--log-level"
                 if i + 1 < parts.len() =>
@@ -1270,6 +1368,29 @@ fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn upstream_top_level_unknown_command_error(parts: &[&str]) -> Option<String> {
+    let ["userz", tail @ ..] = parts else {
+        return None;
+    };
+    (tail.is_empty() || tail_is_help(tail)).then(|| {
+        "unknown command \"userz\" for \"headscale\"\n\nDid you mean this?\n\tusers\n".into()
+    })
+}
+
+fn is_global_bool_assignment(arg: &str) -> bool {
+    let Some((flag, value)) = arg.split_once('=') else {
+        return false;
+    };
+    matches!(flag, "--force" | "--insecure") && is_cobra_bool_value(value)
+}
+
+fn is_cobra_bool_value(value: &str) -> bool {
+    matches!(
+        value,
+        "1" | "0" | "t" | "T" | "true" | "True" | "TRUE" | "f" | "F" | "false" | "False" | "FALSE"
+    )
 }
 
 fn cobra_unknown_flag_error(arg: &str) -> Option<String> {
@@ -1358,6 +1479,15 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
                 "--force",
             )
             | (UtilityFlagScope::CompletionShell, "--" | "--no-descriptions") => {
+                i += 1;
+                continue;
+            }
+            (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                value,
+            ) if is_global_bool_assignment(value) => {
                 i += 1;
                 continue;
             }
@@ -1491,6 +1621,12 @@ fn tail_has_unconsumed_help(tail: &[&str], scope: UtilityFlagScope) -> bool {
             (_, "--") => return false,
             (_, "-h" | "--help") => return true,
             (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                value,
+            ) if is_global_bool_assignment(value) => i += 1,
+            (
                 UtilityFlagScope::Version
                 | UtilityFlagScope::Serve
                 | UtilityFlagScope::GenerateGroup
@@ -1525,6 +1661,7 @@ fn tail_is_help_or_global_config(tail: &[&str]) -> bool {
     while i < tail.len() {
         match tail[i] {
             "--force" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
             "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
             value
                 if value.starts_with("--config=")
@@ -3119,6 +3256,14 @@ mod tests {
         let parsed = Cli::try_parse_from(["headscale", "version"]).unwrap();
         assert!(matches!(parsed.command, Commands::Version));
 
+        let parsed = Cli::try_parse_from(["headscale", "--force=false", "health"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Health));
+        assert!(!parsed.connect.force);
+
+        let parsed = Cli::try_parse_from(["headscale", "--force=true", "health"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Health));
+        assert!(parsed.connect.force);
+
         let parsed = Cli::try_parse_from(["headscale", "configtest"]).unwrap();
         assert!(matches!(parsed.command, Commands::Configtest));
 
@@ -3194,6 +3339,14 @@ mod tests {
             upstream_exact_help(&["health", "--config", "missing.yaml", "--help"]),
             Some(UPSTREAM_HEALTH_HELP)
         );
+        assert_eq!(
+            upstream_exact_help(&["--force=false", "health", "--help"]),
+            Some(UPSTREAM_HEALTH_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["health", "--force=false", "--help"]),
+            Some(UPSTREAM_HEALTH_HELP)
+        );
         assert_eq!(upstream_exact_help(&["health", "--config", "--help"]), None);
         assert_eq!(
             upstream_exact_help(&["health", "-o", "json", "--help"]),
@@ -3257,6 +3410,13 @@ mod tests {
             Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into())
         );
         assert_eq!(
+            upstream_exact_error(&["userz"]),
+            Some(
+                "Error: unknown command \"userz\" for \"headscale\"\n\nDid you mean this?\n\tusers\n\n"
+                    .into()
+            )
+        );
+        assert_eq!(
             upstream_exact_error(&["completion", "bash", "--no-descriptions", "bad"]),
             Some("Error: unknown command \"bad\" for \"headscale completion bash\"\n".to_string())
         );
@@ -3275,6 +3435,10 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["users", "create", "--display-name", "Alice"]),
             Some("Error: missing parameters\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["nodes", "list", "--user"]),
+            Some("Error: flag needs an argument: --user\n".to_string())
         );
         assert_eq!(
             upstream_exact_success_stderr(&["help", "server"]),
@@ -3389,7 +3553,15 @@ mod tests {
             Some(UPSTREAM_AUTH_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["auth", "bogus"]),
+            Some(UPSTREAM_AUTH_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["users", "--help"]),
+            Some(UPSTREAM_USERS_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["users", "bogus"]),
             Some(UPSTREAM_USERS_HELP)
         );
         assert_eq!(
@@ -3486,6 +3658,10 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["policy", "--help"]),
+            Some(UPSTREAM_POLICY_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["policy", "bogus"]),
             Some(UPSTREAM_POLICY_HELP)
         );
         assert_eq!(

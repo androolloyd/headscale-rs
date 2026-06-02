@@ -1602,3 +1602,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused process snapshots cover the consumed-help config/configtest cases,
   while version and private-key coverage assert the upstream human fallback
   output.
+
+## 2026-06-02 CLI residual Cobra parser parity slice
+
+- Global `--force=<bool>` now follows the current-upstream Cobra shape for
+  explicit bool values, including `--force=false health --help` and
+  `health --force=false --help`.
+- Unknown direct children for `users`, `auth`, and `policy` now return the
+  parent command help with exit 0 for the audited `bogus` forms.
+- The top-level `userz` typo now emits the upstream `users` suggestion, and
+  `nodes list --user` now emits Cobra's `flag needs an argument` wording.
+- gRPC node ID preflight now consumes hyphen-prefixed `--identifier` values and
+  rejects invalid IDs such as `abc` and `-1` with the upstream
+  `strconv.ParseUint` error before opening a socket.
+- Validation: focused `headscale-cli` unit/process filters, `cargo fmt -p
+  headscale-cli --check`, `cargo clippy -p headscale-cli --all-targets
+  --features postgres-sqlx -- -D warnings`, and `git diff --check`.

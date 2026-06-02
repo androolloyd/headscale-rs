@@ -1216,8 +1216,11 @@ fn upstream_version_invocation<S: AsRef<OsStr>>(args: &[S]) -> bool {
         };
         parts.push(arg);
     }
+    if parts.first() != Some(&"version") {
+        return false;
+    }
     matches!(
-        upstream_exact_command_parts(parts.as_slice()),
+        parts.as_slice(),
         ["version", tail @ ..] if version_tail_is_supported(tail)
     )
 }
@@ -3676,6 +3679,17 @@ mod tests {
             "version"
         ]));
         assert!(!raw_args_skip_config_load(["-o", "json", "version"]));
+    }
+
+    #[test]
+    fn raw_version_shortcut_requires_version_as_first_arg() {
+        assert!(upstream_version_invocation(&["version", "extra"]));
+        assert!(!upstream_version_invocation(&[
+            "--config",
+            "missing.yaml",
+            "version"
+        ]));
+        assert!(!upstream_version_invocation(&["-o", "json", "version"]));
     }
 
     #[test]

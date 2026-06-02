@@ -1909,7 +1909,6 @@ fn utility_top_level_unknown_flags_match_upstream_stderr_snapshots() {
 #[test]
 fn utility_extra_args_match_upstream_unknown_command_errors() {
     for args in [
-        &["version", "bad"][..],
         &["health", "bad"][..],
         &["configtest", "bad"][..],
         &["dumpConfig", "bad"][..],
@@ -6185,7 +6184,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "apikeys", "expire", "--id", "999"],
-        5,
+        6,
         include_str!("snapshots/grpc_live_apikey_not_found_json.stderr"),
     );
     assert_config_stderr_snapshot(

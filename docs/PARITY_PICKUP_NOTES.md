@@ -1731,3 +1731,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - `AuthApprove` and `AuthReject` intentionally keep the upstream
   `InvalidArgument` wrapper (`invalid auth_id: ...`), matching the distinct
   status-wrapped branch in headscale-go.
+
+## 2026-06-02 gRPC raw lookup error parity slice
+
+- `ListNodes` with a missing user filter now matches headscale-go's raw
+  `GetUserByName` failure: gRPC `Unknown` with `user not found`, and
+  grpc-gateway HTTP 500/code 2.
+- `ExpireApiKey` and `DeleteApiKey` still return `InvalidArgument` for missing
+  or conflicting selectors, but ID/prefix lookup failures now preserve
+  headscale-go's raw API-key lookup errors as gRPC `Unknown` instead of
+  wrapping them as `NotFound`.

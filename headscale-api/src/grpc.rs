@@ -1210,8 +1210,8 @@ pub mod upstream {
                 self.users
                     .get(&filter_user)
                     .await
-                    .map_err(user_error_to_status)?
-                    .ok_or_else(|| Status::not_found("user not found"))?;
+                    .map_err(user_lookup_error_to_unknown)?
+                    .ok_or_else(|| Status::unknown("user not found"))?;
             }
             let machines = self.machines.list().await;
             let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
@@ -1277,7 +1277,7 @@ pub mod upstream {
                 ApiKeySelector::Id(id) => self.api_keys.expire_by_id(id).await,
                 ApiKeySelector::Prefix(prefix) => self.api_keys.expire_by_prefix(&prefix).await,
             }
-            .map_err(admin_error_to_status)?;
+            .map_err(api_key_raw_error_to_status)?;
             Ok(Response::new(ExpireApiKeyResponse {}))
         }
 
@@ -1308,7 +1308,7 @@ pub mod upstream {
                 ApiKeySelector::Id(id) => self.api_keys.delete_by_id(id).await,
                 ApiKeySelector::Prefix(prefix) => self.api_keys.delete_by_prefix(&prefix).await,
             }
-            .map_err(admin_error_to_status)?;
+            .map_err(api_key_raw_error_to_status)?;
             Ok(Response::new(DeleteApiKeyResponse {}))
         }
 
@@ -1486,6 +1486,13 @@ pub mod upstream {
         match e {
             ApiKeyAdminError::NotFound => Status::not_found("api key not found"),
             ApiKeyAdminError::Store(msg) => Status::internal(msg),
+        }
+    }
+
+    fn api_key_raw_error_to_status(e: ApiKeyAdminError) -> Status {
+        match e {
+            ApiKeyAdminError::NotFound => Status::unknown("api key not found"),
+            ApiKeyAdminError::Store(msg) => Status::unknown(msg),
         }
     }
 
@@ -1986,6 +1993,14 @@ pub mod upstream {
                 Status::invalid_argument("cannot edit OIDC user")
             }
             UserRegistryError::Store(msg) => Status::internal(msg),
+        }
+    }
+
+    fn user_lookup_error_to_unknown(e: UserRegistryError) -> Status {
+        match e {
+            UserRegistryError::Missing(_) => Status::unknown("user not found"),
+            UserRegistryError::Store(msg) => Status::unknown(msg),
+            other => Status::unknown(other.to_string()),
         }
     }
 
@@ -4594,7 +4609,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "user not found");
 
         service
             .set_policy(Request::new(SetPolicyRequest {
@@ -5235,7 +5251,7 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::Unknown);
         assert_eq!(err.message(), "api key not found");
 
         let err = service
@@ -5245,7 +5261,27 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "api key not found");
+
+        let err = service
+            .expire_api_key(Request::new(ExpireApiKeyRequest {
+                prefix: "hskey-api-abcdefghijkl-***".into(),
+                id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "api key not found");
+
+        let err = service
+            .delete_api_key(Request::new(DeleteApiKeyRequest {
+                prefix: "hskey-api-abcdefghijkl-***".into(),
+                id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
         assert_eq!(err.message(), "api key not found");
     }
 

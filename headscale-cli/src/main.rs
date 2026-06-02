@@ -980,8 +980,8 @@ fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> 
     }
 
     match parts.as_slice() {
-        ["help", "server"] => Some(format!(
-            "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_USAGE}"
+        ["help", topic] if !topic.starts_with('-') => Some(format!(
+            "Unknown help topic [`{topic}`]\n{UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE}"
         )),
         _ => None,
     }
@@ -1619,6 +1619,34 @@ Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
       --force           Disable prompts and forces the execution
   -h, --help            help for headscale
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Use "headscale [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE: &str = r#"Usage:
+  headscale [command]
+
+Available Commands:
+  apikeys     Handle the Api keys in Headscale
+  auth        Manage node authentication and approval
+  completion  Generate the autocompletion script for the specified shell
+  configtest  Test the configuration.
+  debug       debug and testing commands
+  generate    Generate commands
+  health      Check the health of the Headscale server
+  help        Help about any command
+  mockoidc    Runs a mock OIDC server for testing
+  nodes       Manage the nodes of Headscale
+  policy      Manage the Headscale ACL Policy
+  preauthkeys Handle the preauthkeys in Headscale
+  serve       Launches the headscale server
+  users       Manage the users of Headscale
+  version     Print the version.
+
+Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 
 Use "headscale [command] --help" for more information about a command.
@@ -3182,7 +3210,13 @@ mod tests {
         assert_eq!(
             upstream_exact_success_stderr(&["help", "server"]),
             Some(format!(
-                "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_USAGE}"
+                "Unknown help topic [`server`]\n{UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE}"
+            ))
+        );
+        assert_eq!(
+            upstream_exact_success_stderr(&["help", "status"]),
+            Some(format!(
+                "Unknown help topic [`status`]\n{UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE}"
             ))
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 10:08 ADT
+Updated: 2026-06-02 15:58 ADT
 
 ## Current State
 
@@ -1774,6 +1774,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The existing `Stream:true` route-health failover regression now asserts the
   policy-delta wire shape while still proving old and new primary routers are
   emitted as peer changes with updated `AllowedIPs` and `PrimaryRoutes`.
+- Added focused `Stream:true` route-health all-unhealthy coverage after a
+  normal failover: the stale stream stays quiet when the second candidate
+  becomes unhealthy, and a fresh `/map` retains the last-known primary route
+  owner without letting the old unhealthy primary regain `AllowedIPs`.
 
 ## 2026-06-02 CLI version/preauth parser parity slice
 

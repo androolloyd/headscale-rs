@@ -464,6 +464,11 @@ between the no-restart `postgres-route-health`/`postgres-route-health-reload`
 rows and the existing restart-only all-unhealthy rows, bringing the Postgres
 stock-client matrix from sixty-two to sixty-three rows.
 
+Recent coverage note (2026-06-02): focused `Stream:true` route-health coverage
+now proves the all-unhealthy transition after a normal failover emits no stale
+removal frame while fresh `/map` output retains the last-known primary route
+owner and keeps the old unhealthy primary route-free.
+
 Recent coverage note (2026-06-01): paired `postgres-route-health-mixed-exit`
 stock-client rows now cover the plain Postgres mixed exit-node/subnet-router
 route-health selection path without a production restart. This closes the

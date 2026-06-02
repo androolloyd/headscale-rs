@@ -8819,6 +8819,106 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_route_health_all_unhealthy_retains_last_known_primary() {
+        let (state, _dir) = fixture();
+        let alice = "d4".repeat(32);
+        let router_a = "d5".repeat(32);
+        let router_b = "d6".repeat(32);
+        let route = "10.40.2.0/24";
+
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        for (node_key, host, octet) in [(&router_a, "router-a", 11), (&router_b, "router-b", 12)] {
+            state.machines.upsert(
+                node_key.clone(),
+                routed_record(node_key, host, octet, vec![route.into()]),
+            );
+        }
+
+        let app = router(state.clone());
+        let _router_a_body = open_zstd_stream(app.clone(), &router_a).await;
+        let _router_b_body = open_zstd_stream(app.clone(), &router_b).await;
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+
+        let first = next_zstd_map_response(&mut alice_body).await;
+        let initial_primary = first
+            .peers
+            .iter()
+            .find(|peer| peer.allowed_ips.iter().any(|ip| ip == route))
+            .expect("initial primary route owner");
+        let initial_primary_id = initial_primary.id;
+        let failover_id = [stable_id_from_key(&router_a), stable_id_from_key(&router_b)]
+            .into_iter()
+            .find(|id| *id != initial_primary_id)
+            .expect("second router id present");
+
+        assert!(
+            state
+                .machines
+                .set_route_candidate_health(initial_primary_id, false)
+        );
+        let failover_delta = next_zstd_map_response(&mut alice_body).await;
+        let failover_peer = failover_delta
+            .peers_changed
+            .iter()
+            .find(|peer| peer.id == failover_id)
+            .expect("failover primary peer delta");
+        assert!(
+            failover_peer.allowed_ips.iter().any(|ip| ip == route),
+            "healthy failover router should receive the route"
+        );
+        assert_eq!(failover_peer.primary_routes, vec![route.to_string()]);
+
+        assert!(
+            !state
+                .machines
+                .set_route_candidate_health(failover_id, false),
+            "marking every HA candidate unhealthy retains the last known primary"
+        );
+        assert!(!state.machines.is_route_candidate_healthy(failover_id));
+        assert_no_stream_frame(&mut alice_body, Duration::from_millis(50)).await;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+
+        let retained_primary = mr
+            .peers
+            .iter()
+            .find(|peer| peer.id == failover_id)
+            .expect("last known primary remains visible");
+        assert!(
+            retained_primary.allowed_ips.iter().any(|ip| ip == route),
+            "all-unhealthy HA set should retain the last primary route AllowedIP"
+        );
+        assert_eq!(retained_primary.primary_routes, vec![route.to_string()]);
+
+        let old_primary = mr
+            .peers
+            .iter()
+            .find(|peer| peer.id == initial_primary_id)
+            .expect("old primary remains visible as a peer");
+        assert!(
+            !old_primary.allowed_ips.iter().any(|ip| ip == route),
+            "old unhealthy primary must not regain the route while failover primary is retained"
+        );
+        assert!(old_primary.primary_routes.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_peer_connect_emits_online_peer_change_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

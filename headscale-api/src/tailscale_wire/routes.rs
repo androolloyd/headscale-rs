@@ -505,6 +505,27 @@ mod tests {
     }
 
     #[test]
+    fn auto_approvals_compact_duplicate_current_approvals_and_keep_empty_inputs() {
+        let policy = PolicyStore::new();
+        let approved = auto_approved_routes_for_node(
+            &policy,
+            "100.64.0.8",
+            Some("alice"),
+            &[],
+            &p(&["10.99.0.0/24", "10.99.0.0/24"]),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(approved, p(&["10.99.0.0/24"]));
+        assert_eq!(
+            auto_approved_routes_for_node(&policy, "100.64.0.8", Some("alice"), &[], &[], &[])
+                .unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn active_exit_routes_are_separate_from_primary_routes() {
         let available = p(&["0.0.0.0/0", "::/0", "10.0.0.0/24"]);
         let approved = p(&["0.0.0.0/0", "10.0.0.0/24"]);
@@ -787,6 +808,23 @@ mod tests {
         assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
         assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 2)]));
         assert_eq!(unhealthy(&state), vec![1, 2]);
+    }
+
+    #[test]
+    fn recovered_secondary_router_keeps_primary_after_all_unhealthy_window() {
+        let mut state = PrimaryRouteState::new();
+        assert!(state.set_routes(1, ["10.0.0.0/24"]).unwrap());
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+        assert!(state.set_node_health(1, false));
+        assert!(!state.set_node_health(2, false));
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+
+        assert!(!state.set_node_health(2, true));
+
+        assert_eq!(state.primary_routes(1), Vec::<String>::new());
+        assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
+        assert_eq!(primaries(&state), primary_map(&[("10.0.0.0/24", 2)]));
+        assert_eq!(unhealthy(&state), vec![1]);
     }
 
     #[test]

@@ -1415,6 +1415,20 @@
           "10.10.0.0/16"
         ],
         "changed": true
+      },
+      {
+        "name": "duplicate-current-approved-is-compacted",
+        "approved_routes": [
+          "203.0.113.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "nil-announced-routes-preserve-current-approved",
+        "approved_routes": [
+          "198.51.100.0/24"
+        ],
+        "changed": false
       }
     ]
   },

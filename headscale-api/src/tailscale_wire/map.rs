@@ -6608,6 +6608,94 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_batched_key_expiry_updates_wait_for_map_tick() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let observer = "cc".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        insert_peer(&state, &observer, "observer", 12);
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &observer).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 2);
+        assert!(first_mr.peers.iter().all(|peer| peer.key_expiry.is_none()));
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let expiry_a = chrono::Utc::now() + chrono::Duration::days(7);
+        let expiry_b = chrono::Utc::now() + chrono::Duration::days(8);
+        let machines = state.machines.clone();
+        let a_for_update = a.clone();
+        let first_update =
+            std::thread::spawn(move || machines.set_expiry(&a_for_update, Some(expiry_a)));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while state.machines.nodestore_queue_depth() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued key-expiry update did not reach the NodeStore worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(state.machines.set_expiry(&b, Some(expiry_b)));
+        assert!(
+            first_update
+                .join()
+                .expect("queued key-expiry update should finish")
+        );
+
+        let changes = state.machines.map_change_history();
+        let new_labels = changes[history_len..]
+            .iter()
+            .map(MapChange::reason_label)
+            .collect::<Vec<_>>();
+        assert_eq!(new_labels, vec!["key expiry", "key expiry"]);
+
+        let observer_id = stable_id_from_key(&observer);
+        let pending = state.machines.pending_map_changes();
+        let pending_labels = pending
+            .get(&observer_id)
+            .expect("observer has pending worker-batched key-expiry changes")
+            .iter()
+            .flat_map(MapChange::reason_labels)
+            .collect::<Vec<_>>();
+        assert_eq!(pending_labels, vec!["key expiry", "key expiry"]);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "worker-batched key-expiry updates must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        let patches = mr
+            .peers_changed_patch
+            .iter()
+            .map(|patch| (patch.node_id, patch.key_expiry))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            patches,
+            BTreeMap::from([
+                (stable_id_from_key(&a), Some(expiry_a)),
+                (stable_id_from_key(&b), Some(expiry_b)),
+            ])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_route_update_emits_full_peer_delta_with_allowed_ips() {
         let (state, _dir) = fixture();
         let policy = r#"{

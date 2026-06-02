@@ -266,6 +266,16 @@ async fn main() -> ExitCode {
         eprint!("{error}");
         return ExitCode::from(1);
     }
+    if upstream_version_invocation(&raw_args) {
+        let fmt = output_format_from_raw_args(&raw_args);
+        return match print_version(fmt) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprint!("{error:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
 
     let skip_config_load = raw_args_skip_config_load(&raw_args);
     let error_output_format = output_format_from_raw_args(&raw_args);
@@ -766,6 +776,9 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             Some(UPSTREAM_SERVE_HELP)
         }
         ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
+        ["version", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Version) => {
+            Some(UPSTREAM_VERSION_HELP)
+        }
         ["health", "-h" | "--help"] | ["help", "health"] => Some(UPSTREAM_HEALTH_HELP),
         ["health", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::GlobalConfig) => {
             Some(UPSTREAM_HEALTH_HELP)
@@ -1106,8 +1119,8 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         ));
     }
 
-    if let Some(error) = preauthkeys_create_missing_user_value_error(command_parts) {
-        return Some(admin::output::format_error(output_format, &error));
+    if let Some(error) = preauthkeys_create_user_value_error(parts.as_slice()) {
+        return Some(error);
     }
 
     if let Some(error) = auth_required_flag_error(command_parts) {
@@ -1159,10 +1172,14 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
 }
 
 fn upstream_exact_command_parts<'a>(parts: &'a [&'a str]) -> &'a [&'a str] {
+    &parts[upstream_exact_command_start_index(parts)..]
+}
+
+fn upstream_exact_command_start_index(parts: &[&str]) -> usize {
     let mut i = 0;
     while i < parts.len() {
         match parts[i] {
-            "--" => return &parts[i + 1..],
+            "--" => return i + 1,
             "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
             | "--api-key" | "--unix-socket" | "--log-level"
                 if i + 1 < parts.len() =>
@@ -1185,10 +1202,24 @@ fn upstream_exact_command_parts<'a>(parts: &'a [&'a str]) -> &'a [&'a str] {
             {
                 i += 1;
             }
-            _ => return &parts[i..],
+            _ => return i,
         }
     }
-    &parts[i..]
+    i
+}
+
+fn upstream_version_invocation<S: AsRef<OsStr>>(args: &[S]) -> bool {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(arg) = arg.as_ref().to_str() else {
+            return false;
+        };
+        parts.push(arg);
+    }
+    matches!(
+        upstream_exact_command_parts(parts.as_slice()),
+        ["version", tail @ ..] if version_tail_is_supported(tail)
+    )
 }
 
 fn auth_required_flag_error(parts: &[&str]) -> Option<String> {
@@ -1518,29 +1549,62 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
     true
 }
 
-fn preauthkeys_create_missing_user_value_error(parts: &[&str]) -> Option<String> {
+fn preauthkeys_create_user_value_error(parts: &[&str]) -> Option<String> {
+    let command_start = upstream_exact_command_start_index(parts);
+    let command_parts = &parts[command_start..];
     let [
         "preauthkeys" | "preauthkey" | "authkey" | "pre",
         "create" | "c" | "new",
         tail @ ..,
-    ] = parts
+    ] = command_parts
     else {
         return None;
     };
 
+    let mut output_format = output_format_from_raw_args(&parts[..command_start]);
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
             "--" => return None,
-            "-u" | "--user" if i + 1 < tail.len() => i += 2,
-            "-u" | "--user" => return Some(cobra_missing_flag_value_error(tail[i])),
-            value if value.starts_with("--user=") || value.starts_with("-u") && value.len() > 2 => {
+            "-u" | "--user" if i + 1 < tail.len() => {
+                if let Some(error) = cobra_parse_uint_error(tail[i + 1]) {
+                    return Some(admin::output::format_error(output_format, &error));
+                }
+                i += 2;
+            }
+            "-u" | "--user" => {
+                let error = cobra_missing_flag_value_error(tail[i]);
+                return Some(admin::output::format_error(output_format, &error));
+            }
+            value if value.starts_with("--user=") => {
+                let value = value.strip_prefix("--user=").unwrap_or_default();
+                if let Some(error) = cobra_parse_uint_error(value) {
+                    return Some(admin::output::format_error(output_format, &error));
+                }
+                i += 1;
+            }
+            value if value.starts_with("-u") && value.len() > 2 => {
+                if let Some(error) = cobra_parse_uint_error(&value[2..]) {
+                    return Some(admin::output::format_error(output_format, &error));
+                }
                 i += 1;
             }
             "-e" | "--expiration" | "--tags" if i + 1 < tail.len() => i += 2,
             "-h" | "--help" | "-e" | "--expiration" | "--tags" => return None,
             "--reusable" | "--ephemeral" | "--force" | "--insecure" => i += 1,
             value if is_global_bool_assignment(value) => i += 1,
+            "-o" | "--output" if i + 1 < tail.len() => {
+                output_format = raw_output_format(tail[i + 1]);
+                i += 2;
+            }
+            value if value.starts_with("--output=") => {
+                output_format = raw_output_format(value.strip_prefix("--output=").unwrap_or(""));
+                i += 1;
+            }
+            value if value.starts_with("-o") && value.len() > 2 => {
+                output_format = raw_output_format(&value[2..]);
+                i += 1;
+            }
             "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
             | "--api-key" | "--unix-socket" | "--log-level"
                 if i + 1 < tail.len() =>
@@ -1563,6 +1627,21 @@ fn preauthkeys_create_missing_user_value_error(parts: &[&str]) -> Option<String>
     }
 
     None
+}
+
+fn cobra_parse_uint_error(value: &str) -> Option<String> {
+    if value.parse::<u64>().is_ok() {
+        return None;
+    }
+    let detail = if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+        "value out of range"
+    } else {
+        "invalid syntax"
+    };
+    Some(format!(
+        "invalid argument \"{value}\" for \"-u, --user\" flag: \
+         strconv.ParseUint: parsing \"{value}\": {detail}"
+    ))
 }
 
 fn nodes_list_missing_user_error(parts: &[&str]) -> Option<String> {
@@ -1968,11 +2047,14 @@ fn version_tail_is_supported(tail: &[&str]) -> bool {
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
+            "--" => return true,
             "-h" | "--help" => i += 1,
             "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            "-o" | "--output" => return false,
             value if value.starts_with("--output=") => i += 1,
             value if value.starts_with("-o") && value.len() > 2 => i += 1,
-            _ => return false,
+            value if value.starts_with('-') => return false,
+            _ => i += 1,
         }
     }
     true

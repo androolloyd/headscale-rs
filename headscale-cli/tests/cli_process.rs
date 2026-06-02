@@ -1336,6 +1336,40 @@ fn version_human_uses_upstream_headscale_label() {
 }
 
 #[test]
+fn version_ignores_extra_positionals_like_upstream_cobra() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+
+    let output = headscale_in(&["version", "extra"], cwd.path(), home.path());
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).starts_with("headscale version "));
+    assert_eq!(stderr(&output), "");
+
+    let output = headscale_in(
+        &["version", "extra", "-o", "json-line"],
+        cwd.path(),
+        home.path(),
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).starts_with(r#"{"version":"#));
+    assert_eq!(stderr(&output), "");
+
+    let output = headscale_in(&["version", "--", "-o", "json"], cwd.path(), home.path());
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).starts_with("headscale version "));
+    assert_eq!(stderr(&output), "");
+
+    let output = headscale_in(&["version", "extra", "--help"], cwd.path(), home.path());
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        include_str!("snapshots/version_help.stdout")
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn version_json_line_is_machine_readable() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -3799,6 +3833,21 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
         1,
         "Error: flag needs an argument: --user\n",
     );
+    assert_stderr_snapshot(
+        &["preauthkeys", "create", "--user", "abc"],
+        1,
+        "Error: invalid argument \"abc\" for \"-u, --user\" flag: strconv.ParseUint: parsing \"abc\": invalid syntax\n",
+    );
+    assert_stderr_snapshot(
+        &["preauthkeys", "create", "--user", "-1"],
+        1,
+        "Error: invalid argument \"-1\" for \"-u, --user\" flag: strconv.ParseUint: parsing \"-1\": invalid syntax\n",
+    );
+    assert_stderr_snapshot(
+        &["preauthkeys", "create", "-u", "-o", "json"],
+        1,
+        "Error: invalid argument \"-o\" for \"-u, --user\" flag: strconv.ParseUint: parsing \"-o\": invalid syntax\n",
+    );
 }
 
 #[test]
@@ -3849,6 +3898,15 @@ fn implemented_admin_errors_follow_output_format() {
     assert_eq!(
         stderr(&preauth_missing_user),
         "{\n\t\"error\": \"flag needs an argument: --user\"\n}\n"
+    );
+
+    let preauth_invalid_user =
+        headscale_clean(&["preauthkeys", "create", "-o", "json", "--user", "abc"]);
+    assert_eq!(preauth_invalid_user.status.code(), Some(1));
+    assert_eq!(stdout(&preauth_invalid_user), "");
+    assert_eq!(
+        stderr(&preauth_invalid_user),
+        "{\n\t\"error\": \"invalid argument \\\"abc\\\" for \\\"-u, --user\\\" flag: strconv.ParseUint: parsing \\\"abc\\\": invalid syntax\"\n}\n"
     );
 
     let users_create = headscale_clean(&["--output", "yaml", "users", "create"]);

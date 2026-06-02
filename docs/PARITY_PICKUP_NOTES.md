@@ -1710,3 +1710,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The existing `Stream:true` route-health failover regression now asserts the
   policy-delta wire shape while still proving old and new primary routers are
   emitted as peer changes with updated `AllowedIPs` and `PrimaryRoutes`.
+
+## 2026-06-02 CLI version/preauth parser parity slice
+
+- `headscale version` now mirrors Cobra's permissive positional handling:
+  extra positionals are ignored, `-o/--output` still works before or after
+  them, `--` stops output parsing, and help still wins when `-h/--help`
+  appears in the tail.
+- `headscale preauthkeys create --user/-u` now emits upstream
+  `strconv.ParseUint` wording for invalid numeric owner values, including
+  hyphen-prefixed values that Cobra consumes as the `--user` value rather than
+  treating as a later flag. Output-format wrapping follows Cobra's parse order.

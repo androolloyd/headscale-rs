@@ -257,12 +257,18 @@ async fn main() -> ExitCode {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let Some(help) = upstream_exact_help(&raw_args) {
         print!("{help}");
+        if upstream_help_uses_default_config_warning(&raw_args) {
+            print_no_config_default_warning();
+        }
         if let Some(stderr) = upstream_exact_help_stderr(&raw_args) {
             eprint!("{stderr}");
         }
         return ExitCode::SUCCESS;
     }
     if let Some(error) = upstream_exact_success_stderr(&raw_args) {
+        if upstream_help_uses_default_config_warning(&raw_args) {
+            print_no_config_default_warning();
+        }
         eprint!("{error}");
         return ExitCode::SUCCESS;
     }
@@ -1034,6 +1040,33 @@ fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> 
         )),
         _ => None,
     }
+}
+
+fn upstream_help_uses_default_config_warning<S: AsRef<OsStr>>(args: &[S]) -> bool {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(arg) = arg.as_ref().to_str() else {
+            return false;
+        };
+        parts.push(arg);
+    }
+
+    let command_parts = upstream_exact_command_parts(parts.as_slice());
+    if !matches!(command_parts.first(), Some(&"help")) {
+        return false;
+    }
+    if command_parts
+        .iter()
+        .any(|part| matches!(*part, "-h" | "--help"))
+        || parts
+            .iter()
+            .any(|part| matches!(*part, "-c" | "--config") || part.starts_with("--config="))
+        || std::env::var_os("HEADSCALE_CONFIG").is_some()
+    {
+        return false;
+    }
+
+    CliConfig::load_default_with_source().is_ok_and(|loaded| loaded.used_defaults)
 }
 
 fn upstream_exact_help_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {

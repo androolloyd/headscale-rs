@@ -2686,3 +2686,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p2-dns-live-resolver-behavior` row remains open because the new
   search-domain row is wired but still needs a passing live run; deterministic
   multi-resolver/failure fallback client behavior also remains.
+
+## 2026-06-02 Postgres user rename restart process smoke
+
+- Added `serve_postgres_runtime_gateway_user_rename_restart_smoke`, a
+  feature-gated production Postgres `serve` process test. It creates a user and
+  node through the authenticated public grpc-gateway, renames the owner, restarts
+  the same server against the same temporary Postgres database, then verifies
+  both CLI node listing and `/debug/nodestore` hydrate the registered node with
+  the renamed owner.
+- The `p0-production-postgres-process-mutations` row remains open. This slice
+  adds a user/node owner restart mutation but does not close remaining
+  policy/route/auth-session/config-map-churn breadth.

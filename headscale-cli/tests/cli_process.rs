@@ -6971,6 +6971,203 @@ async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult 
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_user_rename_restart").await?
+    else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let metrics_url = format!("http://{metrics}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let bootstrap = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(bootstrap.status.success(), "stderr: {}", stderr(&bootstrap));
+        let bootstrap = json_output(&bootstrap);
+        let bootstrap_secret = bootstrap
+            .as_str()
+            .expect("bootstrap api key secret")
+            .to_string();
+        assert!(
+            bootstrap_secret.starts_with("hskey-api-"),
+            "api key: {bootstrap_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created_user = http
+            .post(format!("{server_url}/api/v1/user"))
+            .bearer_auth(&bootstrap_secret)
+            .json(&serde_json::json!({
+                "name": "alice",
+                "displayName": "Alice Original",
+                "email": "alice@example.com"
+            }))
+            .send()
+            .await?;
+        assert_eq!(created_user.status(), reqwest::StatusCode::OK);
+        let created_user = created_user.json::<serde_json::Value>().await?;
+        let user_id = created_user["user"]["id"]
+            .as_str()
+            .expect("created user id")
+            .to_string();
+        assert_eq!(user_id, "1");
+        assert_eq!(created_user["user"]["name"].as_str(), Some("alice"));
+
+        let auth_id = "hskey-authreq-adadadadadadadadadadadad";
+        let debug_created = http
+            .post(format!("{server_url}/api/v1/debug/node"))
+            .bearer_auth(&bootstrap_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "key": auth_id,
+                "name": "pg-user-rename-node",
+                "routes": []
+            }))
+            .send()
+            .await?;
+        assert_eq!(debug_created.status(), reqwest::StatusCode::OK);
+        let debug_created = debug_created.json::<serde_json::Value>().await?;
+        assert_eq!(
+            debug_created["node"]["name"].as_str(),
+            Some("pg-user-rename-node")
+        );
+
+        let registered = http
+            .post(format!("{server_url}/api/v1/auth/register"))
+            .bearer_auth(&bootstrap_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "authId": auth_id
+            }))
+            .send()
+            .await?;
+        assert_eq!(registered.status(), reqwest::StatusCode::OK);
+        let registered = registered.json::<serde_json::Value>().await?;
+        let node_id = registered["node"]["id"]
+            .as_str()
+            .expect("registered node id")
+            .to_string();
+        assert!(!node_id.is_empty());
+        assert_eq!(registered["node"]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(
+            registered["node"]["name"].as_str(),
+            Some("pg-user-rename-node")
+        );
+
+        let renamed = http
+            .post(format!("{server_url}/api/v1/user/{user_id}/rename/bob"))
+            .bearer_auth(&bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(renamed.status(), reqwest::StatusCode::OK);
+        let renamed = renamed.json::<serde_json::Value>().await?;
+        assert_eq!(renamed["user"]["id"].as_str(), Some(user_id.as_str()));
+        assert_eq!(renamed["user"]["name"].as_str(), Some("bob"));
+
+        let nodes_before_restart = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(
+            nodes_before_restart.status.success(),
+            "stderr: {}",
+            stderr(&nodes_before_restart)
+        );
+        let nodes_before_restart = json_output(&nodes_before_restart);
+        assert_eq!(nodes_before_restart.as_array().expect("nodes").len(), 1);
+        assert_eq!(
+            nodes_before_restart[0]["id"].as_u64().unwrap().to_string(),
+            node_id
+        );
+        assert_eq!(
+            nodes_before_restart[0]["user"]["name"].as_str(),
+            Some("bob")
+        );
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let listed_user = http
+            .get(format!("{server_url}/api/v1/user?name=bob"))
+            .bearer_auth(&bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(listed_user.status(), reqwest::StatusCode::OK);
+        let listed_user = listed_user.json::<serde_json::Value>().await?;
+        assert_eq!(listed_user["users"].as_array().expect("users").len(), 1);
+        assert_eq!(
+            listed_user["users"][0]["id"].as_str(),
+            Some(user_id.as_str())
+        );
+        assert_eq!(listed_user["users"][0]["name"].as_str(), Some("bob"));
+
+        let nodes_after_restart = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(
+            nodes_after_restart.status.success(),
+            "stderr: {}",
+            stderr(&nodes_after_restart)
+        );
+        let nodes_after_restart = json_output(&nodes_after_restart);
+        assert_eq!(nodes_after_restart.as_array().expect("nodes").len(), 1);
+        assert_eq!(
+            nodes_after_restart[0]["id"].as_u64().unwrap().to_string(),
+            node_id
+        );
+        assert_eq!(nodes_after_restart[0]["user"]["name"].as_str(), Some("bob"));
+        assert_eq!(
+            nodes_after_restart[0]["name"].as_str(),
+            Some("pg-user-rename-node")
+        );
+
+        let nodestore = http
+            .get(format!("{metrics_url}/debug/nodestore"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+        let nodestore = nodestore.json::<serde_json::Value>().await?;
+        let live_node = nodestore
+            .as_object()
+            .and_then(|nodes| {
+                nodes.values().find(|node| {
+                    node["hostname"].as_str() == Some("pg-user-rename-node")
+                        && node["user"].as_str() == Some("bob")
+                })
+            })
+            .unwrap_or_else(|| panic!("missing hydrated renamed-user node {node_id}: {nodestore}"));
+        assert_eq!(live_node["user"].as_str(), Some("bob"));
+        assert_eq!(live_node["hostname"].as_str(), Some("pg-user-rename-node"));
+        assert!(
+            live_node["ipv4"]
+                .as_str()
+                .is_some_and(|ip| ip.starts_with("100.")),
+            "hydrated node: {live_node}"
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_api_key_lifecycle_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_api_key").await? else {
         return Ok(());

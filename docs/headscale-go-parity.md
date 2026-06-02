@@ -945,6 +945,14 @@ preauth key, restarts on the same Postgres database, verifies the hydrated
 preauth-key owner/tag/reusable/ephemeral/unused metadata, and then expires and
 deletes that key after restart.
 
+Recent coverage note (2026-06-02):
+`serve_postgres_runtime_gateway_user_rename_restart_smoke` now covers public
+grpc-gateway user/node owner mutation across a production Postgres restart. The
+real `serve` process creates and registers a node under Alice, renames Alice to
+Bob through grpc-gateway, restarts on the same Postgres database, and verifies
+CLI node listing plus `/debug/nodestore` hydrate the registered node with the
+renamed owner.
+
 Recent coverage note (2026-06-02): `configtest` now snapshots invalid
 `server.https_listen` parsing, matching the already-covered `serve` startup
 guard so explicit HTTPS listener mistakes are caught before runtime state is
@@ -1117,8 +1125,8 @@ sshTest fixture auditing remains open before closing the policy v2 backlog row.
    CI-backed paired stock-client matrix and the grpc-gateway/remote-gRPC admin
    topology smoke, especially additional registration/config mutation rows
    beyond the now-PR-gated web-registration policy-churn restart,
-   custom-domain web-registration, and focused API-key/preauth-key process
-   restart cases, before
+   custom-domain web-registration, focused API-key/preauth-key process restart,
+   and gateway user-rename/node-owner restart cases, before
    claiming full database parity.
 2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for

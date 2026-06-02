@@ -737,6 +737,28 @@ mod tests {
     }
 
     #[test]
+    fn policy_tests_accept_grants_only_with_omitted_proto() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "grants": [
+                    {"src": ["alice@"], "dst": ["tag:server"], "ip": ["tcp:22"]}
+                ],
+                "tests": [
+                    {"src": "alice@", "accept": ["tag:server:22"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
     fn acl_tests_report_failed_assertion() {
         let doc = parse_hujson_policy(
             r#"{

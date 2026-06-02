@@ -1095,6 +1095,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     }
 
     let command_parts = upstream_exact_command_parts(parts.as_slice());
+    if let Some(error) = debug_create_node_required_flag_error(command_parts) {
+        return Some(admin::output::format_error(output_format, &error));
+    }
+
     if let Some(error) = auth_required_flag_error(command_parts) {
         return Some(admin::output::format_error(output_format, &error));
     }
@@ -1235,6 +1239,96 @@ fn auth_required_flag_error(parts: &[&str]) -> Option<String> {
     }
     if !saw_user {
         missing.push(r#""user""#);
+    }
+
+    (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))
+}
+
+fn debug_create_node_required_flag_error(parts: &[&str]) -> Option<String> {
+    let ["debug", "create-node", tail @ ..] = parts else {
+        return None;
+    };
+
+    let mut saw_name = false;
+    let mut saw_user = false;
+    let mut saw_key = false;
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" => return None,
+            "--name" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_name = true;
+                i += 2;
+            }
+            value if value.starts_with("--name=") => {
+                saw_name = true;
+                i += 1;
+            }
+            "-u" | "--user" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_user = true;
+                i += 2;
+            }
+            value if value.starts_with("--user=") => {
+                saw_user = true;
+                i += 1;
+            }
+            value if value.starts_with("-u") && value.len() > 2 => {
+                saw_user = true;
+                i += 1;
+            }
+            "-k" | "--key" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_key = true;
+                i += 2;
+            }
+            value if value.starts_with("--key=") => {
+                saw_key = true;
+                i += 1;
+            }
+            value if value.starts_with("-k") && value.len() > 2 => {
+                saw_key = true;
+                i += 1;
+            }
+            "-r" | "--route" | "-c" | "--config" | "-o" | "--output" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                i += 2;
+            }
+            "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
+            value
+                if value.starts_with("--route=")
+                    || value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-r") && value.len() > 2
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => i += 1,
+        }
+    }
+
+    let mut missing = Vec::new();
+    if !saw_name {
+        missing.push(r#""name""#);
+    }
+    if !saw_user {
+        missing.push(r#""user""#);
+    }
+    if !saw_key {
+        missing.push(r#""key""#);
     }
 
     (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))

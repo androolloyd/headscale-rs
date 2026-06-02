@@ -1777,6 +1777,27 @@ fn debug_create_node_namespace_alias_matches_current_upstream_unknown_flag() {
 }
 
 #[test]
+fn debug_create_node_required_flag_errors_match_current_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("missing.sock");
+    let config = write_unix_socket_config(dir.path(), &socket);
+
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "debug",
+            "create-node",
+            "--user",
+            "alice",
+            "--name",
+            "node-one",
+        ],
+        1,
+        "Error: required flag(s) \"key\" not set\n",
+    );
+}
+
+#[test]
 fn serve_help_with_extra_args_matches_current_upstream_snapshot() {
     assert_stdout_snapshot(
         &["serve", "ignored", "--help"],

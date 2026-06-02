@@ -8896,7 +8896,7 @@ pub fn metrics_debug_router(state: WireState) -> Router {
             "/debug/pprof/:profile",
             any(basic_handlers::handle_debug_pprof_profile),
         )
-        .route("/debug/gc", get(basic_handlers::handle_debug_gc))
+        .route("/debug/gc", any(basic_handlers::handle_debug_gc))
         .route(
             "/debug/statsviz",
             get(basic_handlers::handle_debug_statsviz_redirect),

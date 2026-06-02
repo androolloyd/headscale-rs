@@ -567,13 +567,13 @@ pub enum DebugCmd {
     CreateNode {
         /// User.
         #[arg(short = 'u', long)]
-        user: String,
+        user: Option<String>,
         /// Registration key.
         #[arg(short = 'k', long)]
-        key: String,
+        key: Option<String>,
         /// Node name.
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// List (or repeated flags) of routes to advertise.
         #[arg(short = 'r', long = "route", value_delimiter = ',')]
         routes: Vec<String>,
@@ -791,10 +791,8 @@ fn validate_grpc_node_id_values(cmd: &NodesCmd) -> Result<(), AdminError> {
             identifier: Some(id),
             ..
         }
-        | NodesCmd::ApproveRoutes { id: Some(id), .. } => {
-            nodes::parse_node_id(id)?;
-        }
-        NodesCmd::Expire {
+        | NodesCmd::ApproveRoutes { id: Some(id), .. }
+        | NodesCmd::Expire {
             identifier: Some(id),
             ..
         }
@@ -1041,14 +1039,41 @@ pub async fn run_health(conn: &ConnectArgs) -> Result<(), AdminError> {
 
 pub async fn run_debug(conn: &ConnectArgs, cmd: &DebugCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
-    let mut client = conn.build_grpc_client().await?;
     match cmd {
         DebugCmd::CreateNode {
             user,
             key,
             name,
             routes,
-        } => nodes::debug_create_node_grpc(&mut client, user, key, name, routes.clone(), fmt).await,
+        } => {
+            let mut missing = Vec::new();
+            if name.is_none() {
+                missing.push(r#""name""#);
+            }
+            if user.is_none() {
+                missing.push(r#""user""#);
+            }
+            if key.is_none() {
+                missing.push(r#""key""#);
+            }
+            if !missing.is_empty() {
+                return Err(AdminError::Usage(format!(
+                    "required flag(s) {} not set",
+                    missing.join(", ")
+                )));
+            }
+
+            let mut client = conn.build_grpc_client().await?;
+            nodes::debug_create_node_grpc(
+                &mut client,
+                user.as_deref().unwrap_or_default(),
+                key.as_deref().unwrap_or_default(),
+                name.as_deref().unwrap_or_default(),
+                routes.clone(),
+                fmt,
+            )
+            .await
+        }
     }
 }
 
@@ -1523,9 +1548,9 @@ mod tests {
                 name,
                 routes,
             } => {
-                assert_eq!(user, "alice");
-                assert_eq!(key, "abcdefghijklmnopqrstuvwx");
-                assert_eq!(name, "node-one");
+                assert_eq!(user.as_deref(), Some("alice"));
+                assert_eq!(key.as_deref(), Some("abcdefghijklmnopqrstuvwx"));
+                assert_eq!(name.as_deref(), Some("node-one"));
                 assert_eq!(
                     routes,
                     vec![

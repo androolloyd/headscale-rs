@@ -4201,9 +4201,30 @@ mod tests {
     async fn debug_gc_endpoint_matches_tsweb_text_shape() {
         let (state, _dir) = fixture_state();
 
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/gc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"running GC...\nDone.\n");
+
         let resp = router(state)
             .oneshot(
                 axum::http::Request::builder()
+                    .method(Method::POST)
                     .uri("/debug/gc")
                     .body(axum::body::Body::empty())
                     .unwrap(),

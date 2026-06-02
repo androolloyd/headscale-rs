@@ -26,8 +26,9 @@ Current-head audit overlay, refreshed 2026-05-30:
   for `CheckPolicy`/`SetPolicy` in `c546f5b`; rich
   `Hostinfo`/`NetInfo` runtime preservation in `db7ff65`; public
   `HEAD /machine/ping-response` callback routing in `47b9fad`;
-  non-empty `sshTests` semantic evaluation in the current policy
-  checker; and `PingRequest` map-stream dispatch/callback correlation
+  non-empty `sshTests` semantic evaluation and grants-only omitted-proto
+  `tests` reachability in the current policy checker; and
+  `PingRequest` map-stream dispatch/callback correlation
   plus optional dual-stack live wire address projection, DB-seeded
   production address allocation, configured prefix-family backfill
   add/remove coverage, IPv4-disabled wire/admin/DNS projection, and register-time
@@ -63,7 +64,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   query edge coverage, strict protojson-style grpc-gateway body field,
   timestamp range, timestamp scalar-subfield query-path rejection, and
   scalar-query-path rejection, private-DERP/STUN sidecar real-client parity,
-  operator `/debug/ping`, paired ping-lifecycle stock-client coverage,
+  operator `/debug/ping`, tsweb-style `/debug/gc` method handling,
+  paired ping-lifecycle stock-client coverage,
   enabled `/debug/mapresponses` dump/readback parity,
   current-upstream top-level CLI help text/order parity, and
   current-upstream Cobra help snapshots for stable
@@ -124,8 +126,9 @@ Current-head audit overlay, refreshed 2026-05-30:
   before opening SQLite state with broader server-init failure snapshots,
   utility-command unknown shorthand flag and checked-in OpenAPI
   `disableExpiry` parity are closed in
-  `bd73e18`, and public gRPC reflection filename/dependency parity is
-  closed in `0f0b943`. Node `GivenName` handling now mirrors current
+  `bd73e18`, public gRPC reflection filename/dependency parity is
+  closed in `0f0b943`, and `debug create-node` local required-flag
+  errors now match current upstream. Node `GivenName` handling now mirrors current
   upstream's Tailscale DNS-name path: registration preserves the raw
   client `Hostname`, auto-derives DNS labels with
   `dnsname.SanitizeHostname`-style rules plus `node` fallback and

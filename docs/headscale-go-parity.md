@@ -936,6 +936,12 @@ pins reconnect behavior after a duplicate clear: when a same-node-key session
 disconnect clears health for the remaining session, a later same-key reconnect
 reissues duplicate health to both live sessions.
 
+Recent coverage note (2026-06-02): native DERP post-admission cleanup now
+unregisters raw and WebSocket relay sessions even when the server-info or
+health replay write fails before entering the steady relay loop. A focused raw
+DERP regression scripts that early write failure and asserts the relay session
+registry is empty afterward.
+
 Recent coverage note (2026-06-02): map-stream lifecycle/route batching now
 covers an ordinary peer online event plus route approval before the batch tick.
 The observer receives one incremental policy-style delta with the online peer

@@ -495,18 +495,21 @@ where
     }
 
     let session = runtime.relay.connect(client_public).await;
-    let server_info =
-        encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
-            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    writer.write_all(&server_info).await?;
-    writer.flush().await?;
-    if let Some(frame) = runtime.current_health_frame() {
-        write_derp_frame(&mut writer, &frame).await?;
-    }
-
-    let keepalive_delay = runtime.next_keepalive_delay(&client_public);
     let session_id = session.session_id();
-    let result = run_relay_loop(session, reader, writer, decoder, keepalive_delay).await;
+    let result = async {
+        let server_info =
+            encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
+                .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        writer.write_all(&server_info).await?;
+        writer.flush().await?;
+        if let Some(frame) = runtime.current_health_frame() {
+            write_derp_frame(&mut writer, &frame).await?;
+        }
+
+        let keepalive_delay = runtime.next_keepalive_delay(&client_public);
+        run_relay_loop(session, reader, writer, decoder, keepalive_delay).await
+    }
+    .await;
     runtime
         .relay
         .disconnect_session(&client_public, session_id)
@@ -549,17 +552,20 @@ where
     }
 
     let session = runtime.relay.connect(client_public).await;
-    let server_info =
-        encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
-            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    send_websocket_binary(&mut writer, server_info).await?;
-    if let Some(frame) = runtime.current_health_frame() {
-        send_websocket_derp_frame(&mut writer, &frame).await?;
-    }
-
-    let keepalive_delay = runtime.next_keepalive_delay(&client_public);
     let session_id = session.session_id();
-    let result = run_websocket_relay_loop(session, reader, writer, decoder, keepalive_delay).await;
+    let result = async {
+        let server_info =
+            encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
+                .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        send_websocket_binary(&mut writer, server_info).await?;
+        if let Some(frame) = runtime.current_health_frame() {
+            send_websocket_derp_frame(&mut writer, &frame).await?;
+        }
+
+        let keepalive_delay = runtime.next_keepalive_delay(&client_public);
+        run_websocket_relay_loop(session, reader, writer, decoder, keepalive_delay).await
+    }
+    .await;
     runtime
         .relay
         .disconnect_session(&client_public, session_id)
@@ -1255,6 +1261,27 @@ mod tests {
         drop(client_writer);
         drop(client_reader);
         assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_cleans_session_when_server_info_write_fails() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let client_info =
+            encode_client_info_frame(&client_key, &runtime.public_key(), &ClientInfo::regular())
+                .unwrap();
+
+        let err = drive_native_derp(runtime.clone(), ServerInfoWriteFailureIo::new(client_info))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed writing DERP server info"),
+            "{err:#}"
+        );
+        assert_eq!(runtime.relay.session_count().await, 0);
     }
 
     #[tokio::test]
@@ -2158,6 +2185,66 @@ mod tests {
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.rx.poll_recv(cx)
+        }
+    }
+
+    struct ServerInfoWriteFailureIo {
+        read: Vec<u8>,
+        read_pos: usize,
+        writes: usize,
+    }
+
+    impl ServerInfoWriteFailureIo {
+        fn new(read: Vec<u8>) -> Self {
+            Self {
+                read,
+                read_pos: 0,
+                writes: 0,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncRead for ServerInfoWriteFailureIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.read_pos >= self.read.len() {
+                return Poll::Ready(Ok(()));
+            }
+
+            let remaining = &self.read[self.read_pos..];
+            let len = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..len]);
+            self.read_pos += len;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ServerInfoWriteFailureIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.writes += 1;
+            if self.writes == 1 {
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "failed writing DERP server info",
+                )))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
     }
 

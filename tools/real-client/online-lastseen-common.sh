@@ -76,6 +76,7 @@ expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
 expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
 taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
 expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
+expected_self_capmap_keys="${REAL_CLIENT_EXPECT_SELF_CAPMAP_KEYS:-}"
 force_derp="${REAL_CLIENT_FORCE_DERP:-false}"
 rust_embedded_derp="${REAL_CLIENT_RUST_EMBEDDED_DERP:-${HSRS_HARNESS_EMBEDDED_DERP:-false}}"
 rust_derp_region_id="${REAL_CLIENT_RUST_DERP_REGION_ID:-${REAL_CLIENT_DERP_REGION_ID:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_ID:-900}}}"
@@ -1506,6 +1507,40 @@ assert_file_sharing_cap_if_requested() {
       return 1
     fi
     cat "${work_dir}/file-sharing-cap-${cap_client_name}.json"
+  done
+  echo "::endgroup::"
+}
+
+assert_self_capmap_keys() {
+  local cap_client_name="$1"
+  local output_path="$2"
+  local expected_keys="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${cap_client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      path = ARGV.fetch(0)
+      expected = ARGV.fetch(1).split(/[,\s]+/).reject(&:empty?)
+      netmap = JSON.parse(File.read(path))
+      self_node = netmap["SelfNode"] || netmap["selfNode"] || {}
+      cap_map = self_node["CapMap"] || self_node["capMap"] || {}
+      missing = expected.reject { |key| cap_map.key?(key) }
+      abort("missing expected self CapMap keys #{missing.inspect}; CapMap keys=#{cap_map.keys.inspect}") unless missing.empty?
+      puts JSON.pretty_generate({expected_self_capmap_keys: expected.sort, cap_map_keys: cap_map.keys.sort})
+    ' "${netmap_path}" "${expected_keys}" >"${output_path}"
+}
+
+assert_self_capmap_keys_if_requested() {
+  [[ -n "${expected_self_capmap_keys}" ]] || return 0
+  echo "::group::assert self CapMap keys"
+  local cap_client_name
+  for cap_client_name in "${successful_client_names[@]}"; do
+    if ! wait_for "self CapMap keys ${cap_client_name}" \
+      "assert_self_capmap_keys '${cap_client_name}' '${work_dir}/self-capmap-${cap_client_name}.json' '${expected_self_capmap_keys}'"; then
+      cat "${work_dir}/self-capmap-${cap_client_name}.json.err" >&2 || true
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${work_dir}/self-capmap-${cap_client_name}.json"
   done
   echo "::endgroup::"
 }
@@ -3225,6 +3260,7 @@ assert_derp_map_if_requested
 assert_derp_ping_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
+assert_self_capmap_keys_if_requested
 assert_debug_ping_if_requested
 assert_magic_dns_if_requested
 assert_no_magic_dns_if_requested

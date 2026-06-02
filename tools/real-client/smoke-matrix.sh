@@ -99,6 +99,7 @@ smoke_ids=(
   postgres-authkey-relogin-deleted
   postgres-authkey-relogin-route-preserve
   postgres-taildrop-capmap
+  postgres-randomize-client-port
   postgres-derp-private
   postgres-online-lastseen
   postgres-ping-lifecycle
@@ -359,6 +360,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -459,6 +461,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-authkey-relogin-deleted-smoke.sh
   tools/real-client/postgres-authkey-relogin-route-preserve-smoke.sh
   tools/real-client/postgres-taildrop-capmap-smoke.sh
+  tools/real-client/postgres-randomize-client-port-smoke.sh
   tools/real-client/postgres-derp-private-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
@@ -639,6 +642,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-authkey-relogin-deleted-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh
   tools/real-client/postgres-taildrop-capmap-headscale-go-smoke.sh
+  tools/real-client/postgres-randomize-client-port-headscale-go-smoke.sh
   tools/real-client/postgres-derp-private-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
@@ -819,6 +823,7 @@ smoke_assertions=(
   "production Postgres auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state"
   "production Postgres auth-key same-user relogin preserves approved route state"
   "production Postgres taildrop disabled removes file-sharing from stock-client self CapMap"
+  "production Postgres randomizeClientPort stamps randomize-client-port in stock-client self CapMap"
   "production Postgres private DERP sidecar, STUN, relay path, and DERP map metadata"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"

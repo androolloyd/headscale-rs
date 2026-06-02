@@ -387,14 +387,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty-nine Pg rows, including
+  all ninety Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
   `postgres-authkey-relogin-different-user`,
   `postgres-authkey-relogin-deleted`,
   `postgres-authkey-relogin-route-preserve`,
-  `postgres-taildrop-capmap`, `postgres-derp-private`,
+  `postgres-taildrop-capmap`, `postgres-randomize-client-port`,
+  `postgres-derp-private`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -765,8 +766,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 - Audited `tools/real-client/smoke-matrix.sh --list` against the
   `.github/workflows/real-client-parity.yml` `PR_SMOKES` set after `aeef5d4`:
-  current audit has 177 checked-in smoke IDs, and the push/PR set has 124 IDs
-  with no unknown or duplicate row IDs while covering all 89 Postgres
+  current audit has 178 checked-in smoke IDs, and the push/PR set has 125 IDs
+  with no unknown or duplicate row IDs while covering all 90 Postgres
   stock-client rows.
 - Added the low-risk paired `ping-lifecycle` row to `PR_SMOKES` so the
   non-Postgres auth-key `/debug/ping` path runs on push/PR beside the existing
@@ -1588,6 +1589,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   existing web-registration restart row and the no-restart web-registration
   route-approval row; the Postgres stock-client matrix now has eighty-nine
   rows.
+
+## 2026-06-02 Postgres randomize-client-port CapMap smoke slice
+
+- Added paired `postgres-randomize-client-port` Rust/headscale-go rows over the
+  production Postgres stock-client harness.
+- The row loads an upstream-shaped policy with top-level
+  `randomizeClientPort: true`, registers a stock client, reads
+  `tailscale debug netmap`, and asserts the self `CapMap` contains
+  `randomize-client-port`.
+- This pins the current-head policy/runtime projection through the real client;
+  the Postgres stock-client matrix now has ninety rows.
 
 ## 2026-06-02 CLI consumed-help value parity slice
 

@@ -368,6 +368,20 @@ async fn grpc_gateway_auth_failures_are_plain_unauthorized_before_parsers() {
             body: "",
         },
         Case {
+            name: "bearer prefix without required space before malformed query",
+            method: Method::GET,
+            uri: "/api/v1/user?id=not-a-number",
+            authorization: Some("Bearer"),
+            body: "",
+        },
+        Case {
+            name: "lowercase bearer prefix before malformed JSON",
+            method: Method::POST,
+            uri: "/api/v1/user",
+            authorization: Some("bearer definitely-invalid"),
+            body: "{",
+        },
+        Case {
             name: "invalid bearer on malformed path",
             method: Method::DELETE,
             uri: "/api/v1/user/not-a-number",

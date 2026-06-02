@@ -592,6 +592,10 @@ reject positional node IDs before any connection attempt and require
 `--identifier`, while `/debug/ping` lists connected nodes from the map-batcher
 view even if their node expiry timestamp has passed.
 
+Recent coverage note (2026-06-02): the `/debug/` index now mirrors tsweb's
+runtime key/value rows more closely by including `Uptime`, `Version`, and
+`Machine` before the headscale debug endpoint links.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

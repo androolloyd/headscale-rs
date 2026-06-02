@@ -5,7 +5,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    env, thread,
+    env,
+    sync::OnceLock,
+    thread,
+    time::Instant,
 };
 
 use axum::{
@@ -2904,8 +2907,14 @@ fn blank_html() -> &'static str {
 fn debug_index_html() -> String {
     let version = version_info();
     let mut out = String::from("<html><body><h1>headscale debug</h1><ul>");
+    out.push_str("<li><b>Uptime:</b> ");
+    out.push_str(&html_escape(&debug_uptime_string()));
+    out.push_str("</li>");
     out.push_str("<li><b>Version:</b> ");
     out.push_str(&html_escape(&version.version));
+    out.push_str("</li>");
+    out.push_str("<li><b>Machine:</b> ");
+    out.push_str(&html_escape(&debug_machine_name()));
     out.push_str("</li>");
 
     for (href, description) in DEBUG_INDEX_LINKS {
@@ -2920,6 +2929,19 @@ fn debug_index_html() -> String {
 
     out.push_str("</ul></body></html>");
     out
+}
+
+fn debug_uptime_string() -> String {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let elapsed = START.get_or_init(Instant::now).elapsed();
+    format!("{}s", elapsed.as_secs())
+}
+
+fn debug_machine_name() -> String {
+    match env::var("HOSTNAME").or_else(|_| env::var("COMPUTERNAME")) {
+        Ok(hostname) if !hostname.trim().is_empty() => hostname,
+        _ => "unknown".to_string(),
+    }
 }
 
 fn debug_ping_html(
@@ -3818,7 +3840,9 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
 
         assert!(body.contains("<h1>headscale debug</h1>"), "{body}");
+        assert!(body.contains("<li><b>Uptime:</b> "), "{body}");
         assert!(body.contains("<li><b>Version:</b> "), "{body}");
+        assert!(body.contains("<li><b>Machine:</b> "), "{body}");
         for (href, description) in DEBUG_INDEX_LINKS {
             assert!(
                 body.contains(&format!(r#"<a href="{href}">{href}</a>"#)),

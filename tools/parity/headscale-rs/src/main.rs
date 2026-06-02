@@ -2290,10 +2290,12 @@ fn run_route_checks(
             tags: &node.tags,
         };
 
-        let mut approved = normalize_prefixes(&check.current_approved)
+        let current_approved = parse_prefixes(&check.current_approved)
             .with_context(|| format!("route check {} current_approved", check.name))?;
-        let before = approved.clone();
-        for route in normalize_prefixes(&check.announced_routes)
+        let mut approved = current_approved.clone();
+        let mut before = current_approved;
+        before.sort();
+        for route in parse_prefixes(&check.announced_routes)
             .with_context(|| format!("route check {} announced_routes", check.name))?
         {
             if approved.contains(&route) {
@@ -2393,7 +2395,7 @@ fn run_via_route_checks(
     Ok(out)
 }
 
-fn normalize_prefixes(raw: &[String]) -> Result<Vec<String>> {
+fn parse_prefixes(raw: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(raw.len());
     for route in raw {
         let parsed = route
@@ -2401,6 +2403,11 @@ fn normalize_prefixes(raw: &[String]) -> Result<Vec<String>> {
             .with_context(|| format!("parse prefix {route}"))?;
         out.push(parsed.to_string());
     }
+    Ok(out)
+}
+
+fn normalize_prefixes(raw: &[String]) -> Result<Vec<String>> {
+    let mut out = parse_prefixes(raw)?;
     out.sort();
     out.dedup();
     Ok(out)

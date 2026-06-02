@@ -360,6 +360,7 @@ const fn default_policy_version() -> u32 {
 #[derive(Clone, Debug, Default)]
 pub struct NodeView<'a> {
     pub addr: Option<&'a str>,
+    pub addrs: &'a [String],
     pub user: Option<&'a str>,
     pub tags: &'a [String],
 }
@@ -368,9 +369,14 @@ impl<'a> NodeView<'a> {
     pub fn new(addr: &'a str) -> Self {
         Self {
             addr: Some(addr),
+            addrs: &[],
             user: None,
             tags: &[],
         }
+    }
+    pub fn with_addrs(mut self, addrs: &'a [String]) -> Self {
+        self.addrs = addrs;
+        self
     }
     pub fn with_user(mut self, user: &'a str) -> Self {
         self.user = Some(user);
@@ -379,6 +385,19 @@ impl<'a> NodeView<'a> {
     pub fn with_tags(mut self, tags: &'a [String]) -> Self {
         self.tags = tags;
         self
+    }
+    fn any_addr_matches(&self, mut matches: impl FnMut(&str) -> bool) -> bool {
+        if let Some(addr) = self.addr
+            && matches(addr)
+        {
+            return true;
+        }
+        self.addrs.iter().any(|addr| {
+            if Some(addr.as_str()) == self.addr {
+                return false;
+            }
+            matches(addr)
+        })
     }
 }
 
@@ -2334,15 +2353,15 @@ impl AclDoc {
         }
         if let Some(host) = entry.strip_prefix("host:") {
             if let Some(cidr) = self.hosts.get(host) {
-                return addr_in_cidr(principal.addr, cidr);
+                return node_addr_in_cidr(principal, cidr);
             }
             return false;
         }
         if let Some(cidr) = self.hosts.get(entry) {
-            return addr_in_cidr(principal.addr, cidr);
+            return node_addr_in_cidr(principal, cidr);
         }
         if entry.contains('/') {
-            return addr_in_cidr(principal.addr, entry);
+            return node_addr_in_cidr(principal, entry);
         }
         identity_matches(entry, principal)
     }
@@ -2470,9 +2489,7 @@ pub fn internet_filter_cidrs() -> Vec<String> {
 }
 
 fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
-    if let Some(addr) = principal.addr
-        && entry == addr
-    {
+    if principal.any_addr_matches(|addr| entry == addr) {
         return true;
     }
     if principal.tags.is_empty()
@@ -2497,7 +2514,7 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
     if kind == "internet" {
         return internet_filter_cidrs()
             .iter()
-            .any(|cidr| addr_in_cidr(principal.addr, cidr));
+            .any(|cidr| node_addr_in_cidr(principal, cidr));
     }
     if kind == "danger-all" {
         return true;
@@ -2518,9 +2535,7 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         let Some(peer) = peer else {
             return false;
         };
-        if let (Some(a), Some(b)) = (principal.addr, peer.addr)
-            && a == b
-        {
+        if principal.any_addr_matches(|a| peer.any_addr_matches(|b| a == b)) {
             return true;
         }
         if let (Some(a), Some(b)) = (principal.user, peer.user) {
@@ -2598,6 +2613,10 @@ fn addr_in_cidr(addr: Option<&str>, cidr: &str) -> bool {
         return false;
     };
     net.contains(&parsed)
+}
+
+fn node_addr_in_cidr(node: &NodeView<'_>, cidr: &str) -> bool {
+    node.any_addr_matches(|addr| addr_in_cidr(Some(addr), cidr))
 }
 
 fn split_upstream_dst_ports(dst: &str) -> Result<Option<(String, String)>, String> {
@@ -3510,16 +3529,19 @@ mod tests {
         let user = "alice".to_string();
         let s = NodeView {
             addr: None,
+            addrs: &[],
             user: Some(&user),
             tags: &[],
         };
         let d = NodeView {
             addr: None,
+            addrs: &[],
             user: Some(&user),
             tags: &[],
         };
         let s2 = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("bob"),
             tags: &[],
         };
@@ -4941,11 +4963,13 @@ mod tests {
         let doc = doc_with_rule(&["alice"], &["*"]);
         let alice = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
         let bob = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("bob"),
             tags: &[],
         };
@@ -4966,6 +4990,7 @@ mod tests {
         doc.groups.insert("admins".into(), vec!["alice".into()]);
         let alice = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
@@ -4983,6 +5008,7 @@ mod tests {
         let tags = vec!["tag:router".to_string()];
         let tagged = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &tags,
         };
@@ -5150,6 +5176,7 @@ mod tests {
             .insert("tag:router".into(), vec!["alice@".into()]);
         let node = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
@@ -5166,6 +5193,7 @@ mod tests {
             .insert("tag:db".into(), vec!["group:admins".into()]);
         let node = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
@@ -5190,21 +5218,25 @@ mod tests {
 
         let alice = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
         let bob = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("bob"),
             tags: &[],
         };
         let carol = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("carol"),
             tags: &[],
         };
         let dave = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("dave"),
             tags: &[],
         };
@@ -5230,6 +5262,7 @@ mod tests {
         .unwrap();
         let node = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
@@ -5329,6 +5362,7 @@ mod tests {
         let tags = vec!["tag:router".to_string()];
         let node = NodeView {
             addr: None,
+            addrs: &[],
             user: Some("bob"),
             tags: &tags,
         };

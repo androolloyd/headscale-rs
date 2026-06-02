@@ -1,0 +1,240 @@
+{
+  "name": "multi-address-policy-ssh-dns-route-matrix",
+  "policy": {
+    "tagOwners": {
+      "tag:router": [
+        "ops@example.com"
+      ],
+      "tag:server": [
+        "ops@example.com"
+      ]
+    },
+    "hosts": {
+      "serverv6": "fd7a:115c:a1e0::20/128"
+    },
+    "nodeAttrs": [
+      {
+        "target": [
+          "fd7a:115c:a1e0::10/128"
+        ],
+        "attr": [
+          "nextdns:dual-client",
+          "drive:access"
+        ]
+      },
+      {
+        "target": [
+          "tag:server"
+        ],
+        "attr": [
+          "ssh"
+        ]
+      }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "10.44.0.0/16": [
+          "tag:router"
+        ]
+      }
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "src": [
+          "fd7a:115c:a1e0::10/128"
+        ],
+        "dst": [
+          "serverv6:443"
+        ]
+      }
+    ],
+    "grants": [
+      {
+        "src": [
+          "fd7a:115c:a1e0::10/128"
+        ],
+        "dst": [
+          "10.44.0.0/16"
+        ],
+        "ip": [
+          "tcp:443"
+        ],
+        "via": [
+          "tag:router"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "root"
+        ],
+        "acceptEnv": [
+          "LANG"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "ops",
+      "email": "ops@example.com"
+    },
+    {
+      "id": 3,
+      "name": "bob",
+      "email": "bob@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-dual",
+      "ipv4": "100.64.44.10",
+      "ipv6": "fd7a:115c:a1e0::10",
+      "os": "linux"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "server-dual",
+      "ipv4": "100.64.44.20",
+      "ipv6": "fd7a:115c:a1e0::20",
+      "os": "linux",
+      "tags": [
+        "tag:server"
+      ]
+    },
+    {
+      "id": 3,
+      "user_id": 2,
+      "hostname": "router-dual",
+      "ipv4": "100.64.44.30",
+      "ipv6": "fd7a:115c:a1e0::30",
+      "os": "linux",
+      "tags": [
+        "tag:router"
+      ],
+      "routes": [
+        "10.44.0.0/16"
+      ],
+      "approved_routes": [
+        "10.44.0.0/16"
+      ]
+    },
+    {
+      "id": 4,
+      "user_id": 3,
+      "hostname": "bob-dual",
+      "ipv4": "100.64.44.40",
+      "ipv6": "fd7a:115c:a1e0::40",
+      "os": "windows"
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "server-secondary-v6-filter",
+      "node_id": 2
+    },
+    {
+      "name": "router-secondary-v6-route-filter",
+      "node_id": 3
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "alice-secondary-v6-peers",
+      "node_id": 1
+    },
+    {
+      "name": "server-secondary-v6-peers",
+      "node_id": 2
+    },
+    {
+      "name": "router-secondary-v6-peers",
+      "node_id": 3
+    },
+    {
+      "name": "bob-unmatched-peers",
+      "node_id": 4
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "tagged-router-autoapproves-subnet",
+      "node_id": 3,
+      "announced_routes": [
+        "10.44.0.0/16"
+      ]
+    }
+  ],
+  "via_route_checks": [
+    {
+      "name": "alice-secondary-v6-route-via-router",
+      "viewer_id": 1,
+      "peer_id": 3
+    },
+    {
+      "name": "bob-secondary-v6-does-not-route-via-router",
+      "viewer_id": 4,
+      "peer_id": 3
+    }
+  ],
+  "node_attr_checks": [
+    {
+      "name": "alice-secondary-v6-nodeattrs",
+      "node_id": 1
+    },
+    {
+      "name": "server-tag-nodeattrs",
+      "node_id": 2
+    },
+    {
+      "name": "bob-no-secondary-v6-nodeattrs",
+      "node_id": 4
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "server-dual-ssh-principals",
+      "node_id": 2
+    }
+  ],
+  "wire": {
+    "runtime_dns_config": {
+      "magic_dns": true,
+      "base_domain": "tail.example",
+      "override_local_dns": true,
+      "nameservers": {
+        "global": [
+          "https://dns.nextdns.io/global"
+        ]
+      }
+    },
+    "runtime_dns_requester_checks": [
+      {
+        "name": "alice-secondary-v6-nextdns-profile",
+        "node_id": 1
+      },
+      {
+        "name": "bob-default-nextdns-profile",
+        "node_id": 4
+      }
+    ]
+  }
+}

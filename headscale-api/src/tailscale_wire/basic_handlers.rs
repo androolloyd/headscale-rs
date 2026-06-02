@@ -2320,6 +2320,7 @@ fn debug_peer_map_for_snapshot(
         .map(|(node_key, rec)| PeerMapNode {
             id: stable_id_from_key(node_key),
             addr: rec.primary_addr_string().unwrap_or_default(),
+            addrs: rec.address_strings(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
             routes: primary_routes.get(node_key).cloned().unwrap_or_default(),

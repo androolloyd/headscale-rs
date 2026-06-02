@@ -270,6 +270,7 @@ fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
         PeerMapNode {
             id: 1,
             addr: "100.64.0.1".into(),
+            addrs: Vec::new(),
             user: Some("alice".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -277,6 +278,7 @@ fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
         PeerMapNode {
             id: 2,
             addr: "100.64.0.2".into(),
+            addrs: Vec::new(),
             user: Some("server-owner".into()),
             tags: vec!["tag:server".into()],
             routes: Vec::new(),
@@ -284,6 +286,7 @@ fn build_peer_map_uses_symmetric_visibility_for_one_way_rules() {
         PeerMapNode {
             id: 3,
             addr: "100.64.0.3".into(),
+            addrs: Vec::new(),
             user: Some("bob".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -311,6 +314,7 @@ fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
         PeerMapNode {
             id: 1,
             addr: "100.64.0.1".into(),
+            addrs: Vec::new(),
             user: Some("alice".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -318,6 +322,7 @@ fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
         PeerMapNode {
             id: 2,
             addr: "100.64.0.2".into(),
+            addrs: Vec::new(),
             user: Some("router-owner".into()),
             tags: Vec::new(),
             routes: vec!["10.10.1.0/24".into()],
@@ -354,6 +359,7 @@ fn build_peer_map_autogroup_internet_surfaces_exit_nodes_only() {
         PeerMapNode {
             id: 1,
             addr: "100.64.0.1".into(),
+            addrs: Vec::new(),
             user: Some("alice@example.com".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -361,6 +367,7 @@ fn build_peer_map_autogroup_internet_surfaces_exit_nodes_only() {
         PeerMapNode {
             id: 2,
             addr: "100.64.0.2".into(),
+            addrs: Vec::new(),
             user: Some("router-owner".into()),
             tags: vec!["tag:exit".into()],
             routes: vec!["0.0.0.0/0".into(), "::/0".into()],
@@ -368,6 +375,7 @@ fn build_peer_map_autogroup_internet_surfaces_exit_nodes_only() {
         PeerMapNode {
             id: 3,
             addr: "100.64.0.3".into(),
+            addrs: Vec::new(),
             user: Some("router-owner".into()),
             tags: vec!["tag:router".into()],
             routes: vec!["10.0.0.0/8".into()],
@@ -375,6 +383,7 @@ fn build_peer_map_autogroup_internet_surfaces_exit_nodes_only() {
         PeerMapNode {
             id: 4,
             addr: "100.64.0.4".into(),
+            addrs: Vec::new(),
             user: Some("bob@example.com".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -406,6 +415,7 @@ fn route_as_acl_source_keeps_router_peer_and_route_visible() {
         PeerMapNode {
             id: 1,
             addr: "100.64.0.1".into(),
+            addrs: Vec::new(),
             user: Some("alice".into()),
             tags: Vec::new(),
             routes: Vec::new(),
@@ -413,6 +423,7 @@ fn route_as_acl_source_keeps_router_peer_and_route_visible() {
         PeerMapNode {
             id: 2,
             addr: "100.64.0.2".into(),
+            addrs: Vec::new(),
             user: Some("router-owner".into()),
             tags: Vec::new(),
             routes: vec!["10.10.1.0/24".into()],
@@ -429,6 +440,79 @@ fn route_as_acl_source_keeps_router_peer_and_route_visible() {
         store.can_access_route_for_peer(&nodes, 1, 2, "10.10.1.0/24"),
         Some(true)
     );
+}
+
+#[test]
+fn build_peer_map_matches_secondary_dual_stack_addresses() {
+    let raw = r#"{
+        "hosts": {"serverv6": "fd7a:115c:a1e0::20/128"},
+        "acls": [
+            {"action":"accept","src":["fd7a:115c:a1e0::10/128"],"dst":["serverv6:443"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let alice_addrs = vec!["100.64.0.10".into(), "fd7a:115c:a1e0::10".into()];
+    let server_addrs = vec!["100.64.0.20".into(), "fd7a:115c:a1e0::20".into()];
+    let nodes = vec![
+        PeerMapNode {
+            id: 1,
+            addr: "100.64.0.10".into(),
+            addrs: alice_addrs,
+            user: Some("alice".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 2,
+            addr: "100.64.0.20".into(),
+            addrs: server_addrs,
+            user: Some("server-owner".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+    ];
+
+    let peers = build_peer_map_for_doc(&doc, &nodes);
+    assert_eq!(peers.get(&1).cloned().unwrap_or_default(), vec![2]);
+    assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
+}
+
+#[test]
+fn node_attrs_and_route_grants_match_secondary_address() {
+    let raw = r#"{
+        "nodeAttrs": [
+            {
+                "target": ["fd7a:115c:a1e0::30/128"],
+                "attr": ["nextdns:dual-stack-router"]
+            }
+        ],
+        "grants": [
+            {
+                "src": ["fd7a:115c:a1e0::30/128"],
+                "dst": ["10.44.0.0/16"],
+                "ip": ["tcp:443"]
+            }
+        ],
+        "acls": []
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let addrs = vec!["100.64.0.30".to_string(), "fd7a:115c:a1e0::30".to_string()];
+    let router = NodeView {
+        addr: Some("100.64.0.30"),
+        addrs: &addrs,
+        user: Some("router"),
+        tags: &[],
+    };
+    let primary_only = NodeView::new("100.64.0.30").with_user("router");
+    let route_owner = NodeView::new("100.64.0.99");
+
+    assert_eq!(
+        doc.node_attrs_for(&router),
+        vec!["nextdns:dual-stack-router".to_string()]
+    );
+    assert!(doc.can_access_route(&router, &[], &route_owner, "10.44.8.0/24"));
+    assert!(doc.node_attrs_for(&primary_only).is_empty());
+    assert!(!doc.can_access_route(&primary_only, &[], &route_owner, "10.44.8.0/24"));
 }
 
 // ---------------------------------------------------------------------------

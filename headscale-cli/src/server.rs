@@ -5756,6 +5756,7 @@ database:
         let tags = Vec::new();
         let node = headscale_api::policy::NodeView {
             addr: Some("100.64.0.9"),
+            addrs: &[],
             user: Some("alice"),
             tags: &tags,
         };
@@ -5796,6 +5797,7 @@ database:
         let tags = Vec::new();
         let node = headscale_api::policy::NodeView {
             addr: Some("100.64.0.9"),
+            addrs: &[],
             user: Some("alice"),
             tags: &tags,
         };

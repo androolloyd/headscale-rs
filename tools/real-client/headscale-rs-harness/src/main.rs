@@ -752,9 +752,11 @@ fn apply_policy_auto_approvals(policy: &PolicyStore, machines: &MachineRegistry)
         let announced_routes = normalize_routes(&machine.available_routes)
             .map_err(|err| anyhow::anyhow!("normalizing available routes: {err}"))?;
         let primary_addr = machine.primary_addr_string();
+        let addrs = machine.address_strings();
         let user = (!machine.user.is_empty()).then_some(machine.user.as_str());
         let node = NodeView {
             addr: primary_addr.as_deref(),
+            addrs: &addrs,
             user,
             tags: &machine.forced_tags,
         };
@@ -1083,8 +1085,10 @@ fn apply_requested_tags(policy: &PolicyStore, record: &mut MachineRecord) -> Res
     record.forced_tags.sort();
     record.forced_tags.dedup();
     let addr = record.primary_addr_string();
+    let addrs = record.address_strings();
     let node = NodeView {
         addr: addr.as_deref(),
+        addrs: &addrs,
         user: Some(record.user.as_str()),
         tags: &[],
     };

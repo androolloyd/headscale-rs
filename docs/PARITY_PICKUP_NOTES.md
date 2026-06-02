@@ -1618,3 +1618,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Validation: focused `headscale-cli` unit/process filters, `cargo fmt -p
   headscale-cli --check`, `cargo clippy -p headscale-cli --all-targets
   --features postgres-sqlx -- -D warnings`, and `git diff --check`.
+
+## 2026-06-02 auth-key different-user relogin runtime fix
+
+- Rust now rejects a stock-client auth-key relogin when the presented machine
+  key is already attached to an untagged node owned by a different user.
+- The guard runs before preauth redemption when lookup metadata is available,
+  so the rejected relogin key is not consumed, with an after-redemption fallback
+  for simpler redeemers.
+- SQLite and Postgres persistent auth-key paths now apply the same untagged
+  same-machine/different-user guard so restart/hydration cannot silently create
+  or transfer persistent state.
+- Current-head headscale-go has direct unit coverage that creates a new node
+  for some different-user same-machine paths, but the stock-client real-client
+  row at `171fd7a3` remains logged out and preserves the original node. This
+  slice matches the stock-client observable behavior that failed CI.

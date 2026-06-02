@@ -1,0 +1,1 @@
+Error: Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01

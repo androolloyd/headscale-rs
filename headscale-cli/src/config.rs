@@ -1471,10 +1471,7 @@ impl CliConfig {
             errors.push(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR.to_string());
         }
 
-        if let Some(challenge_type) = self
-            .tls_letsencrypt_challenge_type
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
+        if let Some(challenge_type) = self.tls_letsencrypt_challenge_type.as_deref()
             && challenge_type != "HTTP-01"
             && challenge_type != "TLS-ALPN-01"
         {
@@ -3819,6 +3816,28 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
         config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_rejects_explicit_empty_acme_challenge_type() {
+        let source = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_challenge_type: ""
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Fatal config error: the only supported values for tls_letsencrypt_challenge_type are HTTP-01 and TLS-ALPN-01"
+        );
     }
 
     #[test]

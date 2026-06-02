@@ -2320,6 +2320,40 @@ server_url: "headscale.example"
 
     assert_configtest_default_config_snapshot(
         r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+prefixes:
+  v4: "not-a-cidr"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+"#,
+        include_str!("snapshots/configtest_invalid_prefix_v4.stderr"),
+        "configtest invalid prefixes.v4",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+prefixes:
+  v6: "not-a-cidr"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+"#,
+        include_str!("snapshots/configtest_invalid_prefix_v6.stderr"),
+        "configtest invalid prefixes.v6",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
 server_url: "https://login.tail.example.org"
 noise:
   private_key_path: "noise_private.key"

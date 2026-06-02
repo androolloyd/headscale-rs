@@ -1489,6 +1489,10 @@ impl CliConfig {
         {
             bail!("config error, at least one of prefixes.v4 or prefixes.v6 must be set");
         }
+        validate_config_prefix(&server.mesh_cidr, "IPv4")?;
+        if let Some(mesh_cidr_v6) = server.mesh_cidr_v6.as_deref() {
+            validate_config_prefix(mesh_cidr_v6, "IPv6")?;
+        }
 
         if let Some(dns) = &self.dns {
             dns.validate().context("invalid DNS configuration")?;
@@ -2506,6 +2510,22 @@ fn parse_ip_prefix(raw: &str) -> Result<(IpAddr, u8)> {
         .parse()
         .with_context(|| format!("invalid prefix length {bits:?}"))?;
     Ok((addr, bits))
+}
+
+fn validate_config_prefix(raw: &str, label: &str) -> Result<()> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let (addr, bits) =
+        parse_ip_prefix(raw).with_context(|| format!("parsing {label} prefix from config"))?;
+    if addr.is_ipv4() && bits > 32 {
+        bail!("parsing {label} prefix from config: invalid prefix length {bits:?}");
+    }
+    if addr.is_ipv6() && bits > 128 {
+        bail!("parsing {label} prefix from config: invalid prefix length {bits:?}");
+    }
+    Ok(())
 }
 
 fn parse_env_bool(value: &str) -> Result<bool> {
@@ -3852,6 +3872,44 @@ prefixes:
         let err = config.validate_for_configtest().unwrap_err().to_string();
 
         assert!(err.contains("at least one of prefixes.v4 or prefixes.v6"));
+    }
+
+    #[test]
+    fn configtest_rejects_malformed_prefixes_like_upstream() {
+        for (field, raw, expected) in [
+            (
+                "v4",
+                r#"v4: "not-a-cidr""#,
+                "parsing IPv4 prefix from config",
+            ),
+            (
+                "v6",
+                r#"v6: "not-a-cidr""#,
+                "parsing IPv6 prefix from config",
+            ),
+            ("v4", r#"v4: "100.64.0.0/99""#, "invalid prefix length"),
+        ] {
+            let source = format!(
+                r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+prefixes:
+  {raw}
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#
+            );
+
+            let config = CliConfig::parse(&source, ConfigFormat::Yaml).unwrap();
+            let err = config.validate_for_configtest().unwrap_err().to_string();
+
+            assert!(
+                err.contains(expected),
+                "{field} should contain {expected:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

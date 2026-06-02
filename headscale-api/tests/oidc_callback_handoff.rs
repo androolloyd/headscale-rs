@@ -20,8 +20,8 @@ use headscale_api::{
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, MapResponse,
         PreauthRedeemer, RedeemError, RedeemOk, RegisterResponse, RegistrationCache,
-        ServerNoiseKey, WireState, map as wire_map_handlers, noise::NoisePeerMachineKey,
-        register as wire_register_handlers, router_with_oidc,
+        ServerNoiseKey, SshCheckBinding, WireState, map as wire_map_handlers,
+        noise::NoisePeerMachineKey, register as wire_register_handlers, router_with_oidc,
     },
 };
 use http_body_util::BodyExt;
@@ -266,6 +266,49 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     );
 
     provider.handle.abort();
+}
+
+#[tokio::test]
+async fn oidc_register_confirm_rejects_wire_ssh_check_auth_id() {
+    let (state, _dir) = wire_state();
+    let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+    state.registration_cache.insert_ssh_check(
+        raw_auth_id.into(),
+        SshCheckBinding {
+            src_node_id: 1001,
+            dst_node_id: 1002,
+            local_user: "root".into(),
+        },
+    );
+    let app = router_with_oidc(state.clone(), oidc_runtime("https://issuer.example"));
+    let csrf = "wire-confirm-csrf";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/register/confirm/hskey-authreq-{raw_auth_id}"))
+                .header(header::COOKIE, format!("headscale_register_confirm={csrf}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("headscale_register_confirm={csrf}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_string(response).await,
+        "auth session is not for node registration"
+    );
+    assert_eq!(
+        state.registration_cache.ssh_binding(raw_auth_id),
+        Some(SshCheckBinding {
+            src_node_id: 1001,
+            dst_node_id: 1002,
+            local_user: "root".into(),
+        })
+    );
 }
 
 struct RejectingPreauth;

@@ -2735,3 +2735,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   preservation and DNS/MagicDNS multi-address restart behavior are now covered,
   but SSH/policy multi-address behavior after backfill/restart still needs
   bounded paired rows before closure.
+
+## 2026-06-02 Postgres web-registration policy/config map-churn restart slice
+
+- Added paired `postgres-web-register-policy-config-map-churn-restart`
+  Rust/headscale-go stock-client rows. They register Alice and Bob through the
+  production Postgres no-auth web flow under an isolating file policy, reload
+  policy to expose both peers, assert custom MagicDNS suffix and peer
+  `tailscale debug resolve` visibility, restart the same server URL, and
+  reassert peer map convergence through the shared online/LastSeen harness.
+- Added the row to the real-client matrix and bounded PR/push smoke metadata.
+- The `p0-production-postgres-process-mutations` row remains open. This slice
+  covers another auth-session plus policy/config map-churn restart path, but
+  live execution is intentionally deferred here and broader production-process
+  route, API-auth/session, and wider lifecycle mutation breadth still remains.

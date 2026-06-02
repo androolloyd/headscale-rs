@@ -51,6 +51,12 @@ peer_name="${REAL_CLIENT_PEER_NAME:-${run_id}-peer}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 edge="${REAL_CLIENT_PREFIX_MIGRATION_EDGE:-addresses}"
 route="${REAL_CLIENT_PREFIX_BACKFILL_ROUTE:-10.94.0.0/24}"
+ssh_user="${REAL_CLIENT_SSH_USER:-ssh-it-user}"
+ssh_command="${REAL_CLIENT_SSH_COMMAND:-hostname}"
+ssh_expected_stdout="${REAL_CLIENT_EXPECT_SSH_STDOUT:-}"
+ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
+ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
+ssh_policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
@@ -60,23 +66,42 @@ case "${database_backend}" in
     ;;
 esac
 case "${edge}" in
-  addresses | route-approval-restart | magicdns-peer-restart) ;;
+  addresses | route-approval-restart | magicdns-peer-restart | ssh-policy-restart) ;;
   *)
-    echo "REAL_CLIENT_PREFIX_MIGRATION_EDGE must be addresses, route-approval-restart, or magicdns-peer-restart" >&2
+    echo "REAL_CLIENT_PREFIX_MIGRATION_EDGE must be addresses, route-approval-restart, magicdns-peer-restart, or ssh-policy-restart" >&2
     exit 2
     ;;
 esac
 magic_dns_enabled=false
 accept_dns_arg=false
 client_names=("${client_name}")
-if [[ "${edge}" == "magicdns-peer-restart" ]]; then
+if [[ "${edge}" == "magicdns-peer-restart" || "${edge}" == "ssh-policy-restart" ]]; then
   if [[ "${migration_case}" != "v4-to-dual" ]]; then
-    echo "magicdns-peer-restart edge currently requires REAL_CLIENT_PREFIX_MIGRATION_CASE=v4-to-dual" >&2
+    echo "${edge} edge currently requires REAL_CLIENT_PREFIX_MIGRATION_CASE=v4-to-dual" >&2
     exit 2
   fi
+  client_names+=("${peer_name}")
+fi
+if [[ "${edge}" == "magicdns-peer-restart" ]]; then
   magic_dns_enabled=true
   accept_dns_arg=true
-  client_names+=("${peer_name}")
+fi
+if [[ "${edge}" == "ssh-policy-restart" ]]; then
+  if [[ -z "${ssh_policy_json}" ]]; then
+    ssh_policy_json="$(cat tools/real-client/fixtures/ssh-autogroup-self.hujson)"
+  fi
+  if [[ -z "${ssh_user}" || ! "${ssh_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    echo "REAL_CLIENT_SSH_USER must be a simple Linux username, got ${ssh_user}" >&2
+    exit 2
+  fi
+  if ! [[ "${ssh_attempt_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_attempt_timeout_secs < 1)); then
+    echo "REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS must be a positive integer, got ${ssh_attempt_timeout_secs}" >&2
+    exit 2
+  fi
+  if ! [[ "${ssh_host_key_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_host_key_timeout_secs < 1)); then
+    echo "REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS must be a positive integer, got ${ssh_host_key_timeout_secs}" >&2
+    exit 2
+  fi
 fi
 
 # shellcheck source=tools/real-client/postgres-test-db-common.sh
@@ -475,6 +500,9 @@ start_named_client() {
     docker_args+=(-v "${tls_cert_path}:/usr/local/share/ca-certificates/headscale-control.crt:ro")
     client_entry='update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity'
   fi
+  if [[ "${edge}" == "ssh-policy-restart" ]]; then
+    client_entry="apk add --no-cache openssh-client >/tmp/apk-openssh-client.log 2>&1; id '${ssh_user}' >/dev/null 2>&1 || adduser -D -h '/home/${ssh_user}' -s /bin/sh '${ssh_user}' >/tmp/adduser-${ssh_user}.log 2>&1; ${client_entry}"
+  fi
   docker_args+=("${image}")
   "${docker_args[@]}" \
     -ceu "${client_entry}" \
@@ -563,6 +591,9 @@ login_named_client_initial_family() {
   if [[ "${advertise_route}" == "true" ]]; then
     up_args+=("--advertise-routes=${route}")
   fi
+  if [[ "${edge}" == "ssh-policy-restart" ]]; then
+    up_args+=(--ssh)
+  fi
   docker exec "${name}" "${up_args[@]}" \
     >"${work_dir}/${name}.tailscale-up.stdout" \
     2>"${work_dir}/${name}.tailscale-up.stderr" ||
@@ -578,9 +609,19 @@ login_clients_initial_family() {
   local advertise_route=false
   [[ "${edge}" == "route-approval-restart" ]] && advertise_route=true
   login_named_client_initial_family "${client_name}" "${advertise_route}"
-  if [[ "${edge}" == "magicdns-peer-restart" ]]; then
+  if [[ "${edge}" == "magicdns-peer-restart" || "${edge}" == "ssh-policy-restart" ]]; then
     login_named_client_initial_family "${peer_name}" false
   fi
+}
+
+load_ssh_policy_edge_if_requested() {
+  [[ "${edge}" == "ssh-policy-restart" ]] || return 0
+  echo "::group::load SSH policy before prefix restart"
+  local policy_path="${work_dir}/ssh-policy.hujson"
+  printf '%s\n' "${ssh_policy_json}" >"${policy_path}"
+  headscale_cmd --force -o json policy set --file "${policy_path}" \
+    >"${work_dir}/ssh-policy-set.json"
+  echo "::endgroup::"
 }
 
 assert_node_routes_file() {
@@ -754,6 +795,171 @@ assert_magicdns_edge_if_requested() {
   echo "::endgroup::"
 }
 
+assert_peer_status_family() {
+  local source_name="$1"
+  local target_name="$2"
+  local expected_family="$3"
+  local output_path="$4"
+  local status_path="${output_path}.status.json"
+  docker exec "${source_name}" tailscale status --json >"${status_path}" 2>"${output_path}.status.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      target = ARGV.fetch(1)
+      expected = ARGV.fetch(2)
+      peers = status["Peer"] || {}
+      peer = peers.each_value.find do |candidate|
+        [
+          candidate["HostName"],
+          candidate["DNSName"].to_s.sub(/\.\z/, "").split(".").first,
+          candidate.dig("Hostinfo", "Hostname"),
+          candidate.dig("HostInfo", "Hostname"),
+      ].compact.map(&:to_s).include?(target)
+      end
+      source = ARGV.fetch(3)
+      abort("expected peer #{target.inspect} in #{status.dig('Self', 'HostName')} status, got #{peers.inspect}") unless peer
+      ips = Array(peer["TailscaleIPs"])
+      has_v4 = ips.any? { |value| value.to_s.include?(".") }
+      has_v6 = ips.any? { |value| value.to_s.include?(":") }
+      case expected
+      when "ipv4-only"
+        abort("expected peer #{target.inspect} to have only IPv4, got #{ips.inspect}") unless has_v4 && !has_v6
+      when "ipv6-only"
+        abort("expected peer #{target.inspect} to have only IPv6, got #{ips.inspect}") unless !has_v4 && has_v6
+      when "dual-stack"
+        abort("expected peer #{target.inspect} to have IPv4 and IPv6, got #{ips.inspect}") unless has_v4 && has_v6
+      else
+        abort("unsupported expected family #{expected.inspect}")
+      end
+      puts JSON.pretty_generate({source: source, peer: target, expected_family: expected, tailscale_ips: ips})
+    ' "${status_path}" "${target_name}" "${expected_family}" "${source_name}" >"${output_path}"
+}
+
+tailscale_peer_has_ssh_host_keys() {
+  local source_name="$1"
+  local target_name="$2"
+  local status_json
+  status_json="$(docker exec "${source_name}" tailscale status --json 2>/dev/null || true)"
+  ruby -rjson -e '
+    begin
+      status = JSON.parse(STDIN.read)
+    rescue JSON::ParserError
+      exit 1
+    end
+    peer = (status["Peer"] || {}).each_value.find { |p| p["HostName"] == ARGV.fetch(0) }
+    keys = Array(peer && (peer["SSH_HostKeys"] || peer["SSHHostKeys"] || peer["sshHostKeys"]))
+    exit(keys.empty? ? 1 : 0)
+  ' "${target_name}" <<<"${status_json}"
+}
+
+wait_for_ssh_host_keys() {
+  local source_name="$1"
+  local target_name="$2"
+  local deadline=$((SECONDS + ssh_host_key_timeout_secs))
+  until tailscale_peer_has_ssh_host_keys "${source_name}" "${target_name}"; do
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+tailscale_ssh_attempt() {
+  local source_name="$1"
+  local target_name="$2"
+  local stdout_path="$3"
+  local stderr_path="$4"
+  docker exec "${source_name}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" "$4"' \
+    sh "${ssh_attempt_timeout_secs}" "${ssh_user}" "${target_name}" "${ssh_command}" \
+    >"${stdout_path}" \
+    2>"${stderr_path}"
+}
+
+assert_ssh_allow_stdout() {
+  local target_name="$1"
+  local stdout_path="$2"
+  local expected_stdout="${ssh_expected_stdout}"
+  if [[ -z "${expected_stdout}" && "${ssh_command}" == "hostname" ]]; then
+    expected_stdout="${target_name}"
+  fi
+  if [[ -n "${expected_stdout}" ]]; then
+    local actual_stdout
+    actual_stdout="$(sed 's/\r$//' "${stdout_path}")"
+    if [[ "${actual_stdout}" != "${expected_stdout}" ]]; then
+      echo "expected allowed tailscale ssh stdout '${expected_stdout}', got:" >&2
+      cat "${stdout_path}" >&2 || true
+      return 1
+    fi
+    return 0
+  fi
+  grep -Fxq "${target_name}" "${stdout_path}"
+}
+
+tailscale_ssh_succeeded() {
+  local source_name="$1"
+  local target_name="$2"
+  local stdout_path="$3"
+  local stderr_path="$4"
+  tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" || return 1
+  assert_ssh_allow_stdout "${target_name}" "${stdout_path}" || return 1
+  if [[ -s "${stderr_path}" ]]; then
+    echo "expected allowed tailscale ssh stderr to be empty, got:" >&2
+    cat "${stderr_path}" >&2 || true
+    return 1
+  fi
+}
+
+assert_ssh_allowed_between() {
+  local source_name="$1"
+  local target_name="$2"
+  local label="$3"
+  local slug="${label//[^a-zA-Z0-9_-]/-}"
+  local stdout_path="${work_dir}/ssh-${slug}-${source_name}-to-${target_name}.stdout"
+  local stderr_path="${work_dir}/ssh-${slug}-${source_name}-to-${target_name}.stderr"
+  if ! wait_for_ssh_host_keys "${source_name}" "${target_name}"; then
+    docker exec "${source_name}" tailscale status --json >"${work_dir}/ssh-${slug}-${source_name}-status-missing-hostkeys.json" || true
+    echo "timed out waiting for ${source_name} to learn ${target_name} SSH host keys" >&2
+    return 1
+  fi
+  wait_for "tailscale ssh ${source_name} to ${target_name} ${label}" \
+    "tailscale_ssh_succeeded '${source_name}' '${target_name}' '${stdout_path}' '${stderr_path}'"
+}
+
+assert_ssh_policy_edge_if_requested() {
+  local label="$1"
+  [[ "${edge}" == "ssh-policy-restart" ]] || return 0
+  echo "::group::assert SSH policy dual-stack peer behavior ${label}"
+  local slug="${label//[^a-zA-Z0-9_-]/-}"
+  wait_for "dual-stack peer map ${client_name} sees ${peer_name} ${label}" \
+    "assert_peer_status_family '${client_name}' '${peer_name}' '${final_family}' '${work_dir}/${client_name}.ssh-policy-peer-${slug}.json'" || {
+      dump_client_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/${client_name}.ssh-policy-peer-${slug}.json"
+  wait_for "dual-stack peer map ${peer_name} sees ${client_name} ${label}" \
+    "assert_peer_status_family '${peer_name}' '${client_name}' '${final_family}' '${work_dir}/${peer_name}.ssh-policy-peer-${slug}.json'" || {
+      dump_client_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/${peer_name}.ssh-policy-peer-${slug}.json"
+  assert_ssh_allowed_between "${client_name}" "${peer_name}" "${label}" || {
+    dump_client_debug
+    echo "::endgroup::"
+    return 1
+  }
+  assert_ssh_allowed_between "${peer_name}" "${client_name}" "${label}" || {
+    dump_client_debug
+    echo "::endgroup::"
+    return 1
+  }
+  ruby -rjson -e 'puts JSON.pretty_generate({ssh_checks: ARGV})' \
+    "${client_name}->${peer_name}:allow:${label}" \
+    "${peer_name}->${client_name}:allow:${label}"
+  echo "::endgroup::"
+}
+
 run_backfill() {
   echo "::group::run ${target} backfill after ${backfill_label}"
   headscale_cmd --force -o json nodes backfillips >"${work_dir}/backfill.json"
@@ -771,10 +977,8 @@ assert_node_state_family() {
   local expected_family="$1"
   local label="${2:-after-backfill}"
   local nodes_path="${work_dir}/nodes-${label}.json"
-  local expected_names="${client_name}"
-  if [[ "${edge}" == "magicdns-peer-restart" ]]; then
-    expected_names="${client_name},${peer_name}"
-  fi
+  local expected_names
+  expected_names="$(IFS=,; echo "${client_names[*]}")"
   echo "::group::assert ${target} node state ${label}"
   headscale_cmd -o json nodes list >"${nodes_path}"
   ruby -rjson -e '
@@ -820,8 +1024,7 @@ assert_node_state_family() {
       db_rows="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -F $'\t' -c "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL ORDER BY id;")"
       ;;
   esac
-  local expected_count=1
-  [[ "${edge}" == "magicdns-peer-restart" ]] && expected_count=2
+  local expected_count="${#client_names[@]}"
   local db_ipv4 db_ipv6
   local db_row_count=0
   while IFS=$'\t' read -r db_ipv4 db_ipv6; do
@@ -887,6 +1090,7 @@ if [[ "${target}" == "headscale-go" ]]; then
 fi
 start_server "${initial_family}"
 create_user_and_key
+load_ssh_policy_edge_if_requested
 start_clients
 login_clients_initial_family
 approve_route_edge_if_requested
@@ -901,6 +1105,7 @@ wait_for_all_clients_family "${final_family}" "${final_family} client netmap aft
 assert_node_state_family "${final_family}" "after-backfill"
 assert_route_edge_if_requested "approved route after backfill"
 assert_magicdns_edge_if_requested "after-backfill"
+assert_ssh_policy_edge_if_requested "after-backfill"
 
 echo "::group::restart ${target} server after ${backfill_label} backfill"
 stop_server
@@ -911,5 +1116,6 @@ wait_for_all_clients_family "${final_family}" "${final_family} client netmap aft
 assert_node_state_family "${final_family}" "after-backfill-restart"
 assert_route_edge_if_requested "approved route after post-backfill restart"
 assert_magicdns_edge_if_requested "after-backfill-restart"
+assert_ssh_policy_edge_if_requested "after-backfill-restart"
 
 echo "${target} prefix-family ${migration_case} backfill real-client smoke passed"

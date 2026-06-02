@@ -9,9 +9,9 @@
   },
   "summary": {
     "open_p0": 1,
-    "open_p1": 2,
+    "open_p1": 1,
     "open_p2": 2,
-    "total_open": 5
+    "total_open": 4
   },
   "open_items": [
     {
@@ -50,23 +50,6 @@
         "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go"
       ],
       "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/nodeAttrs/routes/SSH compatibility fixtures in the differential harness."
-    },
-    {
-      "id": "p1-production-backfill-restart-edges",
-      "priority": "P1",
-      "lane": "Address allocation and persistent runtime",
-      "status": "in_progress",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "tools/real-client/*prefix-family*",
-        "headscale-api/src/tailscale_wire/register.rs",
-        "headscale-db/src/headscale_nodes.rs"
-      ],
-      "upstream_evidence": [
-        "integration/node_addressing tests",
-        "hscontrol/state/node_store_test.go"
-      ],
-      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence, prefix-family hydration, the PostgreSQL IPv4-to-dual-stack route-preservation restart row, and the PostgreSQL IPv4-to-dual-stack MagicDNS A/AAAA restart row; remaining closure candidates are SSH/policy multi-address behavior after backfill/restart."
     },
     {
       "id": "p2-cli-output-error-residuals",

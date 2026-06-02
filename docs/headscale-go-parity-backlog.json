@@ -9,9 +9,9 @@
   },
   "summary": {
     "open_p0": 6,
-    "open_p1": 6,
+    "open_p1": 5,
     "open_p2": 4,
-    "total_open": 16
+    "total_open": 15
   },
   "open_items": [
     {
@@ -115,21 +115,6 @@
         "hscontrol/noise.go"
       ],
       "exit_criteria": "Broaden exact stock-client SSH status, stdout, and stderr snapshots outside the already covered allow/deny/check/profile rows."
-    },
-    {
-      "id": "p1-ephemeral-node-races",
-      "priority": "P1",
-      "lane": "Register, map, NodeStore, and batcher churn",
-      "status": "open",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "headscale-api/src/tailscale_wire/mod.rs",
-        "headscale-db/src/headscale_nodes.rs"
-      ],
-      "upstream_evidence": [
-        "hscontrol/state/ephemeral_test.go"
-      ],
-      "exit_criteria": "Expand ephemeral node deletion/logout race coverage across in-memory and persistent paths."
     },
     {
       "id": "p1-route-via-health-edge-coverage",

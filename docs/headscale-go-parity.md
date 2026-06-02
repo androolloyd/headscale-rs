@@ -236,6 +236,10 @@ Current-head audit overlay, refreshed 2026-05-30:
 - Route primary parity now pins the Go property-test sequence for sticky
   primary ownership, unhealthy failover, non-stealing recovery, withdrawal
   failback, stale-primary clearing, and reverse primary-route lookup.
+- Ephemeral lifecycle race coverage now pins pending-GC timer behavior across
+  in-memory and persistent paths: connected streams cancel startup deletion,
+  persistent reauth survives stale timers, explicit delete cancels pending
+  store deletion, and persistent rows are removed before live records.
 - Recent coverage closes the hidden `dumpConfig` no-config default-warning
   slice: process snapshots now pin headscale-go's timestamped
   `WRN no config file found, using defaults` line before the human,

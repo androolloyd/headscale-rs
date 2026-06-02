@@ -7553,6 +7553,57 @@ mod registry_tests {
         gc.abort();
     }
 
+    #[tokio::test]
+    async fn ephemeral_gc_timer_does_not_delete_node_that_reauths_as_persistent() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut ephemeral = mk_record(6);
+        ephemeral.ephemeral = true;
+        reg.upsert("nk-a".to_string(), ephemeral);
+
+        let gc = reg.configure_ephemeral_gc(None, Duration::from_millis(25));
+        assert_eq!(gc.schedule_existing(), 1);
+
+        let mut persistent = reg.get("nk-a").unwrap();
+        persistent.ephemeral = false;
+        persistent.node_key_hex = "nk-a".to_string();
+        reg.upsert("nk-a".to_string(), persistent);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let stored = reg
+            .get("nk-a")
+            .expect("persistent reauth must survive stale ephemeral timer");
+        assert!(
+            !stored.ephemeral,
+            "stale ephemeral timer must observe the latest persistent node state"
+        );
+        gc.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_ephemeral_delete_cancels_pending_persistent_gc_timer() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(7);
+        rec.ephemeral = true;
+        reg.upsert("nk-a".to_string(), rec);
+        let deleted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let store: Arc<dyn MachineRegistrationStore> = Arc::new(RecordingDeletionStore {
+            deleted: deleted.clone(),
+        });
+
+        let gc =
+            reg.configure_ephemeral_gc(Some(Arc::downgrade(&store)), Duration::from_millis(25));
+        assert_eq!(gc.schedule_existing(), 1);
+        assert!(reg.delete("nk-a"));
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            deleted.lock().is_empty(),
+            "explicit delete must cancel the pending ephemeral GC store deletion"
+        );
+        assert!(reg.get("nk-a").is_none());
+        gc.abort();
+    }
+
     #[test]
     fn batcher_connection_state_keeps_disconnect_until_node_delete() {
         let reg = Arc::new(MachineRegistry::new());

@@ -2162,3 +2162,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused worker and streaming map tests pin the observer-visible shape: the
   active `/map` stream waits for the map-batcher tick and then receives only the
   `PeersRemoved` delta for the deleted router.
+
+## 2026-06-02 CLI nodes list user output parity
+
+- `headscale nodes list --user` missing-value preflight now uses the shared
+  upstream-style error formatter, so `-o json`, `-ojson-line`, and
+  `--output=yaml` produce the same structured stderr envelopes as current
+  upstream headscale-go `171fd7a3`.
+- Added focused process snapshots for the three structured forms while
+  preserving the existing human `Error: flag needs an argument: --user` output.

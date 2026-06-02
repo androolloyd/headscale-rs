@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 02:17 ADT
+Updated: 2026-06-02 09:21 ADT
 
 ## Current State
 
@@ -16,6 +16,11 @@ Updated: 2026-06-02 02:17 ADT
 
 Recent accepted slices:
 
+- Current map-churn slice suppresses stale NodeStore worker upsert churn when a
+  same-batch delete removes the node before the batch completes. Upsert-style
+  map-change wakes now revalidate final node presence, and focused registry plus
+  `Stream:true` tests prove observers receive only the delayed `PeersRemoved`
+  delta after the map-batcher tick.
 - Current map-churn slice aligns direct admin expiry/logout with
   headscale-go `SetNodeExpiry`: live observers receive `node added`
   full-peer updates, while scheduled expiry scanning remains the

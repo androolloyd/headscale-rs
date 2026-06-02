@@ -1766,3 +1766,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   500/code 2.
 - Added gRPC and gateway regressions for create/full-token versus list/masked
   token behavior and the missing-user status mapping.
+
+## 2026-06-02 SSH check auth pair-binding parity slice
+
+- SSH check-mode auth sessions and check-period auto-approval now match
+  headscale-go's `(src_node_id, dst_node_id)` binding. `local_user` remains in
+  the client callback URL but is no longer part of the server-side auth binding
+  or last-auth cache key.
+- Server-side check-period lookup now mirrors headscale-go's
+  `SSHCheckParams`: first matching `check` rule by source node and destination
+  node wins, without trusting or evaluating the callback `local_user` parameter.
+- Added regressions for changed-local-user follow-up acceptance, pair-scoped
+  check-period cache reuse, unchanged rejection for different src/dst pairs,
+  and the existing policy-generation invalidation path.

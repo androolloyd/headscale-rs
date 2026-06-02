@@ -1448,7 +1448,7 @@ fn new_ping_id() -> String {
 /// 24-character registration ID.
 pub struct RegistrationCache {
     inner: RwLock<BTreeMap<String, Arc<RegistrationEntry>>>,
-    last_ssh_auth: RwLock<BTreeMap<SshCheckBinding, SshAuthRecord>>,
+    last_ssh_auth: RwLock<BTreeMap<SshCheckPair, SshAuthRecord>>,
     expiration: Duration,
     cleanup: Duration,
     max_entries: usize,
@@ -1471,6 +1471,25 @@ pub struct SshCheckBinding {
     pub src_node_id: u64,
     pub dst_node_id: u64,
     pub local_user: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+struct SshCheckPair {
+    src_node_id: u64,
+    dst_node_id: u64,
+}
+
+impl SshCheckBinding {
+    fn pair(&self) -> SshCheckPair {
+        SshCheckPair {
+            src_node_id: self.src_node_id,
+            dst_node_id: self.dst_node_id,
+        }
+    }
+
+    pub fn matches_pair(&self, other: &Self) -> bool {
+        self.pair() == other.pair()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1745,12 +1764,12 @@ impl RegistrationCache {
 
     pub fn record_ssh_auth(
         &self,
-        binding: SshCheckBinding,
+        binding: &SshCheckBinding,
         now: Instant,
         policy_updated_at: Option<i64>,
     ) {
         self.last_ssh_auth.write().insert(
-            binding,
+            binding.pair(),
             SshAuthRecord {
                 at: now,
                 policy_updated_at,
@@ -1765,7 +1784,7 @@ impl RegistrationCache {
     ) -> Option<Instant> {
         self.last_ssh_auth
             .read()
-            .get(binding)
+            .get(&binding.pair())
             .filter(|record| record.policy_updated_at == policy_updated_at)
             .map(|record| record.at)
     }

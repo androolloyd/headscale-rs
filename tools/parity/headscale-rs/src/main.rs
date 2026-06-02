@@ -798,6 +798,7 @@ fn main() -> Result<()> {
 #[derive(Debug)]
 struct FilterNode {
     id: u64,
+    user_id: u64,
     user: Option<String>,
     addrs: Vec<String>,
     tags: Vec<String>,
@@ -831,6 +832,7 @@ fn build_filter_nodes(scenario: &Scenario) -> Result<Vec<FilterNode>> {
             }
             Ok(FilterNode {
                 id: node.id,
+                user_id: node.user_id,
                 user: users.get(&node.user_id).cloned(),
                 addrs,
                 tags: node.tags.clone(),
@@ -1020,6 +1022,7 @@ fn run_ssh_checks(
         .map(|node| SshPolicyNode {
             id: node.id,
             user: node.user.clone(),
+            user_id: Some(node.user_id),
             addrs: node.addrs.clone(),
             tags: node.tags.clone(),
         })

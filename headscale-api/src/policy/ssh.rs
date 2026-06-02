@@ -119,7 +119,6 @@ pub fn ssh_check_period_for(
     nodes: &[SshPolicyNode],
     src_node_id: u64,
     dst_node_id: u64,
-    local_user: &str,
 ) -> Option<Duration> {
     if doc.ssh.is_empty() {
         return None;
@@ -135,15 +134,6 @@ pub fn ssh_check_period_for(
         if !source_nodes.iter().any(|node| node.id == src_node.id) {
             continue;
         }
-        let ssh_user_rules = ssh_user_rules(&rule.users, &source_nodes);
-        if !ssh_user_rules
-            .iter()
-            .filter(|rule| rule.source_node_ids.contains(&src_node_id))
-            .any(|rule| ssh_user_rule_allows_local_user(rule, local_user))
-        {
-            continue;
-        }
-
         for dst in &rule.dst {
             if dst == "autogroup:self" {
                 if same_ssh_user_owner(src_node, dst_node) {
@@ -159,21 +149,6 @@ pub fn ssh_check_period_for(
     }
 
     None
-}
-
-fn ssh_user_rule_allows_local_user(rule: &SshUserRule, local_user: &str) -> bool {
-    if local_user.is_empty() {
-        return false;
-    }
-    if let Some(target) = rule.ssh_users.get(local_user) {
-        return !target.is_empty();
-    }
-    if local_user != "root"
-        && let Some(target) = rule.ssh_users.get("*")
-    {
-        return !target.is_empty();
-    }
-    false
 }
 
 fn push_ssh_rules_for_nodes(
@@ -851,10 +826,10 @@ mod tests {
             vec!["100.64.0.1", "100.64.0.2"]
         );
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2, "root"),
+            ssh_check_period_for(&doc, &nodes, 1, 2),
             Some(Duration::from_secs(60 * 60))
         );
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
     }
 
     #[test]
@@ -899,8 +874,8 @@ mod tests {
 
         assert_eq!(pol.rules.len(), 1);
         assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.2"]);
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, "root"), None);
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
     }
 
     #[test]
@@ -945,10 +920,9 @@ mod tests {
             "https://headscale.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
         );
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2, "admin"),
+            ssh_check_period_for(&doc, &nodes, 1, 2),
             Some(Duration::from_secs(24 * 60 * 60))
         );
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, "root"), None);
     }
 
     #[test]
@@ -1078,7 +1052,7 @@ mod tests {
         ];
 
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2, "admin"),
+            ssh_check_period_for(&doc, &nodes, 1, 2),
             Some(Duration::from_secs(90 * 60))
         );
     }

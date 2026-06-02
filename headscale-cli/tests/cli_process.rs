@@ -5002,7 +5002,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
     let preauth_json = json_output(&preauth_json);
     let listed_preauth = &preauth_json[0];
-    assert_eq!(listed_preauth["key"].as_str(), Some(preauth_key.as_str()));
+    let expected_listed_preauth_key = display_prefix(&preauth_key, "hskey-auth-");
+    assert_eq!(
+        listed_preauth["key"].as_str(),
+        Some(expected_listed_preauth_key.as_str())
+    );
     assert_eq!(listed_preauth["user"]["name"].as_str(), Some("alice"));
     assert_eq!(listed_preauth["reusable"].as_bool(), Some(true));
     assert_eq!(listed_preauth["ephemeral"].as_bool(), Some(true));
@@ -5158,9 +5162,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let listed_preauth_json_line: serde_json::Value =
         serde_json::from_slice(&list_preauth_json_line.stdout).unwrap();
     let listed_preauth_json_line = &listed_preauth_json_line[0];
+    let created_preauth_json_line_key = created_preauth_json_line["key"].as_str().unwrap();
+    let expected_listed_preauth_json_line_key =
+        display_prefix(created_preauth_json_line_key, "hskey-auth-");
     assert_eq!(
         listed_preauth_json_line["key"].as_str(),
-        created_preauth_json_line["key"].as_str()
+        Some(expected_listed_preauth_json_line_key.as_str())
     );
     assert_eq!(
         listed_preauth_json_line["user"]["name"].as_str(),
@@ -5271,9 +5278,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let list_preauth_yaml = headscale_with_config(&config, &["-o", "yaml", "preauthkeys", "list"]);
     let listed_preauth_yaml = yaml_output(&list_preauth_yaml);
     let listed_preauth_yaml = &listed_preauth_yaml[0];
+    let created_preauth_yaml_key = created_preauth_yaml["key"].as_str().unwrap();
+    let expected_listed_preauth_yaml_key = display_prefix(created_preauth_yaml_key, "hskey-auth-");
     assert_eq!(
         listed_preauth_yaml["key"].as_str(),
-        created_preauth_yaml["key"].as_str()
+        Some(expected_listed_preauth_yaml_key.as_str())
     );
     assert_eq!(listed_preauth_yaml["user"]["name"].as_str(), Some("alice"));
     assert_eq!(listed_preauth_yaml["reusable"].as_bool(), Some(true));
@@ -6140,7 +6149,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--expiration",
             "1h",
         ],
-        5,
+        6,
         include_str!("snapshots/grpc_live_preauth_missing_user_json_line.stderr"),
     );
     assert_config_stderr_snapshot(

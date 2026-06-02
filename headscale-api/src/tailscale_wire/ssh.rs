@@ -57,12 +57,9 @@ pub(crate) async fn handle_ssh_action(
         local_user: query.local_user.unwrap_or_default(),
     };
     let ssh_nodes = ssh_policy_nodes_from_snapshot(&snapshot);
-    let check_period = state.policy.ssh_check_period_for(
-        &ssh_nodes,
-        src_node_id,
-        dst_node_id,
-        &binding.local_user,
-    );
+    let check_period = state
+        .policy
+        .ssh_check_period_for(&ssh_nodes, src_node_id, dst_node_id);
 
     if let Some(auth_id) = query.auth_id.as_deref() {
         return ssh_action_followup(
@@ -121,7 +118,7 @@ async fn ssh_action_followup(
         }
         None => return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id"),
     };
-    if cached_binding != binding {
+    if !cached_binding.matches_pair(&binding) {
         return ssh_error(
             StatusCode::UNAUTHORIZED,
             "src/dst pair does not match auth session",
@@ -144,7 +141,7 @@ async fn ssh_action_followup(
         AuthWaitOutcome::Accepted => {
             if check_found {
                 state.registration_cache.record_ssh_auth(
-                    binding,
+                    &binding,
                     Instant::now(),
                     state.policy.updated_at(),
                 );
@@ -673,6 +670,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_action_followup_accepts_changed_local_user_for_same_pair_like_headscale_go() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+        state.registration_cache.insert_ssh_check(
+            raw_auth_id.into(),
+            SshCheckBinding {
+                src_node_id: src,
+                dst_node_id: dst,
+                local_user: "root".into(),
+            },
+        );
+        assert!(state.registration_cache.approve_without_node(raw_auth_id));
+
+        let resp = inner_router(state)
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?local_user=deploy&auth_id=hskey-authreq-{raw_auth_id}"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let action: SshAction = serde_json::from_slice(&body).unwrap();
+        assert!(action.accept);
+        assert!(!action.reject);
+    }
+
+    #[tokio::test]
     async fn ssh_action_auto_approval_is_bound_to_policy_generation() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
@@ -683,7 +711,7 @@ mod tests {
             local_user: "root".into(),
         };
         state.registration_cache.record_ssh_auth(
-            binding,
+            &binding,
             Instant::now(),
             state.policy.updated_at(),
         );
@@ -729,7 +757,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_action_check_period_cache_is_bound_to_local_user() {
+    async fn ssh_action_check_period_cache_is_bound_to_pair_not_local_user() {
         let (state, _dir) = fixture();
         let raw_policy = r#"{
           "ssh": [{
@@ -746,12 +774,13 @@ mod tests {
         );
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
         let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let binding = SshCheckBinding {
+            src_node_id: src,
+            dst_node_id: dst,
+            local_user: "root".into(),
+        };
         state.registration_cache.record_ssh_auth(
-            SshCheckBinding {
-                src_node_id: src,
-                dst_node_id: dst,
-                local_user: "root".into(),
-            },
+            &binding,
             Instant::now(),
             state.policy.updated_at(),
         );
@@ -766,8 +795,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let action: SshAction = serde_json::from_slice(&body).unwrap();
-        assert!(!action.accept);
+        assert!(action.accept);
         assert!(!action.reject);
-        assert!(action.hold_and_delegate.contains("auth_id=hskey-authreq-"));
+        assert!(action.hold_and_delegate.is_empty());
     }
 }

@@ -1608,6 +1608,32 @@ fn utility_missing_global_flag_values_match_current_upstream_cobra() {
 }
 
 #[test]
+fn utility_global_flags_consume_help_as_values_like_current_upstream_cobra() {
+    assert_stderr_snapshot(
+        &["configtest", "--output", "--help"],
+        1,
+        include_str!("snapshots/configtest_output_consumed_help.stderr"),
+    );
+
+    for args in [
+        &["health", "--config", "--help"][..],
+        &["dumpConfig", "--config", "--help"][..],
+        &["serve", "--config", "--help"][..],
+    ] {
+        assert_stderr_snapshot(
+            args,
+            1,
+            include_str!("snapshots/utility_config_consumed_help.stderr"),
+        );
+    }
+
+    let version = headscale_clean(&["version", "--output", "--help"]);
+    assert!(version.status.success(), "stderr: {}", stderr(&version));
+    assert!(stdout(&version).starts_with("headscale version "));
+    assert_eq!(stderr(&version), "");
+}
+
+#[test]
 fn utility_skip_config_commands_reject_late_global_flags_like_current_upstream_cobra() {
     assert_stderr_snapshot(
         &["version", "--config", "missing.yaml"],

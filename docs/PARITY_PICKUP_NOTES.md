@@ -1573,3 +1573,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   existing web-registration restart row and the no-restart web-registration
   route-approval row; the Postgres stock-client matrix now has eighty-nine
   rows.
+
+## 2026-06-02 CLI consumed-help value parity slice
+
+- Global `--config` and `--output` now accept hyphen-prefixed values like
+  current-upstream Cobra, so `--help` is consumed as the flag value for forms
+  such as `health --config --help`, `serve --config --help`,
+  `configtest --output --help`, and `version --output --help`.
+- The raw help pre-parser now only emits static help when `-h`/`--help` is an
+  unconsumed help flag, preserving the existing upstream help snapshots for
+  forms such as `health --config missing.yaml --help`.
+- Focused process snapshots cover the consumed-help config/configtest cases,
+  while version coverage asserts the upstream human fallback output.

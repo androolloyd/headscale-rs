@@ -158,7 +158,12 @@ pub struct ConnectArgs {
     )]
     pub insecure: bool,
     /// Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'.
-    #[arg(short = 'o', long = "output", global = true)]
+    #[arg(
+        short = 'o',
+        long = "output",
+        global = true,
+        allow_hyphen_values = true
+    )]
     pub output: Option<String>,
     /// Disable prompts and forces the execution.
     #[arg(long, global = true)]

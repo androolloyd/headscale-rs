@@ -44,7 +44,13 @@ use headscale_db::DatabaseBackend;
 #[command(disable_version_flag = true)]
 struct Cli {
     /// config file (default is /etc/headscale/config.yaml).
-    #[arg(short, long, env = "HEADSCALE_CONFIG", global = true)]
+    #[arg(
+        short,
+        long,
+        env = "HEADSCALE_CONFIG",
+        global = true,
+        allow_hyphen_values = true
+    )]
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
@@ -1477,8 +1483,32 @@ fn private_key_help_tail(tail: &[&str]) -> bool {
 
 fn utility_help_tail(tail: &[&str], scope: UtilityFlagScope) -> bool {
     !tail.is_empty()
-        && tail.iter().any(|arg| matches!(*arg, "-h" | "--help"))
+        && tail_has_unconsumed_help(tail, scope)
         && first_unknown_flag(tail, scope).is_none()
+}
+
+fn tail_has_unconsumed_help(tail: &[&str], scope: UtilityFlagScope) -> bool {
+    let mut i = 0;
+    while i < tail.len() {
+        match (scope, tail[i]) {
+            (_, "-h" | "--help") => return true,
+            (
+                UtilityFlagScope::Version
+                | UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                "-o" | "--output",
+            )
+            | (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                "-c" | "--config",
+            ) if i + 1 < tail.len() => i += 2,
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn mockoidc_help_tail(tail: &[&str]) -> bool {
@@ -3166,6 +3196,7 @@ mod tests {
             upstream_exact_help(&["health", "--config", "missing.yaml", "--help"]),
             Some(UPSTREAM_HEALTH_HELP)
         );
+        assert_eq!(upstream_exact_help(&["health", "--config", "--help"]), None);
         assert_eq!(
             upstream_exact_help(&["health", "-o", "json", "--help"]),
             Some(UPSTREAM_HEALTH_HELP)
@@ -3179,8 +3210,16 @@ mod tests {
             Some(UPSTREAM_CONFIGTEST_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["configtest", "--output", "--help"]),
+            None
+        );
+        assert_eq!(
             upstream_exact_help(&["dumpConfig", "--config=missing.yaml", "--help"]),
             Some(UPSTREAM_DUMP_CONFIG_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["dumpConfig", "--config", "--help"]),
+            None
         );
         assert_eq!(
             upstream_exact_help(&["dumpConfig", "--force", "--help"]),

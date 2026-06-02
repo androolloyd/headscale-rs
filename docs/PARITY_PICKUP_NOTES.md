@@ -236,6 +236,11 @@ Recent accepted slices:
   the same production server URL, and assert the post-reload peer visibility
   remains hydrated after reconnect. The checked-in Postgres stock-client matrix
   now has one hundred one rows.
+- This slice also promotes the existing paired
+  `postgres-oidc-policy-churn-restart` row into the bounded push/PR smoke set.
+  It covers production Postgres OIDC registration, file-policy mutation via
+  SIGHUP, stock-client peer/profile convergence, and server restart hydration
+  against Rust and headscale-go.
 
 Current multi-agent split:
 

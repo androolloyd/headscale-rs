@@ -891,7 +891,8 @@ auth-key viewer plus OIDC peer under a file policy, reload the policy with
 `SIGHUP` to expose the peer/profile, restart the production server, and assert
 both clients reconnect with the viewer still seeing the OIDC peer/profile. The
 row is wired through `tools/real-client/smoke-matrix.sh --check
-postgres-oidc-policy-churn-restart --both`.
+postgres-oidc-policy-churn-restart --both` and selected by the bounded PR/push
+real-client CI smoke set.
 
 Recent coverage note (2026-06-02): CI harness metadata now records formal
 verification status through `scripts/check_formal_status.sh`. When

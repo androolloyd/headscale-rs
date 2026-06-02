@@ -233,6 +233,7 @@ fn policy_check_node_from_machine(
 ) -> PolicyCheckNode {
     PolicyCheckNode {
         id: machine_numeric_id(machine),
+        user_id: machine.user_id,
         name: machine.name.clone(),
         user: (!machine.user.is_empty()).then(|| machine.user.clone()),
         addrs: node_ip_addresses(machine),

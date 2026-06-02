@@ -621,6 +621,7 @@ pub mod upstream {
                 id: node_key,
                 name: name.to_string(),
                 user: user.to_string(),
+                user_id: None,
                 online: false,
                 last_seen: now,
                 created_at: now,
@@ -1581,6 +1582,7 @@ pub mod upstream {
             false,
         );
         record.node_id = (machine.node_id != 0).then_some(machine.node_id);
+        record.user_id = machine.user_id;
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1604,6 +1606,7 @@ pub mod upstream {
         record.node_key_hex.clone_from(&machine.id);
         record.machine_key_hex.clone_from(&machine.machine_key_hex);
         record.user.clone_from(&machine.user);
+        record.user_id = machine.user_id;
         record.hostname.clone_from(&machine.name);
         record.ipv4 = machine.ipv4.parse().ok().or_else(|| {
             machine
@@ -1641,6 +1644,7 @@ pub mod upstream {
             id: record.node_key_hex,
             name: record.hostname,
             user: record.user,
+            user_id: record.user_id,
             ipv4: record.ipv4.map(|ip| ip.to_string()).unwrap_or_default(),
             ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
             online: !expired,
@@ -1737,6 +1741,7 @@ pub mod upstream {
     fn policy_check_node_from_machine(machine: &MachineAdminRecord) -> PolicyCheckNode {
         PolicyCheckNode {
             id: machine_numeric_id(machine),
+            user_id: machine.user_id,
             name: machine.name.clone(),
             user: (!machine.user.is_empty()).then(|| machine.user.clone()),
             addrs: node_ip_addresses(machine),
@@ -2033,6 +2038,57 @@ pub mod upstream {
 
     fn upstream_user_not_empty_status() -> Status {
         Status::unknown("user not empty: node(s) found")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn machine_admin_wire_conversions_preserve_numeric_user_id() {
+            let machine = MachineAdminRecord {
+                node_id: 123,
+                id: "aa".repeat(32),
+                name: "alice-laptop".into(),
+                user: "alice".into(),
+                user_id: Some(42),
+                ipv4: "100.64.0.7".into(),
+                ipv6: None,
+                online: true,
+                last_seen: 1_780_000_000,
+                created_at: 1_780_000_000,
+                expiry: None,
+                machine_key_hex: "bb".repeat(32),
+                disco_key: "discokey:abc".into(),
+                os: "linux".into(),
+                version: "1.80.0".into(),
+                tags: Vec::new(),
+                routes: Vec::new(),
+                approved_routes: Vec::new(),
+                register_method: RegisterMethod::Cli as i32,
+                expired: false,
+            };
+
+            let record = machine_admin_to_wire_record(&machine);
+            assert_eq!(record.user_id, Some(42));
+            assert_eq!(wire_record_to_machine_admin(record).user_id, Some(42));
+
+            let mut pending = MachineRecord::new_at(
+                Utc::now(),
+                machine.id.clone(),
+                machine.machine_key_hex.clone(),
+                "pending-user".into(),
+                "pending-name".into(),
+                Ipv4Addr::new(100, 64, 0, 99),
+                false,
+            );
+            pending.user_id = Some(7);
+
+            let overlay = machine_admin_to_wire_record_with_pending(&machine, &pending);
+            assert_eq!(overlay.user, "alice");
+            assert_eq!(overlay.user_id, Some(42));
+            assert_eq!(overlay.hostname, "alice-laptop");
+        }
     }
 }
 
@@ -4790,6 +4846,7 @@ mod upstream_tests {
             id: "dd".repeat(32),
             name: "bob-laptop".into(),
             user: "bob".into(),
+            user_id: None,
             ipv4: "100.64.0.7".into(),
             ipv6: None,
             online: true,

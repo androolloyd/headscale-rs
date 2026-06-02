@@ -16,6 +16,7 @@ use ipnet::IpNet;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyCheckNode {
     pub id: u64,
+    pub user_id: Option<u64>,
     pub name: String,
     pub user: Option<String>,
     pub addrs: Vec<String>,
@@ -27,6 +28,7 @@ struct Endpoint {
     id: Option<u64>,
     label: String,
     addr: String,
+    user_id: Option<u64>,
     user: Option<String>,
     tags: Vec<String>,
 }
@@ -378,10 +380,7 @@ fn ssh_localpart_self_access_matches(
         return source_endpoints
             .iter()
             .any(|candidate| endpoint_matches_endpoint(candidate, src))
-            && src.tags.is_empty()
-            && src.user.as_deref().is_some_and(|user| !user.is_empty())
-            && dst.user.as_deref().is_some_and(|user| !user.is_empty())
-            && src.user == dst.user;
+            && same_user_untagged_endpoint_node(src, dst);
     }
 
     endpoint_matches_node(src, dst)
@@ -496,7 +495,9 @@ fn resolve_alias(
     let mut out = Vec::new();
     resolve_alias_inner(doc, nodes, token.trim(), src, &mut seen, &mut out);
     out.sort_by(|a, b| a.label.cmp(&b.label).then(a.addr.cmp(&b.addr)));
-    out.dedup_by(|a, b| a.addr == b.addr && a.user == b.user && a.tags == b.tags);
+    out.dedup_by(|a, b| {
+        a.addr == b.addr && a.user_id == b.user_id && a.user == b.user && a.tags == b.tags
+    });
     out
 }
 
@@ -559,13 +560,10 @@ fn resolve_alias_inner(
             }
             "self" => {
                 if let Some(src) = src {
-                    for node in nodes.iter().filter(|node| {
-                        node.tags.is_empty()
-                            && src.tags.is_empty()
-                            && node.user.as_deref().is_some_and(|user| !user.is_empty())
-                            && src.user.as_deref().is_some_and(|user| !user.is_empty())
-                            && node.user.as_deref() == src.user.as_deref()
-                    }) {
+                    for node in nodes
+                        .iter()
+                        .filter(|node| same_user_untagged_endpoint_node(src, node))
+                    {
                         push_node_addrs(node, out);
                     }
                 }
@@ -626,6 +624,7 @@ fn push_node_addrs(node: &PolicyCheckNode, out: &mut Vec<Endpoint>) {
             id: Some(node.id),
             label: node.name.clone(),
             addr: addr.clone(),
+            user_id: node.user_id,
             user: node.user.clone(),
             tags: node.tags.clone(),
         });
@@ -640,6 +639,7 @@ fn push_synthetic_prefix(label: &str, prefix: &str, out: &mut Vec<Endpoint>) {
         id: None,
         label: label.to_string(),
         addr: net.addr().to_string(),
+        user_id: None,
         user: None,
         tags: Vec::new(),
     });
@@ -688,7 +688,43 @@ fn parse_test_port(port: &str) -> Result<u16, String> {
 }
 
 fn is_untagged_user_owned(node: &PolicyCheckNode) -> bool {
-    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
+    node.tags.is_empty() && node_owner_key(node).is_some()
+}
+
+fn same_user_untagged_endpoint_node(src: &Endpoint, dst: &PolicyCheckNode) -> bool {
+    if !src.tags.is_empty() || !dst.tags.is_empty() {
+        return false;
+    }
+
+    match (endpoint_owner_key(src), node_owner_key(dst)) {
+        (Some(src_owner), Some(dst_owner)) => src_owner == dst_owner,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NodeOwnerKey<'a> {
+    Id(u64),
+    User(&'a str),
+}
+
+fn endpoint_owner_key(endpoint: &Endpoint) -> Option<NodeOwnerKey<'_>> {
+    endpoint.user_id.map(NodeOwnerKey::Id).or_else(|| {
+        endpoint
+            .user
+            .as_deref()
+            .filter(|user| !user.is_empty())
+            .map(NodeOwnerKey::User)
+    })
+}
+
+fn node_owner_key(node: &PolicyCheckNode) -> Option<NodeOwnerKey<'_>> {
+    node.user_id.map(NodeOwnerKey::Id).or_else(|| {
+        node.user
+            .as_deref()
+            .filter(|user| !user.is_empty())
+            .map(NodeOwnerKey::User)
+    })
 }
 
 fn user_matches(entry: &str, user: &str) -> bool {
@@ -706,10 +742,22 @@ mod tests {
     use crate::policy::parse_hujson_policy;
 
     fn node(id: u64, name: &str, user: &str, addr: &str, tags: &[&str]) -> PolicyCheckNode {
+        node_with_user_id(id, name, None, Some(user), addr, tags)
+    }
+
+    fn node_with_user_id(
+        id: u64,
+        name: &str,
+        user_id: Option<u64>,
+        user: Option<&str>,
+        addr: &str,
+        tags: &[&str],
+    ) -> PolicyCheckNode {
         PolicyCheckNode {
             id,
+            user_id,
             name: name.to_string(),
-            user: Some(user.to_string()),
+            user: user.map(str::to_string),
             addrs: vec![addr.to_string()],
             tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         }
@@ -847,6 +895,57 @@ mod tests {
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_resolve_autogroup_self_by_numeric_user_id() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "ssh": [
+                    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["autogroup:self"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node_with_user_id(1, "alice-a", Some(7), Some("alice"), "100.64.0.1", &[]),
+            node_with_user_id(2, "alice-b", Some(7), None, "100.64.0.2", &[]),
+            node_with_user_id(
+                3,
+                "tagged",
+                Some(7),
+                Some("alice"),
+                "100.64.0.3",
+                &["tag:client"],
+            ),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn ssh_tests_do_not_resolve_autogroup_self_by_label_when_user_ids_differ() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "ssh": [
+                    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["alice@"], "accept": ["root"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node_with_user_id(1, "alice-a", Some(7), Some("alice"), "100.64.0.1", &[]),
+            node_with_user_id(2, "alice-b", Some(8), Some("alice"), "100.64.0.2", &[]),
+        ];
+
+        let err = check_policy_semantics(&doc, &nodes).unwrap_err();
+        assert!(err.contains("alice@/root -> alice-b: expected ALLOWED, got DENIED"));
     }
 
     #[test]

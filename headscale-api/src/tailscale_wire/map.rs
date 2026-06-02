@@ -907,6 +907,7 @@ fn ssh_policy_nodes_from_snapshot(
         .iter()
         .map(|(node_hex, rec)| SshPolicyNode {
             id: rec.stable_node_id_for_key(node_hex),
+            user_id: rec.user_id,
             user: if rec.user.is_empty() {
                 None
             } else {
@@ -3095,6 +3096,21 @@ mod tests {
         assert_eq!(profile.login_name, "alice@example.com");
         assert_eq!(profile.display_name, "Alice Example");
         assert_eq!(profile.profile_pic_url, "https://example.com/alice.png");
+    }
+
+    #[test]
+    fn ssh_policy_nodes_from_snapshot_preserves_numeric_user_id() {
+        let node = "ac".repeat(32);
+        let mut record = policy_record(&node, "alice-node", 10, "alice-renamed", Vec::new());
+        record.user_id = Some(42);
+        let snapshot = HashMap::from([(node.clone(), record)]);
+
+        let nodes = ssh_policy_nodes_from_snapshot(&snapshot);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, stable_id_from_key(&node));
+        assert_eq!(nodes[0].user_id, Some(42));
+        assert_eq!(nodes[0].user.as_deref(), Some("alice-renamed"));
     }
 
     #[tokio::test]

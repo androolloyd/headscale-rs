@@ -1208,6 +1208,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             user: "user".to_string(),
+            user_id: None,
             ipv4: "100.64.0.1".to_string(),
             ipv6: None,
             online: true,

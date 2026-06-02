@@ -96,6 +96,11 @@ pub struct MachineAdminRecord {
     /// Hostname the client advertised (may be empty).
     pub name: String,
     pub user: String,
+    /// Upstream numeric owner ID. Persistent stores populate this from
+    /// `nodes.user_id`; volatile records may leave it unset and fall
+    /// back to login-name matching in policy-only contexts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<u64>,
     /// Allocated tailnet IPv4 (string form for stable JSON).
     pub ipv4: String,
     /// Optional allocated tailnet IPv6. Persistent DB-backed nodes can
@@ -359,6 +364,7 @@ impl WireMachineAdmin {
             id: id.to_string(),
             name: rec.hostname.clone(),
             user: rec.user.clone(),
+            user_id: rec.user_id,
             ipv4: rec.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
             ipv6: rec.ipv6.map(|addr| addr.to_string()),
             online: online && !is_expired,
@@ -903,6 +909,7 @@ impl PersistentMachineAdmin {
             id: node_key_hex,
             name,
             user: user_identity.login_name,
+            user_id: user_identity.id,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
             online: live.map_or(!expired, |(online, _)| online && !expired),
@@ -1405,6 +1412,7 @@ impl PersistentPostgresMachineAdmin {
             id: node_key_hex,
             name,
             user: user_identity.login_name,
+            user_id: user_identity.id,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
             online: live.map_or(!expired, |(online, _)| online && !expired),
@@ -2975,6 +2983,7 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
         id: record.node_key_hex.clone(),
         name: record.hostname.clone(),
         user: record.user.clone(),
+        user_id: record.user_id,
         ipv4: record.ipv4.map(|addr| addr.to_string()).unwrap_or_default(),
         ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
         online: !expired,
@@ -3017,6 +3026,7 @@ fn machine_admin_record_to_wire(
         false,
     );
     record.node_id = (machine.node_id != 0).then_some(machine.node_id);
+    record.user_id = machine.user_id;
     record.expiry = machine
         .expiry
         .map(|expiry| unix_timestamp_for_record(expiry, &machine.id, "expiry"))
@@ -3518,6 +3528,7 @@ mod tests {
             id: id.clone(),
             name: "debug-node".into(),
             user: "alice".into(),
+            user_id: None,
             ipv4: "100.64.0.44".into(),
             ipv6: Some("fd7a:115c:a1e0::44".into()),
             online: false,
@@ -3625,6 +3636,7 @@ mod tests {
             id: "aa".repeat(32),
             name: "alice-laptop".into(),
             user: "alice".into(),
+            user_id: None,
             ipv4: "100.64.0.9".into(),
             ipv6: None,
             online: true,

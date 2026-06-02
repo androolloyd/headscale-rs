@@ -11,6 +11,7 @@ use crate::tailscale_wire::wire::{SshAction, SshPolicy, SshPrincipal, SshRule};
 pub struct SshPolicyNode {
     pub id: u64,
     pub user: Option<String>,
+    pub user_id: Option<u64>,
     pub addrs: Vec<String>,
     pub tags: Vec<String>,
 }
@@ -145,10 +146,7 @@ pub fn ssh_check_period_for(
 
         for dst in &rule.dst {
             if dst == "autogroup:self" {
-                if is_untagged_user_owned(src_node)
-                    && is_untagged_user_owned(dst_node)
-                    && src_node.user == dst_node.user
-                {
+                if same_ssh_user_owner(src_node, dst_node) {
                     return Some(check_period_from_rule(rule.check_period.as_deref()));
                 }
                 continue;
@@ -393,16 +391,28 @@ fn same_user_untagged_nodes<'a>(
     nodes: &'a [&'a SshPolicyNode],
     node: &SshPolicyNode,
 ) -> Vec<&'a SshPolicyNode> {
-    let Some(user) = node.user.as_deref().filter(|user| !user.is_empty()) else {
-        return Vec::new();
-    };
-
     nodes
         .iter()
         .copied()
-        .filter(|candidate| is_untagged_user_owned(candidate))
-        .filter(|candidate| candidate.user.as_deref() == Some(user))
+        .filter(|candidate| same_ssh_user_owner(candidate, node))
         .collect()
+}
+
+fn same_ssh_user_owner(left: &SshPolicyNode, right: &SshPolicyNode) -> bool {
+    if !is_untagged_user_owned(left) || !is_untagged_user_owned(right) {
+        return false;
+    }
+
+    match (left.user_id, right.user_id) {
+        (Some(left_id), Some(right_id)) => left_id == right_id,
+        (None, None) => {
+            let Some(left_user) = left.user.as_deref().filter(|user| !user.is_empty()) else {
+                return false;
+            };
+            right.user.as_deref().filter(|user| !user.is_empty()) == Some(left_user)
+        }
+        _ => false,
+    }
 }
 
 fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshUserRule> {
@@ -665,7 +675,8 @@ fn localpart_for_user(user: &str, domains: &[String]) -> Option<String> {
 }
 
 fn is_untagged_user_owned(node: &SshPolicyNode) -> bool {
-    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
+    node.tags.is_empty()
+        && (node.user_id.is_some() || node.user.as_deref().is_some_and(|user| !user.is_empty()))
 }
 
 fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
@@ -713,12 +724,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("bob".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -753,24 +766,28 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("user1".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("user1".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 3,
                 user: Some("user2".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.3".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 4,
                 user: Some("user3".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.4".into()],
                 tags: Vec::new(),
             },
@@ -786,6 +803,104 @@ mod tests {
         );
         assert_eq!(principal_ips(&user2_target), vec!["100.64.0.3"]);
         assert_eq!(principal_ips(&user3_target), vec!["100.64.0.4"]);
+    }
+
+    #[test]
+    fn autogroup_self_matches_same_numeric_user_id_without_user_label_match() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "1h",
+                "src": ["autogroup:member"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                user_id: Some(42),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some(String::new()),
+                user_id: Some(42),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 3,
+                user: Some("tagged".into()),
+                user_id: Some(42),
+                addrs: vec!["100.64.0.3".into()],
+                tags: vec!["tag:client".into()],
+            },
+        ];
+
+        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(pol.rules.len(), 1);
+        assert_eq!(
+            principal_ips_for_rule(&pol.rules[0]),
+            vec!["100.64.0.1", "100.64.0.2"]
+        );
+        assert_eq!(
+            ssh_check_period_for(&doc, &nodes, 1, 2, "root"),
+            Some(Duration::from_secs(60 * 60))
+        );
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
+    }
+
+    #[test]
+    fn autogroup_self_does_not_match_different_numeric_user_ids_with_same_label() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "1h",
+                "src": ["autogroup:member"],
+                "dst": ["autogroup:self"],
+                "users": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                user_id: Some(1),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice".into()),
+                user_id: Some(2),
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 3,
+                user: Some("alice".into()),
+                user_id: None,
+                addrs: vec!["100.64.0.3".into()],
+                tags: Vec::new(),
+            },
+        ];
+
+        let pol = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+        assert_eq!(pol.rules.len(), 1);
+        assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.2"]);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, "root"), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
     }
 
     #[test]
@@ -808,12 +923,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("bob".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:db".into()],
             },
@@ -891,12 +1008,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -945,12 +1064,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("bob".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:db".into()],
             },
@@ -981,12 +1102,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -1015,12 +1138,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: vec!["tag:client".into(), "tag:admin".into()],
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -1051,24 +1176,28 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("bob@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 3,
                 user: Some("eve@other.example".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.3".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 4,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.4".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -1113,24 +1242,28 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 3,
                 user: Some("bob@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.3".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 4,
                 user: Some("bob@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.4".into()],
                 tags: Vec::new(),
             },
@@ -1174,12 +1307,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -1212,12 +1347,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("bob@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },
@@ -1258,24 +1395,28 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 3,
                 user: Some("bob@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.3".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 4,
                 user: Some("alice@example.com".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.4".into()],
                 tags: vec!["tag:server".into()],
             },
@@ -1309,6 +1450,7 @@ mod tests {
         let nodes = vec![SshPolicyNode {
             id: 1,
             user: Some("alice@example.com".into()),
+            user_id: None,
             addrs: vec!["100.64.0.1".into()],
             tags: vec!["tag:client".into(), "tag:admin".into()],
         }];
@@ -1347,12 +1489,14 @@ mod tests {
             SshPolicyNode {
                 id: 1,
                 user: Some("alice".into()),
+                user_id: None,
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
             },
             SshPolicyNode {
                 id: 2,
                 user: None,
+                user_id: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
             },

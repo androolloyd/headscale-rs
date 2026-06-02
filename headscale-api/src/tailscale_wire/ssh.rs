@@ -222,6 +222,7 @@ fn ssh_policy_nodes_from_snapshot(snapshot: &HashMap<String, MachineRecord>) -> 
         .iter()
         .map(|(node_key, record)| SshPolicyNode {
             id: record.stable_node_id_for_key(node_key),
+            user_id: record.user_id,
             user: if record.user.is_empty() {
                 None
             } else {

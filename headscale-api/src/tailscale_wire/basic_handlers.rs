@@ -2784,6 +2784,7 @@ fn ssh_policy_nodes_from_snapshot(
         .iter()
         .map(|(node_key, rec)| SshPolicyNode {
             id: stable_id_from_key(node_key),
+            user_id: rec.user_id,
             user: if rec.user.is_empty() {
                 None
             } else {

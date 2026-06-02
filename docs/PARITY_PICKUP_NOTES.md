@@ -1741,3 +1741,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   or conflicting selectors, but ID/prefix lookup failures now preserve
   headscale-go's raw API-key lookup errors as gRPC `Unknown` instead of
   wrapping them as `NotFound`.
+
+## 2026-06-02 SSH autogroup self numeric-owner parity slice
+
+- SSH policy compilation and SSH policy checks now preserve upstream numeric
+  owner IDs through `MachineAdminRecord`, policy-check nodes, and wire snapshot
+  SSH policy nodes.
+- `autogroup:self` owner matching now prefers numeric user IDs, matching
+  headscale-go's `node.User().ID()` behavior when login names are stale,
+  missing, or reused. Legacy login-name matching remains only as a fallback for
+  volatile records with no numeric owner ID.
+- Added regressions proving same numeric-owner nodes match without equal user
+  labels, equal labels with different numeric owners do not match, tagged nodes
+  remain excluded from `autogroup:self`, and map snapshot SSH policy nodes keep
+  the numeric owner ID.

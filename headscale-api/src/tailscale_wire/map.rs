@@ -379,6 +379,7 @@ fn select_routes_for_viewer(
         .get(peer_node_key)
         .cloned()
         .unwrap_or_default();
+    let global_primary = selected_primary.clone();
     let mut allowed_routes = selected_primary.clone();
     allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
 
@@ -399,9 +400,13 @@ fn select_routes_for_viewer(
         selected_primary.retain(|route| !via.exclude.contains(route));
         allowed_routes.retain(|route| !via.exclude.contains(route));
         for route in via.include {
+            let is_global_primary = global_primary.contains(&route);
+            if is_global_primary && !selected_primary.contains(&route) {
+                selected_primary.push(route.clone());
+            }
             if !allowed_routes.contains(&route) {
                 let use_primary = via.use_primary.contains(&route);
-                if !use_primary || selected_primary.contains(&route) {
+                if is_global_primary || !use_primary {
                     allowed_routes.push(route);
                 }
             }

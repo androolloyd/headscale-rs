@@ -2283,6 +2283,22 @@ randomize_client_port: true
         "configtest removed randomize_client_port",
     );
 
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), "").unwrap();
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_RANDOMIZE_CLIENT_PORT", "true")],
+    );
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_removed_randomize_client_port.stderr"),
+        "configtest removed randomize_client_port env override",
+    );
+
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"

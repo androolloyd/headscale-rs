@@ -643,6 +643,14 @@ impl CliConfig {
         for (key, value) in vars {
             let key = key.as_ref();
             let value = value.as_ref();
+            if key == "HEADSCALE_RANDOMIZE_CLIENT_PORT" {
+                bail!(
+                    "{}",
+                    removed_config_key_message(removed_config_key_by_display(
+                        "randomize_client_port"
+                    ))
+                );
+            }
             if value.is_empty() {
                 continue;
             }
@@ -2202,6 +2210,14 @@ fn reject_removed_oidc_env_keys(vars: &[(String, String)]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn removed_config_key_by_display(display: &str) -> RemovedConfigKey {
+    REMOVED_CONFIG_KEYS
+        .iter()
+        .copied()
+        .find(|key| key.display == display)
+        .expect("removed config key is registered")
 }
 
 fn removed_config_key_message(key: RemovedConfigKey) -> String {
@@ -5057,6 +5073,20 @@ oidc:
     fn rejects_removed_randomize_client_port_config_key() {
         let err =
             CliConfig::parse(r#"{"randomize_client_port":true}"#, ConfigFormat::Json).unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("randomize_client_port"));
+        assert!(err.contains("randomizeClientPort"));
+        assert!(err.contains("nodeAttrs"));
+    }
+
+    #[test]
+    fn rejects_removed_randomize_client_port_env_override() {
+        let mut config = CliConfig::default();
+
+        let err = config
+            .apply_runtime_feature_env_overrides_from([("HEADSCALE_RANDOMIZE_CLIENT_PORT", "true")])
+            .unwrap_err();
         let err = format!("{err:#}");
 
         assert!(err.contains("randomize_client_port"));

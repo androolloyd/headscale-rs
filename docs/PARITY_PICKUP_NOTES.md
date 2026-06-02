@@ -2534,6 +2534,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   verify-client mode, at least two raw allowed admissions, and zero raw or
   WebSocket denials. The row remains open because stock-client
   DERP-over-WebSocket forcing is not yet proven.
+- Added an opt-in WebSocket-forced native DERP harness path:
+  `REAL_CLIENT_FORCE_DERP_WEBSOCKET=true` injects `TS_DEBUG_DERP_WS_CLIENT=1`
+  into the client `tailscaled` process, and
+  `test-derp-server-websocket-scenario-smoke.sh` now requires at least two
+  native `websocket_allowed` admissions. This stays outside the mandatory
+  matrix until the selected stock Tailscale image is proven to carry the
+  `ts_debug_websockets` build tag.
 - Adopted exact successful Tailscale SSH stderr assertions for the paired
   `ssh-accept-env` and `postgres-ssh-accept-env` rows. Broader SSH
   status/stdout/stderr coverage remains open.

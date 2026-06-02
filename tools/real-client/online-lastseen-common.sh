@@ -84,6 +84,7 @@ taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
 expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
 expected_self_capmap_keys="${REAL_CLIENT_EXPECT_SELF_CAPMAP_KEYS:-}"
 force_derp="${REAL_CLIENT_FORCE_DERP:-false}"
+force_derp_websocket="${REAL_CLIENT_FORCE_DERP_WEBSOCKET:-false}"
 rust_embedded_derp="${REAL_CLIENT_RUST_EMBEDDED_DERP:-${HSRS_HARNESS_EMBEDDED_DERP:-false}}"
 rust_derp_region_id="${REAL_CLIENT_RUST_DERP_REGION_ID:-${REAL_CLIENT_DERP_REGION_ID:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_ID:-900}}}"
 rust_derp_region_code="${REAL_CLIENT_RUST_DERP_REGION_CODE:-${REAL_CLIENT_DERP_REGION_CODE:-${HSRS_HARNESS_EMBEDDED_DERP_REGION_CODE:-headscale}}}"
@@ -427,6 +428,18 @@ case "${force_derp}" in
     ;;
   *)
     echo "REAL_CLIENT_FORCE_DERP must be true or false, got ${force_derp}" >&2
+    exit 2
+    ;;
+esac
+case "${force_derp_websocket}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    force_derp_websocket_flag=1
+    ;;
+  0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    force_derp_websocket_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_FORCE_DERP_WEBSOCKET must be true or false, got ${force_derp_websocket}" >&2
     exit 2
     ;;
 esac
@@ -2855,6 +2868,9 @@ start_client() {
   tailscaled_prefix=""
   if ((force_derp_flag)); then
     tailscaled_prefix="TS_DEBUG_ALWAYS_USE_DERP=1 "
+  fi
+  if ((force_derp_websocket_flag)); then
+    tailscaled_prefix="${tailscaled_prefix}TS_DEBUG_DERP_WS_CLIENT=1 "
   fi
   client_entry="update-ca-certificates >/tmp/update-ca-certificates.log 2>&1; ${tailscaled_prefix}tailscaled --tun=userspace-networking --verbose=10 --statedir=/tmp/tailscale-state >/tmp/tailscaled.log 2>&1 & sleep infinity"
   if ((install_openssh_client)); then

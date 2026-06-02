@@ -225,6 +225,12 @@ Current-head audit overlay, refreshed 2026-05-30:
   metrics/debug listener and require native verify-client mode plus raw
   admission counters for the stock clients. DERP-over-WebSocket stock-client
   forcing is still not proven by these rows, so the native DERP P0 remains open.
+- The opt-in `tools/real-client/test-derp-server-websocket-scenario-smoke.sh`
+  wrapper now starts clients with `TS_DEBUG_DERP_WS_CLIENT=1` via
+  `REAL_CLIENT_FORCE_DERP_WEBSOCKET=true` and requires native
+  `websocket_allowed` admissions. This is not in the mandatory matrix until the
+  selected stock Tailscale image is proven to include the
+  `ts_debug_websockets` client build path.
 - NodeStore hostname/GivenName collision handling now retries auto-derived
   names after concurrent unique-index races on create and auth-path update,
   with SQLite concurrency tests and feature-gated Postgres helper coverage.

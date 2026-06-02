@@ -3,8 +3,8 @@
   "metadata": {
     "audit_date": "2026-06-02",
     "headscale_rs": {
-      "compared_ref": "795db5599ba1b761fedbf15c973368caba3886dc",
-      "origin_main_commit": "795db5599ba1b761fedbf15c973368caba3886dc",
+      "compared_ref": "a08394a3aa3fc06011d0fe062a67829c616d2340",
+      "origin_main_commit": "a08394a3aa3fc06011d0fe062a67829c616d2340",
       "root": "/Users/androolloyd/Development/headscale-rs-main-coordinator-20260602"
     },
     "notes": [
@@ -37,7 +37,7 @@
     },
     "rust_evidence_counts": {
       "cli_commands": 55,
-      "integration_or_smoke_tests": 1209,
+      "integration_or_smoke_tests": 1213,
       "routes": 183
     },
     "upstream_counts": {

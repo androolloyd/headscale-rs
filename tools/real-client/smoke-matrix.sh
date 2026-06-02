@@ -111,6 +111,7 @@ smoke_ids=(
   postgres-policy-churn
   postgres-web-register-policy-churn
   postgres-web-register-policy-churn-restart
+  postgres-web-register-policy-config-map-churn-restart
   postgres-node-rename
   postgres-policy-rename-restart
   postgres-magicdns
@@ -411,6 +412,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -535,6 +537,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-policy-churn-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-restart-smoke.sh
+  tools/real-client/postgres-web-register-policy-config-map-churn-restart-smoke.sh
   tools/real-client/postgres-node-rename-smoke.sh
   tools/real-client/postgres-policy-rename-restart-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
@@ -747,6 +750,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-policy-config-map-churn-restart-headscale-go-smoke.sh
   tools/real-client/postgres-node-rename-headscale-go-smoke.sh
   tools/real-client/postgres-policy-rename-restart-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
@@ -959,6 +963,7 @@ smoke_assertions=(
   "production Postgres auth-key registration plus database policy mutation wakes live peer maps"
   "production Postgres web registration plus database policy mutation wakes live peer maps"
   "production Postgres web-registration policy map churn survives server restart"
+  "production Postgres web-registration policy/config map churn and MagicDNS peer resolution survive server restart"
   "production Postgres admin node rename wakes live peer maps and preserves lifecycle state"
   "production Postgres policy reload plus node rename map churn survives server restart"
   "production Postgres default MagicDNS suffix"

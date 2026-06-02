@@ -274,7 +274,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-health-mixed-exit-all-unhealthy-reload` | `route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention |
 | Routes | `route-health-mixed-exit-all-unhealthy-restart` | `route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart |
 | Routes | `route-health-mixed-exit-all-unhealthy-reload-restart` | `route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable policy reload survives server restart |
-| Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health default and Postgres matrix symmetry audit |
+| Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health matrix symmetry audit plus uncovered upstream gap report |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow/check-period exact success status/stdout/stderr plus deny and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails with exact stable success status/stdout/stderr |
@@ -1207,6 +1207,16 @@ tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-headscale
 
 The headscale-go wrapper also defaults to the audited current-head commit
 because pinned v0.28 does not expose `node.routes.ha`.
+
+The `route-edge-current-upstream-audit` row keeps the default/Postgres matrix
+symmetry checks and now also reports the concrete uncovered current-head
+route-health case from `integration/route_test.go`:
+`TestHASubnetRouterFailoverBothOffline`. That upstream case drives both HA
+subnet routers offline, expects no primary route while both are offline, then
+reconnects the secondary router and expects the stock-client observer to see
+that secondary router online with the route in `PrimaryRoutes`. Set
+`REAL_CLIENT_ROUTE_EDGE_UPSTREAM_SOURCE` to a headscale-go checkout to validate
+the audited test name and assertions against source while running the audit.
 
 Additional knobs:
 

@@ -22,6 +22,7 @@ if [[ ! "${HEADSCALE_GO_CURRENT_VERSION}" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 matrix_output="$(tools/real-client/smoke-matrix.sh --list)"
+upstream_source_root="${REAL_CLIENT_ROUTE_EDGE_UPSTREAM_SOURCE:-}"
 failed=0
 
 route_via_ids=(
@@ -60,6 +61,10 @@ route_health_ids=(
   route-health-mixed-exit-all-unhealthy-reload-restart
 )
 
+uncovered_upstream_route_cases=(
+  "route-health-both-offline-reconnect|integration/route_test.go|TestHASubnetRouterFailoverBothOffline|route-health-both-offline-reconnect|after both HA subnet routers go offline, current headscale-go expects no primary until the secondary router reconnects and returns as the stock-client-visible primary"
+)
+
 fail() {
   echo "route edge audit: $*" >&2
   failed=1
@@ -72,6 +77,11 @@ expected_route_edge() {
     [[ "${candidate}" == "${id}" ]] && return 0
   done
   return 1
+}
+
+matrix_has_row() {
+  local id="$1"
+  awk -v wanted="${id}" 'NR > 1 && $1 == wanted { found = 1 } END { exit(found ? 0 : 1) }' <<<"${matrix_output}"
 }
 
 require_matrix_row() {
@@ -149,8 +159,47 @@ require_default_and_postgres_rows() {
     "tools/real-client/postgres-${id}-headscale-go-smoke.sh"
 }
 
+require_uncovered_upstream_case() {
+  local spec="$1"
+  local case_id
+  local source_path
+  local test_name
+  local suggested_row
+  local summary
+  IFS='|' read -r case_id source_path test_name suggested_row summary <<<"${spec}"
+
+  if matrix_has_row "${suggested_row}" || matrix_has_row "postgres-${suggested_row}"; then
+    fail "uncovered upstream route case ${case_id} now has matrix coverage; update the route-edge audit expected gaps"
+  fi
+
+  if [[ -n "${upstream_source_root}" ]]; then
+    local upstream_file="${upstream_source_root%/}/${source_path}"
+    [[ -f "${upstream_file}" ]] ||
+      fail "uncovered upstream route case ${case_id} source file is missing: ${upstream_file}"
+    if [[ -f "${upstream_file}" ]]; then
+      grep -Fq "${test_name}" "${upstream_file}" ||
+        fail "uncovered upstream route case ${case_id} test ${test_name} is missing from ${upstream_file}"
+      case "${case_id}" in
+        route-health-both-offline-reconnect)
+          grep -Fq 'no primary should be assigned while both routers are offline' "${upstream_file}" ||
+            fail "uncovered upstream route case ${case_id} lost its both-offline no-primary assertion"
+          grep -Fq 'r2 should be re-registered as primary after reconnect' "${upstream_file}" ||
+            fail "uncovered upstream route case ${case_id} lost its reconnect-primary assertion"
+          ;;
+      esac
+    fi
+  fi
+
+  uncovered_messages+=("${case_id}: ${summary}; source ${source_path} ${test_name}; suggested smoke row ${suggested_row}")
+}
+
 for id in "${route_via_ids[@]}" "${route_health_ids[@]}"; do
   require_default_and_postgres_rows "${id}"
+done
+
+uncovered_messages=()
+for spec in "${uncovered_upstream_route_cases[@]}"; do
+  require_uncovered_upstream_case "${spec}"
 done
 
 expected_edge_count=$((${#route_via_ids[@]} + ${#route_health_ids[@]}))
@@ -211,3 +260,8 @@ fi
 
 echo "route edge current-head audit passed for ${audit_target}: ${expected_edge_count} default route-via/route-health rows, ${expected_edge_count} Postgres mirrors, and current-head headscale-go pinning are present"
 echo "headscale-go current-head pin: ${HEADSCALE_GO_CURRENT_VERSION}"
+echo "route edge current-head audit identified ${#uncovered_messages[@]} uncovered upstream route case(s):"
+printf ' - %s\n' "${uncovered_messages[@]}"
+if [[ -z "${upstream_source_root}" ]]; then
+  echo "set REAL_CLIENT_ROUTE_EDGE_UPSTREAM_SOURCE to a headscale-go checkout to validate uncovered-case test names against source"
+fi

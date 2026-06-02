@@ -67,7 +67,7 @@
         "hscontrol/servertest/routes_test.go",
         "hscontrol/servertest/grants_test.go"
       ],
-      "exit_criteria": "Continue route-via and route-health reload/restart/client-observed edge coverage beyond the mirrored default and Postgres rows."
+      "exit_criteria": "Add current-head stock-client coverage for the route-health both-offline secondary reconnect case identified by integration/route_test.go TestHASubnetRouterFailoverBothOffline and hscontrol/servertest/routes_test.go ha_secondary_recovers_after_all_offline; the mirrored default/Postgres route-via and route-health rows are already audited."
     },
     {
       "id": "p1-policy-v2-compat-fixtures",

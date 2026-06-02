@@ -569,6 +569,16 @@ sources `headscale-go-current.sh` and defaults `HEADSCALE_GO_VERSION` to the
 audited current-head SHA, preventing current-head route rows from silently
 falling back to the older pinned baseline.
 
+Recent coverage note (2026-06-02): `route-edge-current-upstream-audit` now
+identifies the concrete remaining current-head route-health gap:
+`integration/route_test.go` `TestHASubnetRouterFailoverBothOffline` plus the
+servertest `ha_secondary_recovers_after_all_offline` case. The missing
+stock-client row should drive both HA subnet routers offline, assert no primary
+route remains while both are offline, reconnect the secondary router, and assert
+the observer sees that secondary router online with the route in
+`PrimaryRoutes`. The `p1-route-via-health-edge-coverage` backlog row is not
+removable until that case has paired Rust/headscale-go coverage.
+
 Recent coverage note (2026-06-02): `policy-route-autogroup-internet-exit-visibility`
 now lives in the default Go-vs-Rust differential scenario set. The promoted row
 pins `autogroup:internet:*` ACL peer visibility for default-route exit nodes

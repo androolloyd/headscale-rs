@@ -41,6 +41,7 @@ reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
 authkey_relogin_expired="${REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED:-false}"
 authkey_relogin_different_user="${REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER:-false}"
+authkey_relogin_deleted="${REAL_CLIENT_AUTHKEY_RELOGIN_DELETED:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
@@ -217,6 +218,18 @@ case "${authkey_relogin_different_user}" in
     exit 2
     ;;
 esac
+case "${authkey_relogin_deleted}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    authkey_relogin_deleted_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    authkey_relogin_deleted_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_AUTHKEY_RELOGIN_DELETED must be true or false, got ${authkey_relogin_deleted}" >&2
+    exit 2
+    ;;
+esac
 authkey_relogin_requested_flag=0
 if ((authkey_relogin_same_user_flag || authkey_relogin_different_user_flag)); then
   authkey_relogin_requested_flag=1
@@ -229,12 +242,24 @@ if ((authkey_relogin_expired_flag && ! authkey_relogin_requested_flag)); then
   echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED requires auth-key relogin" >&2
   exit 2
 fi
+if ((authkey_relogin_deleted_flag && ! authkey_relogin_requested_flag)); then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_DELETED requires auth-key relogin" >&2
+  exit 2
+fi
 if ((authkey_relogin_different_user_flag && authkey_relogin_same_user_flag)); then
   echo "REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER cannot be combined with REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER" >&2
   exit 2
 fi
 if ((authkey_relogin_different_user_flag && authkey_relogin_expired_flag)); then
   echo "REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER cannot be combined with REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED" >&2
+  exit 2
+fi
+if ((authkey_relogin_different_user_flag && authkey_relogin_deleted_flag)); then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER cannot be combined with REAL_CLIENT_AUTHKEY_RELOGIN_DELETED" >&2
+  exit 2
+fi
+if ((authkey_relogin_expired_flag && authkey_relogin_deleted_flag)); then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED cannot be combined with REAL_CLIENT_AUTHKEY_RELOGIN_DELETED" >&2
   exit 2
 fi
 if ((authkey_relogin_requested_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
@@ -1977,11 +2002,15 @@ mint_preauth_key_for_user() {
   local output_name="$2"
   local key_tags="${preauth_tags}"
   local key_expired_flag="${preauth_expired_flag}"
+  local key_deleted_flag=0
   if (($# >= 3)); then
     key_tags="$3"
   fi
   if (($# >= 4)); then
     key_expired_flag="$4"
+  fi
+  if (($# >= 5)); then
+    key_deleted_flag="$5"
   fi
   local preauth_args=(
     -o json preauthkeys create
@@ -2000,6 +2029,12 @@ mint_preauth_key_for_user() {
     authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/${output_name}.json")"
     headscale_cmd -o json preauthkeys expire --id "${authkey_id}" \
       >"${work_dir}/${output_name}-expired.json"
+  fi
+  if ((key_deleted_flag)); then
+    local authkey_id
+    authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/${output_name}.json")"
+    headscale_cmd -o json preauthkeys delete --id "${authkey_id}" \
+      >"${work_dir}/${output_name}-deleted.json"
   fi
   ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' "${work_dir}/${output_name}.json"
 }
@@ -2274,9 +2309,15 @@ tailscale_status_ips() {
 
 relogin_with_authkey_if_requested() {
   ((authkey_relogin_requested_flag)) || return 0
+  local rejection_mode=""
   if ((authkey_relogin_different_user_flag)); then
+    rejection_mode="different-user"
     echo "::group::auth-key logout and different-user relogin rejection"
+  elif ((authkey_relogin_deleted_flag)); then
+    rejection_mode="deleted-key"
+    echo "::group::auth-key logout and deleted-key relogin rejection"
   elif ((authkey_relogin_expired_flag)); then
+    rejection_mode="expired"
     echo "::group::auth-key logout and expired-key relogin rejection"
   else
     echo "::group::auth-key logout and same-user relogin"
@@ -2299,8 +2340,17 @@ relogin_with_authkey_if_requested() {
       relogin_user="$(relogin_user_name_for_idx "${idx}")"
     fi
     user_id="$(user_id_for_name "${relogin_user}")"
-    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}" "${preauth_tags_values[$idx]}" "${authkey_relogin_expired_flag}")")
+    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}" "${preauth_tags_values[$idx]}" "${authkey_relogin_expired_flag}" "${authkey_relogin_deleted_flag}")")
   done
+
+  if ((authkey_relogin_deleted_flag)); then
+    echo "restarting ${target} server after deleting relogin preauth key"
+    stop_server
+    if ! start_server; then
+      echo "::endgroup::"
+      return 1
+    fi
+  fi
 
   for idx in "${!client_names[@]}"; do
     client_name="${client_names[$idx]}"
@@ -2332,10 +2382,12 @@ relogin_with_authkey_if_requested() {
     relogin_status=0
     run_with_timeout "tailscale auth-key relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       relogin_status="$?"
-    if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag)); then
+    if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag || authkey_relogin_deleted_flag)); then
       if client_logged_in "${client_name}" "${work_dir}/${client_name}.unexpected-relogin-status.json"; then
         if ((authkey_relogin_different_user_flag)); then
           echo "expected different-user auth-key relogin to fail for ${client_name}, but it logged in" >&2
+        elif ((authkey_relogin_deleted_flag)); then
+          echo "expected deleted-key auth-key relogin to fail for ${client_name}, but it logged in" >&2
         else
           echo "expected expired auth-key relogin to fail for ${client_name}, but it logged in" >&2
         fi
@@ -2346,6 +2398,8 @@ relogin_with_authkey_if_requested() {
         >"${work_dir}/${client_name}.expected-relogin-failure-status.json" 2>/dev/null || true
       if ((authkey_relogin_different_user_flag)); then
         echo "different-user auth-key relogin failed as expected for ${client_name}"
+      elif ((authkey_relogin_deleted_flag)); then
+        echo "deleted-key auth-key relogin failed as expected for ${client_name}"
       else
         echo "expired auth-key relogin failed as expected for ${client_name}"
       fi
@@ -2370,7 +2424,7 @@ relogin_with_authkey_if_requested() {
   done
 
   headscale_cmd -o json nodes list >"${after_nodes_path}"
-  if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag)); then
+  if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag || authkey_relogin_deleted_flag)); then
     ruby -rjson -e '
       def nodes(path)
         payload = JSON.parse(File.read(path))
@@ -2385,7 +2439,7 @@ relogin_with_authkey_if_requested() {
       abort("expected #{expected_count} nodes before #{mode} relogin, got #{before.length}") unless before.length == expected_count
       abort("expected #{expected_count} nodes after #{mode} relogin rejection, got #{after.length}") unless after.length == expected_count
 
-      if mode == "different-user"
+      if ["different-user", "deleted-key"].include?(mode)
         def node_name(node)
           node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
         end
@@ -2423,15 +2477,17 @@ relogin_with_authkey_if_requested() {
           }
           checks.each do |field, values|
             old_value, new_value = values
-            abort("different-user relogin changed #{name} #{field}: #{old_value.inspect} -> #{new_value.inspect}") unless old_value == new_value
+            abort("#{mode} relogin changed #{name} #{field}: #{old_value.inspect} -> #{new_value.inspect}") unless old_value == new_value
           end
         end
       end
       puts JSON.pretty_generate({"#{mode.tr("-", "_")}_relogin_rejected_nodes": after.length})
-    ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}" "$([[ "${authkey_relogin_different_user_flag}" -eq 1 ]] && printf different-user || printf expired)" "$(IFS=,; echo "${successful_client_names[*]}")"
+    ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}" "${rejection_mode}" "$(IFS=,; echo "${successful_client_names[*]}")"
     echo "::endgroup::"
     if ((authkey_relogin_different_user_flag)); then
       echo "${target} different-user auth-key relogin real-client smoke passed"
+    elif ((authkey_relogin_deleted_flag)); then
+      echo "${target} deleted-key auth-key relogin real-client smoke passed"
     else
       echo "${target} expired auth-key relogin real-client smoke passed"
     fi

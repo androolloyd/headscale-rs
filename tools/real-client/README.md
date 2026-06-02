@@ -82,6 +82,7 @@ upstream commit from `headscale-go-current.sh`.
 | Lifecycle | `authkey-relogin-same-user` | `authkey-relogin-same-user-smoke.sh` | `authkey-relogin-same-user-headscale-go-smoke.sh` | Auth-key logout then same-user relogin preserves node identity and IPs |
 | Lifecycle | `authkey-relogin-expired` | `authkey-relogin-expired-smoke.sh` | `authkey-relogin-expired-headscale-go-smoke.sh` | Auth-key logout then expired same-user relogin key is rejected |
 | Lifecycle | `authkey-relogin-different-user` | `authkey-relogin-different-user-smoke.sh` | `authkey-relogin-different-user-headscale-go-smoke.sh` | Auth-key logout then different-user relogin key is rejected without duplicating or transferring node state |
+| Lifecycle | `authkey-relogin-deleted` | `authkey-relogin-deleted-smoke.sh` | `authkey-relogin-deleted-headscale-go-smoke.sh` | Auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Tailcfg | `taildrop-capmap` | `taildrop-capmap-smoke.sh` | `taildrop-capmap-headscale-go-smoke.sh` | Disabled Taildrop removes file-sharing from stock-client self CapMap |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
@@ -90,6 +91,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-authkey-relogin-same-user` | `postgres-authkey-relogin-same-user-smoke.sh` | `postgres-authkey-relogin-same-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then same-user relogin preserves node identity and IPs |
 | Database | `postgres-authkey-relogin-expired` | `postgres-authkey-relogin-expired-smoke.sh` | `postgres-authkey-relogin-expired-headscale-go-smoke.sh` | Production Postgres auth-key logout then expired same-user relogin key is rejected |
 | Database | `postgres-authkey-relogin-different-user` | `postgres-authkey-relogin-different-user-smoke.sh` | `postgres-authkey-relogin-different-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then different-user relogin key is rejected without duplicating or transferring node state |
+| Database | `postgres-authkey-relogin-deleted` | `postgres-authkey-relogin-deleted-smoke.sh` | `postgres-authkey-relogin-deleted-headscale-go-smoke.sh` | Production Postgres auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Database | `postgres-authkey-relogin-route-preserve` | `postgres-authkey-relogin-route-preserve-smoke.sh` | `postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh` | Production Postgres auth-key same-user relogin preserves approved route state |
 | Database | `postgres-taildrop-capmap` | `postgres-taildrop-capmap-smoke.sh` | `postgres-taildrop-capmap-headscale-go-smoke.sh` | Production Postgres taildrop disabled removes file-sharing from stock-client self CapMap |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
@@ -351,6 +353,9 @@ does not change.
 The different-user relogin variant mints the fresh key for a separate user and
 asserts the stock client remains logged out while the persisted node is neither
 duplicated nor transferred to that user.
+The deleted-key relogin variant deletes the fresh same-user key through the
+CLI, restarts the server, and asserts the stock client remains logged out
+while the persisted node is neither duplicated nor changed.
 The route-preservation variant advertises and approves `REAL_CLIENT_ROUTE`
 (default `10.40.0.0/24`) before relogin, then asserts the approved route
 remains on the same node.
@@ -369,6 +374,9 @@ Additional knobs:
 - `REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED=true` can be combined with
   `REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER=true` to require the fresh relogin
   auth key to be rejected after expiration.
+- `REAL_CLIENT_AUTHKEY_RELOGIN_DELETED=true` can be combined with
+  `REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER=true` to delete the fresh relogin
+  auth key, restart the server, and require rejection.
 
 ## Web Registration Smoke
 
@@ -714,6 +722,8 @@ tools/real-client/postgres-authkey-expired-smoke.sh
 tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
 tools/real-client/postgres-authkey-relogin-expired-smoke.sh
 tools/real-client/postgres-authkey-relogin-expired-headscale-go-smoke.sh
+tools/real-client/postgres-authkey-relogin-deleted-smoke.sh
+tools/real-client/postgres-authkey-relogin-deleted-headscale-go-smoke.sh
 tools/real-client/postgres-online-lastseen-smoke.sh
 tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-smoke.sh

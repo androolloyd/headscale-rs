@@ -1,13 +1,13 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-01 21:18 ADT
+Updated: 2026-06-01 21:33 ADT
 
 ## Current State
 
 - Main worktree: `/Users/androolloyd/Development/headscale-rs-fuzz-update`
 - Branch: `main`
 - Latest pushed baseline before this pickup:
-  `2824150 Add Postgres authkey real-client smoke`
+  `d76ecc3`
 - Remote: `origin/main` should be pushed through the current local `main`
 - Sibling checkout `/Users/androolloyd/Development/headscale-rs` branch `acl-consolidation` should be fast-forwarded to the current local `main`
 - The sibling checkout still has its pre-existing untracked `worktrees/` directory; leave it alone unless explicitly cleaning worktrees
@@ -387,9 +387,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty-four Pg rows, including
+  all eighty-eight Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
+  `postgres-authkey-relogin-expired`,
+  `postgres-authkey-relogin-different-user`,
+  `postgres-authkey-relogin-deleted`,
   `postgres-authkey-relogin-route-preserve`,
   `postgres-taildrop-capmap`, `postgres-derp-private`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
@@ -1543,5 +1546,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The rejection assertion compares pre/post persisted node state so the
   rejected relogin cannot duplicate the node or silently transfer it to the
   different user.
-- This closes the different-user relogin rejection gap; deleted-key restart
-  remains the next auth-key lifecycle row.
+- This closes the different-user relogin rejection gap.
+
+## 2026-06-01 auth-key deleted relogin restart rejection smoke slice
+
+- Added paired `authkey-relogin-deleted` Rust/headscale-go rows and paired
+  `postgres-authkey-relogin-deleted` Rust/headscale-go rows.
+- The production auth-key relogin helper can now mint a fresh same-user
+  preauth key, delete it through `headscale preauthkeys delete`, restart the
+  server, run `tailscale logout`, attempt `tailscale up` with the deleted key,
+  and require the stock client to remain logged out.
+- The rejection assertion compares pre/post persisted node state so the
+  rejected deleted-key relogin cannot duplicate the node or silently change the
+  node identity.
+- This closes the deleted-key restart/relogin auth-key lifecycle gap.

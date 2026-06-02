@@ -2185,6 +2185,15 @@ pub mod upstream {
             assert_eq!(overlay.user_id, Some(42));
             assert_eq!(overlay.hostname, "alice-laptop");
         }
+
+        #[test]
+        fn listed_preauth_display_key_masks_prefixes_containing_dash() {
+            let display = listed_preauth_display_key(
+                "hskey-auth-cdTCY4M-EMkI-ZL-fd2lbOiv4rJRG0eYsUOQQdThmKYqA2NoUYDeHbA_wMb7psc1yu0uwQqsxvrXC",
+            );
+
+            assert_eq!(display, "hskey-auth-cdTCY4M-EMkI-***");
+        }
     }
 }
 

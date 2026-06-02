@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{Child, Command, Output, Stdio};
@@ -215,6 +215,34 @@ fn normalize_localhost_port(text: &str) -> String {
         start = port_start + "<port>".len();
     }
     normalized
+}
+
+fn normalize_os_error_number(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut rest = text;
+    const PREFIX: &str = "(os error ";
+
+    while let Some(offset) = rest.find(PREFIX) {
+        let (before, after_prefix) = rest.split_at(offset);
+        normalized.push_str(before);
+        let after_prefix = &after_prefix[PREFIX.len()..];
+        let digits_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+
+        if digits_len > 0 && after_prefix[digits_len..].starts_with(')') {
+            normalized.push_str("(os error <errno>)");
+            rest = &after_prefix[digits_len + 1..];
+        } else {
+            normalized.push_str(PREFIX);
+            rest = after_prefix;
+        }
+    }
+
+    normalized.push_str(rest);
+    normalized
+}
+
+fn normalize_acme_http01_bind_failure_stderr(text: &str, addr: SocketAddr) -> String {
+    normalize_os_error_number(&text.replace(&addr.to_string(), "<addr>"))
 }
 
 fn normalize_no_config_warning_timestamp(text: &str) -> String {
@@ -3439,6 +3467,75 @@ trusted_proxies:
 "#,
         include_str!("snapshots/serve_unsafe_trusted_proxy.stderr"),
         "serve unsafe trusted proxy",
+    );
+}
+
+#[test]
+fn serve_rejects_http01_acme_challenge_listener_collision_before_public_ca_network() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let challenge_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let challenge_addr = challenge_listener.local_addr().unwrap();
+    let db_path = cwd.path().join("db.sqlite");
+    let cache_dir = cwd.path().join("acme-cache");
+    let noise_path = cwd.path().join("noise_private.key");
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:0"
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_listen: "{challenge_addr}"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve HTTP-01 ACME listener collision; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        trim_line_end_spaces(&normalize_acme_http01_bind_failure_stderr(
+            &stderr(&output),
+            challenge_addr,
+        )),
+        trim_line_end_spaces(include_str!(
+            "snapshots/serve_acme_http01_challenge_listener_collision.stderr"
+        )),
+        "stderr snapshot for serve HTTP-01 ACME listener collision"
+    );
+    assert!(
+        !cache_dir.join("headscale.example").exists(),
+        "ACME certificate cache should not be written after listener bind failure"
     );
 }
 

@@ -5,9 +5,7 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::pin::Pin;
-#[cfg(feature = "postgres-sqlx")]
-use std::process::{Child, Stdio};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
@@ -120,7 +118,6 @@ const MOCKOIDC_ENV: &[&str] = &[
 #[cfg(feature = "postgres-sqlx")]
 const POSTGRES_TEST_URL_ENV: &str = "HEADSCALE_DB_POSTGRES_TEST_URL";
 
-#[cfg(feature = "postgres-sqlx")]
 type BoxTestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn headscale_clean_command() -> Command {
@@ -577,6 +574,47 @@ fn write_remote_grpc_config(dir: &Path, address: &str, api_key: &str) -> std::pa
     config
 }
 
+fn write_sqlite_serve_config(
+    dir: &Path,
+    listen: std::net::SocketAddr,
+    metrics: std::net::SocketAddr,
+    grpc: std::net::SocketAddr,
+) -> std::path::PathBuf {
+    let config = dir.join("config.yaml");
+    let socket = dir.join("headscale.sock");
+    let noise = dir.join("state").join("noise_private.key");
+    let db = dir.join("db.sqlite");
+    fs::write(
+        &config,
+        format!(
+            r#"
+server_url: "http://{listen}"
+listen_addr: "{listen}"
+metrics_listen_addr: "{metrics}"
+grpc_listen_addr: "{grpc}"
+grpc_allow_insecure: true
+unix_socket: {}
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+"#,
+            yaml_double_quoted(&socket.to_string_lossy()),
+            yaml_double_quoted(&noise.to_string_lossy()),
+            yaml_double_quoted(&db.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    config
+}
+
 #[cfg(feature = "postgres-sqlx")]
 struct TempPostgresServeDatabase {
     admin_pool: sqlx::PgPool,
@@ -696,12 +734,10 @@ fn quote_pg_identifier(identifier: &str) -> String {
     format!(r#""{}""#, identifier.replace('"', r#""""#))
 }
 
-#[cfg(feature = "postgres-sqlx")]
 fn yaml_double_quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-#[cfg(feature = "postgres-sqlx")]
 fn unused_loopback_addr() -> std::net::SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
@@ -759,7 +795,6 @@ policy:
     config
 }
 
-#[cfg(feature = "postgres-sqlx")]
 fn spawn_headscale_serve(config: &Path, cwd: &Path) -> BoxTestResult<Child> {
     let mut command = headscale_clean_command();
     command
@@ -772,7 +807,6 @@ fn spawn_headscale_serve(config: &Path, cwd: &Path) -> BoxTestResult<Child> {
     Ok(command.spawn()?)
 }
 
-#[cfg(feature = "postgres-sqlx")]
 fn stop_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
@@ -4388,6 +4422,130 @@ fn implemented_admin_errors_follow_output_format() {
         stderr(&remote),
         "{\n\t\"error\": \"HEADSCALE_CLI_API_KEY environment variable needs to be set\"\n}\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -> BoxTestResult {
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let metrics_url = format!("http://{metrics}");
+    let remote_grpc_address = format!("http://{grpc}");
+    let config = write_sqlite_serve_config(dir.path(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let public_health = headscale_clean(&["status", "--server", &server_url]);
+        assert!(
+            public_health.status.success(),
+            "stderr: {}",
+            stderr(&public_health)
+        );
+        assert_eq!(
+            stdout(&public_health),
+            format!("Control plane at {server_url} is healthy\n")
+        );
+        assert_eq!(stderr(&public_health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "separated"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key_secret = json_output(&api_key)
+            .as_str()
+            .expect("api key secret")
+            .to_string();
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let remote_grpc_dir = tempfile::tempdir()?;
+        let remote_grpc_config = write_remote_grpc_config(
+            remote_grpc_dir.path(),
+            &remote_grpc_address,
+            &api_key_secret,
+        );
+        let remote_health = wait_for_headscale_status(&remote_grpc_config, &["health"], 0).await;
+        assert_eq!(stdout(&remote_health), "\n");
+        assert_eq!(stderr(&remote_health), "");
+
+        let remote_users =
+            headscale_with_config(&remote_grpc_config, &["-o", "json", "users", "list"]);
+        assert!(
+            remote_users.status.success(),
+            "stderr: {}",
+            stderr(&remote_users)
+        );
+        let remote_users = json_output(&remote_users);
+        assert_eq!(remote_users[0]["name"].as_str(), Some("separated"));
+
+        let http = reqwest::Client::new();
+        let metrics_response = http.get(format!("{metrics_url}/metrics")).send().await?;
+        assert_eq!(metrics_response.status(), reqwest::StatusCode::OK);
+        let metrics_body = metrics_response.text().await?;
+        assert!(
+            metrics_body.contains("headscale_nodes_registered"),
+            "metrics body: {metrics_body}"
+        );
+
+        let debug_config = http
+            .get(format!("{metrics_url}/debug/config"))
+            .send()
+            .await?;
+        assert_eq!(debug_config.status(), reqwest::StatusCode::OK);
+        let debug_config = debug_config.json::<serde_json::Value>().await?;
+        assert_eq!(
+            debug_config["GRPCAddr"].as_str(),
+            Some(&remote_grpc_address[7..])
+        );
+        let metrics_addr = metrics.to_string();
+        assert_eq!(
+            debug_config["MetricsAddr"].as_str(),
+            Some(metrics_addr.as_str())
+        );
+
+        let public_metrics = http.get(format!("{server_url}/metrics")).send().await?;
+        assert_eq!(public_metrics.status(), reqwest::StatusCode::OK);
+        let public_metrics_body = public_metrics.text().await?;
+        assert!(
+            !public_metrics_body.contains("headscale_nodes_registered"),
+            "public metrics body: {public_metrics_body}"
+        );
+
+        let public_debug_config = http
+            .get(format!("{server_url}/debug/config"))
+            .send()
+            .await?;
+        assert_eq!(public_debug_config.status(), reqwest::StatusCode::OK);
+        let public_debug_config_body = public_debug_config.text().await?;
+        assert!(
+            !public_debug_config_body.contains("\"GRPCAddr\""),
+            "public debug config body: {public_debug_config_body}"
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    result
 }
 
 #[cfg(feature = "postgres-sqlx")]

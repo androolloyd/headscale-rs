@@ -1990,9 +1990,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   no legacy `Failed to dump config` stdout, and `dumping config: open ...` in
   the formatted error path.
 - Added guarded process snapshots for human, JSON, json-line, and YAML
-  `dumpConfig` failures when `/etc/headscale` is absent. The remaining
-  upstream CLI drift is the timestamped default-config warning that
-  headscale-go logs before the Cobra error when no config file is found.
+  `dumpConfig` failures when `/etc/headscale` is absent.
+
+## 2026-06-02 dumpConfig default-warning parity slice
+
+- Hidden `dumpConfig` now preserves headscale-go's timestamped
+  `WRN no config file found, using defaults` stderr line when default config
+  discovery finds no file before formatting the missing `/etc/headscale`
+  dump-target error.
+- Process snapshots normalize only the timestamp prefix and pin the warning
+  before the human, JSON, json-line, and YAML error envelopes.
+- Explicit `--config missing.yaml` remains a file-load fatal path rather than
+  a default-backed warning path, matching the upstream boundary.
 
 ## 2026-06-02 native DERP protocol foundation
 

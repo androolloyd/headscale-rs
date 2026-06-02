@@ -1,1 +1,2 @@
+<timestamp> WRN no config file found, using defaults
 {"error":"dumping config: open /etc/headscale/config.dump.yaml: no such file or directory"}

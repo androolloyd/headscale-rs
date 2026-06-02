@@ -220,6 +220,24 @@ fn normalize_localhost_port(text: &str) -> String {
     normalized
 }
 
+fn normalize_no_config_warning_timestamp(text: &str) -> String {
+    const WARNING_SUFFIX: &str = " WRN no config file found, using defaults";
+    let mut normalized = String::with_capacity(text.len());
+    for segment in text.split_inclusive('\n') {
+        let (line, line_ending) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        if line.ends_with(WARNING_SUFFIX) {
+            normalized.push_str("<timestamp>");
+            normalized.push_str(WARNING_SUFFIX);
+        } else {
+            normalized.push_str(line);
+        }
+        normalized.push_str(line_ending);
+    }
+    normalized
+}
+
 fn assert_stdout_snapshot(args: &[&str], expected: &str) {
     let output = headscale_clean(args);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -2423,7 +2441,24 @@ fn dump_config_missing_target_matches_current_upstream_snapshots() {
         ),
     ] {
         let output = headscale_in(args, cwd.path(), home.path());
-        assert_process_stderr_snapshot(&output, 1, expected, label);
+        let expected = if label.ends_with("yaml") {
+            format!("{expected}\n")
+        } else {
+            expected.to_string()
+        };
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "unexpected status for {label}; stdout: {}; stderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output), "", "stdout snapshot for {label}");
+        assert_eq!(
+            trim_line_end_spaces(&normalize_no_config_warning_timestamp(&stderr(&output))),
+            trim_line_end_spaces(&expected),
+            "stderr snapshot for {label}"
+        );
     }
 }
 

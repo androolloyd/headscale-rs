@@ -191,6 +191,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   snapshots for residual serve/output drift, narrower gRPC/remote/server error
   text matrices, and Octra-side adaptation to consume the generic no-health
   control router instead of hand-picking stock public control routes.
+- Current branch closes the hidden `dumpConfig` no-config default-warning
+  slice: process snapshots now pin headscale-go's timestamped
+  `WRN no config file found, using defaults` line before the human,
+  JSON, json-line, and YAML missing-target error envelopes.
 
 This ledger tracks observable behavior that must match before
 `headscale-rs` can claim full parity with headscale-go. Rows marked

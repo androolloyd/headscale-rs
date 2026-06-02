@@ -7134,6 +7134,137 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_set_approved_routes_many_fans_out_one_policy_delta() {
+        let (state, _dir) = fixture();
+        let observer = "41".repeat(32);
+        let router_key = "42".repeat(32);
+        let routes = vec!["10.42.1.0/24".to_string(), "10.42.2.0/24".to_string()];
+        state.machines.upsert(
+            observer.clone(),
+            policy_record(&observer, "observer", 10, "observer", Vec::new()),
+        );
+        let mut router_record = policy_record(&router_key, "router", 11, "router", Vec::new());
+        router_record.available_routes = routes.clone();
+        state.machines.upsert(router_key.clone(), router_record);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let _router_first = next_zstd_map_response(&mut router_body).await;
+        let mut observer_body = open_zstd_stream(app, &observer).await;
+        let first_mr = next_zstd_map_response(&mut observer_body).await;
+        let router_peer = peer_named(&first_mr, "router").expect("router peer visible");
+        for route in &routes {
+            assert!(
+                !router_peer
+                    .allowed_ips
+                    .iter()
+                    .any(|allowed| allowed == route),
+                "unapproved advertised routes must not be sent as AllowedIPs"
+            );
+        }
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let generated_before = state.machines.mapresponse_generated_metrics();
+        let full_before = generated_before.get("full").copied().unwrap_or_default();
+        let policy_before = generated_before.get("policy").copied().unwrap_or_default();
+
+        let (changed, missing) = state
+            .machines
+            .set_approved_routes_many(vec![(router_key.clone(), routes.clone())]);
+        assert_eq!(changed, 1);
+        assert!(missing.is_empty());
+        assert_eq!(
+            state
+                .machines
+                .get(&router_key)
+                .expect("router still registered")
+                .approved_routes,
+            routes
+        );
+
+        let changes = state.machines.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("batched route approval records a map change");
+        assert_eq!(change.reason_labels(), vec!["policy change"]);
+        assert_eq!(change.change_type(), "policy");
+        assert!(change.content.include_policy);
+        assert!(change.content.requires_runtime_peer_computation);
+        let pending = state.machines.pending_map_changes();
+        let observer_changes = pending
+            .get(&stable_id_from_key(&observer))
+            .expect("policy route approval should fan out to the observer stream");
+        assert_eq!(
+            observer_changes.len(),
+            1,
+            "one batched approval should enqueue one observer map change"
+        );
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "batched route approvals should wait for the map-batch tick"
+        );
+        assert_eq!(
+            state
+                .machines
+                .mapresponse_generated_metrics()
+                .get("full")
+                .copied()
+                .unwrap_or_default(),
+            full_before,
+            "batched route approval must not emit a stale full update before the batch tick"
+        );
+
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut observer_body).await;
+        assert!(
+            delta.node.is_none(),
+            "batched route approval should be a peer delta, not a full map"
+        );
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "policy-reasoned route approval should carry policy-derived DNS updates"
+        );
+        let peer = changed_peer(&delta, "router").expect("router peer delta");
+        for route in &routes {
+            assert!(
+                peer.allowed_ips.iter().any(|allowed| allowed == route),
+                "approved route {route} should be sent as a route-derived AllowedIP"
+            );
+            assert!(
+                peer.primary_routes.iter().any(|primary| primary == route),
+                "approved route {route} should be marked primary for the only route owner"
+            );
+        }
+
+        let generated_after = state.machines.mapresponse_generated_metrics();
+        assert_eq!(
+            generated_after.get("full").copied().unwrap_or_default(),
+            full_before,
+            "batched route approval must not generate a full follow-up response"
+        );
+        assert_eq!(
+            generated_after.get("policy").copied().unwrap_or_default(),
+            policy_before + 1,
+            "batched route approval should generate one policy peer delta"
+        );
+        tokio::task::yield_now().await;
+        let extra = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            extra.is_none(),
+            "one batched route approval should emit only one observer delta"
+        );
+    }
+
     #[tokio::test]
     async fn stream_true_initial_routable_ips_wake_peer_with_allowed_ips() {
         let (state, _dir) = fixture();

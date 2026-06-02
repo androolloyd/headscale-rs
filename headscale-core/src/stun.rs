@@ -24,6 +24,7 @@ pub const STUN_BINDING_RESPONSE: u16 = 0x0101;
 /// STUN attribute types.
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 pub const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+const ATTR_XOR_MAPPED_ADDRESS_ALT: u16 = 0x8020;
 
 /// IPv4 family constant inside MAPPED-ADDRESS/XOR-MAPPED-ADDRESS.
 pub const STUN_FAMILY_IPV4: u8 = 0x01;
@@ -350,31 +351,47 @@ pub fn parse_binding_response(
         ));
     }
 
-    // Parse attributes
+    // Parse attributes within the declared STUN message length. Datagram
+    // transports may carry trailing bytes that are not part of the response.
+    let message_end = 20 + msg_len;
     let mut offset = 20;
-    while offset + 4 <= data.len() {
-        let attr_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
-        let attr_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
-        offset += 4;
-
-        if offset + attr_len > data.len() {
-            break;
+    let mut fallback_addr = None;
+    while offset < message_end {
+        if offset + 4 > message_end {
+            return Err(StunError::InvalidResponse(
+                "Malformed attributes".to_string(),
+            ));
         }
 
-        let attr_data = &data[offset..offset + attr_len];
+        let attr_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        let attr_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
+        let attr_start = offset + 4;
+        let attr_end = attr_start + attr_len;
+        let next_offset = attr_start + ((attr_len + 3) & !3);
+
+        if next_offset > message_end {
+            return Err(StunError::InvalidResponse(
+                "Malformed attributes".to_string(),
+            ));
+        }
+
+        let attr_data = &data[attr_start..attr_end];
 
         match attr_type {
-            ATTR_XOR_MAPPED_ADDRESS => {
+            ATTR_XOR_MAPPED_ADDRESS | ATTR_XOR_MAPPED_ADDRESS_ALT => {
                 return parse_xor_mapped_address(attr_data, expected_txn_id);
             }
             ATTR_MAPPED_ADDRESS => {
-                return parse_mapped_address(attr_data);
+                fallback_addr = Some(parse_mapped_address(attr_data)?);
             }
             _ => {} // Ignore unknown attributes
         }
 
-        // Move to next attribute (4-byte aligned)
-        offset += (attr_len + 3) & !3;
+        offset = next_offset;
+    }
+
+    if let Some(addr) = fallback_addr {
+        return Ok(addr);
     }
 
     Err(StunError::InvalidResponse(
@@ -507,6 +524,29 @@ pub enum StunError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response_header(transaction_id: &[u8; 12]) -> Vec<u8> {
+        let mut response = Vec::new();
+        response.extend_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
+        response.extend_from_slice(transaction_id);
+        response
+    }
+
+    fn append_attr(response: &mut Vec<u8>, attr_type: u16, body: &[u8]) {
+        response.extend_from_slice(&attr_type.to_be_bytes());
+        response.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        response.extend_from_slice(body);
+        while (response.len() - 20) % 4 != 0 {
+            response.push(0);
+        }
+    }
+
+    fn set_response_len(response: &mut [u8]) {
+        let msg_len = (response.len() - 20) as u16;
+        response[2..4].copy_from_slice(&msg_len.to_be_bytes());
+    }
 
     #[test]
     fn test_build_binding_request() {
@@ -645,6 +685,92 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_binding_response_tolerates_padded_unknown_attr_before_xor() {
+        let txn_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let expected: SocketAddr = "203.0.113.7:3478".parse().unwrap();
+        let mut response = response_header(&txn_id);
+
+        append_attr(&mut response, 0x8022, &[0xab]);
+        append_attr(
+            &mut response,
+            ATTR_XOR_MAPPED_ADDRESS,
+            &encode_xor_mapped_address(&txn_id, expected),
+        );
+        set_response_len(&mut response);
+
+        assert_eq!(
+            parse_binding_response(&response, &txn_id).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_parse_binding_response_ignores_attrs_outside_declared_length() {
+        let txn_id = *b"trailbytes12";
+        let trailing_addr: SocketAddr = "203.0.113.8:3479".parse().unwrap();
+        let mut response = response_header(&txn_id);
+
+        set_response_len(&mut response);
+        append_attr(
+            &mut response,
+            ATTR_XOR_MAPPED_ADDRESS,
+            &encode_xor_mapped_address(&txn_id, trailing_addr),
+        );
+
+        assert!(matches!(
+            parse_binding_response(&response, &txn_id),
+            Err(StunError::InvalidResponse(message))
+                if message == "No mapped address in response"
+        ));
+    }
+
+    #[test]
+    fn test_parse_binding_response_prefers_xor_mapped_over_mapped() {
+        let txn_id = *b"mappedxor123";
+        let mapped_port = 1111u16;
+        let mapped_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let expected: SocketAddr = "203.0.113.9:2222".parse().unwrap();
+        let mut mapped_attr = Vec::new();
+        mapped_attr.push(0);
+        mapped_attr.push(STUN_FAMILY_IPV4);
+        mapped_attr.extend_from_slice(&mapped_port.to_be_bytes());
+        mapped_attr.extend_from_slice(&mapped_ip.octets());
+
+        let mut response = response_header(&txn_id);
+        append_attr(&mut response, ATTR_MAPPED_ADDRESS, &mapped_attr);
+        append_attr(
+            &mut response,
+            ATTR_XOR_MAPPED_ADDRESS,
+            &encode_xor_mapped_address(&txn_id, expected),
+        );
+        set_response_len(&mut response);
+
+        assert_eq!(
+            parse_binding_response(&response, &txn_id).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_parse_binding_response_accepts_alternate_xor_mapped_attr() {
+        let txn_id = *b"altxorattr12";
+        let expected: SocketAddr = "203.0.113.10:3480".parse().unwrap();
+        let mut response = response_header(&txn_id);
+
+        append_attr(
+            &mut response,
+            ATTR_XOR_MAPPED_ADDRESS_ALT,
+            &encode_xor_mapped_address(&txn_id, expected),
+        );
+        set_response_len(&mut response);
+
+        assert_eq!(
+            parse_binding_response(&response, &txn_id).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn test_encode_binding_response_round_trips_v4() {
         let txn_id = *b"txid12345678";
         let remote: SocketAddr = "198.51.100.42:54321".parse().unwrap();
@@ -661,6 +787,18 @@ mod tests {
         let response =
             StunListener::handle_packet(b"GET / HTTP/1.1\r\n\r\n", "127.0.0.1:1".parse().unwrap())
                 .unwrap();
+
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_stun_listener_handle_packet_drops_truncated_declared_length() {
+        let txn_id = *b"truncated123";
+        let mut request = build_binding_request(&txn_id);
+        request[2..4].copy_from_slice(&4u16.to_be_bytes());
+
+        let response =
+            StunListener::handle_packet(&request, "127.0.0.1:1".parse().unwrap()).unwrap();
 
         assert!(response.is_none());
     }

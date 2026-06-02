@@ -574,6 +574,14 @@ operator URLs/paths, auto-update frequency, STUN/private-key/client-verification
 settings, IPv4/IPv6 hints, and the serialized `DERPMap` exposed through the
 runtime snapshot.
 
+Recent coverage note (2026-06-02): route and STUN parity expanded again.
+`set_approved_routes_many` now has map-stream coverage proving one batched
+policy delta fans out to existing observers with all newly approved routes and
+without a stale full-map follow-up. The STUN parser now matches Tailscale client
+edge behavior for declared message lengths, padded unknown attributes before
+`XOR-MAPPED-ADDRESS`, `MAPPED-ADDRESS` fallback, alternate XOR attribute
+`0x8020`, and truncated binding-request drops.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

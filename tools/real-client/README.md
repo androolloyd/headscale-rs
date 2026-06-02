@@ -101,9 +101,9 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
-| Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix and DNS extra record projection |
+| Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup |
 | Database | `postgres-dns-disabled` | `postgres-dns-disabled-smoke.sh` | `postgres-dns-disabled-headscale-go-smoke.sh` | Production Postgres MagicDNS disabled fallback names |
-| Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge records |
+| Database | `postgres-dns-edge` | `postgres-dns-edge-smoke.sh` | `postgres-dns-edge-headscale-go-smoke.sh` | Production Postgres split DNS routes, fallback resolver, and DNS edge resolver records |
 | Database | `postgres-dns-hot-reload` | `postgres-dns-hot-reload-smoke.sh` | `postgres-dns-hot-reload-headscale-go-smoke.sh` | Production Postgres DNS `extra_records` hot reload plus client resolver lookup |
 | Database | `postgres-magicdns-ipv6-only` | `postgres-magicdns-ipv6-only-smoke.sh` | `postgres-magicdns-ipv6-only-headscale-go-smoke.sh` | Production Postgres MagicDNS with IPv6-only prefix-family allocation |
 | Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
@@ -202,12 +202,12 @@ upstream commit from `headscale-go-current.sh`.
 | Tags | `tag-update` | `tag-update-smoke.sh` | `tag-update-headscale-go-smoke.sh` | Post-login forced tag replacement |
 | Tags | `tag-update-invalid` | `tag-update-invalid-smoke.sh` | `tag-update-invalid-headscale-go-smoke.sh` | Invalid tag update rejection |
 | Tags | `tag-reauth-clear` | `tag-reauth-clear-smoke.sh` | `tag-reauth-clear-headscale-go-smoke.sh` | Web reauth clears forced tags |
-| DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix and peer DNS names |
-| DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain |
-| DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap |
-| DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records |
+| DNS | `magicdns` | `magicdns-smoke.sh` | `magicdns-headscale-go-smoke.sh` | MagicDNS suffix, peer DNS names, and peer resolver lookup |
+| DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain and peer resolver lookup |
+| DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap and resolver |
+| DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records and resolver lookups |
 | DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap and resolver |
-| DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation |
+| DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
 | Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill after prefix migration |
@@ -586,7 +586,8 @@ Useful knobs:
 
 The MagicDNS scenario starts two stock clients and asserts that each client
 reports the configured tailnet suffix plus peer DNS names in
-`tailscale status --json`:
+`tailscale status --json`, then resolves each peer MagicDNS name with
+`tailscale debug resolve`:
 
 ```sh
 tools/real-client/magicdns-smoke.sh
@@ -603,11 +604,20 @@ tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
 
 The extra-records variant configures an operator-supplied A record, runs the
 stock client with DNS acceptance enabled, and asserts the record is present in
-the client-observed netmap:
+the client-observed netmap and resolves through `tailscale debug resolve`:
 
 ```sh
 tools/real-client/extra-records-smoke.sh
 tools/real-client/extra-records-headscale-go-smoke.sh
+```
+
+The DNS edge variant also asserts split DNS route and fallback resolver
+projection in the client netmap, then resolves the configured AAAA record and
+its CNAME alias through the stock-client resolver:
+
+```sh
+tools/real-client/dns-edge-smoke.sh
+tools/real-client/dns-edge-headscale-go-smoke.sh
 ```
 
 The DNS hot-reload variant starts the production server with
@@ -642,6 +652,11 @@ Useful knobs:
 - `REAL_CLIENT_MAGIC_DNS=false` disables MagicDNS in the headscale-go smoke.
 - `REAL_CLIENT_EXPECT_NO_MAGIC_DNS=true` asserts the disabled-DNS client
   status shape.
+- `REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE=true` resolves peer MagicDNS names
+  with `tailscale debug resolve`.
+- `REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES` accepts comma-separated
+  `name=ip4:value` or `name=ip6:value` entries for extra-record resolver
+  assertions.
 
 ## ACL Peer Visibility Smoke
 
@@ -732,9 +747,10 @@ a temporary Postgres database. The `postgres-magicdns` variant asserts the
 default MagicDNS suffix over that production Postgres path, the
 `postgres-magicdns-custom-domain` variant asserts a non-default suffix, the
 `postgres-extra-records` variant asserts configured DNS `extra_records` in the
-stock-client netmap, the `postgres-dns-disabled` variant asserts disabled
-MagicDNS fallback names, the `postgres-dns-edge` variant asserts split DNS
-routes, fallback resolvers, and AAAA/CNAME records, the
+stock-client netmap and resolver, the `postgres-dns-disabled` variant asserts
+disabled MagicDNS fallback names, the `postgres-dns-edge` variant asserts split
+DNS routes, fallback resolvers, and AAAA/CNAME records with live resolver
+lookups for the harness-owned extra records, the
 `postgres-dns-hot-reload` variant asserts production `extra_records_path`
 file reloads in both the stock-client netmap and resolver, and the
 `postgres-magicdns-ipv6-only` variant asserts IPv6-only MagicDNS allocation.

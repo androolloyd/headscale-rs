@@ -47,8 +47,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   parsing, public `ipsets` rejection, user CRUD policy/map refresh wakes, per-viewer
   `grants[].via` route steering, current-upstream config-schema
   parsing/debug projection, SQLite import fixture matrix coverage,
-  DNS edge resolver/MagicDNS coverage, production DNS
-  `extra_records_path` hot-reload stock-client coverage, production
+  DNS edge resolver/MagicDNS live stock-client coverage, production DNS
+  `extra_records_path` hot-reload stock-client resolver coverage, production
   restart-persistence smoke wiring with debug batcher state assertions,
   route-withdraw approval
   preservation, paired route-via policy reload/restart and multi-prefix

@@ -2583,6 +2583,18 @@ dns:
 }
 
 #[test]
+fn configtest_accepts_current_upstream_https_and_derp_fixture() {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/headscale-go-v0.28-config-example.yaml");
+
+    let output = headscale_with_config(&config, &["configtest"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn dump_config_missing_target_matches_current_upstream_snapshots() {
     if Path::new("/etc/headscale").exists() {
         eprintln!("skipping dumpConfig missing-target snapshot: /etc/headscale exists");

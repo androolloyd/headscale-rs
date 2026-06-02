@@ -816,6 +816,15 @@ fatal edge. Evidence: headscale-go `hscontrol/types/config.go` requires
 lines 697-710, and Rust now pins the same process stderr in
 `headscale-cli/tests/snapshots/configtest_derp_missing_stun_listen.stderr`.
 
+Recent coverage note (2026-06-02): the pinned current-upstream v0.28
+config-example fixture now carries the lower-frequency DERP server map/source
+settings (`verify_clients`, `stun_listen_addr`, `private_key_path`, IPv4/IPv6
+hints, DERP URL source, `auto_update_enabled`, and `update_frequency`) alongside
+the existing HTTP-01 ACME fields. `headscale-cli/tests/cli_process.rs` now runs
+that fixture through the real `headscale configtest` process to prove those
+HTTPS/DERP runtime settings are accepted without public-CA issuance or
+stock-client traffic.
+
 Recent coverage note (2026-06-02): an env-gated production Postgres `serve`
 process smoke now runs file-backed policy mode, registers a route-advertising
 node, mutates `policy.path`, sends SIGHUP, and asserts the policy reload

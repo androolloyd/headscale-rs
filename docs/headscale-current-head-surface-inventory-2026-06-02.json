@@ -1,0 +1,4223 @@
+{
+  "backlog": [
+    {
+      "category": "integration_test",
+      "id": "integration-test:test2118deletingonlinenodepanics",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "Test2118DeletingOnlineNodePanics",
+        "normalized_name": "2118deletingonlinenodepanics",
+        "source": "integration/general_test.go:1503"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclallowstardst",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-allow-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLAllowStarDst",
+        "normalized_name": "aclallowstardst",
+        "source": "integration/acl_test.go:505"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclallowuser80dst",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-allow-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLAllowUser80Dst",
+        "normalized_name": "aclallowuser80dst",
+        "source": "integration/acl_test.go:339"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclallowuserdst",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-allow-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-allow-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLAllowUserDst",
+        "normalized_name": "aclallowuserdst",
+        "source": "integration/acl_test.go:446"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclautogroupmember",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-autogroup-self-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1",
+        "headscale-api/tests/policy_e2e.rs:262"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLAutogroupMember",
+        "normalized_name": "aclautogroupmember",
+        "source": "integration/acl_test.go:1118"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclautogrouptagged",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-autogroup-self-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLAutogroupTagged",
+        "normalized_name": "aclautogrouptagged",
+        "source": "integration/acl_test.go:1192"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testacldenyallport80",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLDenyAllPort80",
+        "normalized_name": "acldenyallport80",
+        "source": "integration/acl_test.go:396"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testacldevice1canaccessdevice2",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLDevice1CanAccessDevice2",
+        "normalized_name": "acldevice1canaccessdevice2",
+        "source": "integration/acl_test.go:836"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclgroupafteruserdeletion",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLGroupAfterUserDeletion",
+        "normalized_name": "aclgroupafteruserdeletion",
+        "source": "integration/acl_test.go:2972"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclgroupdeletionexactreproduction",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLGroupDeletionExactReproduction",
+        "normalized_name": "aclgroupdeletionexactreproduction",
+        "source": "integration/acl_test.go:3151"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclhostsinnetmaptable",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLHostsInNetMapTable",
+        "normalized_name": "aclhostsinnetmaptable",
+        "source": "integration/acl_test.go:100"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclnamedhostscanreach",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLNamedHostsCanReach",
+        "normalized_name": "aclnamedhostscanreach",
+        "source": "integration/acl_test.go:667"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclnamedhostscanreachbysubnet",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLNamedHostsCanReachBySubnet",
+        "normalized_name": "aclnamedhostscanreachbysubnet",
+        "source": "integration/acl_test.go:565"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testaclpolicypropagationovertime",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLPolicyPropagationOverTime",
+        "normalized_name": "aclpolicypropagationovertime",
+        "source": "integration/acl_test.go:1732"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testacltagpropagation",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLTagPropagation",
+        "normalized_name": "acltagpropagation",
+        "source": "integration/acl_test.go:2132"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testacltagpropagationportspecific",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestACLTagPropagationPortSpecific",
+        "normalized_name": "acltagpropagationportspecific",
+        "source": "integration/acl_test.go:2677"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testapiauthenticationbypass",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:411",
+        "headscale-api/tests/e2e.rs:462",
+        "headscale-api/tests/e2e.rs:430"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAPIAuthenticationBypass",
+        "normalized_name": "apiauthenticationbypass",
+        "source": "integration/api_auth_test.go:32"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testapiauthenticationbypasscurl",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:411",
+        "headscale-api/tests/e2e.rs:462",
+        "headscale-api/tests/e2e.rs:430"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAPIAuthenticationBypassCurl",
+        "normalized_name": "apiauthenticationbypasscurl",
+        "source": "integration/api_auth_test.go:241"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testapikeycommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:133",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-db/tests/postgres_foundation.rs:624",
+        "headscale-db/tests/postgres_foundation.rs:725",
+        "headscale-cli/tests/cli_process.rs:4548",
+        "headscale-api/tests/e2e.rs:411",
+        "headscale-api/tests/e2e.rs:462",
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-identity/tests/crypto_tests.rs:6"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestApiKeyCommand",
+        "normalized_name": "apikeycommand",
+        "source": "integration/cli_test.go:797"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testauthkeydeletekey",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:133",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-cli/tests/cli_process.rs:1134",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAuthKeyDeleteKey",
+        "normalized_name": "authkeydeletekey",
+        "source": "integration/auth_key_test.go:479"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testauthkeylogoutandreloginroutespreserved",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:549",
+        "headscale-cli/tests/cli_process.rs:1134",
+        "headscale-api/tests/grpc_gateway_e2e.rs:609",
+        "headscale-cli/tests/cli_process.rs:6710",
+        "headscale-db/tests/headscale_go_migrations.rs:1399",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAuthKeyLogoutAndReloginRoutesPreserved",
+        "normalized_name": "authkeylogoutandreloginroutespreserved",
+        "source": "integration/auth_key_test.go:586"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testauthkeylogoutandreloginsameuser",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-smoke.sh:1",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/api_keys_e2e.rs:61"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAuthKeyLogoutAndReloginSameUser",
+        "normalized_name": "authkeylogoutandreloginsameuser",
+        "source": "integration/auth_key_test.go:23"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testauthkeylogoutandreloginsameuserexpiredkey",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/authkey-relogin-expired-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-expired-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-expired-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-expired-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAuthKeyLogoutAndReloginSameUserExpiredKey",
+        "normalized_name": "authkeylogoutandreloginsameuserexpiredkey",
+        "source": "integration/auth_key_test.go:353"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testauthwebflowlogoutandreloginsameuser",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-smoke.sh:1",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/api_keys_e2e.rs:61"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestAuthWebFlowLogoutAndReloginSameUser",
+        "normalized_name": "authwebflowlogoutandreloginsameuser",
+        "source": "integration/auth_web_flow_test.go:56"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testcliwithconfigauthenticationbypass",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-cli/tests/cli_process.rs:147",
+        "headscale-identity/tests/crypto_tests.rs:19",
+        "headscale-identity/tests/crypto_tests.rs:6"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestCLIWithConfigAuthenticationBypass",
+        "normalized_name": "cliwithconfigauthenticationbypass",
+        "source": "integration/api_auth_test.go:548"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testderpserverscenario",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestDERPServerScenario",
+        "normalized_name": "derpserverscenario",
+        "source": "integration/embedded_derp_test.go:21"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testderpserverwebsocketscenario",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestDERPServerWebsocketScenario",
+        "normalized_name": "derpserverwebsocketscenario",
+        "source": "integration/embedded_derp_test.go:71"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testderpverifyendpoint",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:411",
+        "headscale-api/tests/e2e.rs:462"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestDERPVerifyEndpoint",
+        "normalized_name": "derpverifyendpoint",
+        "source": "integration/derp_verify_endpoint_test.go:22"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testdisablenodeexpiry",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-db/tests/headscale_go_migrations.rs:1044",
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestDisableNodeExpiry",
+        "normalized_name": "disablenodeexpiry",
+        "source": "integration/general_test.go:1176"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testenablingexitroutes",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_routes_coverage.rs:549",
+        "headscale-db/tests/headscale_go_migrations.rs:1465"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestEnablingExitRoutes",
+        "normalized_name": "enablingexitroutes",
+        "source": "integration/route_test.go:1594"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testenablingroutes",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestEnablingRoutes",
+        "normalized_name": "enablingroutes",
+        "source": "integration/route_test.go:42"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testephemeral2006deletedtooquickly",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestEphemeral2006DeletedTooQuickly",
+        "normalized_name": "ephemeral2006deletedtooquickly",
+        "source": "integration/general_test.go:219"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testephemeralinalternatetimezone",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestEphemeralInAlternateTimezone",
+        "normalized_name": "ephemeralinalternatetimezone",
+        "source": "integration/general_test.go:138"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testexitrouteswithautogroupinternetacl",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-autogroup-self-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1",
+        "headscale-api/tests/admin_routes_coverage.rs:549",
+        "headscale-api/tests/policy_e2e.rs:254",
+        "headscale-db/tests/headscale_go_migrations.rs:1465",
+        "headscale-identity/tests/crypto_tests.rs:19",
+        "headscale-identity/tests/crypto_tests.rs:6"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestExitRoutesWithAutogroupInternetACL",
+        "normalized_name": "exitrouteswithautogroupinternetacl",
+        "source": "integration/route_test.go:1709"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testexpirenode",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestExpireNode",
+        "normalized_name": "expirenode",
+        "source": "integration/general_test.go:944"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testgrpcauthenticationbypass",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestGRPCAuthenticationBypass",
+        "normalized_name": "grpcauthenticationbypass",
+        "source": "integration/api_auth_test.go:423"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testgrantcapdrive",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/wire_serde_coverage.rs:1476"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestGrantCapDrive",
+        "normalized_name": "grantcapdrive",
+        "source": "integration/grant_cap_test.go:530"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testgrantcaprelay",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/wire_serde_coverage.rs:1476"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestGrantCapRelay",
+        "normalized_name": "grantcaprelay",
+        "source": "integration/grant_cap_test.go:75"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testgrantviasubnetsteering",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestGrantViaSubnetSteering",
+        "normalized_name": "grantviasubnetsteering",
+        "source": "integration/route_test.go:3300"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testhasubnetrouterfailover",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestHASubnetRouterFailover",
+        "normalized_name": "hasubnetrouterfailover",
+        "source": "integration/route_test.go:223"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testhasubnetrouterfailoverbothoffline",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestHASubnetRouterFailoverBothOffline",
+        "normalized_name": "hasubnetrouterfailoverbothoffline",
+        "source": "integration/route_test.go:3865"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testhasubnetrouterfailoverbothofflinecablepull",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestHASubnetRouterFailoverBothOfflineCablePull",
+        "normalized_name": "hasubnetrouterfailoverbothofflinecablepull",
+        "source": "integration/route_test.go:4072"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testhasubnetrouterfailoverdockerdisconnect",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestHASubnetRouterFailoverDockerDisconnect",
+        "normalized_name": "hasubnetrouterfailoverdockerdisconnect",
+        "source": "integration/route_test.go:4298"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testnodecommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestNodeCommand",
+        "normalized_name": "nodecommand",
+        "source": "integration/cli_test.go:1046"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testnodeexpirecommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestNodeExpireCommand",
+        "normalized_name": "nodeexpirecommand",
+        "source": "integration/cli_test.go:1307"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testnodeonlinestatus",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestNodeOnlineStatus",
+        "normalized_name": "nodeonlinestatus",
+        "source": "integration/general_test.go:1271"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testnoderenamecommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestNodeRenameCommand",
+        "normalized_name": "noderenamecommand",
+        "source": "integration/cli_test.go:1443"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidc024usercreation",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDC024UserCreation",
+        "normalized_name": "oidc024usercreation",
+        "source": "integration/auth_oidc_test.go:239"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcaclpolicyonjoin",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCACLPolicyOnJoin",
+        "normalized_name": "oidcaclpolicyonjoin",
+        "source": "integration/auth_oidc_test.go:1478"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcauthenticationwithpkce",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/oidc_callback_handoff.rs:41",
+        "headscale-identity/tests/crypto_tests.rs:19",
+        "headscale-identity/tests/crypto_tests.rs:6"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCAuthenticationWithPKCE",
+        "normalized_name": "oidcauthenticationwithpkce",
+        "source": "integration/auth_oidc_test.go:406"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcexpirenodesbasedontokenexpiry",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-identity/tests/crypto_tests.rs:84"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCExpireNodesBasedOnTokenExpiry",
+        "normalized_name": "oidcexpirenodesbasedontokenexpiry",
+        "source": "integration/auth_oidc_test.go:137"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcexpiryafterrestart",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/oidc-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/oidc-restart-smoke.sh:1",
+        "tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/oidc-route-approve-restart-smoke.sh:1",
+        "tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-oidc-restart-smoke.sh:1",
+        "tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-oidc-route-approve-restart-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCExpiryAfterRestart",
+        "normalized_name": "oidcexpiryafterrestart",
+        "source": "integration/auth_oidc_test.go:1340"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcfollowupurl",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCFollowUpUrl",
+        "normalized_name": "oidcfollowupurl",
+        "source": "integration/auth_oidc_test.go:870"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcreloginsamenodesameuser",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCReloginSameNodeSameUser",
+        "normalized_name": "oidcreloginsamenodesameuser",
+        "source": "integration/auth_oidc_test.go:1114"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testoidcreloginsameuserroutespreserved",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-different-user-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-authkey-relogin-same-user-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestOIDCReloginSameUserRoutesPreserved",
+        "normalized_name": "oidcreloginsameuserroutespreserved",
+        "source": "integration/auth_oidc_test.go:1759"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpolicybrokenconfigcommand",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPolicyBrokenConfigCommand",
+        "normalized_name": "policybrokenconfigcommand",
+        "source": "integration/cli_test.go:1705"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpolicycheckcommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-cli/tests/admin_client.rs:479",
+        "headscale-cli/tests/admin_client.rs:471"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPolicyCheckCommand",
+        "normalized_name": "policycheckcommand",
+        "source": "integration/cli_policy_test.go:28"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpolicycommand",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPolicyCommand",
+        "normalized_name": "policycommand",
+        "source": "integration/cli_test.go:1621"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpolicyupdatewhilerunningwithcliindatabase",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-db/tests/headscale_go_migrations.rs:668",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3074",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3097",
+        "headscale-cli/tests/cli_process.rs:157",
+        "headscale-cli/tests/cli_process.rs:167",
+        "headscale-cli/tests/cli_process.rs:3473",
+        "headscale-api/tests/admin_routes_coverage.rs:68",
+        "headscale-identity/tests/crypto_tests.rs:19",
+        "headscale-identity/tests/crypto_tests.rs:6"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPolicyUpdateWhileRunningWithCLIInDatabase",
+        "normalized_name": "policyupdatewhilerunningwithcliindatabase",
+        "source": "integration/acl_test.go:984"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpreauthkeycommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPreAuthKeyCommand",
+        "normalized_name": "preauthkeycommand",
+        "source": "integration/cli_test.go:270"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpreauthkeycommandreusableephemeral",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-api/tests/preauth_e2e.rs:237",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPreAuthKeyCommandReusableEphemeral",
+        "normalized_name": "preauthkeycommandreusableephemeral",
+        "source": "integration/cli_test.go:489"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpreauthkeycommandwithoutexpiry",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:884",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-db/tests/headscale_go_migrations.rs:738",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPreAuthKeyCommandWithoutExpiry",
+        "normalized_name": "preauthkeycommandwithoutexpiry",
+        "source": "integration/cli_test.go:423"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testpreauthkeycorrectuserloggedincommand",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestPreAuthKeyCorrectUserLoggedInCommand",
+        "normalized_name": "preauthkeycorrectuserloggedincommand",
+        "source": "integration/cli_test.go:572"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testresolvemagicdns",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/dns_e2e.rs:79",
+        "headscale-api/tests/dns_e2e.rs:407"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestResolveMagicDNS",
+        "normalized_name": "resolvemagicdns",
+        "source": "integration/dns_test.go:18"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testresolvemagicdnsextrarecordspath",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/extra-records-headscale-go-smoke.sh:1",
+        "tools/real-client/extra-records-smoke.sh:1",
+        "tools/real-client/postgres-extra-records-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-extra-records-smoke.sh:1",
+        "headscale-api/tests/dns_e2e.rs:53",
+        "headscale-api/tests/dns_e2e.rs:79",
+        "headscale-api/tests/dns_e2e.rs:407",
+        "headscale-api/tests/dns_e2e.rs:258",
+        "headscale-api/tests/dns_e2e.rs:218",
+        "headscale-api/tests/dns_e2e.rs:184"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestResolveMagicDNSExtraRecordsPath",
+        "normalized_name": "resolvemagicdnsextrarecordspath",
+        "source": "integration/dns_test.go:75"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testretrydockerop-recoversfromtransient",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-identity/tests/crypto_tests.rs:106"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestRetryDockerOp_RecoversFromTransient",
+        "normalized_name": "retrydockeroprecoversfromtransient",
+        "source": "integration/dockertestutil/network_test.go:16"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testretrydockerop-respectscontextcancellation",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestRetryDockerOp_RespectsContextCancellation",
+        "normalized_name": "retrydockeroprespectscontextcancellation",
+        "source": "integration/dockertestutil/network_test.go:37"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshautogroupself",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/acl-autogroup-self-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHAutogroupSelf",
+        "normalized_name": "sshautogroupself",
+        "source": "integration/ssh_test.go:552"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshcheckmodecheckperiodcli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-cli-check-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHCheckModeCheckPeriodCLI",
+        "normalized_name": "sshcheckmodecheckperiodcli",
+        "source": "integration/ssh_test.go:1092"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshcheckmodenegativecli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-cli-check-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHCheckModeNegativeCLI",
+        "normalized_name": "sshcheckmodenegativecli",
+        "source": "integration/ssh_test.go:1253"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshisblockedinacl",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHIsBlockedInACL",
+        "normalized_name": "sshisblockedinacl",
+        "source": "integration/ssh_test.go:273"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshmultipleusersalltoall",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/wire_serde_coverage.rs:945",
+        "headscale-cli/tests/admin_client.rs:76"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHMultipleUsersAllToAll",
+        "normalized_name": "sshmultipleusersalltoall",
+        "source": "integration/ssh_test.go:142"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshnosshconfigured",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHNoSSHConfigured",
+        "normalized_name": "sshnosshconfigured",
+        "source": "integration/ssh_test.go:228"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshoneusertoall",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-period-local-user-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-wrong-user-smoke.sh:1",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-api/tests/wire_serde_coverage.rs:945"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHOneUserToAll",
+        "normalized_name": "sshoneusertoall",
+        "source": "integration/ssh_test.go:67"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshoneusertoonecheckmodecli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-cli-check-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHOneUserToOneCheckModeCLI",
+        "normalized_name": "sshoneusertoonecheckmodecli",
+        "source": "integration/ssh_test.go:818"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshoneusertoonecheckmodeoidc",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-cli-check-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-cancel-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-deny-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHOneUserToOneCheckModeOIDC",
+        "normalized_name": "sshoneusertoonecheckmodeoidc",
+        "source": "integration/ssh_test.go:891"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshtestsrejectfailingpolicy",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh:1",
+        "tools/real-client/ssh-oidc-policy-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/ssh-oidc-policy-restart-smoke.sh:1",
+        "headscale-api/tests/wire_serde_coverage.rs:945",
+        "headscale-api/tests/wire_serde_coverage.rs:848"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHTestsRejectFailingPolicy",
+        "normalized_name": "sshtestsrejectfailingpolicy",
+        "source": "integration/cli_policy_test.go:173"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsshuseronlyisolation",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-period-local-user-headscale-go-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-period-local-user-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-wrong-user-headscale-go-smoke.sh:1",
+        "tools/real-client/ssh-oidc-check-wrong-user-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSSHUserOnlyIsolation",
+        "normalized_name": "sshuseronlyisolation",
+        "source": "integration/ssh_test.go:325"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsetnodeexpiryinfuture",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-db/tests/headscale_go_migrations.rs:1044",
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSetNodeExpiryInFuture",
+        "normalized_name": "setnodeexpiryinfuture",
+        "source": "integration/general_test.go:1078"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsubnetrouteacl",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303",
+        "headscale-api/tests/policy_consolidation.rs:333"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSubnetRouteACL",
+        "normalized_name": "subnetrouteacl",
+        "source": "integration/route_test.go:1329"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsubnetrouteaclfiltering",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303",
+        "headscale-api/tests/policy_consolidation.rs:333",
+        "headscale-api/tests/e2e.rs:227"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSubnetRouteACLFiltering",
+        "normalized_name": "subnetrouteaclfiltering",
+        "source": "integration/route_test.go:3089"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsubnetroutermultinetwork",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/policy_consolidation.rs:303",
+        "headscale-api/tests/e2e.rs:165"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSubnetRouterMultiNetwork",
+        "normalized_name": "subnetroutermultinetwork",
+        "source": "integration/route_test.go:1842"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testsubnetroutermultinetworkexitnode",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-exit-node-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-exit-node-smoke.sh:1",
+        "tools/real-client/route-exit-node-headscale-go-smoke.sh:1",
+        "tools/real-client/route-exit-node-smoke.sh:1",
+        "headscale-api/tests/policy_consolidation.rs:303",
+        "headscale-api/tests/policy_e2e.rs:237",
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:165",
+        "headscale-api/tests/e2e.rs:227",
+        "headscale-api/tests/e2e.rs:200"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestSubnetRouterMultiNetworkExitNode",
+        "normalized_name": "subnetroutermultinetworkexitnode",
+        "source": "integration/route_test.go:1993"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtaggednodesclioutput",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-db/tests/headscale_go_migrations.rs:1007"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTaggedNodesCLIOutput",
+        "normalized_name": "taggednodesclioutput",
+        "source": "integration/cli_test.go:682"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsadminapicannotremovealltags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:95",
+        "headscale-api/tests/admin_e2e.rs:219",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/admin_routes_coverage.rs:615",
+        "headscale-api/tests/admin_routes_coverage.rs:355",
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAdminAPICannotRemoveAllTags",
+        "normalized_name": "tagsadminapicannotremovealltags",
+        "source": "integration/tags_test.go:2388"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsadminapicannotsetinvalidformat",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:468",
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:95",
+        "headscale-api/tests/admin_e2e.rs:219",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/admin_routes_coverage.rs:310",
+        "headscale-api/tests/admin_routes_coverage.rs:549",
+        "headscale-api/tests/admin_routes_coverage.rs:615"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAdminAPICannotSetInvalidFormat",
+        "normalized_name": "tagsadminapicannotsetinvalidformat",
+        "source": "integration/tags_test.go:2710"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsadminapicannotsetnonexistenttag",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:95",
+        "headscale-api/tests/admin_e2e.rs:219",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/admin_routes_coverage.rs:549",
+        "headscale-api/tests/admin_routes_coverage.rs:615",
+        "headscale-api/tests/admin_routes_coverage.rs:355",
+        "headscale-api/tests/admin_routes_coverage.rs:370"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAdminAPICannotSetNonExistentTag",
+        "normalized_name": "tagsadminapicannotsetnonexistenttag",
+        "source": "integration/tags_test.go:2228"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeyconverttouserviacliregister",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-web-register-tags-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-web-register-tags-smoke.sh:1",
+        "tools/real-client/web-register-tags-headscale-go-smoke.sh:1",
+        "tools/real-client/web-register-tags-smoke.sh:1",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-cli/tests/admin_client.rs:514",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2241",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-api/tests/wire_serde_coverage.rs:363"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyConvertToUserViaCLIRegister",
+        "normalized_name": "tagsauthkeyconverttouserviacliregister",
+        "source": "integration/tags_test.go:3101"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithtagadminoverridereauthpreserves",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-tag-reauth-clear-smoke.sh:1",
+        "tools/real-client/tag-reauth-clear-headscale-go-smoke.sh:1",
+        "tools/real-client/tag-reauth-clear-smoke.sh:1",
+        "headscale-api/tests/machine_lifecycle.rs:449",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:79",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithTagAdminOverrideReauthPreserves",
+        "normalized_name": "tagsauthkeywithtagadminoverridereauthpreserves",
+        "source": "integration/tags_test.go:465"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithtagclicannotmodifyadmintags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:449",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:79",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:659",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithTagCLICannotModifyAdminTags",
+        "normalized_name": "tagsauthkeywithtagclicannotmodifyadmintags",
+        "source": "integration/tags_test.go:592"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithtagcannotaddviacli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-smoke.sh:1",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithTagCannotAddViaCLI",
+        "normalized_name": "tagsauthkeywithtagcannotaddviacli",
+        "source": "integration/tags_test.go:269"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithtagcannotchangeviacli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-smoke.sh:1",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithTagCannotChangeViaCLI",
+        "normalized_name": "tagsauthkeywithtagcannotchangeviacli",
+        "source": "integration/tags_test.go:369"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithtagnoadvertiseflag",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/admin_routes_coverage.rs:68",
+        "headscale-api/tests/preauth_e2e.rs:150",
+        "headscale-api/tests/preauth_e2e.rs:133",
+        "headscale-api/tests/preauth_e2e.rs:166",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithTagNoAdvertiseFlag",
+        "normalized_name": "tagsauthkeywithtagnoadvertiseflag",
+        "source": "integration/tags_test.go:197"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithouttagclicannotreduceadminmultitag",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:659",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/admin_routes_coverage.rs:884"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutTagCLICannotReduceAdminMultiTag",
+        "normalized_name": "tagsauthkeywithouttagclicannotreduceadminmultitag",
+        "source": "integration/tags_test.go:1192"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithouttagclinoopafteradminwithemptyadvertise",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:449",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/machine_lifecycle.rs:528",
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:79",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:659",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/api_keys_e2e.rs:61"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutTagCLINoOpAfterAdminWithEmptyAdvertise",
+        "normalized_name": "tagsauthkeywithouttagclinoopafteradminwithemptyadvertise",
+        "source": "integration/tags_test.go:1073"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithouttagclinoopafteradminwithreset",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:449",
+        "headscale-api/tests/machine_lifecycle.rs:484",
+        "headscale-api/tests/admin_e2e.rs:239",
+        "headscale-api/tests/admin_e2e.rs:79",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:659",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutTagCLINoOpAfterAdminWithReset",
+        "normalized_name": "tagsauthkeywithouttagclinoopafteradminwithreset",
+        "source": "integration/tags_test.go:953"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithouttagcannotaddviacli",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-smoke.sh:1",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutTagCannotAddViaCLI",
+        "normalized_name": "tagsauthkeywithouttagcannotaddviacli",
+        "source": "integration/tags_test.go:854"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithouttagregisternotags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-web-register-tags-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-web-register-tags-smoke.sh:1",
+        "tools/real-client/postgres-web-register-unowned-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-web-register-unowned-tag-smoke.sh:1",
+        "tools/real-client/web-register-tags-headscale-go-smoke.sh:1",
+        "tools/real-client/web-register-tags-smoke.sh:1",
+        "tools/real-client/web-register-unowned-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/web-register-unowned-tag-smoke.sh:1",
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutTagRegisterNoTags",
+        "normalized_name": "tagsauthkeywithouttagregisternotags",
+        "source": "integration/tags_test.go:785"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithoutuserinheritstags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:884",
+        "headscale-api/tests/wire_parity_contract.rs:130",
+        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-db/tests/postgres_nodes.rs:514",
+        "headscale-db/tests/postgres_nodes.rs:518",
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-identity/tests/crypto_tests.rs:54"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutUserInheritsTags",
+        "normalized_name": "tagsauthkeywithoutuserinheritstags",
+        "source": "integration/tags_test.go:2964"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsauthkeywithoutuserrejectsadvertisedtags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/api_keys_e2e.rs:61",
+        "headscale-api/tests/api_keys_e2e.rs:177",
+        "headscale-api/tests/admin_routes_coverage.rs:355",
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/admin_routes_coverage.rs:400",
+        "headscale-api/tests/preauth_e2e.rs:320",
+        "headscale-cli/tests/cli_process.rs:2734",
+        "headscale-api/tests/admin_routes_coverage.rs:884",
+        "headscale-db/tests/postgres_preauth_keys.rs:241"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsAuthKeyWithoutUserRejectsAdvertisedTags",
+        "normalized_name": "tagsauthkeywithoutuserrejectsadvertisedtags",
+        "source": "integration/tags_test.go:3035"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsissue2978reprotagreplacement",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsIssue2978ReproTagReplacement",
+        "normalized_name": "tagsissue2978reprotagreplacement",
+        "source": "integration/tags_test.go:2502"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginaddtagviaclireauth",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-smoke.sh:1",
+        "tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-tag-reauth-clear-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginAddTagViaCLIReauth",
+        "normalized_name": "tagsuserloginaddtagviaclireauth",
+        "source": "integration/tags_test.go:1524"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginclicannotremoveadmintags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_e2e.rs:149",
+        "headscale-api/tests/admin_e2e.rs:116",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-cli/tests/cli_process.rs:3904"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginCLICannotRemoveAdminTags",
+        "normalized_name": "tagsuserloginclicannotremoveadmintags",
+        "source": "integration/tags_test.go:1823"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginclinoopafteradminassignment",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_e2e.rs:149",
+        "headscale-api/tests/admin_e2e.rs:116",
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/machine_lifecycle.rs:582",
+        "headscale-api/tests/machine_lifecycle.rs:134",
+        "headscale-api/tests/admin_routes_coverage.rs:471",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-api/tests/preauth_e2e.rs:183",
+        "headscale-cli/tests/cli_process.rs:3904"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginCLINoOpAfterAdminAssignment",
+        "normalized_name": "tagsuserloginclinoopafteradminassignment",
+        "source": "integration/tags_test.go:1706"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginnonexistenttagatregistration",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/admin_routes_coverage.rs:370",
+        "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/machine_lifecycle.rs:774",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2126",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-api/tests/e2e.rs:430",
+        "headscale-api/tests/e2e.rs:134"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginNonExistentTagAtRegistration",
+        "normalized_name": "tagsuserloginnonexistenttagatregistration",
+        "source": "integration/tags_test.go:1383"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginreauthwithemptytagsremovesalltags",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-api/tests/machine_lifecycle.rs:606",
+        "headscale-api/tests/admin_routes_coverage.rs:355",
+        "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/admin_routes_coverage.rs:291",
+        "headscale-db/tests/headscale_go_migrations.rs:1376",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2126",
+        "headscale-api/tests/wire_serde_coverage.rs:90",
+        "headscale-api/tests/admin_routes_coverage.rs:861",
+        "headscale-api/tests/admin_routes_coverage.rs:68",
+        "headscale-api/tests/preauth_e2e.rs:166"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginReauthWithEmptyTagsRemovesAllTags",
+        "normalized_name": "tagsuserloginreauthwithemptytagsremovesalltags",
+        "source": "integration/tags_test.go:2800"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtagsuserloginremovetagviaclireauth",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/postgres-route-via-same-tag-smoke.sh:1",
+        "tools/real-client/postgres-tag-reauth-clear-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-tag-reauth-clear-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-restart-smoke.sh:1",
+        "tools/real-client/route-via-same-tag-smoke.sh:1"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTagsUserLoginRemoveTagViaCLIReauth",
+        "normalized_name": "tagsuserloginremovetagviaclireauth",
+        "source": "integration/tags_test.go:1615"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtailscalenodesjoiningheadcale",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTailscaleNodesJoiningHeadcale",
+        "normalized_name": "tailscalenodesjoiningheadcale",
+        "source": "integration/scenario_test.go:78"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testtailscalerustaxum",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestTailscaleRustAxum",
+        "normalized_name": "tailscalerustaxum",
+        "source": "integration/tsric_test.go:28"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testupdatehostnamefromclient",
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-identity/tests/crypto_tests.rs:106"
+      ],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestUpdateHostnameFromClient",
+        "normalized_name": "updatehostnamefromclient",
+        "source": "integration/general_test.go:760"
+      }
+    },
+    {
+      "category": "integration_test",
+      "id": "integration-test:testusercommand",
+      "reason": "no Rust integration or real-client smoke name overlap was found",
+      "rust_evidence": [],
+      "status": "needs-review",
+      "upstream": {
+        "name": "TestUserCommand",
+        "normalized_name": "usercommand",
+        "source": "integration/cli_test.go:50"
+      }
+    }
+  ],
+  "metadata": {
+    "audit_date": "2026-06-02",
+    "headscale_rs": {
+      "compared_ref": "c248a887608f816555c1625d1108d83534f11d01",
+      "origin_main_commit": "c248a887608f816555c1625d1108d83534f11d01",
+      "root": "/Users/androolloyd/Development/headscale-rs.worktrees/current-head-surface-inventory-20260602"
+    },
+    "notes": [
+      "Source-only scanner; results are backlog evidence, not a behavioral parity proof.",
+      "Route path parameters are canonicalized across chi {name} and axum :name syntax before comparison.",
+      "Integration-test comparison uses normalized name overlap and should be reviewed manually.",
+      "Compact output keeps upstream inventories and backlog; rerun without --compact for full Rust evidence arrays."
+    ],
+    "upstream": {
+      "commit": "171fd7a3c54156965753a63639cdcafcd50c8d67",
+      "root": "/Users/androolloyd/go/pkg/mod/github.com/juanfont/headscale@v0.29.0-beta.2",
+      "version": "v0.29.0-beta.2"
+    }
+  },
+  "summary": {
+    "backlog_count": 111,
+    "comparison_counts": {
+      "cli_commands": {
+        "present": 44
+      },
+      "integration_tests": {
+        "needs-review": 111,
+        "present": 31
+      },
+      "proto_rpcs": {
+        "present": 29
+      },
+      "routes": {
+        "present": 64
+      }
+    },
+    "rust_evidence_counts": {
+      "cli_commands": 55,
+      "integration_or_smoke_tests": 962,
+      "routes": 182
+    },
+    "upstream_counts": {
+      "cli_commands": 44,
+      "integration_tests": 142,
+      "proto_rpcs": 29,
+      "public_routes": 64
+    }
+  },
+  "upstream": {
+    "cli_commands": [
+      {
+        "aliases": [],
+        "name": "headscale",
+        "path": "headscale",
+        "path_tokens": [
+          "headscale"
+        ],
+        "source": "cmd/headscale/cli/root.go:133",
+        "use": "headscale",
+        "var": "rootCmd"
+      },
+      {
+        "aliases": [
+          "apikey",
+          "api"
+        ],
+        "name": "apikeys",
+        "path": "headscale apikeys",
+        "path_tokens": [
+          "headscale",
+          "apikeys"
+        ],
+        "source": "cmd/headscale/cli/api_key.go:37",
+        "use": "apikeys",
+        "var": "apiKeysCmd"
+      },
+      {
+        "aliases": [
+          "c",
+          "new"
+        ],
+        "name": "create",
+        "path": "headscale apikeys create",
+        "path_tokens": [
+          "headscale",
+          "apikeys",
+          "create"
+        ],
+        "source": "cmd/headscale/cli/api_key.go:77",
+        "use": "create",
+        "var": "createAPIKeyCmd"
+      },
+      {
+        "aliases": [
+          "remove",
+          "del"
+        ],
+        "name": "delete",
+        "path": "headscale apikeys delete",
+        "path_tokens": [
+          "headscale",
+          "apikeys",
+          "delete"
+        ],
+        "source": "cmd/headscale/cli/api_key.go:140",
+        "use": "delete",
+        "var": "deleteAPIKeyCmd"
+      },
+      {
+        "aliases": [
+          "revoke",
+          "exp",
+          "e"
+        ],
+        "name": "expire",
+        "path": "headscale apikeys expire",
+        "path_tokens": [
+          "headscale",
+          "apikeys",
+          "expire"
+        ],
+        "source": "cmd/headscale/cli/api_key.go:118",
+        "use": "expire",
+        "var": "expireAPIKeyCmd"
+      },
+      {
+        "aliases": [
+          "ls",
+          "show"
+        ],
+        "name": "list",
+        "path": "headscale apikeys list",
+        "path_tokens": [
+          "headscale",
+          "apikeys",
+          "list"
+        ],
+        "source": "cmd/headscale/cli/api_key.go:43",
+        "use": "list",
+        "var": "listAPIKeys"
+      },
+      {
+        "aliases": [],
+        "name": "auth",
+        "path": "headscale auth",
+        "path_tokens": [
+          "headscale",
+          "auth"
+        ],
+        "source": "cmd/headscale/cli/auth.go:28",
+        "use": "auth",
+        "var": "authCmd"
+      },
+      {
+        "aliases": [],
+        "name": "approve",
+        "path": "headscale auth approve",
+        "path_tokens": [
+          "headscale",
+          "auth",
+          "approve"
+        ],
+        "source": "cmd/headscale/cli/auth.go:57",
+        "use": "approve",
+        "var": "authApproveCmd"
+      },
+      {
+        "aliases": [],
+        "name": "register",
+        "path": "headscale auth register",
+        "path_tokens": [
+          "headscale",
+          "auth",
+          "register"
+        ],
+        "source": "cmd/headscale/cli/auth.go:33",
+        "use": "register",
+        "var": "authRegisterCmd"
+      },
+      {
+        "aliases": [],
+        "name": "reject",
+        "path": "headscale auth reject",
+        "path_tokens": [
+          "headscale",
+          "auth",
+          "reject"
+        ],
+        "source": "cmd/headscale/cli/auth.go:76",
+        "use": "reject",
+        "var": "authRejectCmd"
+      },
+      {
+        "aliases": [],
+        "name": "configtest",
+        "path": "headscale configtest",
+        "path_tokens": [
+          "headscale",
+          "configtest"
+        ],
+        "source": "cmd/headscale/cli/configtest.go:13",
+        "use": "configtest",
+        "var": "configTestCmd"
+      },
+      {
+        "aliases": [],
+        "name": "debug",
+        "path": "headscale debug",
+        "path_tokens": [
+          "headscale",
+          "debug"
+        ],
+        "source": "cmd/headscale/cli/debug.go:26",
+        "use": "debug",
+        "var": "debugCmd"
+      },
+      {
+        "aliases": [],
+        "name": "create-node",
+        "path": "headscale debug create-node",
+        "path_tokens": [
+          "headscale",
+          "debug",
+          "create-node"
+        ],
+        "source": "cmd/headscale/cli/debug.go:32",
+        "use": "create-node",
+        "var": "createNodeCmd"
+      },
+      {
+        "aliases": [],
+        "name": "dumpConfig",
+        "path": "headscale dumpConfig",
+        "path_tokens": [
+          "headscale",
+          "dumpConfig"
+        ],
+        "source": "cmd/headscale/cli/dump_config.go:14",
+        "use": "dumpConfig",
+        "var": "dumpConfigCmd"
+      },
+      {
+        "aliases": [
+          "gen"
+        ],
+        "name": "generate",
+        "path": "headscale generate",
+        "path_tokens": [
+          "headscale",
+          "generate"
+        ],
+        "source": "cmd/headscale/cli/generate.go:15",
+        "use": "generate",
+        "var": "generateCmd"
+      },
+      {
+        "aliases": [],
+        "name": "private-key",
+        "path": "headscale generate private-key",
+        "path_tokens": [
+          "headscale",
+          "generate",
+          "private-key"
+        ],
+        "source": "cmd/headscale/cli/generate.go:21",
+        "use": "private-key",
+        "var": "generatePrivateKeyCmd"
+      },
+      {
+        "aliases": [],
+        "name": "health",
+        "path": "headscale health",
+        "path_tokens": [
+          "headscale",
+          "health"
+        ],
+        "source": "cmd/headscale/cli/health.go:15",
+        "use": "health",
+        "var": "healthCmd"
+      },
+      {
+        "aliases": [],
+        "name": "mockoidc",
+        "path": "headscale mockoidc",
+        "path_tokens": [
+          "headscale",
+          "mockoidc"
+        ],
+        "source": "cmd/headscale/cli/mockoidc.go:38",
+        "use": "mockoidc",
+        "var": "mockOidcCmd"
+      },
+      {
+        "aliases": [
+          "node"
+        ],
+        "name": "nodes",
+        "path": "headscale nodes",
+        "path_tokens": [
+          "headscale",
+          "nodes"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:60",
+        "use": "nodes",
+        "var": "nodeCmd"
+      },
+      {
+        "aliases": [],
+        "name": "approve-routes",
+        "path": "headscale nodes approve-routes",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "approve-routes"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:491",
+        "use": "approve-routes",
+        "var": "approveRoutesCmd"
+      },
+      {
+        "aliases": [],
+        "name": "backfillips",
+        "path": "headscale nodes backfillips",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "backfillips"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:271",
+        "use": "backfillips",
+        "var": "backfillNodeIPsCmd"
+      },
+      {
+        "aliases": [
+          "del"
+        ],
+        "name": "delete",
+        "path": "headscale nodes delete",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "delete"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:231",
+        "use": "delete",
+        "var": "deleteNodeCmd"
+      },
+      {
+        "aliases": [
+          "logout",
+          "exp",
+          "e"
+        ],
+        "name": "expire",
+        "path": "headscale nodes expire",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "expire"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:147",
+        "use": "expire",
+        "var": "expireNodeCmd"
+      },
+      {
+        "aliases": [
+          "ls",
+          "show"
+        ],
+        "name": "list",
+        "path": "headscale nodes list",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "list"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:91",
+        "use": "list",
+        "var": "listNodesCmd"
+      },
+      {
+        "aliases": [
+          "lsr",
+          "routes"
+        ],
+        "name": "list-routes",
+        "path": "headscale nodes list-routes",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "list-routes"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:114",
+        "use": "list-routes",
+        "var": "listNodeRoutesCmd"
+      },
+      {
+        "aliases": [],
+        "name": "register",
+        "path": "headscale nodes register",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "register"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:66",
+        "use": "register",
+        "var": "registerNodeCmd"
+      },
+      {
+        "aliases": [],
+        "name": "rename",
+        "path": "headscale nodes rename",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "rename"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:206",
+        "use": "rename NEW_NAME",
+        "var": "renameNodeCmd"
+      },
+      {
+        "aliases": [
+          "tags",
+          "t"
+        ],
+        "name": "tag",
+        "path": "headscale nodes tag",
+        "path_tokens": [
+          "headscale",
+          "nodes",
+          "tag"
+        ],
+        "source": "cmd/headscale/cli/nodes.go:468",
+        "use": "tag",
+        "var": "tagCmd"
+      },
+      {
+        "aliases": [],
+        "name": "policy",
+        "path": "headscale policy",
+        "path_tokens": [
+          "headscale",
+          "policy"
+        ],
+        "source": "cmd/headscale/cli/policy.go:56",
+        "use": "policy",
+        "var": "policyCmd"
+      },
+      {
+        "aliases": [],
+        "name": "check",
+        "path": "headscale policy check",
+        "path_tokens": [
+          "headscale",
+          "policy",
+          "check"
+        ],
+        "source": "cmd/headscale/cli/policy.go:171",
+        "use": "check",
+        "var": "checkPolicy"
+      },
+      {
+        "aliases": [
+          "show",
+          "view",
+          "fetch"
+        ],
+        "name": "get",
+        "path": "headscale policy get",
+        "path_tokens": [
+          "headscale",
+          "policy",
+          "get"
+        ],
+        "source": "cmd/headscale/cli/policy.go:61",
+        "use": "get",
+        "var": "getPolicy"
+      },
+      {
+        "aliases": [
+          "put",
+          "update"
+        ],
+        "name": "set",
+        "path": "headscale policy set",
+        "path_tokens": [
+          "headscale",
+          "policy",
+          "set"
+        ],
+        "source": "cmd/headscale/cli/policy.go:109",
+        "use": "set",
+        "var": "setPolicy"
+      },
+      {
+        "aliases": [
+          "preauthkey",
+          "authkey",
+          "pre"
+        ],
+        "name": "preauthkeys",
+        "path": "headscale preauthkeys",
+        "path_tokens": [
+          "headscale",
+          "preauthkeys"
+        ],
+        "source": "cmd/headscale/cli/preauthkeys.go:38",
+        "use": "preauthkeys",
+        "var": "preauthkeysCmd"
+      },
+      {
+        "aliases": [
+          "c",
+          "new"
+        ],
+        "name": "create",
+        "path": "headscale preauthkeys create",
+        "path_tokens": [
+          "headscale",
+          "preauthkeys",
+          "create"
+        ],
+        "source": "cmd/headscale/cli/preauthkeys.go:99",
+        "use": "create",
+        "var": "createPreAuthKeyCmd"
+      },
+      {
+        "aliases": [
+          "del",
+          "rm",
+          "d"
+        ],
+        "name": "delete",
+        "path": "headscale preauthkeys delete",
+        "path_tokens": [
+          "headscale",
+          "preauthkeys",
+          "delete"
+        ],
+        "source": "cmd/headscale/cli/preauthkeys.go:155",
+        "use": "delete",
+        "var": "deletePreAuthKeyCmd"
+      },
+      {
+        "aliases": [
+          "revoke",
+          "exp",
+          "e"
+        ],
+        "name": "expire",
+        "path": "headscale preauthkeys expire",
+        "path_tokens": [
+          "headscale",
+          "preauthkeys",
+          "expire"
+        ],
+        "source": "cmd/headscale/cli/preauthkeys.go:131",
+        "use": "expire",
+        "var": "expirePreAuthKeyCmd"
+      },
+      {
+        "aliases": [
+          "ls",
+          "show"
+        ],
+        "name": "list",
+        "path": "headscale preauthkeys list",
+        "path_tokens": [
+          "headscale",
+          "preauthkeys",
+          "list"
+        ],
+        "source": "cmd/headscale/cli/preauthkeys.go:44",
+        "use": "list",
+        "var": "listPreAuthKeys"
+      },
+      {
+        "aliases": [],
+        "name": "serve",
+        "path": "headscale serve",
+        "path_tokens": [
+          "headscale",
+          "serve"
+        ],
+        "source": "cmd/headscale/cli/serve.go:16",
+        "use": "serve",
+        "var": "serveCmd"
+      },
+      {
+        "aliases": [
+          "user"
+        ],
+        "name": "users",
+        "path": "headscale users",
+        "path_tokens": [
+          "headscale",
+          "users"
+        ],
+        "source": "cmd/headscale/cli/users.go:64",
+        "use": "users",
+        "var": "userCmd"
+      },
+      {
+        "aliases": [
+          "c",
+          "new"
+        ],
+        "name": "create",
+        "path": "headscale users create",
+        "path_tokens": [
+          "headscale",
+          "users",
+          "create"
+        ],
+        "source": "cmd/headscale/cli/users.go:70",
+        "use": "create NAME",
+        "var": "createUserCmd"
+      },
+      {
+        "aliases": [
+          "delete"
+        ],
+        "name": "destroy",
+        "path": "headscale users destroy",
+        "path_tokens": [
+          "headscale",
+          "users",
+          "destroy"
+        ],
+        "source": "cmd/headscale/cli/users.go:115",
+        "use": "destroy --identifier ID or --name NAME",
+        "var": "destroyUserCmd"
+      },
+      {
+        "aliases": [
+          "ls",
+          "show"
+        ],
+        "name": "list",
+        "path": "headscale users list",
+        "path_tokens": [
+          "headscale",
+          "users",
+          "list"
+        ],
+        "source": "cmd/headscale/cli/users.go:159",
+        "use": "list",
+        "var": "listUsersCmd"
+      },
+      {
+        "aliases": [
+          "mv"
+        ],
+        "name": "rename",
+        "path": "headscale users rename",
+        "path_tokens": [
+          "headscale",
+          "users",
+          "rename"
+        ],
+        "source": "cmd/headscale/cli/users.go:207",
+        "use": "rename",
+        "var": "renameUserCmd"
+      },
+      {
+        "aliases": [],
+        "name": "version",
+        "path": "headscale version",
+        "path_tokens": [
+          "headscale",
+          "version"
+        ],
+        "source": "cmd/headscale/cli/version.go:13",
+        "use": "version",
+        "var": "versionCmd"
+      }
+    ],
+    "integration_tests": [
+      {
+        "name": "Test2118DeletingOnlineNodePanics",
+        "normalized_name": "2118deletingonlinenodepanics",
+        "source": "integration/general_test.go:1503"
+      },
+      {
+        "name": "TestACLAllowStarDst",
+        "normalized_name": "aclallowstardst",
+        "source": "integration/acl_test.go:505"
+      },
+      {
+        "name": "TestACLAllowUser80Dst",
+        "normalized_name": "aclallowuser80dst",
+        "source": "integration/acl_test.go:339"
+      },
+      {
+        "name": "TestACLAllowUserDst",
+        "normalized_name": "aclallowuserdst",
+        "source": "integration/acl_test.go:446"
+      },
+      {
+        "name": "TestACLAutogroupMember",
+        "normalized_name": "aclautogroupmember",
+        "source": "integration/acl_test.go:1118"
+      },
+      {
+        "name": "TestACLAutogroupSelf",
+        "normalized_name": "aclautogroupself",
+        "source": "integration/acl_test.go:1475"
+      },
+      {
+        "name": "TestACLAutogroupTagged",
+        "normalized_name": "aclautogrouptagged",
+        "source": "integration/acl_test.go:1192"
+      },
+      {
+        "name": "TestACLDenyAllPort80",
+        "normalized_name": "acldenyallport80",
+        "source": "integration/acl_test.go:396"
+      },
+      {
+        "name": "TestACLDevice1CanAccessDevice2",
+        "normalized_name": "acldevice1canaccessdevice2",
+        "source": "integration/acl_test.go:836"
+      },
+      {
+        "name": "TestACLDynamicUnknownUserAddition",
+        "normalized_name": "acldynamicunknownuseraddition",
+        "source": "integration/acl_test.go:3323"
+      },
+      {
+        "name": "TestACLDynamicUnknownUserRemoval",
+        "normalized_name": "acldynamicunknownuserremoval",
+        "source": "integration/acl_test.go:3470"
+      },
+      {
+        "name": "TestACLGroupAfterUserDeletion",
+        "normalized_name": "aclgroupafteruserdeletion",
+        "source": "integration/acl_test.go:2972"
+      },
+      {
+        "name": "TestACLGroupDeletionExactReproduction",
+        "normalized_name": "aclgroupdeletionexactreproduction",
+        "source": "integration/acl_test.go:3151"
+      },
+      {
+        "name": "TestACLGroupWithUnknownUser",
+        "normalized_name": "aclgroupwithunknownuser",
+        "source": "integration/acl_test.go:2874"
+      },
+      {
+        "name": "TestACLHostsInNetMapTable",
+        "normalized_name": "aclhostsinnetmaptable",
+        "source": "integration/acl_test.go:100"
+      },
+      {
+        "name": "TestACLNamedHostsCanReach",
+        "normalized_name": "aclnamedhostscanreach",
+        "source": "integration/acl_test.go:667"
+      },
+      {
+        "name": "TestACLNamedHostsCanReachBySubnet",
+        "normalized_name": "aclnamedhostscanreachbysubnet",
+        "source": "integration/acl_test.go:565"
+      },
+      {
+        "name": "TestACLPolicyPropagationOverTime",
+        "normalized_name": "aclpolicypropagationovertime",
+        "source": "integration/acl_test.go:1732"
+      },
+      {
+        "name": "TestACLTagPropagation",
+        "normalized_name": "acltagpropagation",
+        "source": "integration/acl_test.go:2132"
+      },
+      {
+        "name": "TestACLTagPropagationPortSpecific",
+        "normalized_name": "acltagpropagationportspecific",
+        "source": "integration/acl_test.go:2677"
+      },
+      {
+        "name": "TestAPIAuthenticationBypass",
+        "normalized_name": "apiauthenticationbypass",
+        "source": "integration/api_auth_test.go:32"
+      },
+      {
+        "name": "TestAPIAuthenticationBypassCurl",
+        "normalized_name": "apiauthenticationbypasscurl",
+        "source": "integration/api_auth_test.go:241"
+      },
+      {
+        "name": "TestApiKeyCommand",
+        "normalized_name": "apikeycommand",
+        "source": "integration/cli_test.go:797"
+      },
+      {
+        "name": "TestAuthKeyDeleteKey",
+        "normalized_name": "authkeydeletekey",
+        "source": "integration/auth_key_test.go:479"
+      },
+      {
+        "name": "TestAuthKeyLogoutAndReloginNewUser",
+        "normalized_name": "authkeylogoutandreloginnewuser",
+        "source": "integration/auth_key_test.go:222"
+      },
+      {
+        "name": "TestAuthKeyLogoutAndReloginRoutesPreserved",
+        "normalized_name": "authkeylogoutandreloginroutespreserved",
+        "source": "integration/auth_key_test.go:586"
+      },
+      {
+        "name": "TestAuthKeyLogoutAndReloginSameUser",
+        "normalized_name": "authkeylogoutandreloginsameuser",
+        "source": "integration/auth_key_test.go:23"
+      },
+      {
+        "name": "TestAuthKeyLogoutAndReloginSameUserExpiredKey",
+        "normalized_name": "authkeylogoutandreloginsameuserexpiredkey",
+        "source": "integration/auth_key_test.go:353"
+      },
+      {
+        "name": "TestAuthWebFlowAuthenticationPingAll",
+        "normalized_name": "authwebflowauthenticationpingall",
+        "source": "integration/auth_web_flow_test.go:18"
+      },
+      {
+        "name": "TestAuthWebFlowLogoutAndReloginNewUser",
+        "normalized_name": "authwebflowlogoutandreloginnewuser",
+        "source": "integration/auth_web_flow_test.go:218"
+      },
+      {
+        "name": "TestAuthWebFlowLogoutAndReloginSameUser",
+        "normalized_name": "authwebflowlogoutandreloginsameuser",
+        "source": "integration/auth_web_flow_test.go:56"
+      },
+      {
+        "name": "TestAutoApproveMultiNetwork",
+        "normalized_name": "autoapprovemultinetwork",
+        "source": "integration/route_test.go:2182"
+      },
+      {
+        "name": "TestCLIWithConfigAuthenticationBypass",
+        "normalized_name": "cliwithconfigauthenticationbypass",
+        "source": "integration/api_auth_test.go:548"
+      },
+      {
+        "name": "TestDERPServerScenario",
+        "normalized_name": "derpserverscenario",
+        "source": "integration/embedded_derp_test.go:21"
+      },
+      {
+        "name": "TestDERPServerWebsocketScenario",
+        "normalized_name": "derpserverwebsocketscenario",
+        "source": "integration/embedded_derp_test.go:71"
+      },
+      {
+        "name": "TestDERPVerifyEndpoint",
+        "normalized_name": "derpverifyendpoint",
+        "source": "integration/derp_verify_endpoint_test.go:22"
+      },
+      {
+        "name": "TestDisableNodeExpiry",
+        "normalized_name": "disablenodeexpiry",
+        "source": "integration/general_test.go:1176"
+      },
+      {
+        "name": "TestEnablingExitRoutes",
+        "normalized_name": "enablingexitroutes",
+        "source": "integration/route_test.go:1594"
+      },
+      {
+        "name": "TestEnablingRoutes",
+        "normalized_name": "enablingroutes",
+        "source": "integration/route_test.go:42"
+      },
+      {
+        "name": "TestEphemeral",
+        "normalized_name": "ephemeral",
+        "source": "integration/general_test.go:132"
+      },
+      {
+        "name": "TestEphemeral2006DeletedTooQuickly",
+        "normalized_name": "ephemeral2006deletedtooquickly",
+        "source": "integration/general_test.go:219"
+      },
+      {
+        "name": "TestEphemeralInAlternateTimezone",
+        "normalized_name": "ephemeralinalternatetimezone",
+        "source": "integration/general_test.go:138"
+      },
+      {
+        "name": "TestExitRoutesWithAutogroupInternetACL",
+        "normalized_name": "exitrouteswithautogroupinternetacl",
+        "source": "integration/route_test.go:1709"
+      },
+      {
+        "name": "TestExpireNode",
+        "normalized_name": "expirenode",
+        "source": "integration/general_test.go:944"
+      },
+      {
+        "name": "TestGRPCAuthenticationBypass",
+        "normalized_name": "grpcauthenticationbypass",
+        "source": "integration/api_auth_test.go:423"
+      },
+      {
+        "name": "TestGrantCapDrive",
+        "normalized_name": "grantcapdrive",
+        "source": "integration/grant_cap_test.go:530"
+      },
+      {
+        "name": "TestGrantCapRelay",
+        "normalized_name": "grantcaprelay",
+        "source": "integration/grant_cap_test.go:75"
+      },
+      {
+        "name": "TestGrantViaSubnetSteering",
+        "normalized_name": "grantviasubnetsteering",
+        "source": "integration/route_test.go:3300"
+      },
+      {
+        "name": "TestHASubnetRouterFailover",
+        "normalized_name": "hasubnetrouterfailover",
+        "source": "integration/route_test.go:223"
+      },
+      {
+        "name": "TestHASubnetRouterFailoverBothOffline",
+        "normalized_name": "hasubnetrouterfailoverbothoffline",
+        "source": "integration/route_test.go:3865"
+      },
+      {
+        "name": "TestHASubnetRouterFailoverBothOfflineCablePull",
+        "normalized_name": "hasubnetrouterfailoverbothofflinecablepull",
+        "source": "integration/route_test.go:4072"
+      },
+      {
+        "name": "TestHASubnetRouterFailoverDockerDisconnect",
+        "normalized_name": "hasubnetrouterfailoverdockerdisconnect",
+        "source": "integration/route_test.go:4298"
+      },
+      {
+        "name": "TestHASubnetRouterPingFailover",
+        "normalized_name": "hasubnetrouterpingfailover",
+        "source": "integration/route_test.go:3621"
+      },
+      {
+        "name": "TestHeadscale",
+        "normalized_name": "headscale",
+        "source": "integration/scenario_test.go:31"
+      },
+      {
+        "name": "TestNodeCommand",
+        "normalized_name": "nodecommand",
+        "source": "integration/cli_test.go:1046"
+      },
+      {
+        "name": "TestNodeExpireCommand",
+        "normalized_name": "nodeexpirecommand",
+        "source": "integration/cli_test.go:1307"
+      },
+      {
+        "name": "TestNodeOnlineStatus",
+        "normalized_name": "nodeonlinestatus",
+        "source": "integration/general_test.go:1271"
+      },
+      {
+        "name": "TestNodeRenameCommand",
+        "normalized_name": "noderenamecommand",
+        "source": "integration/cli_test.go:1443"
+      },
+      {
+        "name": "TestOIDC024UserCreation",
+        "normalized_name": "oidc024usercreation",
+        "source": "integration/auth_oidc_test.go:239"
+      },
+      {
+        "name": "TestOIDCACLPolicyOnJoin",
+        "normalized_name": "oidcaclpolicyonjoin",
+        "source": "integration/auth_oidc_test.go:1478"
+      },
+      {
+        "name": "TestOIDCAuthenticationPingAll",
+        "normalized_name": "oidcauthenticationpingall",
+        "source": "integration/auth_oidc_test.go:28"
+      },
+      {
+        "name": "TestOIDCAuthenticationWithPKCE",
+        "normalized_name": "oidcauthenticationwithpkce",
+        "source": "integration/auth_oidc_test.go:406"
+      },
+      {
+        "name": "TestOIDCExpireNodesBasedOnTokenExpiry",
+        "normalized_name": "oidcexpirenodesbasedontokenexpiry",
+        "source": "integration/auth_oidc_test.go:137"
+      },
+      {
+        "name": "TestOIDCExpiryAfterRestart",
+        "normalized_name": "oidcexpiryafterrestart",
+        "source": "integration/auth_oidc_test.go:1340"
+      },
+      {
+        "name": "TestOIDCFollowUpUrl",
+        "normalized_name": "oidcfollowupurl",
+        "source": "integration/auth_oidc_test.go:870"
+      },
+      {
+        "name": "TestOIDCMultipleOpenedLoginUrls",
+        "normalized_name": "oidcmultipleopenedloginurls",
+        "source": "integration/auth_oidc_test.go:982"
+      },
+      {
+        "name": "TestOIDCReloginSameNodeNewUser",
+        "normalized_name": "oidcreloginsamenodenewuser",
+        "source": "integration/auth_oidc_test.go:461"
+      },
+      {
+        "name": "TestOIDCReloginSameNodeSameUser",
+        "normalized_name": "oidcreloginsamenodesameuser",
+        "source": "integration/auth_oidc_test.go:1114"
+      },
+      {
+        "name": "TestOIDCReloginSameUserRoutesPreserved",
+        "normalized_name": "oidcreloginsameuserroutespreserved",
+        "source": "integration/auth_oidc_test.go:1759"
+      },
+      {
+        "name": "TestPingAllByHostname",
+        "normalized_name": "pingallbyhostname",
+        "source": "integration/general_test.go:338"
+      },
+      {
+        "name": "TestPingAllByIP",
+        "normalized_name": "pingallbyip",
+        "source": "integration/general_test.go:28"
+      },
+      {
+        "name": "TestPingAllByIPManyUpDown",
+        "normalized_name": "pingallbyipmanyupdown",
+        "source": "integration/general_test.go:1399"
+      },
+      {
+        "name": "TestPingAllByIPPublicDERP",
+        "normalized_name": "pingallbyippublicderp",
+        "source": "integration/general_test.go:90"
+      },
+      {
+        "name": "TestPolicyBrokenConfigCommand",
+        "normalized_name": "policybrokenconfigcommand",
+        "source": "integration/cli_test.go:1705"
+      },
+      {
+        "name": "TestPolicyCheckCommand",
+        "normalized_name": "policycheckcommand",
+        "source": "integration/cli_policy_test.go:28"
+      },
+      {
+        "name": "TestPolicyCommand",
+        "normalized_name": "policycommand",
+        "source": "integration/cli_test.go:1621"
+      },
+      {
+        "name": "TestPolicyUpdateWhileRunningWithCLIInDatabase",
+        "normalized_name": "policyupdatewhilerunningwithcliindatabase",
+        "source": "integration/acl_test.go:984"
+      },
+      {
+        "name": "TestPreAuthKeyCommand",
+        "normalized_name": "preauthkeycommand",
+        "source": "integration/cli_test.go:270"
+      },
+      {
+        "name": "TestPreAuthKeyCommandReusableEphemeral",
+        "normalized_name": "preauthkeycommandreusableephemeral",
+        "source": "integration/cli_test.go:489"
+      },
+      {
+        "name": "TestPreAuthKeyCommandWithoutExpiry",
+        "normalized_name": "preauthkeycommandwithoutexpiry",
+        "source": "integration/cli_test.go:423"
+      },
+      {
+        "name": "TestPreAuthKeyCorrectUserLoggedInCommand",
+        "normalized_name": "preauthkeycorrectuserloggedincommand",
+        "source": "integration/cli_test.go:572"
+      },
+      {
+        "name": "TestResolveMagicDNS",
+        "normalized_name": "resolvemagicdns",
+        "source": "integration/dns_test.go:18"
+      },
+      {
+        "name": "TestResolveMagicDNSExtraRecordsPath",
+        "normalized_name": "resolvemagicdnsextrarecordspath",
+        "source": "integration/dns_test.go:75"
+      },
+      {
+        "name": "TestRetryDockerOp_RecoversFromTransient",
+        "normalized_name": "retrydockeroprecoversfromtransient",
+        "source": "integration/dockertestutil/network_test.go:16"
+      },
+      {
+        "name": "TestRetryDockerOp_RespectsContextCancellation",
+        "normalized_name": "retrydockeroprespectscontextcancellation",
+        "source": "integration/dockertestutil/network_test.go:37"
+      },
+      {
+        "name": "TestSSHAutogroupSelf",
+        "normalized_name": "sshautogroupself",
+        "source": "integration/ssh_test.go:552"
+      },
+      {
+        "name": "TestSSHCheckModeAutoApprove",
+        "normalized_name": "sshcheckmodeautoapprove",
+        "source": "integration/ssh_test.go:1187"
+      },
+      {
+        "name": "TestSSHCheckModeCheckPeriodCLI",
+        "normalized_name": "sshcheckmodecheckperiodcli",
+        "source": "integration/ssh_test.go:1092"
+      },
+      {
+        "name": "TestSSHCheckModeNegativeCLI",
+        "normalized_name": "sshcheckmodenegativecli",
+        "source": "integration/ssh_test.go:1253"
+      },
+      {
+        "name": "TestSSHCheckModeUnapprovedTimeout",
+        "normalized_name": "sshcheckmodeunapprovedtimeout",
+        "source": "integration/ssh_test.go:1006"
+      },
+      {
+        "name": "TestSSHIsBlockedInACL",
+        "normalized_name": "sshisblockedinacl",
+        "source": "integration/ssh_test.go:273"
+      },
+      {
+        "name": "TestSSHLocalpart",
+        "normalized_name": "sshlocalpart",
+        "source": "integration/ssh_test.go:1307"
+      },
+      {
+        "name": "TestSSHMultipleUsersAllToAll",
+        "normalized_name": "sshmultipleusersalltoall",
+        "source": "integration/ssh_test.go:142"
+      },
+      {
+        "name": "TestSSHNoSSHConfigured",
+        "normalized_name": "sshnosshconfigured",
+        "source": "integration/ssh_test.go:228"
+      },
+      {
+        "name": "TestSSHOneUserToAll",
+        "normalized_name": "sshoneusertoall",
+        "source": "integration/ssh_test.go:67"
+      },
+      {
+        "name": "TestSSHOneUserToOneCheckModeCLI",
+        "normalized_name": "sshoneusertoonecheckmodecli",
+        "source": "integration/ssh_test.go:818"
+      },
+      {
+        "name": "TestSSHOneUserToOneCheckModeOIDC",
+        "normalized_name": "sshoneusertoonecheckmodeoidc",
+        "source": "integration/ssh_test.go:891"
+      },
+      {
+        "name": "TestSSHTestsRejectFailingPolicy",
+        "normalized_name": "sshtestsrejectfailingpolicy",
+        "source": "integration/cli_policy_test.go:173"
+      },
+      {
+        "name": "TestSSHUserOnlyIsolation",
+        "normalized_name": "sshuseronlyisolation",
+        "source": "integration/ssh_test.go:325"
+      },
+      {
+        "name": "TestSetNodeExpiryInFuture",
+        "normalized_name": "setnodeexpiryinfuture",
+        "source": "integration/general_test.go:1078"
+      },
+      {
+        "name": "TestSubnetRouteACL",
+        "normalized_name": "subnetrouteacl",
+        "source": "integration/route_test.go:1329"
+      },
+      {
+        "name": "TestSubnetRouteACLFiltering",
+        "normalized_name": "subnetrouteaclfiltering",
+        "source": "integration/route_test.go:3089"
+      },
+      {
+        "name": "TestSubnetRouterMultiNetwork",
+        "normalized_name": "subnetroutermultinetwork",
+        "source": "integration/route_test.go:1842"
+      },
+      {
+        "name": "TestSubnetRouterMultiNetworkExitNode",
+        "normalized_name": "subnetroutermultinetworkexitnode",
+        "source": "integration/route_test.go:1993"
+      },
+      {
+        "name": "TestTaggedNodesCLIOutput",
+        "normalized_name": "taggednodesclioutput",
+        "source": "integration/cli_test.go:682"
+      },
+      {
+        "name": "TestTagsAdminAPICanSetUnownedTag",
+        "normalized_name": "tagsadminapicansetunownedtag",
+        "source": "integration/tags_test.go:2300"
+      },
+      {
+        "name": "TestTagsAdminAPICannotRemoveAllTags",
+        "normalized_name": "tagsadminapicannotremovealltags",
+        "source": "integration/tags_test.go:2388"
+      },
+      {
+        "name": "TestTagsAdminAPICannotSetInvalidFormat",
+        "normalized_name": "tagsadminapicannotsetinvalidformat",
+        "source": "integration/tags_test.go:2710"
+      },
+      {
+        "name": "TestTagsAdminAPICannotSetNonExistentTag",
+        "normalized_name": "tagsadminapicannotsetnonexistenttag",
+        "source": "integration/tags_test.go:2228"
+      },
+      {
+        "name": "TestTagsAuthKeyConvertToUserViaCLIRegister",
+        "normalized_name": "tagsauthkeyconverttouserviacliregister",
+        "source": "integration/tags_test.go:3101"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagAdminOverrideReauthPreserves",
+        "normalized_name": "tagsauthkeywithtagadminoverridereauthpreserves",
+        "source": "integration/tags_test.go:465"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagCLICannotModifyAdminTags",
+        "normalized_name": "tagsauthkeywithtagclicannotmodifyadmintags",
+        "source": "integration/tags_test.go:592"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagCannotAddViaCLI",
+        "normalized_name": "tagsauthkeywithtagcannotaddviacli",
+        "source": "integration/tags_test.go:269"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagCannotChangeViaCLI",
+        "normalized_name": "tagsauthkeywithtagcannotchangeviacli",
+        "source": "integration/tags_test.go:369"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagNoAdvertiseFlag",
+        "normalized_name": "tagsauthkeywithtagnoadvertiseflag",
+        "source": "integration/tags_test.go:197"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagRequestDifferentTag",
+        "normalized_name": "tagsauthkeywithtagrequestdifferenttag",
+        "source": "integration/tags_test.go:123"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagRequestNonExistentTag",
+        "normalized_name": "tagsauthkeywithtagrequestnonexistenttag",
+        "source": "integration/tags_test.go:1940"
+      },
+      {
+        "name": "TestTagsAuthKeyWithTagRequestUnownedTag",
+        "normalized_name": "tagsauthkeywithtagrequestunownedtag",
+        "source": "integration/tags_test.go:2010"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagCLICannotReduceAdminMultiTag",
+        "normalized_name": "tagsauthkeywithouttagclicannotreduceadminmultitag",
+        "source": "integration/tags_test.go:1192"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagCLINoOpAfterAdminWithEmptyAdvertise",
+        "normalized_name": "tagsauthkeywithouttagclinoopafteradminwithemptyadvertise",
+        "source": "integration/tags_test.go:1073"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagCLINoOpAfterAdminWithReset",
+        "normalized_name": "tagsauthkeywithouttagclinoopafteradminwithreset",
+        "source": "integration/tags_test.go:953"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagCannotAddViaCLI",
+        "normalized_name": "tagsauthkeywithouttagcannotaddviacli",
+        "source": "integration/tags_test.go:854"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagCannotRequestTags",
+        "normalized_name": "tagsauthkeywithouttagcannotrequesttags",
+        "source": "integration/tags_test.go:714"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagRegisterNoTags",
+        "normalized_name": "tagsauthkeywithouttagregisternotags",
+        "source": "integration/tags_test.go:785"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagRequestNonExistentTag",
+        "normalized_name": "tagsauthkeywithouttagrequestnonexistenttag",
+        "source": "integration/tags_test.go:2084"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutTagRequestUnownedTag",
+        "normalized_name": "tagsauthkeywithouttagrequestunownedtag",
+        "source": "integration/tags_test.go:2154"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutUserInheritsTags",
+        "normalized_name": "tagsauthkeywithoutuserinheritstags",
+        "source": "integration/tags_test.go:2964"
+      },
+      {
+        "name": "TestTagsAuthKeyWithoutUserRejectsAdvertisedTags",
+        "normalized_name": "tagsauthkeywithoutuserrejectsadvertisedtags",
+        "source": "integration/tags_test.go:3035"
+      },
+      {
+        "name": "TestTagsIssue2978ReproTagReplacement",
+        "normalized_name": "tagsissue2978reprotagreplacement",
+        "source": "integration/tags_test.go:2502"
+      },
+      {
+        "name": "TestTagsUserLoginAddTagViaCLIReauth",
+        "normalized_name": "tagsuserloginaddtagviaclireauth",
+        "source": "integration/tags_test.go:1524"
+      },
+      {
+        "name": "TestTagsUserLoginCLICannotRemoveAdminTags",
+        "normalized_name": "tagsuserloginclicannotremoveadmintags",
+        "source": "integration/tags_test.go:1823"
+      },
+      {
+        "name": "TestTagsUserLoginCLINoOpAfterAdminAssignment",
+        "normalized_name": "tagsuserloginclinoopafteradminassignment",
+        "source": "integration/tags_test.go:1706"
+      },
+      {
+        "name": "TestTagsUserLoginNonExistentTagAtRegistration",
+        "normalized_name": "tagsuserloginnonexistenttagatregistration",
+        "source": "integration/tags_test.go:1383"
+      },
+      {
+        "name": "TestTagsUserLoginOwnedTagAtRegistration",
+        "normalized_name": "tagsuserloginownedtagatregistration",
+        "source": "integration/tags_test.go:1311"
+      },
+      {
+        "name": "TestTagsUserLoginReauthWithEmptyTagsRemovesAllTags",
+        "normalized_name": "tagsuserloginreauthwithemptytagsremovesalltags",
+        "source": "integration/tags_test.go:2800"
+      },
+      {
+        "name": "TestTagsUserLoginRemoveTagViaCLIReauth",
+        "normalized_name": "tagsuserloginremovetagviaclireauth",
+        "source": "integration/tags_test.go:1615"
+      },
+      {
+        "name": "TestTagsUserLoginUnownedTagAtRegistration",
+        "normalized_name": "tagsuserloginunownedtagatregistration",
+        "source": "integration/tags_test.go:1455"
+      },
+      {
+        "name": "TestTaildrop",
+        "normalized_name": "taildrop",
+        "source": "integration/general_test.go:377"
+      },
+      {
+        "name": "TestTailscaleNodesJoiningHeadcale",
+        "normalized_name": "tailscalenodesjoiningheadcale",
+        "source": "integration/scenario_test.go:78"
+      },
+      {
+        "name": "TestTailscaleRustAxum",
+        "normalized_name": "tailscalerustaxum",
+        "source": "integration/tsric_test.go:28"
+      },
+      {
+        "name": "TestUpdateHostnameFromClient",
+        "normalized_name": "updatehostnamefromclient",
+        "source": "integration/general_test.go:760"
+      },
+      {
+        "name": "TestUserCommand",
+        "normalized_name": "usercommand",
+        "source": "integration/cli_test.go:50"
+      }
+    ],
+    "proto_rpcs": [
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/user",
+          "method": "POST",
+          "path": "/api/v1/user"
+        },
+        "name": "CreateUser",
+        "request": "CreateUserRequest",
+        "response": "CreateUserResponse",
+        "rust_method": "create_user",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:16"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/user/{param}/rename/{param}",
+          "method": "POST",
+          "path": "/api/v1/user/{old_id}/rename/{new_name}"
+        },
+        "name": "RenameUser",
+        "request": "RenameUserRequest",
+        "response": "RenameUserResponse",
+        "rust_method": "rename_user",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:23"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/user/{param}",
+          "method": "DELETE",
+          "path": "/api/v1/user/{id}"
+        },
+        "name": "DeleteUser",
+        "request": "DeleteUserRequest",
+        "response": "DeleteUserResponse",
+        "rust_method": "delete_user",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:29"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/user",
+          "method": "GET",
+          "path": "/api/v1/user"
+        },
+        "name": "ListUsers",
+        "request": "ListUsersRequest",
+        "response": "ListUsersResponse",
+        "rust_method": "list_users",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:35"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/preauthkey",
+          "method": "POST",
+          "path": "/api/v1/preauthkey"
+        },
+        "name": "CreatePreAuthKey",
+        "request": "CreatePreAuthKeyRequest",
+        "response": "CreatePreAuthKeyResponse",
+        "rust_method": "create_pre_auth_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:43"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/preauthkey/expire",
+          "method": "POST",
+          "path": "/api/v1/preauthkey/expire"
+        },
+        "name": "ExpirePreAuthKey",
+        "request": "ExpirePreAuthKeyRequest",
+        "response": "ExpirePreAuthKeyResponse",
+        "rust_method": "expire_pre_auth_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:51"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/preauthkey",
+          "method": "DELETE",
+          "path": "/api/v1/preauthkey"
+        },
+        "name": "DeletePreAuthKey",
+        "request": "DeletePreAuthKeyRequest",
+        "response": "DeletePreAuthKeyResponse",
+        "rust_method": "delete_pre_auth_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:59"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/preauthkey",
+          "method": "GET",
+          "path": "/api/v1/preauthkey"
+        },
+        "name": "ListPreAuthKeys",
+        "request": "ListPreAuthKeysRequest",
+        "response": "ListPreAuthKeysResponse",
+        "rust_method": "list_pre_auth_keys",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:66"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/debug/node",
+          "method": "POST",
+          "path": "/api/v1/debug/node"
+        },
+        "name": "DebugCreateNode",
+        "request": "DebugCreateNodeRequest",
+        "response": "DebugCreateNodeResponse",
+        "rust_method": "debug_create_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:75"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/{param}",
+          "method": "GET",
+          "path": "/api/v1/node/{node_id}"
+        },
+        "name": "GetNode",
+        "request": "GetNodeRequest",
+        "response": "GetNodeResponse",
+        "rust_method": "get_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:83"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/node/{param}/tags",
+          "method": "POST",
+          "path": "/api/v1/node/{node_id}/tags"
+        },
+        "name": "SetTags",
+        "request": "SetTagsRequest",
+        "response": "SetTagsResponse",
+        "rust_method": "set_tags",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:89"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/node/{param}/approve_routes",
+          "method": "POST",
+          "path": "/api/v1/node/{node_id}/approve_routes"
+        },
+        "name": "SetApprovedRoutes",
+        "request": "SetApprovedRoutesRequest",
+        "response": "SetApprovedRoutesResponse",
+        "rust_method": "set_approved_routes",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:96"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/register",
+          "method": "POST",
+          "path": "/api/v1/node/register"
+        },
+        "name": "RegisterNode",
+        "request": "RegisterNodeRequest",
+        "response": "RegisterNodeResponse",
+        "rust_method": "register_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:104"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/{param}",
+          "method": "DELETE",
+          "path": "/api/v1/node/{node_id}"
+        },
+        "name": "DeleteNode",
+        "request": "DeleteNodeRequest",
+        "response": "DeleteNodeResponse",
+        "rust_method": "delete_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:110"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/{param}/expire",
+          "method": "POST",
+          "path": "/api/v1/node/{node_id}/expire"
+        },
+        "name": "ExpireNode",
+        "request": "ExpireNodeRequest",
+        "response": "ExpireNodeResponse",
+        "rust_method": "expire_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:116"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/{param}/rename/{param}",
+          "method": "POST",
+          "path": "/api/v1/node/{node_id}/rename/{new_name}"
+        },
+        "name": "RenameNode",
+        "request": "RenameNodeRequest",
+        "response": "RenameNodeResponse",
+        "rust_method": "rename_node",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:122"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node",
+          "method": "GET",
+          "path": "/api/v1/node"
+        },
+        "name": "ListNodes",
+        "request": "ListNodesRequest",
+        "response": "ListNodesResponse",
+        "rust_method": "list_nodes",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:128"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/node/backfillips",
+          "method": "POST",
+          "path": "/api/v1/node/backfillips"
+        },
+        "name": "BackfillNodeIPs",
+        "request": "BackfillNodeIPsRequest",
+        "response": "BackfillNodeIPsResponse",
+        "rust_method": "backfill_node_i_ps",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:134"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/auth/register",
+          "method": "POST",
+          "path": "/api/v1/auth/register"
+        },
+        "name": "AuthRegister",
+        "request": "AuthRegisterRequest",
+        "response": "AuthRegisterResponse",
+        "rust_method": "auth_register",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:144"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/auth/approve",
+          "method": "POST",
+          "path": "/api/v1/auth/approve"
+        },
+        "name": "AuthApprove",
+        "request": "AuthApproveRequest",
+        "response": "AuthApproveResponse",
+        "rust_method": "auth_approve",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:151"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/auth/reject",
+          "method": "POST",
+          "path": "/api/v1/auth/reject"
+        },
+        "name": "AuthReject",
+        "request": "AuthRejectRequest",
+        "response": "AuthRejectResponse",
+        "rust_method": "auth_reject",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:158"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/apikey",
+          "method": "POST",
+          "path": "/api/v1/apikey"
+        },
+        "name": "CreateApiKey",
+        "request": "CreateApiKeyRequest",
+        "response": "CreateApiKeyResponse",
+        "rust_method": "create_api_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:167"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/apikey/expire",
+          "method": "POST",
+          "path": "/api/v1/apikey/expire"
+        },
+        "name": "ExpireApiKey",
+        "request": "ExpireApiKeyRequest",
+        "response": "ExpireApiKeyResponse",
+        "rust_method": "expire_api_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:174"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/apikey",
+          "method": "GET",
+          "path": "/api/v1/apikey"
+        },
+        "name": "ListApiKeys",
+        "request": "ListApiKeysRequest",
+        "response": "ListApiKeysResponse",
+        "rust_method": "list_api_keys",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:181"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/apikey/{param}",
+          "method": "DELETE",
+          "path": "/api/v1/apikey/{prefix}"
+        },
+        "name": "DeleteApiKey",
+        "request": "DeleteApiKeyRequest",
+        "response": "DeleteApiKeyResponse",
+        "rust_method": "delete_api_key",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:187"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/policy",
+          "method": "GET",
+          "path": "/api/v1/policy"
+        },
+        "name": "GetPolicy",
+        "request": "GetPolicyRequest",
+        "response": "GetPolicyResponse",
+        "rust_method": "get_policy",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:195"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/policy",
+          "method": "PUT",
+          "path": "/api/v1/policy"
+        },
+        "name": "SetPolicy",
+        "request": "SetPolicyRequest",
+        "response": "SetPolicyResponse",
+        "rust_method": "set_policy",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:201"
+      },
+      {
+        "http": {
+          "body": "*",
+          "canonical_path": "/api/v1/policy/check",
+          "method": "POST",
+          "path": "/api/v1/policy/check"
+        },
+        "name": "CheckPolicy",
+        "request": "CheckPolicyRequest",
+        "response": "CheckPolicyResponse",
+        "rust_method": "check_policy",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:208"
+      },
+      {
+        "http": {
+          "canonical_path": "/api/v1/health",
+          "method": "GET",
+          "path": "/api/v1/health"
+        },
+        "name": "Health",
+        "request": "HealthRequest",
+        "response": "HealthResponse",
+        "rust_method": "health",
+        "service": "HeadscaleService",
+        "source": "proto/headscale/v1/headscale.proto:217"
+      }
+    ],
+    "public_routes": [
+      {
+        "canonical_path": "/",
+        "method": "GET",
+        "path": "/",
+        "source": "hscontrol/app.go:587",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/api/v1/*",
+        "method": "ANY",
+        "path": "/api/v1/*",
+        "source": "hscontrol/app.go:580",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/api/v1/apikey",
+        "method": "GET",
+        "path": "/api/v1/apikey",
+        "rpc": "ListApiKeys",
+        "source": "proto/headscale/v1/headscale.proto:181",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/apikey",
+        "method": "POST",
+        "path": "/api/v1/apikey",
+        "rpc": "CreateApiKey",
+        "source": "proto/headscale/v1/headscale.proto:167",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/apikey/expire",
+        "method": "POST",
+        "path": "/api/v1/apikey/expire",
+        "rpc": "ExpireApiKey",
+        "source": "proto/headscale/v1/headscale.proto:174",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/apikey/{param}",
+        "method": "DELETE",
+        "path": "/api/v1/apikey/{prefix}",
+        "rpc": "DeleteApiKey",
+        "source": "proto/headscale/v1/headscale.proto:187",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/auth/approve",
+        "method": "POST",
+        "path": "/api/v1/auth/approve",
+        "rpc": "AuthApprove",
+        "source": "proto/headscale/v1/headscale.proto:151",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/auth/register",
+        "method": "POST",
+        "path": "/api/v1/auth/register",
+        "rpc": "AuthRegister",
+        "source": "proto/headscale/v1/headscale.proto:144",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/auth/reject",
+        "method": "POST",
+        "path": "/api/v1/auth/reject",
+        "rpc": "AuthReject",
+        "source": "proto/headscale/v1/headscale.proto:158",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/debug/node",
+        "method": "POST",
+        "path": "/api/v1/debug/node",
+        "rpc": "DebugCreateNode",
+        "source": "proto/headscale/v1/headscale.proto:75",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/health",
+        "method": "GET",
+        "path": "/api/v1/health",
+        "rpc": "Health",
+        "source": "proto/headscale/v1/headscale.proto:217",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node",
+        "method": "GET",
+        "path": "/api/v1/node",
+        "rpc": "ListNodes",
+        "source": "proto/headscale/v1/headscale.proto:128",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/backfillips",
+        "method": "POST",
+        "path": "/api/v1/node/backfillips",
+        "rpc": "BackfillNodeIPs",
+        "source": "proto/headscale/v1/headscale.proto:134",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/register",
+        "method": "POST",
+        "path": "/api/v1/node/register",
+        "rpc": "RegisterNode",
+        "source": "proto/headscale/v1/headscale.proto:104",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}",
+        "method": "DELETE",
+        "path": "/api/v1/node/{node_id}",
+        "rpc": "DeleteNode",
+        "source": "proto/headscale/v1/headscale.proto:110",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}",
+        "method": "GET",
+        "path": "/api/v1/node/{node_id}",
+        "rpc": "GetNode",
+        "source": "proto/headscale/v1/headscale.proto:83",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}/approve_routes",
+        "method": "POST",
+        "path": "/api/v1/node/{node_id}/approve_routes",
+        "rpc": "SetApprovedRoutes",
+        "source": "proto/headscale/v1/headscale.proto:96",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}/expire",
+        "method": "POST",
+        "path": "/api/v1/node/{node_id}/expire",
+        "rpc": "ExpireNode",
+        "source": "proto/headscale/v1/headscale.proto:116",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}/rename/{param}",
+        "method": "POST",
+        "path": "/api/v1/node/{node_id}/rename/{new_name}",
+        "rpc": "RenameNode",
+        "source": "proto/headscale/v1/headscale.proto:122",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/node/{param}/tags",
+        "method": "POST",
+        "path": "/api/v1/node/{node_id}/tags",
+        "rpc": "SetTags",
+        "source": "proto/headscale/v1/headscale.proto:89",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/policy",
+        "method": "GET",
+        "path": "/api/v1/policy",
+        "rpc": "GetPolicy",
+        "source": "proto/headscale/v1/headscale.proto:195",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/policy",
+        "method": "PUT",
+        "path": "/api/v1/policy",
+        "rpc": "SetPolicy",
+        "source": "proto/headscale/v1/headscale.proto:201",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/policy/check",
+        "method": "POST",
+        "path": "/api/v1/policy/check",
+        "rpc": "CheckPolicy",
+        "source": "proto/headscale/v1/headscale.proto:208",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/preauthkey",
+        "method": "DELETE",
+        "path": "/api/v1/preauthkey",
+        "rpc": "DeletePreAuthKey",
+        "source": "proto/headscale/v1/headscale.proto:59",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/preauthkey",
+        "method": "GET",
+        "path": "/api/v1/preauthkey",
+        "rpc": "ListPreAuthKeys",
+        "source": "proto/headscale/v1/headscale.proto:66",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/preauthkey",
+        "method": "POST",
+        "path": "/api/v1/preauthkey",
+        "rpc": "CreatePreAuthKey",
+        "source": "proto/headscale/v1/headscale.proto:43",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/preauthkey/expire",
+        "method": "POST",
+        "path": "/api/v1/preauthkey/expire",
+        "rpc": "ExpirePreAuthKey",
+        "source": "proto/headscale/v1/headscale.proto:51",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/user",
+        "method": "GET",
+        "path": "/api/v1/user",
+        "rpc": "ListUsers",
+        "source": "proto/headscale/v1/headscale.proto:35",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/user",
+        "method": "POST",
+        "path": "/api/v1/user",
+        "rpc": "CreateUser",
+        "source": "proto/headscale/v1/headscale.proto:16",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/user/{param}",
+        "method": "DELETE",
+        "path": "/api/v1/user/{id}",
+        "rpc": "DeleteUser",
+        "source": "proto/headscale/v1/headscale.proto:29",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/api/v1/user/{param}/rename/{param}",
+        "method": "POST",
+        "path": "/api/v1/user/{old_id}/rename/{new_name}",
+        "rpc": "RenameUser",
+        "source": "proto/headscale/v1/headscale.proto:23",
+        "surface": "grpc_gateway"
+      },
+      {
+        "canonical_path": "/apple",
+        "method": "GET",
+        "path": "/apple",
+        "source": "hscontrol/app.go:561",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/apple/{param}",
+        "method": "GET",
+        "path": "/apple/{platform}",
+        "source": "hscontrol/app.go:562",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/auth/{param}",
+        "method": "GET",
+        "path": "/auth/{auth_id}",
+        "source": "hscontrol/app.go:554",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/bootstrap-dns",
+        "method": "ANY",
+        "path": "/bootstrap-dns",
+        "source": "hscontrol/app.go:575",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/derp",
+        "method": "ANY",
+        "path": "/derp",
+        "source": "hscontrol/app.go:572",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/derp/latency-check",
+        "method": "ANY",
+        "path": "/derp/latency-check",
+        "source": "hscontrol/app.go:574",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/derp/probe",
+        "method": "ANY",
+        "path": "/derp/probe",
+        "source": "hscontrol/app.go:573",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/favicon.ico",
+        "method": "GET",
+        "path": "/favicon.ico",
+        "source": "hscontrol/app.go:586",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/health",
+        "method": "GET",
+        "path": "/health",
+        "source": "hscontrol/app.go:550",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/key",
+        "method": "GET",
+        "path": "/key",
+        "source": "hscontrol/app.go:552",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/audit-log",
+        "method": "POST",
+        "path": "/machine/audit-log",
+        "source": "hscontrol/noise.go:198",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/c2n",
+        "method": "POST",
+        "path": "/machine/c2n",
+        "source": "hscontrol/noise.go:211",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/feature/query",
+        "method": "POST",
+        "path": "/machine/feature/query",
+        "source": "hscontrol/noise.go:205",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/id-token",
+        "method": "POST",
+        "path": "/machine/id-token",
+        "source": "hscontrol/noise.go:201",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/map",
+        "method": "POST",
+        "path": "/machine/map",
+        "source": "hscontrol/noise.go:174",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/ping-response",
+        "method": "HEAD",
+        "path": "/machine/ping-response",
+        "source": "hscontrol/app.go:584",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/register",
+        "method": "POST",
+        "path": "/machine/register",
+        "source": "hscontrol/noise.go:173",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/set-device-attr",
+        "method": "PATCH",
+        "path": "/machine/set-device-attr",
+        "source": "hscontrol/noise.go:193",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/set-dns",
+        "method": "POST",
+        "path": "/machine/set-dns",
+        "source": "hscontrol/noise.go:189",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/ssh/action/{param}/to/{param}",
+        "method": "GET",
+        "path": "/machine/ssh/action/{src_node_id}/to/{dst_node_id}",
+        "source": "hscontrol/noise.go:177",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/update-health",
+        "method": "POST",
+        "path": "/machine/update-health",
+        "source": "hscontrol/noise.go:207",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/machine/whoami",
+        "method": "GET",
+        "path": "/machine/whoami",
+        "source": "hscontrol/noise.go:184",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/metrics",
+        "method": "ANY",
+        "path": "/metrics",
+        "source": "hscontrol/noise.go:170",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/oidc/callback",
+        "method": "GET",
+        "path": "/oidc/callback",
+        "source": "hscontrol/app.go:557",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/register/confirm/{param}",
+        "method": "POST",
+        "path": "/register/confirm/{auth_id}",
+        "source": "hscontrol/app.go:558",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/register/{param}",
+        "method": "GET",
+        "path": "/register/{auth_id}",
+        "source": "hscontrol/app.go:553",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/robots.txt",
+        "method": "GET",
+        "path": "/robots.txt",
+        "source": "hscontrol/app.go:549",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/swagger",
+        "method": "GET",
+        "path": "/swagger",
+        "source": "hscontrol/app.go:566",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/swagger/v1/openapiv2.json",
+        "method": "GET",
+        "path": "/swagger/v1/openapiv2.json",
+        "source": "hscontrol/app.go:567",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/ts2021",
+        "method": "POST",
+        "path": "/ts2021",
+        "source": "hscontrol/app.go:547",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/verify",
+        "method": "POST",
+        "path": "/verify",
+        "source": "hscontrol/app.go:569",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/version",
+        "method": "GET",
+        "path": "/version",
+        "source": "hscontrol/app.go:551",
+        "surface": "control_http"
+      },
+      {
+        "canonical_path": "/windows",
+        "method": "GET",
+        "path": "/windows",
+        "source": "hscontrol/app.go:563",
+        "surface": "control_http"
+      }
+    ]
+  }
+}

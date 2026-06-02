@@ -208,7 +208,7 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
 
         let alice = seed_user(&mut schema.conn, "alice").await?;
         let auth_key_id = seed_auth_key(&mut schema.conn, alice.id).await?;
-        headscale_nodes::create_postgres_on_connection(
+        let node = headscale_nodes::create_postgres_on_connection(
             &mut schema.conn,
             node_params(alice.id, auth_key_id),
         )

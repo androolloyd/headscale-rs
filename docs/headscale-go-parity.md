@@ -208,6 +208,9 @@ Current-head audit overlay, refreshed 2026-05-30:
   unknown-topic help lookups; process snapshots now normalize that timestamp
   via `no_config_default_warning.stderr` while direct `subcommand --help`
   remains clean.
+- Current branch adds process snapshots for API-key delete selector errors in
+  JSON, json-line, and YAML, pinning the current-upstream missing
+  `--id`/`--prefix` envelope before any gRPC connection attempt.
 
 This ledger tracks observable behavior that must match before
 `headscale-rs` can claim full parity with headscale-go. Rows marked

@@ -4680,6 +4680,22 @@ fn implemented_admin_errors_follow_output_format() {
         "error: 'either --id or --prefix must be provided: missing parameters'\n\n"
     );
 
+    assert_stderr_snapshot(
+        &["-o", "json", "apikeys", "delete"],
+        1,
+        include_str!("snapshots/apikeys_delete_missing_selector_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["-ojson-line", "apikeys", "delete"],
+        1,
+        include_str!("snapshots/apikeys_delete_missing_selector_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--output", "yaml", "apikeys", "delete"],
+        1,
+        include_str!("snapshots/apikeys_delete_missing_selector_yaml.stderr"),
+    );
+
     let remote = headscale_clean(&[
         "--output=json",
         "--address",

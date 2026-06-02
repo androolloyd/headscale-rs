@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 dns_live_resolver_pid=""
+dns_live_resolver_pids=()
 
 dns_live_resolver_free_udp_port() {
   ruby -rsocket -e 's=UDPSocket.new; s.bind("0.0.0.0", 0); puts s.addr[1]; s.close'
@@ -46,6 +47,44 @@ dns_live_resolver_ready() {
       sock&.close
     end
   ' "${port}" "${name}" "${expected_ip}" "${qtype}"
+}
+
+dns_live_resolver_rcode_ready() {
+  local port="$1"
+  local name="$2"
+  local expected_rcode="$3"
+  ruby -rsocket -e '
+    def encode_name(name)
+      name.sub(/\.\z/, "").split(".").map { |label| [label.bytesize].pack("C") + label.b }.join.b + "\0".b
+    end
+
+    port = Integer(ARGV.fetch(0))
+    name = ARGV.fetch(1)
+    expected_rcode = Integer(ARGV.fetch(2))
+    sock = nil
+    begin
+      sock = UDPSocket.new
+      sock.connect("127.0.0.1", port)
+      query = "hf".b + [0x0100, 1, 0, 0, 0].pack("nnnnn") + encode_name(name) + [1, 1].pack("nn")
+      sock.send(query, 0)
+      ready = IO.select([sock], nil, nil, 2)
+      exit 1 unless ready
+      response = sock.recv(1500)
+      exit 1 if response.bytesize < 4
+      flags = response.byteslice(2, 2).unpack1("n")
+      exit((flags & 0x000f) == expected_rcode ? 0 : 1)
+    rescue SystemCallError
+      exit 1
+    ensure
+      sock&.close
+    end
+  ' "${port}" "${name}" "${expected_rcode}"
+}
+
+dns_live_resolver_track_pid() {
+  local pid="$1"
+  dns_live_resolver_pid="${pid}"
+  dns_live_resolver_pids+=("${pid}")
 }
 
 start_dns_live_split_resolver() {
@@ -129,7 +168,7 @@ start_dns_live_split_resolver() {
   ' "${port}" "${records_json}" \
     >"${work_dir}/dns-live-resolver.stdout" \
     2>"${work_dir}/dns-live-resolver.stderr" &
-  dns_live_resolver_pid="$!"
+  dns_live_resolver_track_pid "$!"
 
   local deadline=$((SECONDS + 5))
   until dns_live_resolver_ready "${port}" "${name}" "${expected_ip}" 1 &&
@@ -178,10 +217,114 @@ start_dns_live_split_resolver() {
   export DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS
 }
 
-stop_dns_live_resolver() {
-  if [[ -n "${dns_live_resolver_pid}" ]]; then
-    kill "${dns_live_resolver_pid}" >/dev/null 2>&1 || true
-    wait "${dns_live_resolver_pid}" >/dev/null 2>&1 || true
-    dns_live_resolver_pid=""
+start_dns_live_failure_resolver() {
+  local image="$1"
+  local work_dir="$2"
+  local name="${3:-fallback-probe.test}"
+  local mode="${REAL_CLIENT_DNS_LIVE_FAILURE_MODE:-servfail}"
+  local host_gateway_ip
+  local port
+  local rcode
+
+  case "${mode}" in
+    servfail) rcode=2 ;;
+    nxdomain) rcode=3 ;;
+    refused) rcode=5 ;;
+    *)
+      echo "REAL_CLIENT_DNS_LIVE_FAILURE_MODE must be servfail, nxdomain, or refused" >&2
+      return 2
+      ;;
+  esac
+
+  mkdir -p "${work_dir}"
+  host_gateway_ip="$(dns_live_resolver_host_gateway_ip "${image}")"
+  if [[ -z "${host_gateway_ip}" ]]; then
+    echo "could not discover Docker host gateway IP for live DNS failure resolver fixture" >&2
+    return 1
   fi
+
+  port="$(dns_live_resolver_free_udp_port)"
+  ruby -rsocket -e '
+    def parse_name(data, offset)
+      labels = []
+      loop do
+        length = data.getbyte(offset)
+        return nil if length.nil?
+        offset += 1
+        return [labels.join("."), offset] if length.zero?
+        return nil if (length & 0xc0) != 0
+        label = data.byteslice(offset, length)
+        return nil if label.nil? || label.bytesize != length
+        labels << label
+        offset += length
+      end
+    end
+
+    port = Integer(ARGV.fetch(0))
+    rcode = Integer(ARGV.fetch(1))
+    socket = UDPSocket.new
+    socket.bind("0.0.0.0", port)
+    $stdout.sync = true
+    puts "dns-live-failure-resolver listening on 0.0.0.0:#{port} with rcode #{rcode}"
+
+    loop do
+      data, remote = socket.recvfrom(1500)
+      next if data.bytesize < 12
+      parsed = parse_name(data, 12)
+      next if parsed.nil?
+      _qname, offset = parsed
+      question = data.byteslice(12, offset + 4 - 12)
+      next if question.nil?
+      flags = 0x8180 | rcode
+      response = data.byteslice(0, 2) + [flags, 1, 0, 0, 0].pack("nnnnn") + question
+      socket.send(response, 0, remote.fetch(3), remote.fetch(1))
+    end
+  ' "${port}" "${rcode}" \
+    >"${work_dir}/dns-live-failure-resolver.stdout" \
+    2>"${work_dir}/dns-live-failure-resolver.stderr" &
+  dns_live_resolver_track_pid "$!"
+
+  local deadline=$((SECONDS + 5))
+  until dns_live_resolver_rcode_ready "${port}" "${name}" "${rcode}"; do
+    if ! kill -0 "${dns_live_resolver_pid}" >/dev/null 2>&1; then
+      echo "live DNS failure resolver fixture exited before answering ${name}" >&2
+      stop_dns_live_resolver
+      return 1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting for live DNS failure resolver fixture to answer ${name}" >&2
+      stop_dns_live_resolver
+      return 1
+    fi
+    sleep 0.2
+  done
+
+  DNS_LIVE_FAILURE_RESOLVER_ADDR="${host_gateway_ip}:${port}"
+  DNS_LIVE_FAILURE_RESOLVER_RCODE="${rcode}"
+  export DNS_LIVE_FAILURE_RESOLVER_ADDR
+  export DNS_LIVE_FAILURE_RESOLVER_RCODE
+}
+
+stop_dns_live_resolver() {
+  local pids=("${dns_live_resolver_pids[@]}")
+  local pid
+  local seen=false
+  if [[ -n "${dns_live_resolver_pid}" ]]; then
+    for pid in "${pids[@]}"; do
+      [[ "${pid}" == "${dns_live_resolver_pid}" ]] && seen=true
+    done
+    if [[ "${seen}" != true ]]; then
+      pids+=("${dns_live_resolver_pid}")
+    fi
+  fi
+  for pid in "${pids[@]}"; do
+    [[ -n "${pid}" ]] || continue
+    kill "${pid}" >/dev/null 2>&1 || true
+  done
+  for pid in "${pids[@]}"; do
+    [[ -n "${pid}" ]] || continue
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
+  dns_live_resolver_pid=""
+  dns_live_resolver_pids=()
 }

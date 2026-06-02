@@ -122,6 +122,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
 | Database | `postgres-prefix-family-v4-to-dual-backfill` | `postgres-prefix-family-v4-to-dual-backfill-smoke.sh` | `postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | Production Postgres IPv4-to-dual-stack backfill plus post-backfill restart hydration after prefix migration |
 | Database | `postgres-prefix-family-v4-to-dual-backfill-route-restart` | `postgres-prefix-family-v4-to-dual-backfill-route-restart-smoke.sh` | `postgres-prefix-family-v4-to-dual-backfill-route-restart-headscale-go-smoke.sh` | Production Postgres IPv4-to-dual-stack backfill preserves approved route state across post-backfill restart |
+| Database | `postgres-prefix-family-v4-to-dual-backfill-magicdns-restart` | `postgres-prefix-family-v4-to-dual-backfill-magicdns-restart-smoke.sh` | `postgres-prefix-family-v4-to-dual-backfill-magicdns-restart-headscale-go-smoke.sh` | Production Postgres IPv4-to-dual-stack backfill preserves peer MagicDNS A/AAAA resolution across post-backfill restart |
 | Database | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv4-only backfill plus post-backfill restart hydration after prefix-family removal |
 | Database | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv6-only backfill plus post-backfill restart hydration after prefix-family removal |
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
@@ -230,6 +231,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records and resolver lookups |
 | DNS | `dns-split-live-records` | `dns-split-live-records-smoke.sh` | `dns-split-live-records-headscale-go-smoke.sh` | Split DNS live resolver A and AAAA stock-client lookups |
 | DNS | `dns-search-live-resolver` | `dns-search-live-resolver-smoke.sh` | `dns-search-live-resolver-headscale-go-smoke.sh` | Search-domain live resolver stock-client lookup |
+| DNS | `dns-multi-resolver-fallback` | `dns-multi-resolver-fallback-smoke.sh` | `dns-multi-resolver-fallback-headscale-go-smoke.sh` | Split DNS multi-resolver fallback from a failing resolver to a live resolver |
 | DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap and resolver |
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
@@ -679,6 +681,17 @@ tools/real-client/dns-search-live-resolver-smoke.sh
 tools/real-client/dns-search-live-resolver-headscale-go-smoke.sh
 ```
 
+The multi-resolver fallback variant puts an explicit SERVFAIL UDP resolver first
+in a split-DNS resolver list and a live answer resolver second, asserts the
+client-observed route order, then resolves the live record through the stock
+client. A successful lookup proves fallback behavior because the first resolver
+cannot answer the name:
+
+```sh
+tools/real-client/dns-multi-resolver-fallback-smoke.sh
+tools/real-client/dns-multi-resolver-fallback-headscale-go-smoke.sh
+```
+
 The DNS hot-reload variant starts the production server with
 `dns.extra_records_path`, logs in a stock client, edits the JSON records file,
 and asserts that both the client-observed netmap and `tailscale debug resolve`
@@ -827,7 +840,10 @@ restart again after `nodes backfillips` and reassert stock-client netmap plus
 database node address family, pinning post-backfill persistent hydration. The
 `postgres-prefix-family-v4-to-dual-backfill-route-restart` row composes the
 same IPv4-to-dual-stack migration with a pre-existing advertised/approved route
-and reasserts that route approval after backfill and after the final restart:
+and reasserts that route approval after backfill and after the final restart.
+The `postgres-prefix-family-v4-to-dual-backfill-magicdns-restart` row composes
+the same prefix migration with two MagicDNS-enabled stock clients and reasserts
+peer A/AAAA resolution after backfill and after the final restart:
 
 ```sh
 tools/real-client/postgres-authkey-nonreusable-smoke.sh
@@ -862,6 +878,8 @@ tools/real-client/postgres-prefix-family-v4-to-dual-backfill-smoke.sh
 tools/real-client/postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-v4-to-dual-backfill-route-restart-smoke.sh
 tools/real-client/postgres-prefix-family-v4-to-dual-backfill-route-restart-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-v4-to-dual-backfill-magicdns-restart-smoke.sh
+tools/real-client/postgres-prefix-family-v4-to-dual-backfill-magicdns-restart-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh

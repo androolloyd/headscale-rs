@@ -47,6 +47,7 @@ database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/prefix-family-${migration_case}-backfill-${target}}"
 run_id="hspf-${migration_case}-${target}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
+peer_name="${REAL_CLIENT_PEER_NAME:-${run_id}-peer}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 edge="${REAL_CLIENT_PREFIX_MIGRATION_EDGE:-addresses}"
 route="${REAL_CLIENT_PREFIX_BACKFILL_ROUTE:-10.94.0.0/24}"
@@ -59,12 +60,24 @@ case "${database_backend}" in
     ;;
 esac
 case "${edge}" in
-  addresses | route-approval-restart) ;;
+  addresses | route-approval-restart | magicdns-peer-restart) ;;
   *)
-    echo "REAL_CLIENT_PREFIX_MIGRATION_EDGE must be addresses or route-approval-restart" >&2
+    echo "REAL_CLIENT_PREFIX_MIGRATION_EDGE must be addresses, route-approval-restart, or magicdns-peer-restart" >&2
     exit 2
     ;;
 esac
+magic_dns_enabled=false
+accept_dns_arg=false
+client_names=("${client_name}")
+if [[ "${edge}" == "magicdns-peer-restart" ]]; then
+  if [[ "${migration_case}" != "v4-to-dual" ]]; then
+    echo "magicdns-peer-restart edge currently requires REAL_CLIENT_PREFIX_MIGRATION_CASE=v4-to-dual" >&2
+    exit 2
+  fi
+  magic_dns_enabled=true
+  accept_dns_arg=true
+  client_names+=("${peer_name}")
+fi
 
 # shellcheck source=tools/real-client/postgres-test-db-common.sh
 source tools/real-client/postgres-test-db-common.sh
@@ -92,7 +105,7 @@ headscale_bin=""
 active_server_label=""
 
 cleanup() {
-  docker rm -f "${client_name}" >/dev/null 2>&1 || true
+  docker rm -f "${client_names[@]}" >/dev/null 2>&1 || true
   if [[ -n "${server_pid}" ]]; then
     kill "${server_pid}" >/dev/null 2>&1 || true
     wait "${server_pid}" >/dev/null 2>&1 || true
@@ -138,8 +151,13 @@ wait_for() {
 
 dump_client_debug() {
   dump_server_logs "client debug snapshot"
-  docker exec "${client_name}" tailscale status 2>&1 || true
-  docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
+  local name
+  for name in "${client_names[@]}"; do
+    echo "--- client ${name} status ---" >&2
+    docker exec "${name}" tailscale status 2>&1 || true
+    echo "--- client ${name} tailscaled log ---" >&2
+    docker exec "${name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
+  done
 }
 
 dump_server_logs() {
@@ -288,7 +306,7 @@ EOF
       fi
       cat >>"${config_path}" <<EOF
 dns:
-  magic_dns: false
+  magic_dns: ${magic_dns_enabled}
   base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
@@ -324,7 +342,7 @@ EOF
       cat >>"${config_path}" <<EOF
 
 dns:
-  magic_dns: false
+  magic_dns: ${magic_dns_enabled}
   base_domain: "${base_domain}"
   override_local_dns: false
   nameservers:
@@ -442,12 +460,13 @@ create_user_and_key() {
   echo "::endgroup::"
 }
 
-start_client() {
-  echo "::group::start stock tailscale client"
+start_named_client() {
+  local name="$1"
+  echo "::group::start stock tailscale client ${name}"
   docker_args=(
     docker run -d
-    --name "${client_name}" \
-    --hostname "${client_name}" \
+    --name "${name}" \
+    --hostname "${name}" \
     --add-host host.docker.internal:host-gateway \
     --entrypoint /bin/sh
   )
@@ -462,8 +481,15 @@ start_client() {
     >/dev/null
 
   wait_for "tailscaled local socket" \
-    "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+    "docker exec '${name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
   echo "::endgroup::"
+}
+
+start_clients() {
+  local name
+  for name in "${client_names[@]}"; do
+    start_named_client "${name}"
+  done
 }
 
 assert_status_family_file() {
@@ -491,12 +517,13 @@ assert_status_family_file() {
   ' "${path}" "${expected}"
 }
 
-wait_for_client_family() {
-  local expected="$1"
-  local label="$2"
+wait_for_named_client_family() {
+  local name="$1"
+  local expected="$2"
+  local label="$3"
   local slug="${label//[^[:alnum:]_.-]/-}"
-  local path="${work_dir}/${client_name}.${slug}.${expected}.status.json"
-  wait_for "${label}" "docker exec '${client_name}' tailscale status --json >'${path}' 2>/dev/null && assert_status_family_file '${path}' '${expected}'" || {
+  local path="${work_dir}/${name}.${slug}.${expected}.status.json"
+  wait_for "${label}" "docker exec '${name}' tailscale status --json >'${path}' 2>/dev/null && assert_status_family_file '${path}' '${expected}'" || {
     dump_client_debug
     return 1
   }
@@ -506,30 +533,54 @@ wait_for_client_family() {
   ' "${path}"
 }
 
-login_client_initial_family() {
-  echo "::group::tailscale up against ${initial_family} config"
+wait_for_client_family() {
+  wait_for_named_client_family "${client_name}" "$@"
+}
+
+wait_for_all_clients_family() {
+  local expected="$1"
+  local label="$2"
+  local name
+  for name in "${client_names[@]}"; do
+    wait_for_named_client_family "${name}" "${expected}" "${label} (${name})"
+  done
+}
+
+login_named_client_initial_family() {
+  local name="$1"
+  local advertise_route="$2"
+  echo "::group::tailscale up ${name} against ${initial_family} config"
   up_status=0
   up_args=(
     tailscale up
     "--login-server=${control_url}" \
-    "--hostname=${client_name}" \
+    "--hostname=${name}" \
     --timeout=60s \
     --accept-routes=false \
-    --accept-dns=false \
+    "--accept-dns=${accept_dns_arg}" \
     "--authkey=${authkey}"
   )
-  if [[ "${edge}" == "route-approval-restart" ]]; then
+  if [[ "${advertise_route}" == "true" ]]; then
     up_args+=("--advertise-routes=${route}")
   fi
-  docker exec "${client_name}" "${up_args[@]}" \
-    >"${work_dir}/${client_name}.tailscale-up.stdout" \
-    2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
+  docker exec "${name}" "${up_args[@]}" \
+    >"${work_dir}/${name}.tailscale-up.stdout" \
+    2>"${work_dir}/${name}.tailscale-up.stderr" ||
     up_status="$?"
   if ((up_status != 0)); then
     echo "tailscale up returned ${up_status}; verifying logged-in netmap"
   fi
-  wait_for_client_family "${initial_family}" "${initial_family} client netmap"
+  wait_for_named_client_family "${name}" "${initial_family}" "${initial_family} client netmap (${name})"
   echo "::endgroup::"
+}
+
+login_clients_initial_family() {
+  local advertise_route=false
+  [[ "${edge}" == "route-approval-restart" ]] && advertise_route=true
+  login_named_client_initial_family "${client_name}" "${advertise_route}"
+  if [[ "${edge}" == "magicdns-peer-restart" ]]; then
+    login_named_client_initial_family "${peer_name}" false
+  fi
 }
 
 assert_node_routes_file() {
@@ -618,6 +669,91 @@ assert_route_edge_if_requested() {
   wait_for_node_routes "${route}" "${route}" "${label}"
 }
 
+assert_dns_debug_resolve() {
+  local resolver_client="$1"
+  local expected_name="$2"
+  local network="$3"
+  local expected_value="$4"
+  local output_path="$5"
+  local raw_path="${output_path}.raw"
+  docker exec "${resolver_client}" tailscale debug resolve "--net=${network}" "${expected_name}" \
+    >"${raw_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      raw_path = ARGV.fetch(0)
+      expected_name = ARGV.fetch(1)
+      network = ARGV.fetch(2)
+      expected_value = ARGV.fetch(3)
+      values = File.read(raw_path).lines.map(&:strip).reject(&:empty?)
+      abort("expected #{expected_name} #{network} resolution #{expected_value.inspect}, got #{values.inspect}") unless values == [expected_value]
+      puts JSON.pretty_generate({"Name" => expected_name, "Network" => network, "Resolved" => values})
+    ' "${raw_path}" "${expected_name}" "${network}" "${expected_value}" >"${output_path}"
+}
+
+assert_magicdns_peer_resolves_both_families() {
+  local resolver_client="$1"
+  local target_client="$2"
+  local output_path="$3"
+  local status_path="${output_path}.status.json"
+  local expectation_path="${output_path}.expectation.tsv"
+  docker exec "${resolver_client}" tailscale status --json >"${status_path}" 2>"${output_path}.status.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      target = ARGV.fetch(1)
+      peers = status["Peer"] || {}
+      peer = peers.each_value.find do |candidate|
+        [
+          candidate["HostName"],
+          candidate["DNSName"].to_s.sub(/\.\z/, "").split(".").first,
+          candidate.dig("Hostinfo", "Hostname"),
+          candidate.dig("HostInfo", "Hostname"),
+        ].compact.map(&:to_s).include?(target)
+      end
+      abort("expected peer #{target.inspect} in MagicDNS resolver status, got #{peers.inspect}") unless peer
+      name = peer.fetch("DNSName").to_s.sub(/\.\z/, "")
+      abort("expected peer DNSName for #{target.inspect}, got #{peer.inspect}") if name.empty?
+      ips = Array(peer["TailscaleIPs"])
+      ip4 = ips.find { |value| value.to_s.include?(".") }
+      ip6 = ips.find { |value| value.to_s.include?(":") }
+      abort("expected peer #{target.inspect} to have IPv4 and IPv6 for MagicDNS A/AAAA resolution, got #{ips.inspect}") if ip4.to_s.empty? || ip6.to_s.empty?
+      puts [name, ip4, ip6].join("\t")
+    ' "${status_path}" "${target_client}" >"${expectation_path}" || return
+
+  local name ip4 ip6
+  IFS=$'\t' read -r name ip4 ip6 <"${expectation_path}"
+  local safe_name="${name//[^a-zA-Z0-9_.-]/-}"
+  wait_for "peer MagicDNS ${resolver_client} resolves ${name} A" \
+    "assert_dns_debug_resolve '${resolver_client}' '${name}' ip4 '${ip4}' '${output_path}.${safe_name}.ip4.json'" || return 1
+  wait_for "peer MagicDNS ${resolver_client} resolves ${name} AAAA" \
+    "assert_dns_debug_resolve '${resolver_client}' '${name}' ip6 '${ip6}' '${output_path}.${safe_name}.ip6.json'" || return 1
+  ruby -rjson -e '
+    resolver = ARGV.fetch(0)
+    target = ARGV.fetch(1)
+    name, ip4, ip6 = File.read(ARGV.fetch(2)).strip.split("\t")
+    puts JSON.pretty_generate({resolver: resolver, target: target, dns_name: name, a: ip4, aaaa: ip6})
+  ' "${resolver_client}" "${target_client}" "${expectation_path}" >"${output_path}"
+}
+
+assert_magicdns_edge_if_requested() {
+  local label="$1"
+  [[ "${edge}" == "magicdns-peer-restart" ]] || return 0
+  echo "::group::assert MagicDNS peer A/AAAA resolution ${label}"
+  wait_for "MagicDNS ${client_name} resolves ${peer_name} ${label}" \
+    "assert_magicdns_peer_resolves_both_families '${client_name}' '${peer_name}' '${work_dir}/${client_name}.magicdns-${label//[^a-zA-Z0-9_-]/-}.json'" || {
+      dump_client_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/${client_name}.magicdns-${label//[^a-zA-Z0-9_-]/-}.json"
+  wait_for "MagicDNS ${peer_name} resolves ${client_name} ${label}" \
+    "assert_magicdns_peer_resolves_both_families '${peer_name}' '${client_name}' '${work_dir}/${peer_name}.magicdns-${label//[^a-zA-Z0-9_-]/-}.json'" || {
+      dump_client_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/${peer_name}.magicdns-${label//[^a-zA-Z0-9_-]/-}.json"
+  echo "::endgroup::"
+}
+
 run_backfill() {
   echo "::group::run ${target} backfill after ${backfill_label}"
   headscale_cmd --force -o json nodes backfillips >"${work_dir}/backfill.json"
@@ -635,57 +771,78 @@ assert_node_state_family() {
   local expected_family="$1"
   local label="${2:-after-backfill}"
   local nodes_path="${work_dir}/nodes-${label}.json"
+  local expected_names="${client_name}"
+  if [[ "${edge}" == "magicdns-peer-restart" ]]; then
+    expected_names="${client_name},${peer_name}"
+  fi
   echo "::group::assert ${target} node state ${label}"
   headscale_cmd -o json nodes list >"${nodes_path}"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
+    expected_names = ARGV.fetch(1).split(",").reject(&:empty?)
     expected_family = ARGV.fetch(2)
     nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
-    abort("expected one node, got #{nodes.length}") unless nodes.length == 1
-    node = nodes.fetch(0)
-    name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
-    addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
-    has_v4 = addresses.any? { |ip| ip.to_s.include?(".") }
-    has_v6 = addresses.any? { |ip| ip.to_s.include?(":") }
-    abort("expected #{ARGV.fetch(1)}, got #{name.inspect}") unless name.to_s == ARGV.fetch(1)
-    case expected_family
-    when "ipv4-only"
-      abort("expected IPv4-only node addresses, got #{addresses.inspect}") unless has_v4 && !has_v6
-    when "ipv6-only"
-      abort("expected IPv6-only node addresses, got #{addresses.inspect}") unless !has_v4 && has_v6
-    when "dual-stack"
-      abort("expected dual-stack node addresses, got #{addresses.inspect}") unless has_v4 && has_v6
-    else
-      abort("unsupported expected family #{expected_family.inspect}")
+    abort("expected #{expected_names.length} node(s), got #{nodes.length}") unless nodes.length == expected_names.length
+    matched = expected_names.map do |expected_name|
+      node = nodes.find do |candidate|
+        [
+          candidate["givenName"],
+          candidate["given_name"],
+          candidate["name"],
+          candidate["hostname"],
+        ].compact.map(&:to_s).include?(expected_name)
+      end
+      abort("expected node #{expected_name.inspect}, got #{nodes.inspect}") unless node
+      addresses = Array(node["ipAddresses"] || node["ip_addresses"] || node["addresses"])
+      has_v4 = addresses.any? { |ip| ip.to_s.include?(".") }
+      has_v6 = addresses.any? { |ip| ip.to_s.include?(":") }
+      case expected_family
+      when "ipv4-only"
+        abort("expected IPv4-only node addresses for #{expected_name}, got #{addresses.inspect}") unless has_v4 && !has_v6
+      when "ipv6-only"
+        abort("expected IPv6-only node addresses for #{expected_name}, got #{addresses.inspect}") unless !has_v4 && has_v6
+      when "dual-stack"
+        abort("expected dual-stack node addresses for #{expected_name}, got #{addresses.inspect}") unless has_v4 && has_v6
+      else
+        abort("unsupported expected family #{expected_family.inspect}")
+      end
+      node
     end
-    puts JSON.pretty_generate(node)
-  ' "${nodes_path}" "${client_name}" "${expected_family}"
+    puts JSON.pretty_generate({"expected_family" => expected_family, "nodes" => matched})
+  ' "${nodes_path}" "${expected_names}" "${expected_family}"
 
-  local db_row
+  local db_rows
   case "${database_backend}" in
     sqlite)
-      db_row="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+      db_rows="$(sqlite3 -separator $'\t' "${db_path}" "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL ORDER BY id;")"
       ;;
     postgres)
-      db_row="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -F $'\t' -c "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL LIMIT 1;")"
+      db_rows="$(psql "${postgres_runtime_url}" -v ON_ERROR_STOP=1 -At -F $'\t' -c "SELECT COALESCE(NULLIF(ipv4,''),'<empty>'), COALESCE(NULLIF(ipv6,''),'<empty>') FROM nodes WHERE deleted_at IS NULL ORDER BY id;")"
       ;;
   esac
+  local expected_count=1
+  [[ "${edge}" == "magicdns-peer-restart" ]] && expected_count=2
   local db_ipv4 db_ipv6
-  IFS=$'\t' read -r db_ipv4 db_ipv6 <<<"${db_row}"
-  case "${expected_family}" in
-    ipv4-only)
-      [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
-      [[ "${db_ipv6}" == "<empty>" ]] || { echo "expected empty DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
-      ;;
-    ipv6-only)
-      [[ "${db_ipv4}" == "<empty>" ]] || { echo "expected empty DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
-      [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
-      ;;
-    dual-stack)
-      [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
-      [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
-      ;;
-  esac
+  local db_row_count=0
+  while IFS=$'\t' read -r db_ipv4 db_ipv6; do
+    [[ -n "${db_ipv4}${db_ipv6}" ]] || continue
+    db_row_count=$((db_row_count + 1))
+    case "${expected_family}" in
+      ipv4-only)
+        [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+        [[ "${db_ipv6}" == "<empty>" ]] || { echo "expected empty DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+        ;;
+      ipv6-only)
+        [[ "${db_ipv4}" == "<empty>" ]] || { echo "expected empty DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+        [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+        ;;
+      dual-stack)
+        [[ "${db_ipv4}" == 100.* ]] || { echo "expected DB IPv4 after backfill, got ${db_ipv4}" >&2; exit 1; }
+        [[ "${db_ipv6}" == fd7a:115c:a1e0* ]] || { echo "expected DB IPv6 after backfill, got ${db_ipv6}" >&2; exit 1; }
+        ;;
+    esac
+  done <<<"${db_rows}"
+  [[ "${db_row_count}" -eq "${expected_count}" ]] || { echo "expected ${expected_count} DB node rows, got ${db_row_count}" >&2; exit 1; }
   echo "::endgroup::"
 }
 
@@ -730,8 +887,8 @@ if [[ "${target}" == "headscale-go" ]]; then
 fi
 start_server "${initial_family}"
 create_user_and_key
-start_client
-login_client_initial_family
+start_clients
+login_clients_initial_family
 approve_route_edge_if_requested
 
 echo "::group::restart ${target} server from ${initial_family} to ${final_family}"
@@ -740,17 +897,19 @@ start_server "${final_family}"
 echo "::endgroup::"
 
 run_backfill
-wait_for_client_family "${final_family}" "${final_family} client netmap after backfill"
+wait_for_all_clients_family "${final_family}" "${final_family} client netmap after backfill"
 assert_node_state_family "${final_family}" "after-backfill"
 assert_route_edge_if_requested "approved route after backfill"
+assert_magicdns_edge_if_requested "after-backfill"
 
 echo "::group::restart ${target} server after ${backfill_label} backfill"
 stop_server
 start_server "${final_family}"
 echo "::endgroup::"
 
-wait_for_client_family "${final_family}" "${final_family} client netmap after post-backfill restart"
+wait_for_all_clients_family "${final_family}" "${final_family} client netmap after post-backfill restart"
 assert_node_state_family "${final_family}" "after-backfill-restart"
 assert_route_edge_if_requested "approved route after post-backfill restart"
+assert_magicdns_edge_if_requested "after-backfill-restart"
 
 echo "${target} prefix-family ${migration_case} backfill real-client smoke passed"

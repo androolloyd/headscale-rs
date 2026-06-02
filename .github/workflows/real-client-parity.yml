@@ -112,6 +112,8 @@ jobs:
           echo "REAL_CLIENT_SMOKES=${smokes}" >> "${GITHUB_ENV}"
       - name: Validate selected matrix
         run: tools/real-client/smoke-matrix.sh --check
+      - name: Check DNS live resolver harness metadata
+        run: tools/real-client/dns-live-resolver-harness-check.sh
       - name: List selected matrix
         run: tools/real-client/smoke-matrix.sh --list-selected
       - uses: dtolnay/rust-toolchain@master

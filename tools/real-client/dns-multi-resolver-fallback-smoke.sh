@@ -25,10 +25,11 @@ start_dns_live_failure_resolver "${image}" "${fixture_work_dir}/failure" "${reco
 failure_resolver_addr="${DNS_LIVE_FAILURE_RESOLVER_ADDR}"
 start_dns_live_split_resolver "${image}" "${fixture_work_dir}/answer" "${base_domain}"
 trap stop_dns_live_resolver EXIT
-
-split_json="$(ruby -rjson -e 'puts JSON.generate({ARGV.fetch(0) => [ARGV.fetch(1), ARGV.fetch(2)]})' \
-  "${DNS_LIVE_SPLIT_SUFFIX}" "${failure_resolver_addr}" "${DNS_LIVE_SPLIT_RESOLVER_ADDR}")"
-expected_route="${DNS_LIVE_SPLIT_SUFFIX}=${failure_resolver_addr}|${DNS_LIVE_SPLIT_RESOLVER_ADDR}"
+dns_live_resolver_plan_multi_fallback_row \
+  "${DNS_LIVE_SPLIT_SUFFIX}" \
+  "${failure_resolver_addr}" \
+  "${DNS_LIVE_SPLIT_RESOLVER_ADDR}" \
+  "${DNS_LIVE_SPLIT_RESOLVE_EXPECTATION}"
 
 REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/dns-multi-resolver-fallback-smoke}" \
 REAL_CLIENT_CLIENT_COUNT="${REAL_CLIENT_CLIENT_COUNT:-1}" \
@@ -36,9 +37,9 @@ REAL_CLIENT_BASE_DOMAIN="${base_domain}" \
 REAL_CLIENT_MAGIC_DNS=true \
 REAL_CLIENT_ACCEPT_DNS=true \
 REAL_CLIENT_DNS_OVERRIDE_LOCAL=false \
-REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON="${REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON:-${split_json}}" \
+REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON="${REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON:-${DNS_LIVE_MULTI_SPLIT_NAMESERVERS_JSON}}" \
 REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX="${REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX:-${base_domain}}" \
-REAL_CLIENT_EXPECT_DNS_ROUTES="${REAL_CLIENT_EXPECT_DNS_ROUTES:-${expected_route}}" \
+REAL_CLIENT_EXPECT_DNS_ROUTES="${REAL_CLIENT_EXPECT_DNS_ROUTES:-${DNS_LIVE_MULTI_EXPECT_DNS_ROUTES}}" \
 REAL_CLIENT_EXPECT_DNS_RESOLVER_OBJECTS="${REAL_CLIENT_EXPECT_DNS_RESOLVER_OBJECTS:-true}" \
-REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES="${REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES:-${DNS_LIVE_SPLIT_RESOLVE_EXPECTATION}}" \
+REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES="${REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES:-${DNS_LIVE_MULTI_EXPECT_DNS_DEBUG_RESOLVES}}" \
   tools/real-client/authkey-smoke.sh

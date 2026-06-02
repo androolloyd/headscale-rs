@@ -1535,6 +1535,27 @@ fn grpc_gateway_current_head_swagger_request_mapping_is_exact() {
     );
 }
 
+#[test]
+fn grpc_gateway_swagger_excludes_non_upstream_octra_api_routes() {
+    const SWAGGER: &str = include_str!("../src/tailscale_wire/assets/headscale.swagger.json");
+    const NON_UPSTREAM_ROUTES: &[&str] = &[
+        "/api/v1/nodes",
+        "/api/v1/register",
+        "/api/v1/status",
+        "/api/v1/balance/{account}",
+        "/api/v1/transfer",
+    ];
+
+    let swagger: Value = serde_json::from_str(SWAGGER).expect("swagger JSON parses");
+    let paths = swagger["paths"].as_object().expect("swagger has paths");
+    for route in NON_UPSTREAM_ROUTES {
+        assert!(
+            !paths.contains_key(*route),
+            "Octra-only route {route} must stay outside replacement swagger"
+        );
+    }
+}
+
 #[tokio::test]
 async fn grpc_gateway_rejects_non_upstream_octra_api_routes() {
     let (app, token) = fixture().await;

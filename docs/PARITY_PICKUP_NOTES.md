@@ -2028,6 +2028,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   balance, and transfer aliases return the standard HTTP 404/code 5 `Not Found`
   status JSON instead of being accepted by the headscale replacement gateway.
 
+## 2026-06-02 Octra consumer boundary closure
+
+- Added `docs/octra-consumer-boundary.md` as the replacement-parity boundary
+  contract for Octra consumers: Octra-only admin mounting, preauth account
+  policy, embedded CLI documentation, and settlement/billing behavior stay
+  downstream unless they expose a reusable headscale-go contract.
+- Added a swagger absence regression for the same Octra-only `/api/v1` routes
+  covered by the runtime grpc-gateway 404 test, then removed
+  `p2-octra-consumer-boundary` from the machine-readable open backlog. The
+  backlog checker now requires the boundary doc, parity ledger row, and route
+  tests whenever that row is absent.
+
 ## 2026-06-02 grpc-gateway raw semicolon query parser
 
 - Matched current headscale-go/grpc-gateway query parsing for raw semicolon

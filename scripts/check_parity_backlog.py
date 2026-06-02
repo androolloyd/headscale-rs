@@ -12,9 +12,39 @@ from typing import Any
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 BACKLOG = REPO_ROOT / "docs" / "headscale-go-parity-backlog.json"
+OCTRA_BOUNDARY_ID = "p2-octra-consumer-boundary"
+OCTRA_BOUNDARY_DOC = REPO_ROOT / "docs" / "octra-consumer-boundary.md"
+OCTRA_PARITY_DOC = REPO_ROOT / "docs" / "headscale-go-parity.md"
+OCTRA_BOUNDARY_TEST = REPO_ROOT / "headscale-api" / "tests" / "grpc_gateway_e2e.rs"
 PRIORITIES = {"P0", "P1", "P2"}
 STATUSES = {"open", "in_progress", "blocked"}
 COMPLETION_STATUSES = {"complete", "completed", "full_parity_complete"}
+OCTRA_DOC_MARKERS = (
+    "`headscale-rs` replacement parity means generic headscale-go replacement",
+    "Downstream-Only Surfaces",
+    "admin mounting",
+    "preauth store unification",
+    "embedded CLI documentation",
+    "settlement and billing policy",
+    "`/api/v1/nodes`",
+    "`/api/v1/register`",
+    "`/api/v1/status`",
+    "`/api/v1/balance/{account}`",
+    "`/api/v1/transfer`",
+)
+OCTRA_PARITY_DOC_MARKERS = (
+    "`docs/octra-consumer-boundary.md`",
+    "| Octra boundary checks | Done |",
+)
+OCTRA_TEST_MARKERS = (
+    "grpc_gateway_rejects_non_upstream_octra_api_routes",
+    "grpc_gateway_swagger_excludes_non_upstream_octra_api_routes",
+    '"/api/v1/nodes"',
+    '"/api/v1/register"',
+    '"/api/v1/status"',
+    '"/api/v1/balance',
+    '"/api/v1/transfer"',
+)
 
 
 class BacklogError(Exception):
@@ -53,6 +83,29 @@ def load_document() -> dict[str, Any]:
     if not isinstance(document, dict):
         raise BacklogError(f"{relative(BACKLOG)} must contain a JSON object")
     return document
+
+
+def expect_file_markers(path: pathlib.Path, markers: tuple[str, ...], label: str) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as err:
+        raise BacklogError(f"{label} evidence file is missing: {relative(path)}") from err
+
+    missing = [marker for marker in markers if marker not in text]
+    if missing:
+        raise BacklogError(
+            f"{label} evidence in {relative(path)} is missing markers: "
+            + ", ".join(repr(marker) for marker in missing)
+        )
+
+
+def validate_octra_boundary_closed(open_ids: set[str]) -> None:
+    if OCTRA_BOUNDARY_ID in open_ids:
+        return
+
+    expect_file_markers(OCTRA_BOUNDARY_DOC, OCTRA_DOC_MARKERS, OCTRA_BOUNDARY_ID)
+    expect_file_markers(OCTRA_PARITY_DOC, OCTRA_PARITY_DOC_MARKERS, OCTRA_BOUNDARY_ID)
+    expect_file_markers(OCTRA_BOUNDARY_TEST, OCTRA_TEST_MARKERS, OCTRA_BOUNDARY_ID)
 
 
 def validate() -> tuple[int, Counter[str]]:
@@ -100,6 +153,8 @@ def validate() -> tuple[int, Counter[str]]:
             expect_str(item, key, item_id)
         for key in ("owner_scope", "upstream_evidence"):
             expect_str_list(item, key, item_id)
+
+    validate_octra_boundary_closed(seen_ids)
 
     summary = document.get("summary")
     if not isinstance(summary, dict):

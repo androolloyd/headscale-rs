@@ -10,8 +10,8 @@
   "summary": {
     "open_p0": 3,
     "open_p1": 4,
-    "open_p2": 3,
-    "total_open": 10
+    "open_p2": 2,
+    "total_open": 9
   },
   "open_items": [
     {
@@ -165,22 +165,6 @@
         "integration/dns_test.go"
       ],
       "exit_criteria": "Broaden live resolver client behavior beyond current netmap/DNSConfig and stock-client MagicDNS coverage."
-    },
-    {
-      "id": "p2-octra-consumer-boundary",
-      "priority": "P2",
-      "lane": "Octra consumer boundary",
-      "status": "open",
-      "type": "downstream/evidence",
-      "owner_scope": [
-        "/Users/androolloyd/Development/octra/crates/**",
-        "headscale-api consumer trait tests"
-      ],
-      "upstream_evidence": [
-        "headscale-go replacement boundary",
-        "Octra embedding requirements"
-      ],
-      "exit_criteria": "Keep Octra-specific admin mounting, preauth store unification, embedded CLI docs, and settlement/billing policy behavior on the Octra side unless a generic headscale contract is missing."
     }
   ]
 }

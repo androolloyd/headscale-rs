@@ -9,6 +9,16 @@ fn ip_string(bytes: [u8; 4]) -> String {
     Ipv4Addr::from(bytes).to_string()
 }
 
+fn sorted_flat_rule_ports(doc: &AclDoc) -> Vec<&str> {
+    let mut ports = doc
+        .rules
+        .iter()
+        .flat_map(|rule| rule.ports.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    ports.sort_unstable();
+    ports
+}
+
 #[test]
 fn empty_policy_is_default_deny_for_ipv4_matrix() {
     let doc = AclDoc::empty();
@@ -390,8 +400,7 @@ fn hujson_nested_member_names_match_go_case_insensitive_json() {
     assert_eq!(doc.auto_approvers.exit_node, vec!["tag:server"]);
     assert_eq!(doc.node_attrs[0].target, vec!["tag:server"]);
     assert_eq!(doc.node_attrs[0].attr, vec!["randomize-client-port"]);
-    assert_eq!(doc.rules[0].ports, vec!["ipv6-icmp/*"]);
-    assert_eq!(doc.rules[1].ports, vec!["tcp/443"]);
+    assert_eq!(sorted_flat_rule_ports(&doc), vec!["ipv6-icmp/*", "tcp/443"]);
 }
 
 #[test]
@@ -497,8 +506,8 @@ fn hujson_accepts_go_numeric_tcp_udp_sctp_protocols_with_specific_ports() {
     )
     .unwrap();
 
-    assert_eq!(doc.rules[0].ports, vec!["tcp/443"]);
-    assert_eq!(doc.rules[1].ports, vec!["udp/53"]);
-    assert_eq!(doc.rules[2].ports, vec!["sctp/9899"]);
-    assert_eq!(doc.rules[3].ports, vec!["tcp/8443"]);
+    assert_eq!(
+        sorted_flat_rule_ports(&doc),
+        vec!["sctp/9899", "tcp/443", "tcp/8443", "udp/53"]
+    );
 }

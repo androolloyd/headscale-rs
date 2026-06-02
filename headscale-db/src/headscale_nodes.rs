@@ -499,7 +499,7 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
         let given_name = create_given_name(pool, &params).await?;
         match create_with_given_name(pool, &params, &given_name).await {
             Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
         }
     }
@@ -575,7 +575,7 @@ async fn create_with_given_name(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&given_name)
+    .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -615,7 +615,7 @@ pub async fn create_postgres_on_connection(
         let given_name = create_postgres_given_name(conn, &params).await?;
         match create_postgres_with_given_name(conn, &params, &given_name).await {
             Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
         }
     }
@@ -698,7 +698,7 @@ async fn create_postgres_with_given_name(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&given_name)
+    .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -905,7 +905,7 @@ pub async fn update_from_auth_path(
         let given_name = auth_path_given_name(pool, id, &params).await?;
         match update_from_auth_path_with_given_name(pool, id, &params, &given_name).await {
             Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
         }
     }
@@ -958,7 +958,7 @@ async fn update_from_auth_path_with_given_name(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&given_name)
+    .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
@@ -1006,7 +1006,7 @@ pub async fn update_postgres_from_auth_path_on_connection(
         let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
         match update_postgres_from_auth_path_with_given_name(conn, id, &params, &given_name).await {
             Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
         }
     }
@@ -1066,7 +1066,7 @@ async fn update_postgres_from_auth_path_with_given_name(
     .bind(&params.ipv4)
     .bind(&params.ipv6)
     .bind(&params.hostname)
-    .bind(&given_name)
+    .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)

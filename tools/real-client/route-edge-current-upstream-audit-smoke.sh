@@ -115,6 +115,16 @@ require_matrix_row() {
   done
 }
 
+require_current_head_go_script() {
+  local id="$1"
+  local script="$2"
+
+  grep -Fq 'source tools/real-client/headscale-go-current.sh' "${script}" ||
+    fail "${id} headscale-go script does not source headscale-go-current.sh: ${script}"
+  grep -Fq 'HEADSCALE_GO_VERSION="${HEADSCALE_GO_VERSION:-${HEADSCALE_GO_CURRENT_VERSION}}"' "${script}" ||
+    fail "${id} headscale-go script does not default to HEADSCALE_GO_CURRENT_VERSION: ${script}"
+}
+
 require_default_and_postgres_rows() {
   local id="$1"
 
@@ -128,6 +138,13 @@ require_default_and_postgres_rows() {
     "postgres-${id}" \
     database \
     "tools/real-client/postgres-${id}-smoke.sh" \
+    "tools/real-client/postgres-${id}-headscale-go-smoke.sh"
+
+  require_current_head_go_script \
+    "${id}" \
+    "tools/real-client/${id}-headscale-go-smoke.sh"
+  require_current_head_go_script \
+    "postgres-${id}" \
     "tools/real-client/postgres-${id}-headscale-go-smoke.sh"
 }
 
@@ -191,5 +208,5 @@ if ((failed != 0)); then
   exit 2
 fi
 
-echo "route edge current-head audit passed for ${audit_target}: ${expected_edge_count} default route-via/route-health rows and ${expected_edge_count} Postgres mirrors are present"
+echo "route edge current-head audit passed for ${audit_target}: ${expected_edge_count} default route-via/route-health rows, ${expected_edge_count} Postgres mirrors, and current-head headscale-go pinning are present"
 echo "headscale-go current-head pin: ${HEADSCALE_GO_CURRENT_VERSION}"

@@ -470,6 +470,12 @@ route-via-health symmetry row is already covered by live stock-client scripts;
 future route work should add new upstream semantics rather than another mirror
 row.
 
+Recent coverage note (2026-06-02): `route-edge-current-upstream-audit` now also
+asserts every default and Postgres route-via/route-health headscale-go mirror
+sources `headscale-go-current.sh` and defaults `HEADSCALE_GO_VERSION` to the
+audited current-head SHA, preventing current-head route rows from silently
+falling back to the older pinned baseline.
+
 Recent coverage note (2026-06-01): paired `postgres-route-primary`,
 `postgres-route-primary-failover`, `postgres-route-primary-sticky`, and
 `postgres-route-primary-withdraw` stock-client rows now cover production
@@ -785,8 +791,8 @@ existing database-policy restart or grpc-gateway CRUD smokes.
 3. Keep paired stock-client route coverage tracking current upstream route-via
    and route-health behavior; `route-edge-current-upstream-audit` now guards
    the checked-in default/Postgres reload, restart, mixed-exit, all-unhealthy,
-   and route-via symmetry set, so remaining work is new edge semantics rather
-   than row mirroring.
+   and route-via symmetry set plus current-head headscale-go script pinning, so
+   remaining work is new edge semantics rather than row mirroring.
 4. Finish config-runtime gaps: HTTP-01/TLS-ALPN now have production-listener
    controlled-CA process coverage, and HTTP-01 challenge-listener bind failure
    is pinned without public-CA traffic; continue with lower-frequency config

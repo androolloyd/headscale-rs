@@ -233,10 +233,11 @@ It compares `tools/parity/headscale-rs` with headscale-go at commit
 golden at
 `tools/parity/golden/headscale-go-v0.29.0-beta.2.json`.
 Former current-head-only route-via steering, SSH `acceptEnv`,
-hold-and-delegate SSH checks, and SSH host-destination rejection now live in the
-default Go-vs-Rust differential scenario set. New current-head-only scenarios
-can still stage under `tools/parity/current-head/` and run through the Rust
-golden gate until they are promoted:
+hold-and-delegate SSH checks, SSH host-destination rejection, and
+autogroup-internet exit-node route visibility now live in the default
+Go-vs-Rust differential scenario set. New current-head-only scenarios can still
+stage under `tools/parity/current-head/` and run through the Rust golden gate
+until they are promoted:
 
 ```sh
 ./scripts/headscale_rs_current_head_golden.sh
@@ -488,6 +489,11 @@ asserts every default and Postgres route-via/route-health headscale-go mirror
 sources `headscale-go-current.sh` and defaults `HEADSCALE_GO_VERSION` to the
 audited current-head SHA, preventing current-head route rows from silently
 falling back to the older pinned baseline.
+
+Recent coverage note (2026-06-02): `policy-route-autogroup-internet-exit-visibility`
+now lives in the default Go-vs-Rust differential scenario set. The promoted row
+pins `autogroup:internet:*` ACL peer visibility for default-route exit nodes
+alongside private subnet route auto-approval.
 
 Recent coverage note (2026-06-01): paired `postgres-route-primary`,
 `postgres-route-primary-failover`, `postgres-route-primary-sticky`, and

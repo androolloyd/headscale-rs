@@ -1072,6 +1072,363 @@ pub mod protocol {
     }
 }
 
+/// Native DERP relay primitives.
+///
+/// This is the in-process session registry and packet-routing layer for a
+/// future `/derp` upgrade handler. It does not perform the DERP HTTP upgrade
+/// or encrypted client-info handshake; callers are expected to authenticate and
+/// parse a client key before registering a session.
+pub mod native {
+    use super::protocol::{Frame, KEY_LEN, PeerGoneReason};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use tokio::sync::{RwLock, mpsc};
+
+    const DEFAULT_SESSION_QUEUE: usize = 256;
+
+    /// In-process DERP relay registry.
+    #[derive(Clone, Debug)]
+    pub struct NativeDerpRelay {
+        inner: Arc<RwLock<RelayState>>,
+        session_queue: usize,
+    }
+
+    #[derive(Debug, Default)]
+    struct RelayState {
+        sessions: HashMap<[u8; KEY_LEN], mpsc::Sender<Frame>>,
+        reverse_paths: HashMap<[u8; KEY_LEN], HashSet<[u8; KEY_LEN]>>,
+    }
+
+    /// A registered native DERP client session.
+    #[derive(Debug)]
+    pub struct NativeDerpSession {
+        relay: NativeDerpRelay,
+        key: [u8; KEY_LEN],
+        rx: mpsc::Receiver<Frame>,
+    }
+
+    /// Native relay routing errors.
+    #[derive(Debug, thiserror::Error)]
+    pub enum NativeDerpRelayError {
+        /// The source session was no longer registered.
+        #[error("DERP source session is not registered")]
+        SourceNotRegistered,
+        /// A destination session existed but could not receive its frame.
+        #[error("DERP destination session closed")]
+        DestinationClosed,
+    }
+
+    impl Default for NativeDerpRelay {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl NativeDerpRelay {
+        /// Create an empty native relay registry.
+        pub fn new() -> Self {
+            Self::with_session_queue(DEFAULT_SESSION_QUEUE)
+        }
+
+        /// Create an empty registry with a bounded per-session send queue.
+        pub fn with_session_queue(session_queue: usize) -> Self {
+            Self {
+                inner: Arc::new(RwLock::new(RelayState::default())),
+                session_queue: session_queue.max(1),
+            }
+        }
+
+        /// Register or replace a client session for `key`.
+        pub async fn connect(&self, key: [u8; KEY_LEN]) -> NativeDerpSession {
+            let (tx, rx) = mpsc::channel(self.session_queue);
+            self.inner.write().await.sessions.insert(key, tx);
+            NativeDerpSession {
+                relay: self.clone(),
+                key,
+                rx,
+            }
+        }
+
+        /// Remove a client session and notify peers that had received packets
+        /// from it through this relay.
+        pub async fn disconnect(&self, key: &[u8; KEY_LEN]) {
+            let (watchers, frames) = {
+                let mut state = self.inner.write().await;
+                state.sessions.remove(key);
+                let watchers = state.reverse_paths.remove(key).unwrap_or_default();
+                for peers in state.reverse_paths.values_mut() {
+                    peers.remove(key);
+                }
+                let frames = watchers
+                    .iter()
+                    .filter_map(|watcher| {
+                        state
+                            .sessions
+                            .get(watcher)
+                            .cloned()
+                            .map(|tx| (*watcher, tx))
+                    })
+                    .collect::<Vec<_>>();
+                (watchers, frames)
+            };
+
+            if watchers.is_empty() {
+                return;
+            }
+            let gone = Frame::PeerGone {
+                peer: *key,
+                reason: PeerGoneReason::Disconnected,
+            };
+            for (_, tx) in frames {
+                let _ = tx.send(gone.clone()).await;
+            }
+        }
+
+        /// Current registered session count.
+        pub async fn session_count(&self) -> usize {
+            self.inner.read().await.sessions.len()
+        }
+
+        async fn handle_from(
+            &self,
+            source: [u8; KEY_LEN],
+            frame: Frame,
+        ) -> Result<(), NativeDerpRelayError> {
+            match frame {
+                Frame::SendPacket {
+                    destination,
+                    packet,
+                } => self.route_packet(source, destination, packet).await,
+                Frame::ForwardPacket {
+                    source: forwarded_source,
+                    destination,
+                    packet,
+                } => {
+                    self.route_packet(forwarded_source, destination, packet)
+                        .await
+                }
+                Frame::Ping(payload) => self
+                    .send_to_registered(source, Frame::Pong(payload))
+                    .await
+                    .map(|_| ()),
+                Frame::ClosePeer { peer } => {
+                    self.disconnect(&peer).await;
+                    Ok(())
+                }
+                Frame::KeepAlive | Frame::NotePreferred(_) | Frame::Pong(_) => Ok(()),
+                _ => Ok(()),
+            }
+        }
+
+        async fn route_packet(
+            &self,
+            source: [u8; KEY_LEN],
+            destination: [u8; KEY_LEN],
+            packet: Vec<u8>,
+        ) -> Result<(), NativeDerpRelayError> {
+            let dest_tx = {
+                let mut state = self.inner.write().await;
+                if !state.sessions.contains_key(&source) {
+                    return Err(NativeDerpRelayError::SourceNotRegistered);
+                }
+                state.sessions.get(&destination).cloned().inspect(|_| {
+                    state
+                        .reverse_paths
+                        .entry(source)
+                        .or_default()
+                        .insert(destination);
+                })
+            };
+            let Some(dest_tx) = dest_tx else {
+                return self.send_peer_gone_not_here(source, destination).await;
+            };
+
+            dest_tx
+                .send(Frame::RecvPacket { source, packet })
+                .await
+                .map_err(|_| NativeDerpRelayError::DestinationClosed)
+        }
+
+        async fn send_peer_gone_not_here(
+            &self,
+            source: [u8; KEY_LEN],
+            destination: [u8; KEY_LEN],
+        ) -> Result<(), NativeDerpRelayError> {
+            self.send_to_registered(
+                source,
+                Frame::PeerGone {
+                    peer: destination,
+                    reason: PeerGoneReason::NotHere,
+                },
+            )
+            .await
+            .map(|_| ())
+        }
+
+        async fn send_to_registered(
+            &self,
+            key: [u8; KEY_LEN],
+            frame: Frame,
+        ) -> Result<(), NativeDerpRelayError> {
+            let tx = self
+                .inner
+                .read()
+                .await
+                .sessions
+                .get(&key)
+                .cloned()
+                .ok_or(NativeDerpRelayError::SourceNotRegistered)?;
+            tx.send(frame)
+                .await
+                .map_err(|_| NativeDerpRelayError::DestinationClosed)
+        }
+    }
+
+    impl NativeDerpSession {
+        /// Registered client key.
+        pub fn key(&self) -> [u8; KEY_LEN] {
+            self.key
+        }
+
+        /// Submit a frame received from this client.
+        pub async fn handle_frame(&self, frame: Frame) -> Result<(), NativeDerpRelayError> {
+            self.relay.handle_from(self.key, frame).await
+        }
+
+        /// Receive the next frame that should be written to this client.
+        pub async fn recv(&mut self) -> Option<Frame> {
+            self.rx.recv().await
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::derp::protocol::PeerGoneReason;
+        use std::time::Duration;
+
+        async fn recv_frame(session: &mut NativeDerpSession) -> Frame {
+            tokio::time::timeout(Duration::from_secs(1), session.recv())
+                .await
+                .expect("timed out waiting for DERP relay frame")
+                .expect("session closed before receiving DERP relay frame")
+        }
+
+        #[tokio::test]
+        async fn native_relay_routes_send_packet_to_connected_peer() {
+            let relay = NativeDerpRelay::new();
+            let alice_key = [1u8; KEY_LEN];
+            let bob_key = [2u8; KEY_LEN];
+            let alice = relay.connect(alice_key).await;
+            let mut bob = relay.connect(bob_key).await;
+
+            alice
+                .handle_frame(Frame::SendPacket {
+                    destination: bob_key,
+                    packet: b"wireguard".to_vec(),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                recv_frame(&mut bob).await,
+                Frame::RecvPacket {
+                    source: alice_key,
+                    packet: b"wireguard".to_vec(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_unknown_peer_returns_peer_gone_not_here() {
+            let relay = NativeDerpRelay::new();
+            let alice_key = [1u8; KEY_LEN];
+            let missing_key = [9u8; KEY_LEN];
+            let mut alice = relay.connect(alice_key).await;
+
+            alice
+                .handle_frame(Frame::SendPacket {
+                    destination: missing_key,
+                    packet: b"disco".to_vec(),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                recv_frame(&mut alice).await,
+                Frame::PeerGone {
+                    peer: missing_key,
+                    reason: PeerGoneReason::NotHere,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_disconnect_notifies_reverse_path_peers() {
+            let relay = NativeDerpRelay::new();
+            let alice_key = [1u8; KEY_LEN];
+            let bob_key = [2u8; KEY_LEN];
+            let alice = relay.connect(alice_key).await;
+            let mut bob = relay.connect(bob_key).await;
+
+            alice
+                .handle_frame(Frame::SendPacket {
+                    destination: bob_key,
+                    packet: b"hello".to_vec(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                recv_frame(&mut bob).await,
+                Frame::RecvPacket {
+                    source: alice_key,
+                    packet: b"hello".to_vec(),
+                }
+            );
+
+            relay.disconnect(&alice_key).await;
+
+            assert_eq!(
+                recv_frame(&mut bob).await,
+                Frame::PeerGone {
+                    peer: alice_key,
+                    reason: PeerGoneReason::Disconnected,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_answers_ping_with_matching_pong() {
+            let relay = NativeDerpRelay::new();
+            let alice_key = [1u8; KEY_LEN];
+            let mut alice = relay.connect(alice_key).await;
+
+            alice
+                .handle_frame(Frame::Ping([0, 1, 2, 3, 4, 5, 6, 7]))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                recv_frame(&mut alice).await,
+                Frame::Pong([0, 1, 2, 3, 4, 5, 6, 7])
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_tracks_session_count() {
+            let relay = NativeDerpRelay::new();
+            let alice_key = [1u8; KEY_LEN];
+            let bob_key = [2u8; KEY_LEN];
+            let _alice = relay.connect(alice_key).await;
+            let _bob = relay.connect(bob_key).await;
+            assert_eq!(relay.session_count().await, 2);
+
+            relay.disconnect(&alice_key).await;
+            assert_eq!(relay.session_count().await, 1);
+        }
+    }
+}
+
 /// A DERP server entry.
 #[derive(Debug, Clone)]
 pub struct DerpServer {

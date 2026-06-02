@@ -1978,3 +1978,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added an incremental DERP frame decoder for native relay work so split TCP
   headers, split payloads, coalesced frames, unknown frame preservation, and
   oversized-frame rejection are handled before wiring a `/derp` upgrade route.
+
+## 2026-06-02 native DERP relay registry foundation
+
+- Added an in-process native DERP relay registry foundation in
+  `headscale-core`: sessions register by node public key, `SendPacket` routes
+  to connected peers as `RecvPacket`, unknown destinations return
+  `PeerGone(NotHere)`, disconnects notify reverse-path peers with
+  `PeerGone(Disconnected)`, and pings receive matching pongs.
+- This still sits below the HTTP `/derp` upgrade and encrypted client-info
+  handshake; production relay parity remains sidecar-backed until those layers
+  and stock-client native DERP smokes are wired.

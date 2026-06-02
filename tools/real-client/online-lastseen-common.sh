@@ -119,6 +119,7 @@ ssh_send_env="${REAL_CLIENT_SSH_SEND_ENV:-}"
 ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
 ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
 ssh_deny_status="${REAL_CLIENT_EXPECT_SSH_DENY_STATUS:-}"
+ssh_timeout_status="${REAL_CLIENT_EXPECT_SSH_TIMEOUT_STATUS:-}"
 ssh_deny_stderr_regex="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_REGEX:-Permission denied \(tailscale\)|failed to evaluate SSH policy|tailnet policy does not permit you to SSH to this node}"
 ssh_deny_stderr_first_line="${REAL_CLIENT_EXPECT_SSH_DENY_STDERR_FIRST_LINE:-}"
 if [[ -n "${expected_ssh_matrix}" ]]; then
@@ -573,6 +574,10 @@ if ! [[ "${ssh_host_key_timeout_secs}" =~ ^[0-9]+$ ]] || ((ssh_host_key_timeout_
 fi
 if [[ -n "${ssh_deny_status}" && "${ssh_deny_status}" != "any" && ! "${ssh_deny_status}" =~ ^[0-9]+$ ]]; then
   echo "REAL_CLIENT_EXPECT_SSH_DENY_STATUS must be empty, any, or a non-negative integer, got ${ssh_deny_status}" >&2
+  exit 2
+fi
+if [[ -n "${ssh_timeout_status}" && "${ssh_timeout_status}" != "any" && ! "${ssh_timeout_status}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_SSH_TIMEOUT_STATUS must be empty, any, or a non-negative integer, got ${ssh_timeout_status}" >&2
   exit 2
 fi
 ssh_env_args=()
@@ -1446,6 +1451,13 @@ assert_ssh_matrix_if_requested() {
         printf '%s\n' "${ssh_status}" >"${status_path}"
         if ((ssh_status == 0)); then
           echo "expected tailscale ssh ${source_name} to ${target_name} to time out" >&2
+          echo "::endgroup::"
+          return 1
+        fi
+        if [[ -n "${ssh_timeout_status}" && "${ssh_timeout_status}" != "any" ]] &&
+          ((ssh_status != ssh_timeout_status)); then
+          echo "expected timed-out tailscale ssh status ${ssh_timeout_status}, got ${ssh_status}" >&2
+          cat "${stderr_path}" >&2 || true
           echo "::endgroup::"
           return 1
         fi

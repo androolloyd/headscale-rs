@@ -2153,6 +2153,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   sources that decide when to set DERP health problems or announce server
   restart, not the native `/derp` frame loop or sidecar-preserving route mount.
 
+## 2026-06-02 native DERP duplicate-health lifecycle slice
+
+- Native DERP relay sessions now keep multiple same-node-key connections rather
+  than silently replacing the older session in the relay registry.
+- When a node key connects more than once, all same-key raw DERP and
+  DERP-over-WebSocket sessions receive a server-originated duplicate-connection
+  `Health` problem; when the duplicate clears, the remaining session receives an
+  empty `Health` clear frame.
+- Focused core, raw DERP, and DERP-over-WebSocket tests pin duplicate health
+  emission and session-specific disconnect. This closes the first production
+  health lifecycle source for native DERP; remaining native DERP lifecycle gaps
+  are server-restart announcements and broader stock-client runtime assertions.
+
 ## 2026-06-02 NodeStore update-many/delete churn slice
 
 - The NodeStore write worker now revalidates update-many outcomes that require

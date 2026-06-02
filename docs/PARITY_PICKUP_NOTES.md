@@ -2075,3 +2075,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused tests cover fast-start request detection, WebSocket rejection, query
   strings, and preserving an already-pipelined encrypted `ClientInfo` frame
   across the raw-TLS peek buffer.
+
+## 2026-06-02 DNS live resolver evidence slice
+
+- Extended the authkey and online/LastSeen real-client harnesses with
+  `tailscale debug resolve` assertions for peer MagicDNS names and explicit DNS
+  record expectations.
+- The paired MagicDNS rows now accept DNS and resolve each visible peer's
+  MagicDNS name to the peer Tailscale IP from `tailscale status --json`,
+  including the custom-domain and IPv6-only variants.
+- The extra-record and DNS-edge rows now prove configured A/AAAA/CNAME records
+  through the stock-client resolver in addition to the existing netmap checks;
+  split DNS remains asserted at the tailcfg route/fallback resolver layer
+  because these smoke rows intentionally configure synthetic split resolvers.

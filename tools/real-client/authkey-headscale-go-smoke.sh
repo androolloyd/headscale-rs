@@ -74,6 +74,8 @@ expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
+expected_dns_debug_resolves="${REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES:-}"
+expected_peer_magic_dns_resolve="${REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
@@ -536,6 +538,18 @@ if ((expect_no_magic_dns)) && [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "REAL_CLIENT_EXPECT_NO_MAGIC_DNS conflicts with REAL_CLIENT_EXPECT_MAGIC_DNS_SUFFIX" >&2
   exit 2
 fi
+case "${expected_peer_magic_dns_resolve}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_peer_magic_dns_resolve=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_peer_magic_dns_resolve=0
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE must be true or false, got ${expected_peer_magic_dns_resolve}" >&2
+    exit 2
+    ;;
+esac
 case "${accept_dns}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     accept_dns_arg=true
@@ -1244,6 +1258,75 @@ assert_dns_route() {
       abort("expected DNS route #{suffix}=#{expected.inspect}, got #{got.inspect}") unless got == expected
       puts JSON.pretty_generate({suffix => got})
     ' "${netmap_path}" "${suffix}" "${expected_csv}" >"${output_path}"
+}
+
+assert_dns_debug_resolve() {
+  local resolver_client="$1"
+  local expected_name="$2"
+  local network="$3"
+  local expected_value="$4"
+  local output_path="$5"
+  local raw_path="${output_path}.raw"
+  docker exec "${resolver_client}" tailscale debug resolve "--net=${network}" "${expected_name}" \
+    >"${raw_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      raw_path = ARGV.fetch(0)
+      expected_name = ARGV.fetch(1)
+      network = ARGV.fetch(2)
+      expected_value = ARGV.fetch(3)
+      values = File.read(raw_path).lines.map(&:strip).reject(&:empty?)
+      abort("expected #{expected_name} #{network} resolution #{expected_value.inspect}, got #{values.inspect}") unless values == [expected_value]
+      puts JSON.pretty_generate({"Name" => expected_name, "Network" => network, "Resolved" => values})
+    ' "${raw_path}" "${expected_name}" "${network}" "${expected_value}" >"${output_path}"
+}
+
+assert_peer_magic_dns_debug_resolve() {
+  local resolver_client="$1"
+  local output_path="$2"
+  local status_path="${output_path}.status.json"
+  local expectations_path="${output_path}.expectations.tsv"
+  docker exec "${resolver_client}" tailscale status --json >"${status_path}" 2>"${output_path}.status.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      peers = status["Peer"] || {}
+      abort("expected peers for MagicDNS resolver evidence, got none") if peers.empty?
+      peers.each_value do |peer|
+        name = peer.fetch("DNSName").to_s.sub(/\.\z/, "")
+        abort("expected peer DNSName in #{peer.inspect}") if name.empty?
+        ips = Array(peer["TailscaleIPs"])
+        ip = ips.find { |value| value.to_s.include?(".") }
+        network = "ip4"
+        unless ip
+          ip = ips.find { |value| value.to_s.include?(":") }
+          network = "ip6"
+        end
+        abort("expected peer TailscaleIPs in #{peer.inspect}") if ip.to_s.empty?
+        puts [name, network, ip].join("\t")
+      end
+    ' "${status_path}" >"${expectations_path}" || return
+
+  local idx=0
+  local name
+  local network
+  local expected_value
+  while IFS=$'\t' read -r name network expected_value; do
+    [[ -n "${name}" ]] || continue
+    safe_name="${name//[^a-zA-Z0-9_.-]/-}"
+    wait_for "peer MagicDNS ${resolver_client} resolves ${name}" \
+      "assert_dns_debug_resolve '${resolver_client}' '${name}' '${network}' '${expected_value}' '${output_path}.${idx}.${safe_name}.${network}.json'" || {
+        return 1
+      }
+    idx=$((idx + 1))
+  done <"${expectations_path}"
+
+  ruby -rjson -e '
+    client = ARGV.fetch(0)
+    rows = File.readlines(ARGV.fetch(1), chomp: true).reject(&:empty?).map do |line|
+      name, network, resolved = line.split("\t", 3)
+      {name: name, network: network, resolved: resolved}
+    end
+    puts JSON.pretty_generate({client: client, peer_magicdns_resolves: rows})
+  ' "${resolver_client}" "${expectations_path}" >"${output_path}"
 }
 
 assert_stun_round_trip() {
@@ -2447,6 +2530,20 @@ if [[ -n "${expected_magic_dns_suffix}" ]]; then
   echo "::endgroup::"
 fi
 
+if ((expect_peer_magic_dns_resolve)); then
+  echo "::group::assert peer MagicDNS client resolution"
+  for client_name in "${client_names[@]}"; do
+    safe_client="${client_name//[^a-zA-Z0-9_.-]/-}"
+    wait_for "peer MagicDNS resolver ${client_name}" \
+      "assert_peer_magic_dns_debug_resolve '${client_name}' '${work_dir}/${safe_client}.peer-magicdns-resolve.json'" || {
+        dump_client_debug "${client_name}"
+        exit 1
+      }
+    cat "${work_dir}/${safe_client}.peer-magicdns-resolve.json"
+  done
+  echo "::endgroup::"
+fi
+
 if ((expect_no_magic_dns)); then
   echo "::group::assert MagicDNS disabled client status"
   no_magicdns_status_paths=()
@@ -2521,6 +2618,37 @@ if [[ -n "${expected_dns_extra_records}" ]]; then
       exit 2
       ;;
   esac
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_dns_debug_resolves}" ]]; then
+  echo "::group::assert DNS client resolution"
+  resolver_client="${client_names[0]}"
+  IFS=',' read -r -a dns_resolution_expectations <<<"${expected_dns_debug_resolves}"
+  for expectation in "${dns_resolution_expectations[@]}"; do
+    host="${expectation%%=*}"
+    expected="${expectation#*=}"
+    if [[ -z "${host}" || -z "${expected}" || "${host}" == "${expectation}" ]]; then
+      echo "REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES entries must be host=value or host=network:value, got ${expectation}" >&2
+      exit 2
+    fi
+    network=""
+    if [[ "${expected}" =~ ^(ip4|ip6):(.*)$ ]]; then
+      network="${BASH_REMATCH[1]}"
+      expected="${BASH_REMATCH[2]}"
+    elif [[ "${expected}" == *:* ]]; then
+      network=ip6
+    else
+      network=ip4
+    fi
+    safe_host="${host//[^a-zA-Z0-9_.-]/-}"
+    wait_for "DNS debug resolve ${host}" \
+      "assert_dns_debug_resolve '${resolver_client}' '${host}' '${network}' '${expected}' '${work_dir}/dns-resolve-${safe_host}-${network}.json'" || {
+        dump_client_debug "${resolver_client}"
+        exit 1
+      }
+    cat "${work_dir}/dns-resolve-${safe_host}-${network}.json"
+  done
   echo "::endgroup::"
 fi
 

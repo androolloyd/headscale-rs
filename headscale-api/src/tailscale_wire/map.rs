@@ -6801,6 +6801,103 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_auth_rekey_old_key_delete_same_batch_keeps_auth_peer_delta() {
+        let (state, _dir) = fixture();
+        let observer = "aa".repeat(32);
+        let old_node = "bb".repeat(32);
+        let new_node = "cc".repeat(32);
+        insert_peer(&state, &observer, "observer", 10);
+
+        let mut old = MachineRecord::new_at(
+            chrono::Utc::now(),
+            old_node.clone(),
+            "reauth-machine".into(),
+            "alice".into(),
+            "old-auth-node".into(),
+            Ipv4Addr::new(100, 64, 0, 11),
+            false,
+        );
+        old.node_id = Some(42);
+        state.machines.upsert(old_node.clone(), old);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &observer).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, 42);
+        assert_eq!(first_mr.peers[0].name, "old-auth-node");
+        let _ = state.machines.drain_pending_map_changes();
+
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let history_len = state.machines.map_change_history().len();
+        let machines = state.machines.clone();
+        let pending_new_node = new_node.clone();
+        let rekey = std::thread::spawn(move || {
+            let mut pending = MachineRecord::new_at(
+                chrono::Utc::now(),
+                pending_new_node.clone(),
+                "reauth-machine".into(),
+                String::new(),
+                "old-auth-node-reauth".into(),
+                Ipv4Addr::new(100, 64, 0, 12),
+                false,
+            );
+            pending.node_id = Some(42);
+            machines.complete_web_registration(pending, "alice", 2);
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while state.machines.nodestore_queue_depth() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued auth-completion rekey did not reach the NodeStore worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            !state.machines.delete(&old_node),
+            "same-batch stale old-key delete should be a no-op after the rekey wins"
+        );
+        rekey
+            .join()
+            .expect("queued auth-completion rekey should finish");
+        assert!(state.machines.get(&old_node).is_none());
+        assert!(state.machines.get(&new_node).is_some());
+
+        let changes = state.machines.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(new_changes[0].content.peers_changed, vec![42]);
+        assert!(new_changes[0].content.peers_removed.is_empty());
+        assert!(!new_changes[0].content.include_policy);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "worker-batched old-key delete/rekey must wait for the map-batch tick"
+        );
+
+        publish_test_map_batch().await;
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, 42);
+        assert_eq!(mr.peers_changed[0].name, "old-auth-node-reauth");
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert!(
+            mr.dns_config.is_none(),
+            "auth peer-delta rekey should not become a policy/config chunk"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_worker_gc_ephemeral_emits_batched_peers_removed_reason() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

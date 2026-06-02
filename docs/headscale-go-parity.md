@@ -211,6 +211,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   snapshots for residual serve/output drift, narrower gRPC/remote/server error
   text matrices, and Octra-side adaptation to consume the generic no-health
   control router instead of hand-picking stock public control routes.
+- Recent Rust-only SSH parity pins current-head localpart profile variants
+  beyond the stock-client rows: special-character email localparts now compile
+  into concrete client-facing `sshUsers`, while domain/profile mismatches still
+  emit only the upstream root-deny rule.
 - Recent coverage adds `postgres-derp-native-reload` as Rust-only native DERP
   stock-client coverage: two Postgres-backed clients start under isolated
   policy, snapshot the native DERP map, reload policy to expose the peer, and

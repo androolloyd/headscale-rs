@@ -16,6 +16,10 @@ Updated: 2026-06-02 10:08 ADT
 
 Recent accepted slices:
 
+- This route/via pure Rust slice pins current-head
+  `TestIssue3233ViaInternetExitVisibility`: an `autogroup:internet`
+  `grants[].via` rule includes the matching tagged exit node's default routes
+  and excludes non-matching exit nodes from the viewer's route effects.
 - Current tag-expiry slice matches headscale-go's tagged-node restart guard:
   existing tagged nodes that send `Auth=nil` with Go zero `Expiry` return the
   current tagged register identity and keep nil node-key expiry instead of
@@ -2386,3 +2390,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   contain `-`: list responses now slice the fixed 12-character prefix and
   return `hskey-auth-<prefix>-***`, while create responses still return the
   one-time full token.
+
+## 2026-06-02 SSH localpart profile variant regression
+
+- Added a focused Rust parity regression for current-head SSH localpart profile
+  variants. It proves `localpart:*@example.com` compiles a special-character
+  profile email such as `dave+sshuser@example.com` into the concrete client
+  login user `dave+sshuser`, and that a domain/profile mismatch emits only
+  root-deny `sshUsers` rather than leaking the localpart pattern.

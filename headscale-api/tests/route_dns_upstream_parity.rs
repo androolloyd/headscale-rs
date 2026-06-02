@@ -369,6 +369,75 @@ fn grantviasubnetsteering() {
 }
 
 #[test]
+fn issue3233viainternetexitvisibility() {
+    let raw = r#"{
+        "tagOwners": {
+            "tag:exit1": ["alice@headscale.net"],
+            "tag:exit2": ["bob@headscale.net"]
+        },
+        "grants": [
+            {
+                "src": ["alice@headscale.net"],
+                "dst": ["autogroup:internet"],
+                "via": ["tag:exit1"],
+                "ip": ["*"]
+            }
+        ]
+    }"#;
+    let store = policy_store(raw);
+    let exit_routes = &["0.0.0.0/0", "::/0"];
+    let nodes = vec![
+        peer(1, "100.64.0.10", Some("alice@headscale.net"), &[], &[]),
+        peer(
+            2,
+            "100.64.0.11",
+            Some("alice@headscale.net"),
+            &["tag:exit1"],
+            exit_routes,
+        ),
+        peer(
+            3,
+            "100.64.0.21",
+            Some("bob@headscale.net"),
+            &["tag:exit2"],
+            exit_routes,
+        ),
+    ];
+
+    let peer_map = store.build_peer_map(&nodes).unwrap();
+    assert_eq!(
+        peer_map.get(&1).cloned().unwrap_or_default(),
+        vec![2],
+        "alice must see only the via-tagged exit node"
+    );
+    assert_eq!(
+        peer_map.get(&2).cloned().unwrap_or_default(),
+        vec![1],
+        "matching exit node must see alice through the via grant"
+    );
+    assert!(
+        peer_map.get(&3).cloned().unwrap_or_default().is_empty(),
+        "non-matching exit node must stay hidden from alice"
+    );
+
+    let alice_to_exit1 = store.via_routes_for_peer(&nodes, 1, 2).unwrap();
+    assert_eq!(
+        alice_to_exit1.include,
+        routes(exit_routes),
+        "matching exit node defaults drive AllowedIPs"
+    );
+    assert!(alice_to_exit1.exclude.is_empty());
+
+    let alice_to_exit2 = store.via_routes_for_peer(&nodes, 1, 3).unwrap();
+    assert!(alice_to_exit2.include.is_empty());
+    assert_eq!(
+        alice_to_exit2.exclude,
+        routes(exit_routes),
+        "other exit-node defaults are stripped by the via grant"
+    );
+}
+
+#[test]
 fn resolvemagicdns() {
     let machines = [
         MachineDnsRecord {

@@ -292,6 +292,83 @@ fn test_ssh_autogroup_self() {
 }
 
 #[test]
+fn test_ssh_localpart_profile_variants_special_chars_and_no_match() {
+    let mut nodes = vec![
+        SshPolicyNode {
+            id: 10,
+            user: Some("dave+sshuser@example.com".into()),
+            user_id: Some(10),
+            addrs: vec!["100.64.0.10".into()],
+            tags: Vec::new(),
+        },
+        SshPolicyNode {
+            id: 11,
+            user: Some("dave-cli".into()),
+            user_id: Some(11),
+            addrs: vec!["100.64.0.11".into()],
+            tags: Vec::new(),
+        },
+        SshPolicyNode {
+            id: 12,
+            user: Some("server@example.com".into()),
+            user_id: Some(12),
+            addrs: vec!["100.64.0.12".into()],
+            tags: vec!["tag:server".into()],
+        },
+    ];
+
+    let special = doc(r#"{
+          "tagOwners": {"tag:server": ["server@example.com"]},
+          "acls": [{"action":"accept","proto":"tcp","src":["*"],"dst":["*:0-65535"]}],
+          "ssh": [{
+            "action": "accept",
+            "src": ["autogroup:member"],
+            "dst": ["tag:server"],
+            "users": ["localpart:*@example.com"]
+          }]
+        }"#);
+
+    let policy = compile_ssh_policy(&special, &nodes, 12).unwrap();
+    assert_eq!(policy.rules.len(), 3);
+    assert_eq!(rule_ips(&policy.rules[0]), vec!["100.64.0.10"]);
+    assert_eq!(
+        policy.rules[0].ssh_users,
+        BTreeMap::from([("root".to_string(), String::new())])
+    );
+    assert_eq!(rule_ips(&policy.rules[1]), vec!["100.64.0.10"]);
+    assert_eq!(
+        policy.rules[1].ssh_users,
+        BTreeMap::from([("dave+sshuser".to_string(), "dave+sshuser".to_string())])
+    );
+    assert_eq!(rule_ips(&policy.rules[2]), vec!["100.64.0.11"]);
+    assert_eq!(
+        policy.rules[2].ssh_users,
+        BTreeMap::from([("root".to_string(), String::new())])
+    );
+    assert!(
+        policy
+            .rules
+            .iter()
+            .all(|rule| !rule.ssh_users.contains_key("localpart:*@example.com")),
+        "client-facing sshUsers must contain concrete login users, not localpart patterns"
+    );
+
+    nodes[0].user = Some("dave+sshuser@other.example".into());
+    let no_match = compile_ssh_policy(&special, &nodes, 12).unwrap();
+    assert_eq!(no_match.rules.len(), 2);
+    assert_eq!(rule_ips(&no_match.rules[0]), vec!["100.64.0.10"]);
+    assert_eq!(
+        no_match.rules[0].ssh_users,
+        BTreeMap::from([("root".to_string(), String::new())])
+    );
+    assert_eq!(rule_ips(&no_match.rules[1]), vec!["100.64.0.11"]);
+    assert_eq!(
+        no_match.rules[1].ssh_users,
+        BTreeMap::from([("root".to_string(), String::new())])
+    );
+}
+
+#[test]
 fn test_ssh_one_user_to_one_check_mode_cli() {
     let doc = doc(r#"{
           "groups": {"group:integration-test": ["user1@"]},

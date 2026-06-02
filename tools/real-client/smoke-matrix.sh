@@ -126,6 +126,7 @@ smoke_ids=(
   postgres-route-primary-withdraw
   postgres-route-exit-node
   postgres-web-register-route-approve
+  postgres-web-register-route-approve-restart
   postgres-oidc
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
@@ -357,6 +358,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -484,6 +486,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-primary-withdraw-smoke.sh
   tools/real-client/postgres-route-exit-node-smoke.sh
   tools/real-client/postgres-web-register-route-approve-smoke.sh
+  tools/real-client/postgres-web-register-route-approve-restart-smoke.sh
   tools/real-client/postgres-oidc-smoke.sh
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
@@ -663,6 +666,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-primary-withdraw-headscale-go-smoke.sh
   tools/real-client/postgres-route-exit-node-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-route-approve-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
@@ -842,6 +846,7 @@ smoke_assertions=(
   "production Postgres primary route withdrawal preserves approval and fails over"
   "production Postgres exit-node route advertisement/approval"
   "production Postgres web registration with route advertisement/approval"
+  "production Postgres web registration route approval survives server restart"
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"

@@ -120,6 +120,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-route-primary-withdraw` | `postgres-route-primary-withdraw-smoke.sh` | `postgres-route-primary-withdraw-headscale-go-smoke.sh` | Production Postgres primary route withdrawal preserves approval and fails over |
 | Database | `postgres-route-exit-node` | `postgres-route-exit-node-smoke.sh` | `postgres-route-exit-node-headscale-go-smoke.sh` | Production Postgres exit-node route advertisement/approval |
 | Database | `postgres-web-register-route-approve` | `postgres-web-register-route-approve-smoke.sh` | `postgres-web-register-route-approve-headscale-go-smoke.sh` | Production Postgres web registration with route advertisement/approval |
+| Database | `postgres-web-register-route-approve-restart` | `postgres-web-register-route-approve-restart-smoke.sh` | `postgres-web-register-route-approve-restart-headscale-go-smoke.sh` | Production Postgres web registration route approval survives server restart |
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
@@ -424,6 +425,9 @@ Useful knobs:
   scripts for custom scenarios.
 - `REAL_CLIENT_RESTART_WEB_REGISTER=true` enables the focused production
   restart path in `restart-persistence-common.sh`.
+- `REAL_CLIENT_RESTART_WEB_REGISTER_ROUTE_APPROVE=true` makes that restart path
+  advertise and approve `REAL_CLIENT_RESTART_ROUTE`, then assert the approved
+  route before and after restart.
 - `REAL_CLIENT_PREAUTH_TAGS` defaults to `tag:server` in the tagged variant.
 - `REAL_CLIENT_UNOWNED_TAG` defaults to `tag:blocked` in the unowned-tag
   variant.

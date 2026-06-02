@@ -40,6 +40,7 @@ route_primary_sticky="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_STICKY:-false}"
 route_primary_withdraw="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_WITHDRAW:-false}"
 route_primary_no_restart="${REAL_CLIENT_ROUTE_PRIMARY_NO_RESTART:-false}"
 web_register_restart="${REAL_CLIENT_RESTART_WEB_REGISTER:-false}"
+web_register_route_approve="${REAL_CLIENT_RESTART_WEB_REGISTER_ROUTE_APPROVE:-false}"
 route_health_probe_interval_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_INTERVAL_SECS:-2}"
 route_health_probe_timeout_secs="${REAL_CLIENT_ROUTE_HEALTH_PROBE_TIMEOUT_SECS:-1}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/restart-persistence-${target}}"
@@ -251,6 +252,22 @@ case "${web_register_restart}" in
     exit 2
     ;;
 esac
+case "${web_register_route_approve}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    web_register_route_approve_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    web_register_route_approve_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_WEB_REGISTER_ROUTE_APPROVE must be true or false, got ${web_register_route_approve}" >&2
+    exit 2
+    ;;
+esac
+if ((web_register_route_approve_flag && ! web_register_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_WEB_REGISTER_ROUTE_APPROVE requires REAL_CLIENT_RESTART_WEB_REGISTER=true" >&2
+  exit 2
+fi
 if ((web_register_restart_flag && (route_via_restart_flag || route_health_restart_flag || route_primary_restart_flag))); then
   echo "REAL_CLIENT_RESTART_WEB_REGISTER cannot be combined with route-via, route-health, or route-primary restart modes" >&2
   exit 2
@@ -1309,12 +1326,17 @@ login_observer_with_web_registration() {
   local client_name="${1:-${observer_name}}"
   local user="${2:-alice}"
   echo "::group::tailscale up web observer ${client_name}"
-  docker exec "${client_name}" tailscale up \
+  local tailscale_up_args=(
     "--login-server=${control_url}" \
     "--hostname=${client_name}" \
     --timeout=60s \
     --accept-routes=true \
-    --accept-dns=false \
+    --accept-dns=false
+  )
+  if ((web_register_route_approve_flag)); then
+    tailscale_up_args+=("--advertise-routes=${advertised_routes}")
+  fi
+  docker exec "${client_name}" tailscale up "${tailscale_up_args[@]}" \
     >"${work_dir}/${client_name}.tailscale-up.stdout" \
     2>"${work_dir}/${client_name}.tailscale-up.stderr" &
   local up_pid="$!"
@@ -1546,6 +1568,15 @@ assert_web_registered_node() {
     abort("expected non-empty machine key") if machine_key.to_s.empty?
     abort("expected non-empty node key") if node_key.to_s.empty?
     abort("expected non-empty node ID") if node_id.to_s.empty?
+    if ARGV.fetch(4) == "1"
+      expected_routes = ARGV.fetch(5).split(",").reject(&:empty?).sort
+      available_routes = Array(node["availableRoutes"] || node["available_routes"]).map(&:to_s).sort
+      approved_routes = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+      expected_routes.each do |route|
+        abort("expected web node available route #{route.inspect}, got #{available_routes.inspect}") unless available_routes.include?(route)
+        abort("expected web node approved route #{route.inspect}, got #{approved_routes.inspect}") unless approved_routes.include?(route)
+      end
+    end
 
     File.write(summary_path, JSON.pretty_generate({
       node_id: node_id,
@@ -1555,7 +1586,7 @@ assert_web_registered_node() {
       ip_addresses: addresses,
     }))
     puts node_id
-  ' "${nodes_path}" "${observer_name}" "alice" "${summary_path}"
+  ' "${nodes_path}" "${observer_name}" "alice" "${summary_path}" "${web_register_route_approve_flag}" "${advertised_routes}"
 }
 
 assert_route_health_persisted_nodes() {
@@ -2672,6 +2703,9 @@ if ((web_register_restart_flag)); then
   create_user_json alice "${work_dir}/user-alice.json" >/dev/null
   start_client "${observer_name}"
   login_observer_with_web_registration "${observer_name}" alice
+  if ((web_register_route_approve_flag)); then
+    approve_router_routes "${observer_name}"
+  fi
   web_node_id_before="$(assert_web_registered_node "before-restart")"
 
   stop_server

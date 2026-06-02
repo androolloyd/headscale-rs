@@ -387,7 +387,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all eighty-eight Pg rows, including
+  all eighty-nine Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -404,7 +404,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-primary`,
   `postgres-route-primary-failover`, `postgres-route-primary-sticky`,
-  `postgres-route-primary-withdraw`, `postgres-acl-allow`,
+  `postgres-route-primary-withdraw`,
+  `postgres-web-register-route-approve-restart`, `postgres-acl-allow`,
   `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
   `postgres-ssh`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`,
@@ -1560,3 +1561,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   rejected deleted-key relogin cannot duplicate the node or silently change the
   node identity.
 - This closes the deleted-key restart/relogin auth-key lifecycle gap.
+
+## 2026-06-02 Postgres web-registration route-approval restart smoke slice
+
+- Added paired `postgres-web-register-route-approve-restart`
+  Rust/headscale-go rows over the production restart harness.
+- The row uses web/CLI registration, advertises and approves a stock-client
+  route, restarts the Postgres-backed server with the same control URL, and
+  asserts the web-registered node identity plus approved route survive restart.
+- This closes a small Postgres stock-client mutation symmetry gap between the
+  existing web-registration restart row and the no-restart web-registration
+  route-approval row; the Postgres stock-client matrix now has eighty-nine
+  rows.

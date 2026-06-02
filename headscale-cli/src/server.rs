@@ -1,6 +1,7 @@
 //! Server mode - runs the control plane.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -39,7 +40,7 @@ use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
-use headscale_api::tailscale_wire::derp::NativeDerpRuntime;
+use headscale_api::tailscale_wire::derp::{NativeDerpLifecycleDelivery, NativeDerpRuntime};
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
@@ -71,6 +72,7 @@ const DEFAULT_ACME_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
 const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
 const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
+const NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunServerConfig {
@@ -476,6 +478,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         derp_shuffle_base_domain.to_string(),
     );
 
+    let native_derp_shutdown = runtime.state.native_derp.clone();
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
@@ -534,8 +537,14 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let external_acme_http01 = acme_http01_runtime
         .as_mut()
         .and_then(AcmeHttp01Runtime::take_handle);
-    let serve_result =
-        await_serve_handle(handle, local_grpc, remote_grpc, external_acme_http01).await;
+    let serve_result = await_serve_handle(
+        handle,
+        local_grpc,
+        remote_grpc,
+        external_acme_http01,
+        native_derp_shutdown,
+    )
+    .await;
     if let Some(handle) = policy_reload {
         handle.abort();
     }
@@ -2223,7 +2232,30 @@ async fn await_serve_handle(
     local_grpc: tokio::task::JoinHandle<Result<()>>,
     remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
     external_acme_http01: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+    native_derp: Option<Arc<NativeDerpRuntime>>,
 ) -> Result<()> {
+    await_serve_handle_with_shutdown(
+        handle,
+        local_grpc,
+        remote_grpc,
+        external_acme_http01,
+        native_derp,
+        shutdown_signal(),
+    )
+    .await
+}
+
+async fn await_serve_handle_with_shutdown<S>(
+    handle: serve::ServeHandle,
+    local_grpc: tokio::task::JoinHandle<Result<()>>,
+    remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
+    external_acme_http01: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+    native_derp: Option<Arc<NativeDerpRuntime>>,
+    shutdown_signal: S,
+) -> Result<()>
+where
+    S: Future<Output = Result<&'static str>>,
+{
     let serve::ServeHandle {
         http,
         https,
@@ -2231,6 +2263,7 @@ async fn await_serve_handle(
         acme_http01,
         ..
     } = handle;
+    tokio::pin!(shutdown_signal);
     tokio::select! {
         result = await_optional_listener_result(http, "http") => result,
         result = await_optional_listener_result(https, "https") => result,
@@ -2239,7 +2272,59 @@ async fn await_serve_handle(
         result = await_optional_listener_result(external_acme_http01, "acme http-01") => result,
         result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
         result = await_optional_anyhow_task_result(remote_grpc, "remote grpc") => result,
+        signal = &mut shutdown_signal => {
+            let signal = signal?;
+            tracing::info!(signal, "Received signal to stop, shutting down gracefully");
+            let delivery = announce_native_derp_server_shutdown(native_derp.as_ref()).await;
+            if delivery.delivered() > 0 {
+                tokio::time::sleep(NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE).await;
+            }
+            Ok(())
+        },
     }
+}
+
+async fn announce_native_derp_server_shutdown(
+    native_derp: Option<&Arc<NativeDerpRuntime>>,
+) -> NativeDerpLifecycleDelivery {
+    let Some(native_derp) = native_derp else {
+        return NativeDerpLifecycleDelivery::default();
+    };
+
+    let delivery = native_derp.announce_server_shutdown().await;
+    tracing::info!(
+        health_frames = delivery.health,
+        restarting_frames = delivery.restarting,
+        "announced native DERP server shutdown lifecycle"
+    );
+    delivery
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<&'static str> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+
+    tokio::select! {
+        signal = sigint.recv() => {
+            signal.context("SIGINT stream closed before receiving a signal")?;
+            Ok("SIGINT")
+        },
+        signal = sigterm.recv() => {
+            signal.context("SIGTERM stream closed before receiving a signal")?;
+            Ok("SIGTERM")
+        },
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("install Ctrl-C handler")?;
+    Ok("SIGINT")
 }
 
 fn optional_socket_addr(value: Option<&str>, field: &str) -> Result<Option<SocketAddr>> {
@@ -2682,16 +2767,30 @@ mod tests {
         OidcAuthConfig, OidcPkceConfig, OidcPolicyConfig, OidcRegistrationHandler, OidcStoredUser,
         REGISTER_METHOD_OIDC,
     };
+    use headscale_api::tailscale_wire::derp::{
+        NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM, NATIVE_DERP_SHUTDOWN_RECONNECT_IN,
+        NATIVE_DERP_SHUTDOWN_TRY_FOR, drive_native_derp,
+    };
     use headscale_api::tailscale_wire::{
         map as wire_map_handlers,
         noise::NoisePeerMachineKey,
         register as wire_register_handlers,
         wire::{MapResponse, RegisterResponse},
     };
-    use headscale_core::config::EmbeddedDerpRelayMode;
+    use headscale_core::{
+        config::EmbeddedDerpRelayMode,
+        derp::{
+            native::NativeDerpRelay,
+            protocol::{
+                ClientInfo, DerpNodeKeyPair, Frame, FrameDecoder, KEY_LEN, MAX_INFO_LEN,
+                ServerInfo, encode_client_info_frame, open_server_info,
+            },
+        },
+    };
     use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
     use tokio::time::{sleep, timeout};
     use tonic::{
         Request as TonicRequest,
@@ -3017,6 +3116,93 @@ mod tests {
     fn unused_loopback_addr() -> SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap()
+    }
+
+    async fn read_test_derp_frame<R>(reader: &mut R, decoder: &mut FrameDecoder) -> Frame
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut buf = [0u8; 1024];
+        loop {
+            if let Some(frame) = decoder.next_frame().unwrap() {
+                return frame;
+            }
+            let n = timeout(Duration::from_secs(2), reader.read(&mut buf))
+                .await
+                .expect("timed out waiting for DERP frame bytes")
+                .expect("read DERP frame bytes");
+            assert_ne!(n, 0, "DERP stream closed before the next frame");
+            decoder.push(&buf[..n]);
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_shutdown_signal_announces_native_derp_lifecycle_to_raw_session() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let native_derp = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = native_derp.clone();
+        let derp_server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_test_derp_frame(&mut client_reader, &mut decoder).await
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+        let server_info_frame = read_test_derp_frame(&mut client_reader, &mut decoder).await;
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let local_grpc = tokio::spawn(async { std::future::pending::<Result<()>>().await });
+        let handle = serve::ServeHandle {
+            http: None,
+            https: None,
+            metrics: None,
+            acme_http01: None,
+            metrics_addr: None,
+            acme_http01_addr: None,
+            tls: None,
+            tls_reloader: None,
+        };
+        await_serve_handle_with_shutdown(
+            handle,
+            local_grpc,
+            None,
+            None,
+            Some(native_derp),
+            async { Ok("test-shutdown") },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read_test_derp_frame(&mut client_reader, &mut decoder).await,
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+        assert_eq!(
+            read_test_derp_frame(&mut client_reader, &mut decoder).await,
+            Frame::Restarting {
+                reconnect_in_ms: NATIVE_DERP_SHUTDOWN_RECONNECT_IN.as_millis() as u32,
+                try_for_ms: NATIVE_DERP_SHUTDOWN_TRY_FOR.as_millis() as u32,
+            }
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(derp_server.await.unwrap().is_ok());
     }
 
     #[tokio::test]

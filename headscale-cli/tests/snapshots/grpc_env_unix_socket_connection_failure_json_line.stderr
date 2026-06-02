@@ -1,0 +1,2 @@
+<timestamp> WRN no config file found, using defaults
+{"error":"connecting to headscale: connecting to /tmp/headscale-missing-parity-env.sock: context deadline exceeded"}

@@ -4612,6 +4612,18 @@ fn local_unix_socket_connection_warnings_match_current_upstream_snapshots() {
         include_str!("snapshots/grpc_default_unix_socket_connection_failure.stderr"),
         "default Unix socket connection failure",
     );
+    let default_json = headscale_in_with_env(
+        &["-o", "json", "users", "list"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_CLI_TIMEOUT", "1s")],
+    );
+    assert_process_no_config_warning_stderr_snapshot(
+        &default_json,
+        1,
+        include_str!("snapshots/grpc_default_unix_socket_connection_failure_json.stderr"),
+        "default Unix socket JSON connection failure",
+    );
 
     let socket = "/tmp/headscale-missing-parity-env.sock";
     let _ = fs::remove_file(socket);
@@ -4632,6 +4644,21 @@ fn local_unix_socket_connection_warnings_match_current_upstream_snapshots() {
         include_str!("snapshots/grpc_env_unix_socket_connection_failure.stderr"),
         "env Unix socket connection failure",
     );
+    let env_socket_json_line = headscale_in_with_env(
+        &["-ojson-line", "users", "list"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_UNIX_SOCKET", socket),
+            ("HEADSCALE_CLI_TIMEOUT", "1s"),
+        ],
+    );
+    assert_process_no_config_warning_stderr_snapshot(
+        &env_socket_json_line,
+        1,
+        include_str!("snapshots/grpc_env_unix_socket_connection_failure_json_line.stderr"),
+        "env Unix socket JSON-line connection failure",
+    );
 
     let socket = "/tmp/headscale-missing-parity-config.sock";
     let _ = fs::remove_file(socket);
@@ -4648,6 +4675,16 @@ fn local_unix_socket_connection_warnings_match_current_upstream_snapshots() {
         1,
         include_str!("snapshots/grpc_config_unix_socket_connection_failure.stderr"),
         "config Unix socket connection failure",
+    );
+    let config_socket_yaml = headscale_with_config(&config, &["-oyaml", "users", "list"]);
+    assert_process_stderr_snapshot(
+        &config_socket_yaml,
+        1,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/grpc_config_unix_socket_connection_failure_yaml.stderr")
+        ),
+        "config Unix socket YAML connection failure",
     );
 }
 

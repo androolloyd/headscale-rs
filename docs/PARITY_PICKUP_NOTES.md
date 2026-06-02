@@ -2617,3 +2617,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Removed `p1-config-tls-acme-public-ca-drift` from the open backlog. Actual
   live public-CA smoke coverage remains an externally-networked release concern,
   not an open deterministic parity gate.
+
+## 2026-06-02 CLI Unix-socket structured failure snapshots
+
+- Added exact process-level structured output snapshots for local Unix-socket
+  gRPC connection failures across default config JSON, `HEADSCALE_UNIX_SOCKET`
+  JSON-line, and configured-socket YAML paths.
+- The `p2-cli-output-error-residuals` row remains open because broader
+  current-upstream CLI output/error parity still has residual utility and
+  process-level surfaces to pin.

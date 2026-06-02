@@ -1,0 +1,4 @@
+<timestamp> WRN no config file found, using defaults
+{
+	"error": "connecting to headscale: connecting to /var/run/headscale/headscale.sock: context deadline exceeded"
+}

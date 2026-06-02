@@ -1302,6 +1302,7 @@ impl CliConfig {
         let server_url = server.server_url.as_deref().unwrap_or("");
         self.validate_upstream_fatal_config(server, server_url)?;
         self.validate_manual_tls_paths()?;
+        self.validate_tls_acme_listener()?;
         parse_server_url_parts(server_url)?;
         validate_socket_addr(&server.listen, "listen_addr")?;
         if let Some(https_listen) = server.https_listen.as_deref() {
@@ -1574,6 +1575,32 @@ impl CliConfig {
             .is_some_and(|value| !value.as_os_str().is_empty());
         if cert_path != key_path {
             bail!("tls_cert_path and tls_key_path must both be set");
+        }
+
+        Ok(())
+    }
+
+    fn validate_tls_acme_listener(&self) -> Result<()> {
+        let letsencrypt_enabled = self
+            .tls_letsencrypt_hostname
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !letsencrypt_enabled {
+            return Ok(());
+        }
+
+        let challenge_type = self
+            .tls_letsencrypt_challenge_type
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("HTTP-01");
+        if challenge_type == "HTTP-01" {
+            let listen = self
+                .tls_letsencrypt_listen
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(":http");
+            validate_acme_http01_listen_addr(listen)?;
         }
 
         Ok(())
@@ -1863,6 +1890,14 @@ fn validate_optional_socket_addr(value: Option<&str>, field: &str) -> Result<()>
         validate_socket_addr(value, field)?;
     }
     Ok(())
+}
+
+fn validate_acme_http01_listen_addr(value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case(":http") || trimmed.eq_ignore_ascii_case("http") {
+        return Ok(());
+    }
+    validate_socket_addr(trimmed, "tls_letsencrypt_listen")
 }
 
 pub(crate) fn server_url_hostname(raw: &str) -> Option<String> {
@@ -3783,6 +3818,48 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_http01_acme_listener() {
+        let source = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_listen: "not-a-socket"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("Invalid tls_letsencrypt_listen address"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn configtest_ignores_http01_listener_for_tls_alpn_acme() {
+        let source = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_listen: "not-a-socket"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
         config.validate_for_configtest().unwrap();
     }
 

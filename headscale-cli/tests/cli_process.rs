@@ -2180,6 +2180,22 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_listen: "not-a-socket"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+        include_str!("snapshots/configtest_invalid_acme_http01_listen.stderr"),
+        "configtest invalid ACME HTTP-01 listener",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),

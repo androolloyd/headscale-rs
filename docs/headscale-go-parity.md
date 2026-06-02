@@ -928,6 +928,13 @@ registers a pending node, mutates database-backed policy to allow a tag, applies
 that node tag while `serve` remains running, and polls `/debug/nodestore` until
 the live registry exposes the new `forced_tags` state.
 
+Recent coverage note (2026-06-02):
+`serve_postgres_runtime_gateway_api_key_revocation_restart_smoke` now
+starts the real env-gated production Postgres `serve` binary, creates a
+secondary API key through the authenticated public grpc-gateway, proves that key
+can authenticate public health, expires it through the bootstrap key, and asserts
+the expired key is rejected immediately and after a production server restart.
+
 Recent coverage note (2026-06-02): `configtest` now snapshots invalid
 `server.https_listen` parsing, matching the already-covered `serve` startup
 guard so explicit HTTPS listener mistakes are caught before runtime state is

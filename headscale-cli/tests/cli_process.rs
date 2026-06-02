@@ -7075,6 +7075,136 @@ async fn serve_postgres_runtime_grpc_gateway_api_key_lifecycle_smoke() -> BoxTes
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_gateway_api_key_revocation_restart_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_api_revoke").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let bootstrap = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(bootstrap.status.success(), "stderr: {}", stderr(&bootstrap));
+        let bootstrap = json_output(&bootstrap);
+        let bootstrap_secret = bootstrap.as_str().expect("bootstrap api key secret");
+        assert!(
+            bootstrap_secret.starts_with("hskey-api-"),
+            "api key: {bootstrap_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created = http
+            .post(format!("{server_url}/api/v1/apikey"))
+            .bearer_auth(bootstrap_secret)
+            .json(&serde_json::json!({ "expiration": "2030-01-02T03:04:05Z" }))
+            .send()
+            .await?;
+        assert_eq!(created.status(), reqwest::StatusCode::OK);
+        let created = created.json::<serde_json::Value>().await?;
+        let revoked_secret = created["apiKey"]
+            .as_str()
+            .expect("created api key secret")
+            .to_string();
+        assert!(
+            revoked_secret.starts_with("hskey-api-"),
+            "created api key: {created}"
+        );
+
+        let health_with_created_key = http
+            .get(format!("{server_url}/api/v1/health"))
+            .bearer_auth(&revoked_secret)
+            .send()
+            .await?;
+        assert_eq!(health_with_created_key.status(), reqwest::StatusCode::OK);
+        let health_with_created_key = health_with_created_key.json::<serde_json::Value>().await?;
+        assert_eq!(
+            health_with_created_key["databaseConnectivity"].as_bool(),
+            Some(true)
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/apikey"))
+            .bearer_auth(bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        let created_row = listed["apiKeys"]
+            .as_array()
+            .expect("apiKeys")
+            .iter()
+            .find(|key| key["id"] == "2")
+            .unwrap_or_else(|| panic!("missing secondary API-key row: {listed}"));
+        assert_eq!(created_row["expiration"], "2030-01-02T03:04:05Z");
+
+        let expired = http
+            .post(format!("{server_url}/api/v1/apikey/expire"))
+            .bearer_auth(bootstrap_secret)
+            .json(&serde_json::json!({ "id": "2" }))
+            .send()
+            .await?;
+        assert_eq!(expired.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            expired.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let rejected = http
+            .get(format!("{server_url}/api/v1/health"))
+            .bearer_auth(&revoked_secret)
+            .send()
+            .await?;
+        assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(rejected.text().await?, "Unauthorized");
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let bootstrap_still_valid = http
+            .get(format!("{server_url}/api/v1/health"))
+            .bearer_auth(bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(bootstrap_still_valid.status(), reqwest::StatusCode::OK);
+
+        let rejected_after_restart = http
+            .get(format!("{server_url}/api/v1/health"))
+            .bearer_auth(&revoked_secret)
+            .send()
+            .await?;
+        assert_eq!(
+            rejected_after_restart.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(rejected_after_restart.text().await?, "Unauthorized");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_node_lifecycle").await? else {
         return Ok(());

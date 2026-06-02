@@ -698,6 +698,24 @@ impl CliConfig {
                         .ephemeral
                         .inactivity_timeout = Some(timeout);
                 }
+                "HEADSCALE_NODE_ROUTES_HA_PROBE_INTERVAL" => {
+                    let interval = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.node
+                        .get_or_insert_with(NodeConfig::default)
+                        .routes
+                        .ha
+                        .probe_interval = Some(interval);
+                }
+                "HEADSCALE_NODE_ROUTES_HA_PROBE_TIMEOUT" => {
+                    let timeout = parse_duration_secs_str(value)
+                        .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
+                    self.node
+                        .get_or_insert_with(NodeConfig::default)
+                        .routes
+                        .ha
+                        .probe_timeout = Some(timeout);
+                }
                 "HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT" => {
                     let timeout = parse_duration_secs_str(value)
                         .map_err(|err| anyhow::anyhow!("invalid {key}: {err}"))?;
@@ -2991,6 +3009,49 @@ expiry = 0
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT"));
+    }
+
+    #[test]
+    fn applies_headscale_node_route_ha_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_node_env_overrides_from([
+                ("HEADSCALE_NODE_ROUTES_HA_PROBE_INTERVAL", "15s"),
+                ("HEADSCALE_NODE_ROUTES_HA_PROBE_TIMEOUT", "4s"),
+            ])
+            .unwrap();
+
+        let node = config.node.as_ref().expect("node config created");
+        assert_eq!(node.routes.ha.probe_interval, Some(15));
+        assert_eq!(node.routes.ha.probe_timeout, Some(4));
+
+        let err = config
+            .apply_node_env_overrides_from([("HEADSCALE_NODE_ROUTES_HA_PROBE_INTERVAL", "1500ms")])
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid HEADSCALE_NODE_ROUTES_HA_PROBE_INTERVAL"));
+    }
+
+    #[test]
+    fn configtest_validates_node_route_ha_env_overrides_against_upstream_defaults() {
+        let source = r#"
+server_url: "https://headscale.example"
+"#;
+        let mut config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config
+            .apply_node_env_overrides_from([("HEADSCALE_NODE_ROUTES_HA_PROBE_TIMEOUT", "10s")])
+            .unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains(
+                "node.routes.ha.probe_timeout (10s) must be less than node.routes.ha.probe_interval (10s)"
+            ),
+            "unexpected validation error: {message}"
+        );
     }
 
     #[test]

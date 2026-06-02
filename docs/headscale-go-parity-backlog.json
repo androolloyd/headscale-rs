@@ -30,7 +30,7 @@
         "integration/cli_test.go",
         "integration/api_auth_test.go"
       ],
-      "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage beyond the current selected stock-client matrix and focused API-key/preauth-key plus gateway user-rename/node-owner restart smokes, especially remaining policy, routes, auth sessions, config/map-churn, and wider user/node lifecycle cases."
+      "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage beyond the current selected stock-client matrix, focused API-key/preauth-key plus gateway user-rename/node-owner restart smokes, the paired stock-client policy/config map-churn restart row, and the paired stock-client user/node lifecycle restart row, especially remaining routes, auth/API sessions, additional config churn, registration, and map-stream churn cases."
     },
     {
       "id": "p1-policy-v2-compat-fixtures",

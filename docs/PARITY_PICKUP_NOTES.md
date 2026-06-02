@@ -2787,3 +2787,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   allow behavior after backfill and after the final production restart.
 - This closes `p1-production-backfill-restart-edges`; the backlog now tracks
   four open parity items.
+
+## 2026-06-02 Postgres user/node lifecycle restart stock-client smoke
+
+- Added paired `postgres-user-node-lifecycle-restart` Rust/headscale-go
+  stock-client rows over the production Postgres serving path. The shared
+  lifecycle runner now has an opt-in
+  `REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART=true` path that registers three
+  auth-key clients, renames Alice to `alice-renamed`, expires Bob's node,
+  deletes Carol's node, destroys Carol, restarts the same server against the
+  same temporary Postgres database, and reasserts the persisted user/node
+  lifecycle state.
+- The row is wired into `tools/real-client/smoke-matrix.sh`, the bounded
+  real-client PR/push smoke set, and real-client docs. The P0
+  `p0-production-postgres-process-mutations` backlog row remains open for
+  broader policy, route, auth-session, config, registration, and map-stream
+  churn coverage.

@@ -2203,7 +2203,6 @@ fn rebuild_peer_delta_chunk(
     let peer_in_scope = |peer_id: u64| filter_peer_ids.is_none_or(|ids| ids.contains(&peer_id));
     let peers_removed = previous_peer_ids
         .difference(&current_peer_ids)
-        .filter(|peer_id| peer_in_scope(**peer_id))
         .copied()
         .collect::<Vec<_>>();
     let mut next_peer_state = if filter_peer_ids.is_some() {

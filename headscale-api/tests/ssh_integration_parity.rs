@@ -9,8 +9,7 @@ use headscale_api::policy::{
 use headscale_api::tailscale_wire::wire::{SshPolicy, SshRule};
 use headscale_api::tailscale_wire::{AuthWaitOutcome, RegistrationCache, SshCheckBinding};
 
-const CURRENT_HEAD_FIXTURES: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/current-head");
+const PARITY_SCENARIOS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/scenarios");
 
 fn user_node(id: u64, user: &str, ip: u8) -> SshPolicyNode {
     SshPolicyNode {
@@ -58,8 +57,8 @@ fn doc(raw: &str) -> PolicyDoc {
     parse_hujson_policy(raw).unwrap()
 }
 
-fn current_head_policy_doc(name: &str) -> PolicyDoc {
-    let path = format!("{CURRENT_HEAD_FIXTURES}/{name}");
+fn parity_policy_doc(name: &str) -> PolicyDoc {
+    let path = format!("{PARITY_SCENARIOS}/{name}");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
     let scenario: serde_json::Value =
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {path}: {e}"));
@@ -238,8 +237,8 @@ fn test_ssh_is_blocked_in_acl() {
 }
 
 #[test]
-fn current_head_multi_address_fixture_compiles_ssh_principals_and_accept_env() {
-    let doc = current_head_policy_doc("multi-address-policy-ssh-dns-route-matrix.json");
+fn multi_address_fixture_compiles_ssh_principals_and_accept_env() {
+    let doc = parity_policy_doc("multi-address-policy-ssh-dns-route-matrix.json");
     let nodes = vec![
         SshPolicyNode {
             id: 1,

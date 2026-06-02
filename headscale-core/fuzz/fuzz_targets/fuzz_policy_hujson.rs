@@ -99,10 +99,7 @@ fn exercise_ssh_policy(doc: &AclDoc) {
             id: 1,
             user: Some("alice@example.com".to_string()),
             user_id: Some(1),
-            addrs: vec![
-                "100.64.0.10".to_string(),
-                "fd7a:115c:a1e0::10".to_string(),
-            ],
+            addrs: vec!["100.64.0.10".to_string(), "fd7a:115c:a1e0::10".to_string()],
             tags: Vec::new(),
         },
         SshPolicyNode {
@@ -116,10 +113,7 @@ fn exercise_ssh_policy(doc: &AclDoc) {
             id: 3,
             user: Some("admin@example.com".to_string()),
             user_id: Some(3),
-            addrs: vec![
-                "100.64.0.30".to_string(),
-                "fd7a:115c:a1e0::30".to_string(),
-            ],
+            addrs: vec!["100.64.0.30".to_string(), "fd7a:115c:a1e0::30".to_string()],
             tags: vec!["tag:server".to_string(), "tag:router".to_string()],
         },
     ];
@@ -131,7 +125,10 @@ fn exercise_ssh_policy(doc: &AclDoc) {
                 assert!(!rule.ssh_users.is_empty());
                 assert!(
                     rule.action.accept
-                        || rule.action.hold_and_delegate.starts_with("/machine/ssh/action/")
+                        || rule
+                            .action
+                            .hold_and_delegate
+                            .starts_with("/machine/ssh/action/")
                         || rule.action.hold_and_delegate.is_empty()
                 );
             }

@@ -568,6 +568,12 @@ payloads. Admin rename churn now mirrors headscale-go's self-map response path:
 the renamed node receives a self `Node` update without peer, DNS, DERP,
 user-profile, packet-filter, or SSH-policy payloads.
 
+Recent coverage note (2026-06-02): runtime debug/config parity now covers the
+upstream-shaped `derp:` projection, including embedded-region precedence,
+operator URLs/paths, auto-update frequency, STUN/private-key/client-verification
+settings, IPv4/IPv6 hints, and the serialized `DERPMap` exposed through the
+runtime snapshot.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

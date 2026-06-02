@@ -4883,6 +4883,97 @@ database:
     }
 
     #[test]
+    fn runtime_config_snapshot_projects_upstream_derp_config_and_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let derp_private_key = dir.path().join("derp_server_private.key");
+        let derp_path = dir.path().join("derp-map.yaml");
+        let mut cfg = test_run_server_config(&dir);
+        cfg.derp = Some(DerpConfig {
+            server: crate::derp_config::UpstreamDerpServerConfig {
+                enabled: true,
+                region_id: 777,
+                region_code: "hs".into(),
+                region_name: "Headscale DERP".into(),
+                verify_clients: false,
+                stun_listen_addr: Some("127.0.0.1:3478".parse().unwrap()),
+                private_key_path: derp_private_key.clone(),
+                automatically_add_embedded_derp_region: false,
+                ipv4: Some("203.0.113.7".into()),
+                ipv6: Some("2001:db8::7".into()),
+            },
+            urls: vec!["https://derp.example/map.json".into()],
+            paths: vec![derp_path.clone()],
+            auto_update_enabled: true,
+            update_frequency: 600,
+        });
+        cfg.embedded_derp = EmbeddedDerpConfig {
+            enabled: true,
+            region_id: 900,
+            region_code: "embedded".into(),
+            region_name: "Embedded DERP".into(),
+            host_name: "embedded.example.com".into(),
+            ..EmbeddedDerpConfig::default()
+        };
+        let derp_map = DerpMap {
+            regions: std::collections::HashMap::from([(
+                777,
+                DerpRegion {
+                    region_id: 777,
+                    region_code: "hs".into(),
+                    region_name: "Headscale DERP".into(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    avoid: false,
+                    no_measure_no_home: false,
+                    nodes: vec![DerpRegionNode {
+                        name: "777a".into(),
+                        region_id: 777,
+                        host_name: "derp.example.com".into(),
+                        cert_name: String::new(),
+                        ipv4: "203.0.113.7".into(),
+                        ipv6: "2001:db8::7".into(),
+                        derp_port: 8443,
+                        stun_port: 3478,
+                        stun_only: false,
+                        insecure_for_tests: false,
+                        stun_test_ip: String::new(),
+                        can_port80: true,
+                    }],
+                },
+            )]),
+            omit_default_regions: true,
+            ..DerpMap::default()
+        };
+        let dns = DnsStore::new();
+
+        let snapshot = runtime_config_snapshot(&cfg, &derp_map, &dns);
+
+        assert!(snapshot.derp.server_enabled);
+        assert!(!snapshot.derp.automatically_add_embedded_derp_region);
+        assert_eq!(snapshot.derp.server_region_id, 777);
+        assert_eq!(snapshot.derp.server_region_code, "hs");
+        assert_eq!(snapshot.derp.server_region_name, "Headscale DERP");
+        assert_eq!(
+            snapshot.derp.server_private_key_path,
+            derp_private_key.display().to_string()
+        );
+        assert!(!snapshot.derp.server_verify_clients);
+        assert_eq!(snapshot.derp.stun_addr, "127.0.0.1:3478");
+        assert_eq!(snapshot.derp.urls, ["https://derp.example/map.json"]);
+        assert_eq!(snapshot.derp.paths, [derp_path.display().to_string()]);
+        assert!(snapshot.derp.auto_update);
+        assert_eq!(snapshot.derp.update_frequency, 600_000_000_000);
+        assert_eq!(snapshot.derp.ipv4, "203.0.113.7");
+        assert_eq!(snapshot.derp.ipv6, "2001:db8::7");
+        assert_eq!(snapshot.derp.derp_map["Regions"]["777"]["RegionCode"], "hs");
+        assert_eq!(
+            snapshot.derp.derp_map["Regions"]["777"]["Nodes"][0]["DERPPort"],
+            8443
+        );
+        assert_eq!(snapshot.derp.derp_map["omitDefaultRegions"], true);
+    }
+
+    #[test]
     fn runtime_config_snapshot_projects_current_upstream_schema_fields() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");

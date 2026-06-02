@@ -2584,3 +2584,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Removed `p0-broader-ssh-client-status` from the open backlog. Remaining
   non-exact SSH paths are dynamic auth URL and bounded timeout cases rather
   than stable deterministic status/stdout/stderr gaps.
+
+## 2026-06-02 route-via-health reload restart edge
+
+- Added paired `route-via-health-reload-restart` and
+  `postgres-route-via-health-reload-restart` Rust/headscale-go rows. The
+  shared restart harness now combines a shared same-tag `grants[].via` target
+  with distinct route-health approval tags, reloads policy to add the standby
+  router, restarts the same server URL, and asserts stock-client observed route
+  ownership failover.
+- Extended the route-edge audit and real-client matrix to include the new
+  default/Postgres mirrors. The `p1-route-via-health-edge-coverage` row remains
+  open because broader route-via/route-health edge matrices remain before full
+  route parity closure.

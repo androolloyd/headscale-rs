@@ -538,9 +538,17 @@ production restart, bringing the Postgres stock-client matrix to ninety-six
 rows.
 
 Recent coverage note (2026-06-02): paired
+`route-via-health-reload-restart` and
+`postgres-route-via-health-reload-restart` stock-client rows now cover same-tag
+`grants[].via` ownership after route-health policy reload expands the approved
+HA candidate set, the server restarts on the same URL, and stock clients
+observe route ownership failover. The Postgres stock-client matrix now has one
+hundred two rows.
+
+Recent coverage note (2026-06-02): paired
 `route-edge-current-upstream-audit` matrix scripts now check the audited
-current-head upstream pin and assert all twenty-nine default
-route-via/route-health rows have matching twenty-nine Postgres mirrors with
+current-head upstream pin and assert all thirty default
+route-via/route-health rows have matching thirty Postgres mirrors with
 checked-in Rust/headscale-go scripts. This is evidence-only because every
 reload, restart, all-unhealthy, mixed-exit, same-tag, multiprefix, and
 route-via-health symmetry row is already covered by live stock-client scripts;

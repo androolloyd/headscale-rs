@@ -58,7 +58,9 @@
       "type": "coverage/evidence",
       "owner_scope": [
         "headscale-api/src/tailscale_wire/routes.rs",
-        "tools/real-client/route-*.sh"
+        "tools/real-client/route-*.sh",
+        "tools/real-client/postgres-route-*.sh",
+        "tools/real-client/restart-persistence-common.sh"
       ],
       "upstream_evidence": [
         "integration/route_test.go",

@@ -283,8 +283,8 @@ if ((route_via_restart_flag && route_health_restart_flag)); then
     echo "combined route-via/route-health mode requires REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG=true without route-via reload or multiprefix modes" >&2
     exit 2
   fi
-  if ((route_health_reload_restart_flag || route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag)); then
-    echo "combined route-via/route-health mode cannot use route-health reload, mixed-exit, or all-unhealthy modes" >&2
+  if ((route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag)); then
+    echo "combined route-via/route-health mode cannot use route-health mixed-exit or all-unhealthy modes" >&2
     exit 2
   fi
   if ((route_via_no_restart_flag != route_health_no_restart_flag)); then
@@ -608,42 +608,11 @@ write_policy() {
   if ((route_via_restart_flag)); then
     if ((route_via_same_tag_restart_flag)); then
       if ((route_via_health_flag)); then
-        cat >"${work_dir}/policy.hujson" <<EOF
-{
-  "tagOwners": {
-    "tag:router-ha": ["router@"]
-  },
-  "autoApprovers": {
-    "routes": {
-      "${route}": ["tag:router-ha"]
-    }
-  },
-  "grants": [
-    {
-      "src": ["*"],
-      "dst": ["tag:router-ha"],
-      "ip": ["*"]
-    },
-    {
-      "src": ["alice@", "bob@"],
-      "dst": ["${route}"],
-      "ip": ["*"]
-    },
-    {
-      "src": ["alice@"],
-      "dst": ["${route}"],
-      "ip": ["*"],
-      "via": ["tag:router-ha"]
-    },
-    {
-      "src": ["bob@"],
-      "dst": ["${route}"],
-      "ip": ["*"],
-      "via": ["tag:router-ha"]
-    }
-  ]
-}
-EOF
+        if ((route_health_reload_restart_flag)); then
+          write_route_via_health_policy tag:router-a
+        else
+          write_route_via_health_policy tag:router-ha
+        fi
         return
       fi
       cat >"${work_dir}/policy.hujson" <<EOF
@@ -798,6 +767,11 @@ EOF
 }
 
 write_route_health_reload_policy() {
+  if ((route_via_health_flag)); then
+    write_route_via_health_policy "$@"
+    return
+  fi
+
   local auto_tags=("$@")
   ruby -rjson -e '
     route = ARGV.fetch(0)
@@ -836,6 +810,50 @@ write_route_health_reload_policy() {
       ],
     })
   ' "${route}" "${exit_routes}" "${route_health_mixed_exit_restart_flag}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
+}
+
+write_route_via_health_policy() {
+  local auto_tags=("$@")
+  ruby -rjson -e '
+    route = ARGV.fetch(0)
+    auto_tags = ARGV.drop(1)
+    puts JSON.pretty_generate({
+      tagOwners: {
+        "tag:router-ha" => ["router@"],
+        "tag:router-a" => ["router@"],
+        "tag:router-b" => ["router@"],
+      },
+      autoApprovers: {
+        routes: {
+          route => auto_tags,
+        },
+      },
+      grants: [
+        {
+          src: ["*"],
+          dst: ["tag:router-ha"],
+          ip: ["*"],
+        },
+        {
+          src: ["alice@", "bob@"],
+          dst: [route],
+          ip: ["*"],
+        },
+        {
+          src: ["alice@"],
+          dst: [route],
+          ip: ["*"],
+          via: ["tag:router-ha"],
+        },
+        {
+          src: ["bob@"],
+          dst: [route],
+          ip: ["*"],
+          via: ["tag:router-ha"],
+        },
+      ],
+    })
+  ' "${route}" "${auto_tags[@]}" >"${work_dir}/policy.hujson"
 }
 
 write_route_via_reload_policy() {
@@ -1196,7 +1214,10 @@ create_route_via_users_and_keys() {
   router_user_id="$(create_user_json router "${work_dir}/user-router.json")"
   alice_user_id="$(create_user_json alice "${work_dir}/user-alice.json")"
   bob_user_id="$(create_user_json bob "${work_dir}/user-bob.json")"
-  if ((route_via_same_tag_restart_flag)); then
+  if ((route_via_health_flag && route_health_reload_restart_flag)); then
+    router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha,tag:router-a "${work_dir}/preauth-router-a.json")"
+    router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha,tag:router-b "${work_dir}/preauth-router-b.json")"
+  elif ((route_via_same_tag_restart_flag)); then
     router_a_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha "${work_dir}/preauth-router-a.json")"
     router_b_authkey="$(create_tagged_preauth_key "${router_user_id}" tag:router-ha "${work_dir}/preauth-router-b.json")"
   else
@@ -2765,12 +2786,22 @@ elif ((route_via_health_flag)); then
   start_client "${bob_name}"
   login_router_with_authkey "${router_name}" "${router_a_authkey}"
   login_router_with_authkey "${router_b_name}" "${router_b_authkey}"
-  approve_router_routes "${router_name}"
-  approve_router_routes "${router_b_name}"
+  if ((!route_health_reload_restart_flag)); then
+    approve_router_routes "${router_name}"
+    approve_router_routes "${router_b_name}"
+  fi
   login_observer_with_web_registration "${observer_name}" alice
   login_observer_with_web_registration "${bob_name}" bob
-  assert_route_via_persisted_nodes "initial"
-  wait_for_route_via_peer_maps "initial"
+  if ((route_health_reload_restart_flag)); then
+    wait_for_route_health_approved_candidates "before-policy-reload" "${router_name}"
+    wait_for_route_via_peer_maps "before policy reload"
+    reload_route_health_policy
+    assert_route_via_persisted_nodes "after-policy-reload"
+    wait_for_route_health_peer_owner_from_admin "after-policy-reload"
+  else
+    assert_route_via_persisted_nodes "initial"
+    wait_for_route_via_peer_maps "initial"
+  fi
   if ((route_via_no_restart_flag)); then
     assert_route_via_health_peer_failover
     echo "${target} route-via-health real-client smoke passed"
@@ -2784,7 +2815,12 @@ elif ((route_via_health_flag)); then
   wait_for "alice reconnected after route-via-health restart" "tailscale_logged_in '${observer_name}'"
   wait_for "bob reconnected after route-via-health restart" "tailscale_logged_in '${bob_name}'"
   assert_route_via_persisted_nodes "after-restart"
-  wait_for_route_via_peer_maps "after restart"
+  if ((route_health_reload_restart_flag)); then
+    wait_for_route_health_approved_candidates "after-restart" "${router_name},${router_b_name}"
+    wait_for_route_health_peer_owner_from_admin "after-restart"
+  else
+    wait_for_route_via_peer_maps "after restart"
+  fi
   assert_route_via_health_peer_failover
   echo "${target} route-via-health real-client smoke passed"
 elif ((route_via_restart_flag)); then

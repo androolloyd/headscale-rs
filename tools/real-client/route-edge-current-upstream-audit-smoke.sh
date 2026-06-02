@@ -29,6 +29,7 @@ route_via_ids=(
   route-via-same-tag
   route-via-health
   route-via-health-restart
+  route-via-health-reload-restart
   route-via-reload
   route-via-restart
   route-via-same-tag-restart

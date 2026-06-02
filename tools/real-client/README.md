@@ -169,6 +169,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-route-via-same-tag` | `postgres-route-via-same-tag-smoke.sh` | `postgres-route-via-same-tag-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route steering |
 | Database | `postgres-route-via-health` | `postgres-route-via-health-smoke.sh` | `postgres-route-via-health-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route owner follows route-health failover |
 | Database | `postgres-route-via-health-restart` | `postgres-route-via-health-restart-smoke.sh` | `postgres-route-via-health-restart-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route-health failover survives server restart |
+| Database | `postgres-route-via-health-reload-restart` | `postgres-route-via-health-reload-restart-smoke.sh` | `postgres-route-via-health-reload-restart-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route-health policy reload survives server restart |
 | Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
 | Database | `postgres-route-via-multiprefix` | `postgres-route-via-multiprefix-smoke.sh` | `postgres-route-via-multiprefix-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` route steering |
 | Database | `postgres-route-via-multiprefix-reload` | `postgres-route-via-multiprefix-reload-smoke.sh` | `postgres-route-via-multiprefix-reload-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload steering |
@@ -248,6 +249,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-via-same-tag-restart` | `route-via-same-tag-restart-smoke.sh` | `route-via-same-tag-restart-headscale-go-smoke.sh` | Current-head same-tag route steering with `grants[].via` survives server restart |
 | Routes | `route-via-health` | `route-via-health-smoke.sh` | `route-via-health-headscale-go-smoke.sh` | Current-head regular-overlap same-tag `grants[].via` route owner follows route-health failover |
 | Routes | `route-via-health-restart` | `route-via-health-restart-smoke.sh` | `route-via-health-restart-headscale-go-smoke.sh` | Current-head same-tag `grants[].via` route-health failover survives server restart |
+| Routes | `route-via-health-reload-restart` | `route-via-health-reload-restart-smoke.sh` | `route-via-health-reload-restart-headscale-go-smoke.sh` | Current-head same-tag `grants[].via` route-health policy reload survives server restart |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-reload-restart` | `route-via-reload-restart-smoke.sh` | `route-via-reload-restart-headscale-go-smoke.sh` | Current-head route steering policy reload survives server restart |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
@@ -912,6 +914,10 @@ tools/real-client/postgres-route-via-same-tag-smoke.sh
 tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-health-smoke.sh
 tools/real-client/postgres-route-via-health-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-health-restart-smoke.sh
+tools/real-client/postgres-route-via-health-restart-headscale-go-smoke.sh
+tools/real-client/postgres-route-via-health-reload-restart-smoke.sh
+tools/real-client/postgres-route-via-health-reload-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-reload-smoke.sh
 tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
 tools/real-client/postgres-route-via-multiprefix-smoke.sh
@@ -1052,12 +1058,20 @@ tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh
 The route-via plus route-health variant uses the same two-router `via` tag with
 a regular overlapping route grant, enables HA route-health probes, pauses the
 current primary router, and asserts Alice and Bob's stock-client netmaps move
-the route owner to the surviving router. After the old primary recovers, it also
-asserts sticky route-health ownership does not steal the route back:
+the route owner to the surviving router. The reload+restart variant keeps the
+shared `via` tag, starts with only `tag:router-a` auto-approved through a
+distinct approval tag, reloads policy to add `tag:router-b`, restarts the
+server, and then asserts the clients observe route ownership failover. After
+the old primary recovers, the variants also assert sticky route-health ownership
+does not steal the route back:
 
 ```sh
 tools/real-client/route-via-health-smoke.sh
 tools/real-client/route-via-health-headscale-go-smoke.sh
+tools/real-client/route-via-health-restart-smoke.sh
+tools/real-client/route-via-health-restart-headscale-go-smoke.sh
+tools/real-client/route-via-health-reload-restart-smoke.sh
+tools/real-client/route-via-health-reload-restart-headscale-go-smoke.sh
 ```
 
 The route-via reload variant starts from the same two-router state, reloads the

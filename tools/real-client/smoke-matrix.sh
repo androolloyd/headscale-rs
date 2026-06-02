@@ -169,6 +169,7 @@ smoke_ids=(
   postgres-route-via-same-tag
   postgres-route-via-health
   postgres-route-via-health-restart
+  postgres-route-via-health-reload-restart
   postgres-route-via-reload
   postgres-route-via-multiprefix
   postgres-route-via-multiprefix-reload
@@ -247,6 +248,7 @@ smoke_ids=(
   route-via-same-tag
   route-via-health
   route-via-health-restart
+  route-via-health-reload-restart
   route-via-reload
   route-via-restart
   route-via-same-tag-restart
@@ -396,6 +398,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -438,6 +441,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -573,6 +577,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-via-same-tag-smoke.sh
   tools/real-client/postgres-route-via-health-smoke.sh
   tools/real-client/postgres-route-via-health-restart-smoke.sh
+  tools/real-client/postgres-route-via-health-reload-restart-smoke.sh
   tools/real-client/postgres-route-via-reload-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-smoke.sh
@@ -651,6 +656,7 @@ smoke_rust_scripts=(
   tools/real-client/route-via-same-tag-smoke.sh
   tools/real-client/route-via-health-smoke.sh
   tools/real-client/route-via-health-restart-smoke.sh
+  tools/real-client/route-via-health-reload-restart-smoke.sh
   tools/real-client/route-via-reload-smoke.sh
   tools/real-client/route-via-restart-smoke.sh
   tools/real-client/route-via-same-tag-restart-smoke.sh
@@ -775,6 +781,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-via-same-tag-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-health-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-health-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-route-via-health-reload-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-headscale-go-smoke.sh
   tools/real-client/postgres-route-via-multiprefix-reload-headscale-go-smoke.sh
@@ -853,6 +860,7 @@ smoke_go_scripts=(
   tools/real-client/route-via-same-tag-headscale-go-smoke.sh
   tools/real-client/route-via-health-headscale-go-smoke.sh
   tools/real-client/route-via-health-restart-headscale-go-smoke.sh
+  tools/real-client/route-via-health-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-via-reload-headscale-go-smoke.sh
   tools/real-client/route-via-restart-headscale-go-smoke.sh
   tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh
@@ -977,6 +985,7 @@ smoke_assertions=(
   "production Postgres current-head same-tag grants via route steering"
   "production Postgres current-head same-tag grants via route owner follows route-health failover"
   "production Postgres current-head same-tag grants via route-health failover survives server restart"
+  "production Postgres current-head same-tag grants via route-health policy reload survives server restart"
   "production Postgres current-head grants via policy reload steering"
   "production Postgres current-head multi-prefix grants via route steering"
   "production Postgres current-head multi-prefix grants via policy reload steering"
@@ -1055,6 +1064,7 @@ smoke_assertions=(
   "current-head same-tag multi-router grants via election"
   "current-head regular-overlap same-tag grants via follows route-health failover"
   "current-head same-tag grants via route-health failover survives server restart"
+  "current-head same-tag grants via route-health policy reload survives server restart"
   "current-head route steering policy reload moves grants via ownership"
   "current-head route steering with grants via survives server restart"
   "current-head same-tag route steering with grants via survives server restart"

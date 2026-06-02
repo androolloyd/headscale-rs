@@ -487,7 +487,7 @@ case "${expected_tags_exact}" in
     ;;
 esac
 if [[ -z "${headscale_go_tls}" ]]; then
-  if ((do_reauth_after_login || authkey_relogin_same_user_flag)); then
+  if ((do_reauth_after_login || authkey_relogin_requested_flag)); then
     headscale_go_tls=true
   else
     headscale_go_tls=false

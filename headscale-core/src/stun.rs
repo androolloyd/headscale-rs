@@ -538,7 +538,7 @@ mod tests {
         response.extend_from_slice(&attr_type.to_be_bytes());
         response.extend_from_slice(&(body.len() as u16).to_be_bytes());
         response.extend_from_slice(body);
-        while (response.len() - 20) % 4 != 0 {
+        while !(response.len() - 20).is_multiple_of(4) {
             response.push(0);
         }
     }

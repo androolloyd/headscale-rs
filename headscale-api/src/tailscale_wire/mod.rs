@@ -7969,6 +7969,54 @@ mod registry_tests {
     }
 
     #[test]
+    fn map_change_batcher_full_update_then_delete_prunes_deleted_stream() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = stable_id_from_key("nk-a");
+        let node_b = stable_id_from_key("nk-b");
+        reg.upsert("nk-a".to_string(), mk_record(1));
+        reg.upsert("nk-b".to_string(), mk_record(2));
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+        let _ = reg.drain_pending_map_changes();
+
+        reg.enqueue_map_change(MapChange::full_update(10));
+        let pending = reg.pending_map_changes();
+        assert_eq!(
+            pending
+                .get(&node_b)
+                .and_then(|changes| changes.last())
+                .map(MapChange::reason_labels),
+            Some(vec!["full update"])
+        );
+
+        assert!(reg.delete("nk-b"));
+
+        let pending = reg.pending_map_changes();
+        assert!(
+            !pending.contains_key(&node_b),
+            "deleted streams must not retain stale full-update batches"
+        );
+        assert!(!reg.active_connections().contains_key(&node_b));
+        assert_eq!(
+            pending
+                .get(&node_a)
+                .expect("observer keeps pending changes")
+                .iter()
+                .flat_map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec!["full update", "peers removed"]
+        );
+    }
+
+    #[test]
     fn map_change_batcher_publish_drains_pending_and_updates_watch() {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = 3001;

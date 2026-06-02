@@ -2314,6 +2314,39 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_query_unknown_fields_are_discarded_like_grpc_gateway() {
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"query-unknown-ok"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = app
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/user?name=query-unknown-ok&unknown=true&unknown.path=ignored",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let users = body["users"].as_array().expect("users array");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["name"], "query-unknown-ok");
+}
+
+#[tokio::test]
 async fn grpc_gateway_query_parser_accepts_go_bool_forms() {
     let (app, token) = fixture().await;
 

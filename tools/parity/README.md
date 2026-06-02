@@ -82,5 +82,6 @@ they are being staged. They use Rust golden verification through
 `./scripts/headscale_rs_current_head_golden.sh` until they are promoted into the
 default differential scenario set. The current default v0.29 gate now directly
 compares formerly staged route-via steering, SSH `acceptEnv`,
-hold-and-delegate SSH checks, SSH host-destination rejection, and
-autogroup-internet exit-node route visibility against headscale-go.
+hold-and-delegate SSH checks, SSH host-destination rejection,
+autogroup-internet exit-node route visibility, and the multi-address
+SSH/DNS/route policy matrix against headscale-go.

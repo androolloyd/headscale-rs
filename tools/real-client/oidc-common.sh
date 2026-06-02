@@ -1241,6 +1241,69 @@ approve_oidc_routes() {
 
   assert_rust_cli_state
   assert_headscale_go_cli_state
+  assert_oidc_self_route_netmap "after-approval"
+}
+
+oidc_self_netmap_routes_match() {
+  local active_client_name="$1"
+  local expected_routes="$2"
+  local output_path="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${active_client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      client_name = ARGV.fetch(1)
+      expected_routes = ARGV.fetch(2).split(",").reject(&:empty?).sort
+      self_node = netmap["SelfNode"] || netmap["selfNode"] || netmap["Self"] || netmap["self"]
+      abort("missing self node in netmap") unless self_node.is_a?(Hash)
+
+      def route_values(node, keys)
+        keys.flat_map { |key| Array(node[key]) }.compact.flatten.map(&:to_s).sort.uniq
+      end
+
+      allowed_routes = route_values(self_node, [
+        "AllowedIPs",
+        "AllowedIps",
+        "allowedIPs",
+        "allowed_ips",
+      ])
+      primary_routes = route_values(self_node, [
+        "PrimaryRoutes",
+        "primaryRoutes",
+        "primary_routes",
+        "SubnetRoutes",
+        "subnetRoutes",
+        "subnet_routes",
+      ])
+      expected_routes.each do |route|
+        abort("expected self AllowedIPs to include #{route.inspect}, got #{allowed_routes.inspect}") unless allowed_routes.include?(route)
+        abort("expected self PrimaryRoutes to include #{route.inspect}, got #{primary_routes.inspect}") unless primary_routes.include?(route)
+      end
+
+      puts JSON.pretty_generate({
+        client: client_name,
+        expected_routes: expected_routes,
+        allowed_routes: allowed_routes,
+        primary_routes: primary_routes,
+      })
+    ' "${netmap_path}" "${active_client_name}" "${expected_routes}" >"${output_path}"
+}
+
+assert_oidc_self_route_netmap() {
+  [[ -n "${oidc_approve_routes}" ]] || return 0
+
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_.-]/-}"
+  local output_path="${work_dir}/oidc-self-route-netmap-${safe_label}.json"
+  echo "::group::assert OIDC approved route in self netmap ${label}"
+  if ! wait_for "OIDC approved route in self netmap ${label}" \
+    "oidc_self_netmap_routes_match '${client_name}' '${oidc_approve_routes}' '${output_path}'"; then
+    cat "${output_path}.err" >&2 || true
+    dump_client_debug "${client_name}"
+    exit 1
+  fi
+  cat "${output_path}"
+  echo "::endgroup::"
 }
 
 restart_oidc_server_and_assert_client() {
@@ -1263,6 +1326,7 @@ restart_oidc_server_and_assert_client() {
   assert_oidc_database_state
   assert_rust_cli_state
   assert_headscale_go_cli_state
+  assert_oidc_self_route_netmap "after-restart"
 }
 
 need ruby

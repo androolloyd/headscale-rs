@@ -1,5 +1,6 @@
 #![no_main]
 
+use headscale_api::policy::{compile_ssh_policy, SshPolicyNode};
 use headscale_api_acl::{parse_hujson_policy, strip_hujson, AclAction, AclDoc, NodeView, PortRef};
 use libfuzzer_sys::fuzz_target;
 
@@ -59,6 +60,8 @@ fn exercise_doc(doc: &AclDoc) {
         let _ = doc.auto_approves_route(&src, prefix);
     }
     let _ = doc.auto_approves_exit_node(&src);
+
+    exercise_ssh_policy(doc);
 }
 
 fn assert_node_attrs_invariants(doc: &AclDoc) {
@@ -86,6 +89,52 @@ fn assert_node_attrs_invariants(doc: &AclDoc) {
 
         if doc.randomize_client_port {
             assert!(attrs.iter().any(|attr| attr == "randomize-client-port"));
+        }
+    }
+}
+
+fn exercise_ssh_policy(doc: &AclDoc) {
+    let nodes = vec![
+        SshPolicyNode {
+            id: 1,
+            user: Some("alice@example.com".to_string()),
+            user_id: Some(1),
+            addrs: vec![
+                "100.64.0.10".to_string(),
+                "fd7a:115c:a1e0::10".to_string(),
+            ],
+            tags: Vec::new(),
+        },
+        SshPolicyNode {
+            id: 2,
+            user: Some("bob@example.com".to_string()),
+            user_id: Some(2),
+            addrs: vec!["100.64.0.20".to_string()],
+            tags: Vec::new(),
+        },
+        SshPolicyNode {
+            id: 3,
+            user: Some("admin@example.com".to_string()),
+            user_id: Some(3),
+            addrs: vec![
+                "100.64.0.30".to_string(),
+                "fd7a:115c:a1e0::30".to_string(),
+            ],
+            tags: vec!["tag:server".to_string(), "tag:router".to_string()],
+        },
+    ];
+
+    for target in [1, 2, 3, 99] {
+        if let Some(policy) = compile_ssh_policy(doc, &nodes, target) {
+            for rule in policy.rules {
+                assert!(!rule.principals.is_empty());
+                assert!(!rule.ssh_users.is_empty());
+                assert!(
+                    rule.action.accept
+                        || rule.action.hold_and_delegate.starts_with("/machine/ssh/action/")
+                        || rule.action.hold_and_delegate.is_empty()
+                );
+            }
         }
     }
 }

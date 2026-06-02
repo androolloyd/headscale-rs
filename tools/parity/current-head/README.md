@@ -10,9 +10,8 @@ route-via, route auto-approval, SSH policy, SSH `acceptEnv`,
 hold-and-delegate SSH check, and SSH host-destination rejection scenarios
 against headscale-go.
 
-Two current-head-only scenarios remain staged here under the Rust golden:
+One current-head-only scenario remains staged here under the Rust golden:
 
-- `multi-address-policy-ssh-dns-route-matrix`
 - `policy-v2-taildrive-taildrop-caps`
 
 Keep new current-head-only scenarios here only when the Go harness or Rust

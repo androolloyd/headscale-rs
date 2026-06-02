@@ -646,7 +646,11 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let mut doc = serde_json::from_value::<AclDoc>(value)
         .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
     let grant_rules = acl_rules_from_grants(&doc.grants).map_err(PolicyParseError::Schema)?;
-    doc.rules.extend(grant_rules);
+    if !grant_rules.is_empty() {
+        let mut rules = grant_rules;
+        rules.extend(doc.rules);
+        doc.rules = rules;
+    }
     validate_policy(&doc).map_err(PolicyParseError::Schema)?;
     Ok(doc)
 }
@@ -2127,14 +2131,14 @@ impl AclDoc {
             }
 
             for route in result.include.clone() {
-                if self.regular_policy_allows_route(viewer, &[], peer, &route) {
+                if self.non_via_policy_overlaps_route(viewer, &route) {
                     push_unique(&mut result.use_primary, route);
                 }
             }
 
             result
                 .exclude
-                .retain(|route| !self.regular_policy_allows_route(viewer, &[], peer, route));
+                .retain(|route| !self.non_via_policy_overlaps_route(viewer, route));
         }
 
         result.include.sort();
@@ -2214,21 +2218,72 @@ impl AclDoc {
         self.principal_matches(&grant.src, src, None)
     }
 
+    fn non_via_policy_overlaps_route(&self, viewer: &NodeView<'_>, route: &str) -> bool {
+        let grant_match = self.grants.iter().any(|grant| {
+            grant.via.is_empty()
+                && grant_port_matches(grant, PortRef::any())
+                && self.grant_src_matches(grant, viewer)
+                && self.grant_dsts_overlap_route(grant, route)
+        });
+        if grant_match {
+            return true;
+        }
+
+        self.rules.iter().any(|rule| {
+            matches!(rule.action, AclAction::Accept)
+                && self.principal_matches(&rule.src, viewer, None)
+                && (rule.ports.is_empty()
+                    || rule
+                        .ports
+                        .iter()
+                        .any(|port| port_matches(port, PortRef::any())))
+                && self.route_destinations_overlap(&rule.dst, route)
+        })
+    }
+
     fn grant_dsts_overlap_route(&self, grant: &GrantRule, route: &str) -> bool {
+        self.route_destinations_overlap(&grant.dst, route)
+    }
+
+    fn route_destinations_overlap(&self, destinations: &[String], route: &str) -> bool {
         let Some(route) = parse_cidr(route) else {
             return false;
         };
         if is_default_route(&route) {
-            return grant
-                .dst
-                .iter()
-                .any(|dst| dst == "*" || dst == "autogroup:internet");
+            return destinations.iter().any(|dst| dst == "autogroup:internet");
         }
-        grant.dst.iter().any(|dst| {
-            self.expand_principal(dst).iter().any(|expanded| {
+
+        destinations.iter().any(|dst| {
+            self.expand_route_destination(dst).iter().any(|expanded| {
                 parse_cidr(expanded).is_some_and(|allowed| nets_overlap(&allowed, &route))
             })
         })
+    }
+
+    fn expand_route_destination(&self, destination: &str) -> Vec<String> {
+        if destination == "*"
+            || destination.starts_with("tag:")
+            || destination.starts_with("group:")
+        {
+            return Vec::new();
+        }
+        if destination.starts_with("autogroup:") {
+            return Vec::new();
+        }
+        if let Some(host) = destination.strip_prefix("host:") {
+            return self
+                .hosts
+                .get(host)
+                .map(|cidr| vec![cidr.clone()])
+                .unwrap_or_default();
+        }
+        if let Some(cidr) = self.hosts.get(destination) {
+            return vec![cidr.clone()];
+        }
+        if parse_cidr(destination).is_some() {
+            return vec![destination.to_string()];
+        }
+        Vec::new()
     }
 
     fn matches(
@@ -4934,6 +4989,49 @@ mod tests {
         assert_eq!(got.include, vec![route.clone()]);
         assert!(got.exclude.is_empty());
         assert_eq!(got.use_primary, vec![route]);
+    }
+
+    #[test]
+    fn via_routes_broad_acl_overlap_does_not_mark_use_primary() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:client": ["client@"],
+                "tag:router": ["router@"]
+              },
+              "acls": [{
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["*:*"]
+              }],
+              "grants": [{
+                "src": ["tag:client"],
+                "dst": ["172.16.0.0/24"],
+                "ip": ["*"],
+                "via": ["tag:router"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let client_tags = vec!["tag:client".to_string()];
+        let router_tags = vec!["tag:router".to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let router = NodeView::new("100.64.0.1").with_tags(&router_tags);
+        let route = "172.16.0.0/24".to_string();
+        let routes = vec![route.clone()];
+        let candidates = vec![ViaRouteCandidate {
+            id: 1,
+            tags: &router_tags,
+            routes: &routes,
+        }];
+
+        let got =
+            doc.via_routes_for_peer_with_candidates(&client, 10, &router, 1, &routes, &candidates);
+
+        assert_eq!(got.include, vec![route]);
+        assert!(got.exclude.is_empty());
+        assert!(got.use_primary.is_empty());
     }
 
     #[test]

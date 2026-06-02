@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use headscale_api::{
     dns::{DnsConfigSpec, DnsRequester, DnsStore, MachineDnsRecord},
     policy::{
-        NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode, ViaRouteCandidate,
+        GrantRule, NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode,
+        ViaRouteCandidate,
         build_peer_map_for_doc, compile_ssh_policy_with_base_url, parse_hujson_policy,
     },
     tailscale_wire::wire::{
@@ -1149,14 +1150,35 @@ fn compile_filter_rules(
 ) -> Vec<FilterRuleOut> {
     let self_node = node_id.and_then(|id| nodes.iter().find(|node| node.id == id));
     let mut out = Vec::new();
+    append_app_grant_rules(&mut out, doc, nodes, self_node);
+    let via_insert_index = projected_network_grant_rule_count(&doc.grants);
+    let mut via_appended = false;
+    if via_insert_index == 0 {
+        if let Some(node) = self_node {
+            append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+            via_appended = true;
+        }
+    }
 
-    for rule in &doc.rules {
+    for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
+            if !via_appended && rule_index + 1 == via_insert_index {
+                if let Some(node) = self_node {
+                    append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+                    via_appended = true;
+                }
+            }
             continue;
         }
 
         let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
         if src_ips.is_empty() {
+            if !via_appended && rule_index + 1 == via_insert_index {
+                if let Some(node) = self_node {
+                    append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+                    via_appended = true;
+                }
+            }
             continue;
         }
 
@@ -1196,12 +1218,19 @@ fn compile_filter_rules(
                 resolve_principals(doc, &rule.dst, nodes, None, PrincipalPosition::Destination);
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
+
+        if !via_appended && rule_index + 1 == via_insert_index {
+            if let Some(node) = self_node {
+                append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+                via_appended = true;
+            }
+        }
     }
 
-    append_app_grant_rules(&mut out, doc, nodes, self_node);
-
-    if let Some(node) = self_node {
-        append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+    if !via_appended {
+        if let Some(node) = self_node {
+            append_via_grant_rules_for_node(&mut out, doc, nodes, node);
+        }
     }
 
     if let Some(node) = self_node {
@@ -1209,6 +1238,13 @@ fn compile_filter_rules(
     } else {
         coalesce_filter_rules(out)
     }
+}
+
+fn projected_network_grant_rule_count(grants: &[GrantRule]) -> usize {
+    grants
+        .iter()
+        .filter(|grant| grant.via.is_empty() && !grant.ip.is_empty())
+        .count()
 }
 
 fn append_app_grant_rules(
@@ -1355,6 +1391,12 @@ fn append_companion_cap_grant_rules(
 }
 
 fn resolve_cap_grant_dst(doc: &PolicyDoc, token: &str, nodes: &[FilterNode]) -> Vec<String> {
+    if token == "*" {
+        return tailnet_filter_srcs()
+            .into_iter()
+            .flat_map(|prefix| ipset_string_to_cidrs(&prefix))
+            .collect();
+    }
     if let Some(host) = token.strip_prefix("host:") {
         return doc
             .hosts

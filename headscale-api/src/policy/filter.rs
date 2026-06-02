@@ -99,6 +99,8 @@ pub fn raw_policy_omits_packet_filter_rules(raw: &str) -> bool {
 /// behaviour for deny-all policies.
 pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
     let mut out: Vec<FilterRule> = Vec::new();
+    append_app_grant_rules(&mut out, doc, &doc.grants, &[], None);
+
     for rule in &doc.rules {
         if !matches!(rule.action, PolicyAction::Accept) {
             continue;
@@ -141,7 +143,6 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
             );
         }
     }
-    append_app_grant_rules(&mut out, doc, &doc.grants, &[], None);
     out
 }
 
@@ -160,14 +161,29 @@ pub fn acl_to_filter_rules_for_node(
         return Vec::new();
     };
     let mut out = Vec::new();
+    append_app_grant_rules(&mut out, doc, &doc.grants, nodes, Some(self_node));
+    let via_insert_index = projected_network_grant_rule_count(&doc.grants);
+    let mut via_appended = false;
+    if via_insert_index == 0 {
+        append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+        via_appended = true;
+    }
 
-    for rule in &doc.rules {
+    for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
+            if !via_appended && rule_index + 1 == via_insert_index {
+                append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+                via_appended = true;
+            }
             continue;
         }
 
         let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
         if src_ips.is_empty() {
+            if !via_appended && rule_index + 1 == via_insert_index {
+                append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+                via_appended = true;
+            }
             continue;
         }
 
@@ -201,12 +217,25 @@ pub fn acl_to_filter_rules_for_node(
             );
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
+
+        if !via_appended && rule_index + 1 == via_insert_index {
+            append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+            via_appended = true;
+        }
     }
 
-    append_app_grant_rules(&mut out, doc, &doc.grants, nodes, Some(self_node));
-    append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+    if !via_appended {
+        append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
+    }
 
     coalesce_filter_rules(reduce_filter_rules_for_node(out, self_node))
+}
+
+fn projected_network_grant_rule_count(grants: &[GrantRule]) -> usize {
+    grants
+        .iter()
+        .filter(|grant| grant.via.is_empty() && !grant.ip.is_empty())
+        .count()
 }
 
 fn append_app_grant_rules(
@@ -1704,6 +1733,56 @@ mod tests {
             rs[0].cap_grant[0]
                 .cap_map
                 .contains_key("example.com/cap/use")
+        );
+    }
+
+    #[test]
+    fn app_grant_star_destination_reduces_to_target_node_caps() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "grants": [{
+                    "src": ["*"],
+                    "dst": ["*"],
+                    "app": {"example.com/cap/basic": [{}]}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user_id: Some(1),
+                user: Some("client".into()),
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user_id: Some(2),
+                user: Some("server".into()),
+                addrs: vec!["100.110.61.78".into(), "fd7a:115c:a1e0::7937:3d4e".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+        ];
+
+        let rs = acl_to_filter_rules_for_node(&d, &nodes, 2);
+
+        assert_eq!(rs.len(), 1);
+        assert!(rs[0].dst_ports.is_empty());
+        assert_eq!(rs[0].cap_grant.len(), 1);
+        assert_eq!(
+            rs[0].cap_grant[0].dsts,
+            vec![
+                "100.110.61.78/32".to_string(),
+                "fd7a:115c:a1e0::7937:3d4e/128".to_string(),
+            ]
+        );
+        assert!(
+            rs[0].cap_grant[0]
+                .cap_map
+                .contains_key("example.com/cap/basic")
         );
     }
 

@@ -1037,6 +1037,13 @@ missing-session CLI errors, and real `headscale serve` projection for
 upstream-shaped `derp.server` config with explicit self-signed HTTPS. The PR
 real-client set now includes `postgres-web-register-policy-churn-restart`.
 
+Recent coverage note (2026-06-02): `policy-v2-tailscale-compat-fixtures`
+adds a representative pinned Tailscale compatibility slice for ACLs, wildcard
+app grants, subnet routes, auto-approvers, `grants[].via`, and SSH
+accept/check rules. The pinned golden now covers 93 scenarios; broader
+upstream ACL/grants/routes/SSH fixture auditing remains open before closing the
+policy v2 backlog row.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

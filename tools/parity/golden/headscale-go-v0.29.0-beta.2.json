@@ -2265,6 +2265,565 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-tailscale-compat-fixtures",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.115.94.0-100.127.255.255",
+          "100.64.0.0-100.115.91.255",
+          "172.16.0.0/24",
+          "192.168.1.0/24",
+          "fd7a:115c:a1e0::/48"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.112.0.0/15",
+              "100.114.0.0/16",
+              "100.115.0.0/18",
+              "100.115.128.0/17",
+              "100.115.64.0/20",
+              "100.115.80.0/21",
+              "100.115.88.0/22",
+              "100.115.94.0/23",
+              "100.115.96.0/19",
+              "100.116.0.0/14",
+              "100.120.0.0/13",
+              "100.64.0.0/11",
+              "100.96.0.0/12",
+              "fd7a:115c:a1e0::/48"
+            ],
+            "CapMap": {
+              "example.com/cap/basic": [
+                {
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.100.126.4",
+          "100.65.167.67",
+          "fd7a:115c:a1e0::a437:7e04",
+          "fd7a:115c:a1e0::e637:a743"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.110.61.78",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::7937:3d4e",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.100.126.4",
+          "100.65.167.67",
+          "fd7a:115c:a1e0::a437:7e04",
+          "fd7a:115c:a1e0::e637:a743"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.110.61.78",
+            "Ports": {
+              "First": 53,
+              "Last": 53
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::7937:3d4e",
+            "Ports": {
+              "First": 53,
+              "Last": 53
+            }
+          }
+        ],
+        "IPProto": [
+          17
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.100.126.4",
+          "100.106.158.115",
+          "100.65.167.67",
+          "fd7a:115c:a1e0::a437:7e04",
+          "fd7a:115c:a1e0::a837:9e73",
+          "fd7a:115c:a1e0::e637:a743"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "192.168.1.0/24"
+        ],
+        "DstPorts": [
+          {
+            "IP": "172.16.0.0/24",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "acl-a01-grant-a1-server-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.115.94.0-100.127.255.255",
+              "100.64.0.0-100.115.91.255",
+              "172.16.0.0/24",
+              "192.168.1.0/24",
+              "fd7a:115c:a1e0::/48"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.110.61.78/32",
+                  "fd7a:115c:a1e0::7937:3d4e/128"
+                ],
+                "CapMap": {
+                  "example.com/cap/basic": [
+                    {
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.100.126.4",
+              "100.65.167.67",
+              "fd7a:115c:a1e0::a437:7e04",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.110.61.78",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::7937:3d4e",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.100.126.4",
+              "100.65.167.67",
+              "fd7a:115c:a1e0::a437:7e04",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.110.61.78",
+                "Ports": {
+                  "First": 53,
+                  "Last": 53
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::7937:3d4e",
+                "Ports": {
+                  "First": 53,
+                  "Last": 53
+                }
+              }
+            ],
+            "IPProto": [
+              17
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.100.126.4",
+              "100.106.158.115",
+              "100.65.167.67",
+              "fd7a:115c:a1e0::a437:7e04",
+              "fd7a:115c:a1e0::a837:9e73",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "DstPorts": [
+              {
+                "IP": "*",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "routes-f10-subnet-b-router-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.115.94.0-100.127.255.255",
+              "100.64.0.0-100.115.91.255",
+              "172.16.0.0/24",
+              "192.168.1.0/24",
+              "fd7a:115c:a1e0::/48"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.111.14.6/32",
+                  "fd7a:115c:a1e0::7037:e06/128"
+                ],
+                "CapMap": {
+                  "example.com/cap/basic": [
+                    {
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "DstPorts": [
+              {
+                "IP": "172.16.0.0/24",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.100.126.4",
+              "100.106.158.115",
+              "100.65.167.67",
+              "fd7a:115c:a1e0::a437:7e04",
+              "fd7a:115c:a1e0::a837:9e73",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "DstPorts": [
+              {
+                "IP": "*",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "192.168.1.0/24"
+            ],
+            "DstPorts": [
+              {
+                "IP": "172.16.0.0/24",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "acl-a01-member-client-peers",
+        "peers": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "name": "grant-a1-server-cap-peers",
+        "peers": [
+          1,
+          2,
+          3,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "name": "routes-f10-subnet-a-router-peers",
+        "peers": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          7,
+          8
+        ]
+      },
+      {
+        "name": "routes-f10-subnet-b-router-peers",
+        "peers": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          8
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "routes-f10-ha-router-autoapproves-subnet-a",
+        "approved_routes": [
+          "192.168.1.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "routes-f10-router-autoapproves-subnet-b",
+        "approved_routes": [
+          "172.16.0.0/24"
+        ],
+        "changed": true
+      },
+      {
+        "name": "grant-a1-exit-tag-autoapproves-defaults",
+        "approved_routes": [
+
+        ],
+        "changed": false
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "via-grant-odin-uses-router-for-subnet-b",
+        "include": [
+          "172.16.0.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "via-grant-thor-does-not-use-odin-router",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "ssh-a1-member-self-bulbasaur",
+        "rules": [
+          {
+            "principals": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "odin": "odin"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "ssh-g1-localpart-check-server",
+        "rules": [
+          {
+            "principals": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.65.167.67",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "odin": "odin"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.100.126.4",
+              "fd7a:115c:a1e0::a437:7e04"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.100.126.4",
+              "100.106.158.115",
+              "100.65.167.67",
+              "fd7a:115c:a1e0::a437:7e04",
+              "fd7a:115c:a1e0::a837:9e73",
+              "fd7a:115c:a1e0::e637:a743"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "GIT_EDITOR",
+              "TERM"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-validation-unknown-ipsets",
     "filter": [
 

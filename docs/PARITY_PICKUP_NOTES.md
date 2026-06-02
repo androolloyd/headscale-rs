@@ -2543,3 +2543,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p0-production-postgres-process-mutations` row remains open until the
   new Postgres process smoke runs against a live `HEADSCALE_DB_POSTGRES_TEST_URL`
   and broader mutation/restart coverage is complete.
+
+## 2026-06-02 policy compat fixture adoption
+
+- Added `policy-v2-tailscale-compat-fixtures` to the pinned Go/Rust
+  differential suite, raising the pinned golden to 93 scenarios. The fixture
+  covers representative ACL, app grant, route, auto-approver, via-route, and
+  SSH accept/check compatibility slices.
+- Matched Go's grant-before-ACL packet-filter order, fixed wildcard app-cap
+  destination reduction for per-node `CapGrant` output, and kept broad
+  wildcard ACL destinations from counting as route-prefix overlap for
+  `grants[].via` `UsePrimary`.
+- The `p1-policy-v2-compat-fixtures` backlog row remains open because this is
+  a representative pinned slice, not an exhaustive audit of the upstream
+  ACL/grants/routes/SSH compatibility corpus.

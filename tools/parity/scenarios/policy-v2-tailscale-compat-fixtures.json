@@ -1,0 +1,345 @@
+{
+  "name": "policy-v2-tailscale-compat-fixtures",
+  "policy": {
+    "groups": {
+      "group:admins": [
+        "odin@example.com"
+      ],
+      "group:developers": [
+        "thor@example.org",
+        "odin@example.com"
+      ],
+      "group:empty": [],
+      "group:monitors": [
+        "freya@example.com"
+      ]
+    },
+    "hosts": {
+      "internal": "10.0.0.0/8",
+      "subnet_a": "192.168.1.0/24",
+      "subnet_b": "172.16.0.0/24",
+      "webserver": "100.108.74.26"
+    },
+    "tagOwners": {
+      "tag:client": [
+        "odin@example.com"
+      ],
+      "tag:exit": [
+        "odin@example.com"
+      ],
+      "tag:ha": [
+        "odin@example.com"
+      ],
+      "tag:router": [
+        "odin@example.com"
+      ],
+      "tag:server": [
+        "odin@example.com"
+      ]
+    },
+    "autoApprovers": {
+      "routes": {
+        "0.0.0.0/0": [
+          "tag:exit"
+        ],
+        "10.0.0.0/8": [
+          "tag:router"
+        ],
+        "172.16.0.0/12": [
+          "tag:router"
+        ],
+        "192.168.0.0/16": [
+          "tag:ha"
+        ],
+        "::/0": [
+          "tag:exit"
+        ]
+      }
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "src": [
+          "autogroup:member"
+        ],
+        "dst": [
+          "*:*"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "subnet_a"
+        ],
+        "dst": [
+          "subnet_b:*"
+        ]
+      }
+    ],
+    "grants": [
+      {
+        "src": [
+          "*"
+        ],
+        "dst": [
+          "*"
+        ],
+        "app": {
+          "example.com/cap/basic": [
+            {}
+          ]
+        }
+      },
+      {
+        "src": [
+          "group:developers"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "ip": [
+          "tcp:22",
+          "udp:53"
+        ]
+      },
+      {
+        "src": [
+          "odin@example.com"
+        ],
+        "dst": [
+          "subnet_b"
+        ],
+        "ip": [
+          "*"
+        ],
+        "via": [
+          "tag:router"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": [
+          "autogroup:member"
+        ],
+        "dst": [
+          "autogroup:self"
+        ],
+        "users": [
+          "root"
+        ]
+      },
+      {
+        "action": "accept",
+        "acceptEnv": [
+          "GIT_EDITOR",
+          "TERM"
+        ],
+        "src": [
+          "autogroup:member"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "root"
+        ]
+      },
+      {
+        "action": "check",
+        "checkPeriod": "24h",
+        "src": [
+          "group:developers"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "localpart:*@example.com",
+          "root"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "odin",
+      "email": "odin@example.com"
+    },
+    {
+      "id": 2,
+      "name": "thor",
+      "email": "thor@example.org"
+    },
+    {
+      "id": 3,
+      "name": "freya",
+      "email": "freya@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "bulbasaur",
+      "ipv4": "100.65.167.67",
+      "ipv6": "fd7a:115c:a1e0::e637:a743"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "ivysaur",
+      "ipv4": "100.100.126.4",
+      "ipv6": "fd7a:115c:a1e0::a437:7e04"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "venusaur",
+      "ipv4": "100.106.158.115",
+      "ipv6": "fd7a:115c:a1e0::a837:9e73"
+    },
+    {
+      "id": 4,
+      "user_id": 1,
+      "hostname": "beedrill",
+      "ipv4": "100.110.61.78",
+      "ipv6": "fd7a:115c:a1e0::7937:3d4e",
+      "tags": [
+        "tag:server"
+      ]
+    },
+    {
+      "id": 5,
+      "user_id": 1,
+      "hostname": "weedle",
+      "ipv4": "100.77.10.94",
+      "ipv6": "fd7a:115c:a1e0::1137:a5e",
+      "tags": [
+        "tag:client"
+      ]
+    },
+    {
+      "id": 6,
+      "user_id": 1,
+      "hostname": "butterfree",
+      "ipv4": "100.117.196.66",
+      "ipv6": "fd7a:115c:a1e0::3737:c442",
+      "tags": [
+        "tag:ha"
+      ],
+      "routes": [
+        "192.168.1.0/24"
+      ],
+      "approved_routes": [
+        "192.168.1.0/24"
+      ]
+    },
+    {
+      "id": 7,
+      "user_id": 1,
+      "hostname": "wartortle",
+      "ipv4": "100.111.14.6",
+      "ipv6": "fd7a:115c:a1e0::7037:e06",
+      "tags": [
+        "tag:router"
+      ],
+      "routes": [
+        "172.16.0.0/24"
+      ],
+      "approved_routes": [
+        "172.16.0.0/24"
+      ]
+    },
+    {
+      "id": 8,
+      "user_id": 1,
+      "hostname": "charmander",
+      "ipv4": "100.116.30.70",
+      "ipv6": "fd7a:115c:a1e0::3b37:1e46",
+      "tags": [
+        "tag:exit"
+      ],
+      "routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "acl-a01-grant-a1-server-filter",
+      "node_id": 4
+    },
+    {
+      "name": "routes-f10-subnet-b-router-filter",
+      "node_id": 7
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "acl-a01-member-client-peers",
+      "node_id": 1
+    },
+    {
+      "name": "grant-a1-server-cap-peers",
+      "node_id": 4
+    },
+    {
+      "name": "routes-f10-subnet-a-router-peers",
+      "node_id": 6
+    },
+    {
+      "name": "routes-f10-subnet-b-router-peers",
+      "node_id": 7
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "routes-f10-ha-router-autoapproves-subnet-a",
+      "node_id": 6,
+      "announced_routes": [
+        "192.168.1.0/24"
+      ]
+    },
+    {
+      "name": "routes-f10-router-autoapproves-subnet-b",
+      "node_id": 7,
+      "announced_routes": [
+        "172.16.0.0/24"
+      ]
+    },
+    {
+      "name": "grant-a1-exit-tag-autoapproves-defaults",
+      "node_id": 8,
+      "announced_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "via_route_checks": [
+    {
+      "name": "via-grant-odin-uses-router-for-subnet-b",
+      "viewer_id": 1,
+      "peer_id": 7
+    },
+    {
+      "name": "via-grant-thor-does-not-use-odin-router",
+      "viewer_id": 2,
+      "peer_id": 7
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "ssh-a1-member-self-bulbasaur",
+      "node_id": 1
+    },
+    {
+      "name": "ssh-g1-localpart-check-server",
+      "node_id": 4
+    }
+  ]
+}
